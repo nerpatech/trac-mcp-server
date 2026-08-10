@@ -12,6 +12,7 @@ from trac_mcp_server.converters import (
     tracwiki_to_markdown,
 )
 from trac_mcp_server.converters.common import (
+    is_link_target,
     markdown_to_tracwiki_lang,
     tracwiki_to_markdown_lang,
 )
@@ -2065,6 +2066,161 @@ class TestReadPathConverterTicketRegressions(unittest.TestCase):
         )
         self.assertIn("`[[BR]]`", result.text)
         self.assertIn("`''never italic''`", result.text)
+
+
+class TestIsLinkTarget(unittest.TestCase):
+    """Unit tests for the shared link-target predicate (tickets #13, #14)."""
+
+    def test_bare_page_name_is_a_target(self):
+        """No colon at all — a wiki page name or relative path."""
+        for candidate in (
+            "WikiPage",
+            "Planning/Phases/Phase01",
+            "../Up",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(is_link_target(candidate))
+
+    def test_traclink_resolvers_are_targets(self):
+        """Known Trac resolvers with a non-empty target qualify."""
+        for candidate in (
+            "wiki:WikiPage",
+            "ticket:42",
+            "source:trunk/file.py",
+            "attachment:file.diff",
+            "milestone:v2.3.0",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(is_link_target(candidate))
+
+    def test_url_schemes_are_targets(self):
+        """Transport schemes qualify."""
+        for candidate in (
+            "https://example.com",
+            "http://example.com/a/b",
+            "ftp://files.example.com",
+            "mailto:someone@example.com",
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertTrue(is_link_target(candidate))
+
+    def test_sentinels_are_not_targets(self):
+        """Bracketed prose that merely looks scheme-shaped is refused."""
+        for candidate in ("auto-pm:", "foo:bar", "note:", "TODO:"):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(is_link_target(candidate))
+
+    def test_known_scheme_with_empty_target_is_refused(self):
+        """A resolver with nothing after the colon is degenerate."""
+        self.assertFalse(is_link_target("wiki:"))
+
+
+class TestBracketedProseNotRewritten(unittest.TestCase):
+    """Ticket #13: '[word: word]' must not become a degenerate link.
+
+    The reported symptom was ``[auto-pm: state NEEDS_EDIT]`` being rewritten
+    as ``[state NEEDS_EDIT](auto-pm:)`` — note the empty URL. The ticket named
+    ``markdown_to_tracwiki``, but the rewrite actually happened in
+    ``tracwiki_to_markdown``'s ``[target label]`` matcher.
+    """
+
+    SENTINEL = "[auto-pm: state NEEDS_EDIT]"
+
+    def test_sentinel_preserved_tracwiki_to_markdown(self):
+        """The direction that actually carried the bug."""
+        result = tracwiki_to_markdown(self.SENTINEL)
+        self.assertEqual(result.text, self.SENTINEL)
+
+    def test_sentinel_preserved_markdown_to_tracwiki(self):
+        """The direction the ticket named; already correct, pinned here."""
+        self.assertEqual(
+            markdown_to_tracwiki(self.SENTINEL).strip(), self.SENTINEL
+        )
+
+    def test_sentinel_survives_full_round_trip(self):
+        """md -> tw -> md leaves the marker byte-identical."""
+        once = markdown_to_tracwiki(self.SENTINEL)
+        twice = tracwiki_to_markdown(once)
+        self.assertEqual(twice.text.strip(), self.SENTINEL)
+
+    def test_generic_colon_prose_preserved(self):
+        """Any '[word: word]' construct, not just auto-pm markers."""
+        for text in ("[note: see below]", "[TODO: fix this]"):
+            with self.subTest(text=text):
+                self.assertEqual(tracwiki_to_markdown(text).text, text)
+
+    def test_real_links_still_convert(self):
+        """Regression guard: valid targets are unaffected."""
+        self.assertEqual(
+            tracwiki_to_markdown(
+                "[https://example.com Link Text]"
+            ).text,
+            "[Link Text](https://example.com)",
+        )
+        self.assertEqual(
+            tracwiki_to_markdown("[wiki:WikiPage Wiki Link]").text,
+            "[Wiki Link](wiki:WikiPage)",
+        )
+
+
+class TestOrphanBracketDoesNotSpanLines(unittest.TestCase):
+    """Ticket #14: '[text]' must not consume a '(url)' on a later line.
+
+    The old matcher used ``\\S+`` for the target (which matches ``]`` and
+    ``(``) and ``\\s+`` for the separator (which matches newlines), so a
+    complete link on one line plus an orphan bracket on the next collapsed
+    into a single mangled construct. As with #13, the ticket named
+    ``markdown_to_tracwiki`` but the defect was in ``tracwiki_to_markdown``.
+    """
+
+    BLOCK = (
+        "[file1.diff](attachment:file1.diff)\n"
+        "[attachment:file2.diff]\n"
+        "(claude-code:sonnet)\n"
+    )
+
+    def test_each_line_renders_independently(self):
+        """No construct spans a line break."""
+        result = tracwiki_to_markdown(self.BLOCK).text
+        lines = result.strip().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(
+            lines[0], "[file1.diff](attachment:file1.diff)"
+        )
+        self.assertEqual(lines[1], "<attachment:file2.diff>")
+        self.assertEqual(lines[2], "(claude-code:sonnet)")
+
+    def test_no_nested_mush(self):
+        """The reported mangled output must not reappear."""
+        result = tracwiki_to_markdown(self.BLOCK).text
+        self.assertNotIn("[[", result)
+        self.assertNotIn("](file1.diff]", result)
+
+    def test_orphan_bracket_then_parenthetical(self):
+        """Minimal case: orphan '[foo]' then '(bar)' on the next line."""
+        result = tracwiki_to_markdown("[foo]\n(bar)\n").text
+        lines = result.strip().splitlines()
+        self.assertEqual(lines[0], "<foo>")
+        self.assertEqual(lines[1], "(bar)")
+
+    def test_target_cannot_swallow_closing_bracket(self):
+        """A target may not contain ']' — that was the swallow vector."""
+        result = tracwiki_to_markdown("[wiki:A a] [wiki:B b]").text
+        self.assertEqual(result, "[a](wiki:A) [b](wiki:B)")
+
+    def test_single_line_link_still_converts(self):
+        """Regression guard: the ordinary form is untouched."""
+        self.assertEqual(
+            tracwiki_to_markdown("[wiki:Page label]").text,
+            "[label](wiki:Page)",
+        )
+
+    def test_attachment_block_round_trips(self):
+        """tw -> md -> tw returns the orphan bracket unchanged."""
+        as_md = tracwiki_to_markdown(self.BLOCK).text
+        back = markdown_to_tracwiki(as_md)
+        self.assertIn("[attachment:file2.diff]", back)
+        self.assertIn("(claude-code:sonnet)", back)
 
 
 if __name__ == "__main__":

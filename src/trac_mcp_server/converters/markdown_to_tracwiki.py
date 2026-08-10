@@ -5,7 +5,12 @@ from typing import Any
 
 import mistune
 
-from .common import ConversionResult, markdown_to_tracwiki_lang
+from .common import (
+    SCHEME_RE,
+    TRACLINK_SCHEMES,
+    ConversionResult,
+    markdown_to_tracwiki_lang,
+)
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -103,39 +108,10 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
     return _PLACEHOLDER_RE.sub(restore, text)
 
 
-# TracLink resolvers that Trac understands natively as the target of
-# `[target text]`.  Deliberately an explicit allowlist rather than
-# "anything scheme-shaped": non-URL sentinels such as ``auto-pm:`` or
-# ``foo:bar`` must stay literal (ticket #8), while real TracLinks that
-# `tracwiki_to_markdown` emits as ``[text](wiki:Page)`` must survive a
-# push back through this converter unchanged (ticket #17).
-_TRACLINK_SCHEMES = frozenset(
-    {
-        "attachment",
-        "browser",
-        "changeset",
-        "comment",
-        "diff",
-        "export",
-        "htdocs",
-        "log",
-        "milestone",
-        "query",
-        "raw-attachment",
-        "report",
-        "repos",
-        "search",
-        "source",
-        "ticket",
-        "timeline",
-        "wiki",
-    }
-)
-# scheme:target — target must be non-empty, so a bare ``auto-pm:``
-# sentinel never matches even if its scheme were listed above.
-_TRACLINK_RE = re.compile(
-    r"(?P<scheme>[A-Za-z][\w+.-]*):(?P<target>\S.*)\Z"
-)
+# The TracLink resolver allowlist and `scheme:target` pattern live in
+# `common` so both conversion directions share one definition — a target
+# this module emits verbatim must not be re-parsed as a link by
+# `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
 
 
 def _heading_slug(rendered_text: str) -> str:
@@ -368,10 +344,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # stand — emit them verbatim. This is what `tracwiki_to_markdown`
         # produces, so a wiki_get -> wiki_update round-trip that leaves
         # existing links untouched no longer corrupts them (ticket #17).
-        traclink = _TRACLINK_RE.match(url)
+        traclink = SCHEME_RE.match(url)
         if (
             traclink
-            and traclink.group("scheme").lower() in _TRACLINK_SCHEMES
+            and traclink.group("scheme").lower() in TRACLINK_SCHEMES
         ):
             # `<wiki:Page>` autolinks arrive with text == url; `[target]`
             # is the tidier equivalent of `[target target]`.
@@ -383,7 +359,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # starts with a known scheme (handled above), is an anchor
         # (handled above), or is a wiki-page-shaped path. Wiki page names
         # never contain ":" — Trac reserves it for the resolvers listed in
-        # _TRACLINK_SCHEMES — so any ":" still present here means the url
+        # TRACLINK_SCHEMES — so any ":" still present here means the url
         # is a sentinel like "auto-pm:" or "foo:bar", not a page path.
         # Emit the original Markdown link syntax verbatim so the text is
         # preserved downstream rather than wrapped as a broken wiki link.
