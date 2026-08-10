@@ -9,6 +9,7 @@ The Trac MCP Server exposes wiki pages as resources via URI templates, enabling 
 | `trac://wiki/{page_name}` | Read specific wiki page (Markdown by default) |
 | `trac://wiki/{page_name}?format=tracwiki` | Read page in raw TracWiki format |
 | `trac://wiki/{page_name}?version=N` | Read specific historical version |
+| `trac://wiki/{page_name}?instance=/project` | Read from another Trac instance |
 | `trac://wiki/_index` | List all wiki pages in hierarchical tree structure |
 
 ## Query Parameters
@@ -17,6 +18,7 @@ The Trac MCP Server exposes wiki pages as resources via URI templates, enabling 
 |-----------|--------|-------------|
 | `format` | `markdown` (default), `tracwiki` | Output format for page content |
 | `version` | Integer (1+) | Retrieve specific version instead of latest |
+| `instance` | Configured name, or a path/URL on the same host | Route to another Trac instance instead of the default -- see [Multiple Instances](configuration.md#multiple-instances) |
 
 ## Examples
 
@@ -43,6 +45,11 @@ trac://wiki/API/Reference
 **List all pages:**
 ```
 trac://wiki/_index
+```
+
+**Read from another instance:**
+```
+trac://wiki/WikiStart?instance=/other-project
 ```
 
 ## Response Format
@@ -88,6 +95,13 @@ Similar pages: WikiStart, WikiSandbox
 Error (invalid_version): Version 99 not found for page 'WikiStart'.
 
 Hint: Use trac://wiki/WikiStart to see the latest version.
+```
+
+**Unknown instance:**
+```
+Error (unknown_instance): Unknown instance 'nope'. Configured instances: default, bcs
+
+Action: Call list_instances to see what is reachable.
 ```
 
 ---

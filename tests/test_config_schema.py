@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from trac_mcp_server.config_schema import (
+    InstanceConfig,
     LoggingConfig,
     TracConfig,
     UnifiedConfig,
@@ -292,3 +293,64 @@ class TestBuildConfig:
         # An empty dict is falsy, triggering the early return
         config = build_config({})
         assert isinstance(config, UnifiedConfig)
+
+
+class TestInstanceConfig:
+    """Tests for the InstanceConfig model and UnifiedConfig.instances."""
+
+    def test_absent_section_defaults_to_empty_dict(self):
+        """No instances: key in raw config -> instances is {}."""
+        config = build_config(
+            {"trac": {"url": "https://trac.example.com"}}
+        )
+        assert config.instances == {}
+
+    def test_empty_unified_config_has_empty_instances(self):
+        config = UnifiedConfig()
+        assert config.instances == {}
+
+    def test_url_only_instance(self):
+        config = build_config({"instances": {"bcs": {"url": "/bcs"}}})
+        assert config.instances["bcs"].url == "/bcs"
+        assert config.instances["bcs"].username is None
+        assert config.instances["bcs"].password is None
+        assert config.instances["bcs"].insecure is None
+
+    def test_full_instance_fields(self):
+        config = build_config(
+            {
+                "instances": {
+                    "bcs": {
+                        "url": "http://192.168.10.4:8000/bcs",
+                        "username": "bcsuser",
+                        "password": "bcspass",
+                        "insecure": True,
+                    }
+                }
+            }
+        )
+        inst = config.instances["bcs"]
+        assert inst.url == "http://192.168.10.4:8000/bcs"
+        assert inst.username == "bcsuser"
+        assert inst.password == "bcspass"
+        assert inst.insecure is True
+
+    def test_multiple_instances(self):
+        config = build_config(
+            {
+                "instances": {
+                    "bcs": {"url": "/bcs"},
+                    "auto_pm": {"url": "/auto_pm"},
+                }
+            }
+        )
+        assert set(config.instances) == {"bcs", "auto_pm"}
+
+    def test_instance_config_is_frozen(self):
+        inst = InstanceConfig(url="/bcs")
+        with pytest.raises(ValidationError):
+            inst.url = "/other"  # type: ignore[misc]
+
+    def test_missing_url_raises(self):
+        with pytest.raises(ValidationError):
+            InstanceConfig()  # type: ignore[call-arg]

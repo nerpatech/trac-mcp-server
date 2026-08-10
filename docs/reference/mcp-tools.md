@@ -1,12 +1,22 @@
 # MCP Tools Reference
 
-The Trac MCP Server provides 27 tools organized into five categories:
+The Trac MCP Server provides 28 tools organized into six categories:
 
 - **System:** 2 tools (ping, get_server_time)
 - **Tickets:** 11 tools (search, get, create, update, delete, changelog, fields, actions, batch_create, batch_delete, batch_update)
 - **Wiki:** 6 tools (get, search, create, update, delete, recent_changes)
 - **Wiki File:** 3 tools (push, pull, detect_format)
 - **Milestones:** 5 tools (list, get, create, update, delete)
+- **Instances:** 1 tool (list_instances)
+
+## Instance Routing
+
+Every tool below also accepts an optional `instance` argument (added
+automatically to each tool's schema; omitted from the per-tool parameter
+tables below for brevity) that routes the call to another Trac project
+instead of the default one -- see
+[Multiple Instances](configuration.md#multiple-instances). Call
+`list_instances` to discover what's reachable.
 
 ---
 
@@ -1477,6 +1487,71 @@ Each update object:
   "arguments": {
     "name": "v1.0-beta"
   }
+}
+```
+
+---
+
+## list_instances
+
+**Description:** List Trac instances reachable from this server: named instances from configuration, and (when `discover=true`) other projects visible on the same Trac host's project index. Use the returned path (e.g. `/project`) as the `instance` argument on any other tool to target that project. Always available -- no Trac permission required.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `discover` | boolean | No | `true` | Scrape the Trac host's project index for other reachable projects |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Default instance: http://trac.example.com:8000/main-project\n\nConfigured:\n  default: http://trac.example.com:8000/main-project (default)\n  bcs: http://trac.example.com:8000/bcs\n\nDiscovered on host:\n  /main-project: Main Project [configured]\n  /bcs: BCS [configured]\n  /other: Other Project"
+}
+```
+```json
+{
+  "configured": [
+    {
+      "name": "default",
+      "url": "http://trac.example.com:8000/main-project",
+      "is_default": true,
+      "credentials": "explicit"
+    },
+    {
+      "name": "bcs",
+      "url": "http://trac.example.com:8000/bcs",
+      "is_default": false,
+      "credentials": "inherited"
+    }
+  ],
+  "default": "http://trac.example.com:8000/main-project",
+  "discovered": [
+    {
+      "path": "/main-project",
+      "title": "Main Project",
+      "description": "",
+      "url": "http://trac.example.com:8000/main-project",
+      "configured": true
+    },
+    {
+      "path": "/other",
+      "title": "Other Project",
+      "description": "",
+      "url": "http://trac.example.com:8000/other",
+      "configured": false
+    }
+  ]
+}
+```
+
+The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are never included in the response. The `discovered` key is omitted when `discover` is `false` or the host's project index could not be scraped.
+
+**Example Call:**
+```json
+{
+  "name": "list_instances",
+  "arguments": {}
 }
 ```
 

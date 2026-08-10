@@ -133,6 +133,29 @@ def _load_yaml_with_includes(
 
 
 # ---------------------------------------------------------------------------
+# 2a. TRAC_INSTANCES file loading
+# ---------------------------------------------------------------------------
+
+
+def load_instances_file(path: str | Path) -> Any:
+    """Load and env-interpolate a ``TRAC_INSTANCES`` file (YAML or JSON).
+
+    Valid JSON is valid YAML, so ``_load_yaml_with_includes`` parses both
+    formats. Returns the raw parsed value -- callers handle both the
+    ``{"instances": {...}}`` and bare ``{name: {...}}`` shapes.
+
+    Args:
+        path: Path to the instances file.
+
+    Returns:
+        The parsed (and env-interpolated) contents, or ``{}`` if the file
+        is empty.
+    """
+    data = _load_yaml_with_includes(Path(path))
+    return _interpolate_recursive(data) if data else {}
+
+
+# ---------------------------------------------------------------------------
 # 3. Convention-based file discovery
 # ---------------------------------------------------------------------------
 

@@ -119,7 +119,9 @@ Auth setup: use an existing `.trac_mcp/config.yml` (the same file `trac-mcp-serv
 
 Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
 
-## Available Tools (42)
+## Available Tools (43)
+
+Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 
 ### Tickets (11)
 | Tool | Description |
@@ -194,6 +196,11 @@ Trac errors (auth, network, page-not-found, permission-denied) exit with code `4
 |------|-------------|
 | `ping` | Test connectivity and return API version |
 | `get_server_time` | Get Trac server time |
+
+### Instances (1)
+| Tool | Description |
+|------|-------------|
+| `list_instances` | List configured and (via discovery) host-visible Trac instances |
 
 
 ## Development

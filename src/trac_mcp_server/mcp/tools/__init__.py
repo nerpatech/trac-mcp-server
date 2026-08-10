@@ -5,6 +5,7 @@ with async handlers, Markdown conversion, and structured error responses.
 """
 
 from .errors import build_error_response
+from .instances import INSTANCE_SPECS, INSTANCE_TOOLS
 from .milestone import MILESTONE_SPECS, MILESTONE_TOOLS
 from .registry import ToolRegistry, ToolSpec, load_permissions_file
 from .system import SYSTEM_SPECS, SYSTEM_TOOLS
@@ -53,6 +54,7 @@ ALL_SPECS: list[ToolSpec] = (
     + WIKI_SPECS
     + MILESTONE_SPECS
     + TICKET_ADMIN_SPECS
+    + INSTANCE_SPECS
 )
 
 __all__ = [
@@ -76,6 +78,7 @@ __all__ = [
     "WIKI_ATTACHMENT_SPECS",
     "MILESTONE_SPECS",
     "TICKET_ADMIN_SPECS",
+    "INSTANCE_SPECS",
     # Tool lists (backward compat)
     "TICKET_TOOLS",
     "TICKET_READ_TOOLS",
@@ -90,4 +93,5 @@ __all__ = [
     "WIKI_FILE_TOOLS",
     "MILESTONE_TOOLS",
     "SYSTEM_TOOLS",
+    "INSTANCE_TOOLS",
 ]

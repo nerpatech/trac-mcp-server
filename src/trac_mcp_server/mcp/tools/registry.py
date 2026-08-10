@@ -17,6 +17,7 @@ import xmlrpc.client
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import mcp.types as types
 
@@ -155,6 +156,64 @@ def _domain_from_tool_name(name: str) -> str:
     if name.startswith("ticket_"):
         return "ticket"
     return "ticket"
+
+
+def with_instance_param(
+    specs: list[ToolSpec], names: list[str]
+) -> list[ToolSpec]:
+    """Return new specs with an optional ``instance`` argument added.
+
+    Applied unconditionally to every tool spec -- hiding the parameter
+    behind config would defeat the point of making other Trac projects
+    discoverable. Additive and optional: existing ``required`` lists are
+    left untouched, so callers that never pass ``instance`` see identical
+    behavior to before.
+
+    Args:
+        specs: Tool specs to augment.
+        names: Configured (declared) instance names, for the description.
+
+    Returns:
+        New list of ToolSpec with the same permissions/handler but an
+        updated inputSchema.
+    """
+    if names:
+        description = (
+            "Optional. Route this call to another configured Trac instance "
+            f"instead of the default. Configured instances: {', '.join(names)}. "
+            "Any other project on the same Trac host as the default instance "
+            "is also reachable ad-hoc via its path, e.g. '/project'."
+        )
+    else:
+        description = (
+            "Optional. Route this call to another project on the same Trac "
+            "host as the default instance, addressed by path, e.g. "
+            "'/project'. No named instances are configured."
+        )
+
+    result = []
+    for spec in specs:
+        schema: dict[str, Any] = dict(
+            spec.tool.inputSchema
+            or {"type": "object", "properties": {}, "required": []}
+        )
+        properties: dict[str, Any] = dict(
+            schema.get("properties") or {}
+        )
+        properties["instance"] = {
+            "type": "string",
+            "description": description,
+        }
+        schema["properties"] = properties
+        new_tool = spec.tool.model_copy(update={"inputSchema": schema})
+        result.append(
+            ToolSpec(
+                tool=new_tool,
+                permissions=spec.permissions,
+                handler=spec.handler,
+            )
+        )
+    return result
 
 
 def load_permissions_file(path: str | Path) -> frozenset[str]:

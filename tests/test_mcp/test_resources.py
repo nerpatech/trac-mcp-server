@@ -59,13 +59,15 @@ class TestReadResourceRouting:
     """Test handle_read_resource URI routing."""
 
     @patch("trac_mcp_server.mcp.server.handle_read_wiki_resource")
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     def test_routes_wiki_uri_to_wiki_handler(
-        self, mock_get_client, mock_wiki_handler
+        self, mock_get_instances, mock_wiki_handler
     ):
         """trac://wiki/* URIs route to wiki handler."""
         mock_wiki_handler.return_value = "Wiki content"
-        mock_client = mock_get_client.return_value
+        mock_client = (
+            mock_get_instances.return_value.get_client.return_value
+        )
 
         uri = Url("trac://wiki/WikiStart")
         result = asyncio.run(handle_read_resource(uri))
@@ -74,13 +76,15 @@ class TestReadResourceRouting:
         assert result == "Wiki content"
 
     @patch("trac_mcp_server.mcp.server.handle_read_wiki_resource")
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     def test_routes_wiki_index_uri(
-        self, mock_get_client, mock_wiki_handler
+        self, mock_get_instances, mock_wiki_handler
     ):
         """trac://wiki/_index routes to wiki handler."""
         mock_wiki_handler.return_value = "# Wiki Pages\n..."
-        mock_client = mock_get_client.return_value
+        mock_client = (
+            mock_get_instances.return_value.get_client.return_value
+        )
 
         uri = Url("trac://wiki/_index")
         result = asyncio.run(handle_read_resource(uri))
@@ -89,9 +93,9 @@ class TestReadResourceRouting:
         assert "Wiki Pages" in result
 
     @patch("trac_mcp_server.mcp.server.handle_read_wiki_resource")
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     def test_routes_hierarchical_wiki_uri(
-        self, mock_get_client, mock_wiki_handler
+        self, mock_get_instances, mock_wiki_handler
     ):
         """trac://wiki/Dev/Setup routes to wiki handler."""
         mock_wiki_handler.return_value = "Setup content"

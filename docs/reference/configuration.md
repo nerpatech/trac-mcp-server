@@ -149,6 +149,50 @@ claude mcp add trac -e TRAC_URL=https://trac.example.com \
   -- trac-mcp-server
 ```
 
+## Multiple Instances
+
+If your Trac host serves more than one project, you can declare additional
+named instances in your config file's `instances:` section. Every MCP tool
+accepts an optional `instance` argument that routes the call to one of these
+instead of the default -- see the [MCP Tools Reference](mcp-tools.md) for the
+argument, and the `list_instances` tool for discovering what's reachable.
+
+```yaml
+trac:
+  url: http://trac.example.com:8000/main-project
+  username: agent_rpc
+  password: secret
+
+instances:
+  bcs:
+    url: /bcs                 # relative -- resolved against the default host
+  other-host:
+    url: https://other.example.com/trac
+    username: other-user      # unset fields (username/password/insecure)
+    password: other-pass      # inherit from the default `trac:` section
+```
+
+Instances can also be declared out-of-band via a `TRAC_INSTANCES` file (YAML
+or JSON), pointed to by the `TRAC_INSTANCES` environment variable -- either
+`{"instances": {...}}` or a bare `{name: {...}}` mapping. `TRAC_INSTANCES`
+wins over the config file's `instances:` section on a name collision, and
+edits to either source are picked up on the next call without restarting the
+server.
+
+### Ad-hoc addressing and the same-host restriction
+
+Beyond named instances, any tool call can pass `instance: "/project-path"` to
+reach *any* project on the same Trac host as the default instance, with no
+config needed -- the server joins the path onto the default host and reuses
+the default credentials. An absolute URL is also accepted for `instance`, but
+**only if its scheme and host exactly match the default instance's**.
+
+This restriction is deliberate: if arbitrary hostnames were accepted, an
+agent (or a prompt-injected value flowing into a tool call) could redirect
+the operator's configured Trac credentials to an attacker-controlled server.
+Requests for `instance` values on a different host are rejected with an
+`unknown_instance` error before any request leaves the process.
+
 ## Validation
 
 Configuration is validated at server startup. The server will refuse to start with a clear error message if validation fails.

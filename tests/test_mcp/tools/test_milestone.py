@@ -136,15 +136,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
     def tearDown(self):
         _clear_registry()
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_list_milestones_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test milestone_list is dispatched to handle_milestone_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync to return milestone names
         async def mock_run_sync_impl(func, *args):
@@ -170,15 +172,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
             ["v1.0", "v2.0", "Future"],
         )
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_get_milestone_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test milestone_get is dispatched to handle_milestone_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync to return milestone data
         async def mock_run_sync_impl(func, *args):
@@ -208,15 +212,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
         self.assertIsNotNone(result.structuredContent)
         self.assertEqual(result.structuredContent["name"], "v1.0")
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_create_milestone_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test milestone_create is dispatched to handle_milestone_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync (create returns None)
         async def mock_run_sync_impl(func, *args):
@@ -243,15 +249,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
         self.assertEqual(result.content[0].type, "text")
         self.assertIn("Created milestone: v3.0", result.content[0].text)
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_update_milestone_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test milestone_update is dispatched to handle_milestone_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync (update returns None)
         async def mock_run_sync_impl(func, *args):
@@ -283,15 +291,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
             "Updated milestone 'v1.0'", result.content[0].text
         )
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_delete_milestone_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test milestone_delete is dispatched to handle_milestone_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync (delete returns None)
         async def mock_run_sync_impl(func, *args):
@@ -312,15 +322,17 @@ class TestMilestoneToolDispatch(unittest.TestCase):
         self.assertEqual(result.content[0].type, "text")
         self.assertIn("Deleted milestone: old", result.content[0].text)
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.ticket_read.run_sync")
     def test_ticket_fields_dispatch(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test ticket_fields is dispatched to handle_ticket_tool."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync to return field metadata
         async def mock_run_sync_impl(func, *args):
@@ -376,13 +388,17 @@ class TestMilestoneToolErrors(unittest.TestCase):
     def tearDown(self):
         _clear_registry()
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
-    def test_milestone_not_found(self, mock_run_sync, mock_get_client):
+    def test_milestone_not_found(
+        self, mock_run_sync, mock_get_instances
+    ):
         """Test error when milestone not found."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync to raise Fault
         async def mock_run_sync_impl(func, *args):
@@ -405,15 +421,17 @@ class TestMilestoneToolErrors(unittest.TestCase):
         self.assertIn("Error", result.content[0].text)
         self.assertIn("not found", result.content[0].text.lower())
 
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     @patch("trac_mcp_server.mcp.tools.milestone.run_sync")
     def test_milestone_permission_error(
-        self, mock_run_sync, mock_get_client
+        self, mock_run_sync, mock_get_instances
     ):
         """Test error when user lacks TICKET_ADMIN permission."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Mock run_sync to raise permission Fault
         async def mock_run_sync_impl(func, *args):
@@ -438,12 +456,14 @@ class TestMilestoneToolErrors(unittest.TestCase):
         self.assertIn("Error", result.content[0].text)
         self.assertIn("permission", result.content[0].text.lower())
 
-    @patch("trac_mcp_server.mcp.server.get_client")
-    def test_unknown_milestone_tool(self, mock_get_client):
+    @patch("trac_mcp_server.mcp.server.get_instances")
+    def test_unknown_milestone_tool(self, mock_get_instances):
         """Test error for invalid milestone tool name."""
         # Mock TracClient
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
 
         # Call with invalid tool name - should return error response, not raise exception
         result = asyncio.run(handle_call_tool("milestone_unknown", {}))

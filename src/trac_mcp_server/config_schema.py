@@ -67,6 +67,32 @@ class TracConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class InstanceConfig(BaseModel):
+    """A named additional Trac instance.
+
+    Unset ``username``/``password``/``insecure`` inherit from the default
+    ``trac`` section at resolution time (see ``instances.InstanceRegistry``).
+    """
+
+    url: str = Field(
+        description="Trac instance URL (absolute, or a path resolved against the default host)"
+    )
+    username: str | None = Field(
+        default=None,
+        description="Trac username (inherits default if unset)",
+    )
+    password: str | None = Field(
+        default=None,
+        description="Trac password (inherits default if unset)",
+    )
+    insecure: bool | None = Field(
+        default=None,
+        description="Disable SSL verification (inherits default if unset)",
+    )
+
+    model_config = {"frozen": True}
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration.
 
@@ -95,6 +121,7 @@ class UnifiedConfig(BaseModel):
 
     trac: TracConfig = Field(default_factory=TracConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    instances: dict[str, InstanceConfig] = Field(default_factory=dict)
 
     model_config = {"frozen": True}
 

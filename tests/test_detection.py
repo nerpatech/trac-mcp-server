@@ -5,9 +5,13 @@ Tests CapabilityDetector, processor testing, caching, and detection orchestratio
 Uses mocking to avoid live Trac dependency.
 """
 
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
+from urllib.parse import urlparse
+
+import pytest
 
 from trac_mcp_server.detection.capabilities import CapabilityDetector
 from trac_mcp_server.detection.processor_utils import (
@@ -268,6 +272,149 @@ class TestWebScraping:
         )
 
         assert result == {}
+
+
+class TestProjectIndexScraping:
+    """Tests for scrape_project_index -- multi-project host root page."""
+
+    # Shape verified live against a real multi-project Trac host root.
+    MOCK_INDEX_HTML = (
+        b"<html><body>"
+        b"<h1>Available Projects</h1>"
+        b"<ul>"
+        b'<li><a href="/bcs" title="BCS project">BCS</a></li>'
+        b'<li><a href="/trac_mcp_server" title="Trac MCP Server">'
+        b"Trac MCP Server</a></li>"
+        b"</ul>"
+        b"</body></html>"
+    )
+
+    @patch("trac_mcp_server.detection.web_scraper.requests.get")
+    def test_scrape_success(self, mock_get):
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        mock_response = Mock()
+        mock_response.content = self.MOCK_INDEX_HTML
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = scrape_project_index(
+            "http://192.168.10.4:8000", ("user", "pass")
+        )
+
+        assert len(result) == 2
+        bcs = next(e for e in result if e["path"] == "/bcs")
+        assert bcs["title"] == "BCS"
+        assert bcs["description"] == "BCS project"
+        assert bcs["url"] == "http://192.168.10.4:8000/bcs"
+        mock_get.assert_called_once_with(
+            "http://192.168.10.4:8000",
+            auth=("user", "pass"),
+            timeout=10,
+        )
+
+    @patch("trac_mcp_server.detection.web_scraper.requests.get")
+    def test_scrape_without_auth(self, mock_get):
+        """The host root is typically unauthenticated (auth_tuple optional)."""
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        mock_response = Mock()
+        mock_response.content = self.MOCK_INDEX_HTML
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = scrape_project_index("http://192.168.10.4:8000")
+
+        assert len(result) == 2
+        mock_get.assert_called_once_with(
+            "http://192.168.10.4:8000", auth=None, timeout=10
+        )
+
+    @patch("trac_mcp_server.detection.web_scraper.requests.get")
+    def test_scrape_connection_failure_returns_empty_list(
+        self, mock_get
+    ):
+        import requests as req
+
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        mock_get.side_effect = req.RequestException(
+            "Connection refused"
+        )
+
+        result = scrape_project_index("http://192.168.10.4:8000")
+
+        assert result == []
+
+    @patch("trac_mcp_server.detection.web_scraper.requests.get")
+    def test_scrape_http_error_returns_empty_list(self, mock_get):
+        import requests as req
+
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.raise_for_status.side_effect = req.HTTPError(
+            response=mock_response
+        )
+        mock_get.return_value = mock_response
+
+        result = scrape_project_index("http://192.168.10.4:8000")
+
+        assert result == []
+
+    @patch("trac_mcp_server.detection.web_scraper.requests.get")
+    def test_scrape_ignores_links_without_href(self, mock_get):
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        mock_response = Mock()
+        mock_response.content = (
+            b"<html><body><ul><li><a>No href</a></li>"
+            b'<li><a href="/bcs">BCS</a></li></ul></body></html>'
+        )
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = scrape_project_index("http://192.168.10.4:8000")
+
+        assert len(result) == 1
+        assert result[0]["path"] == "/bcs"
+
+
+@pytest.mark.live
+def test_live_scrape_project_index():
+    """Live: scrape the real multi-project Trac host's project index.
+
+    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars. Derives
+    the host root from TRAC_URL (e.g. http://host:8000/trac_mcp_server ->
+    http://host:8000) and expects the configured project to appear among
+    the discovered projects.
+    """
+    from trac_mcp_server.detection.web_scraper import (
+        scrape_project_index,
+    )
+
+    trac_url = os.environ["TRAC_URL"]
+    parsed = urlparse(trac_url)
+    host_root = f"{parsed.scheme}://{parsed.netloc}"
+    auth = (os.environ["TRAC_USERNAME"], os.environ["TRAC_PASSWORD"])
+
+    results = scrape_project_index(host_root, auth)
+
+    assert len(results) > 0
+    assert any(
+        parsed.path.rstrip("/") == entry["path"] for entry in results
+    )
 
 
 class TestProcessorTesting:

@@ -135,13 +135,15 @@ class TestWikiToolRouting:
         _clear_registry()
 
     @patch("trac_mcp_server.mcp.server.get_registry")
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     def test_wiki_read_tools_route_to_registry(
-        self, mock_get_client, mock_get_registry
+        self, mock_get_instances, mock_get_registry
     ):
         """wiki_get routes through ToolRegistry.call_tool."""
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
         mock_registry = MagicMock()
         mock_get_registry.return_value = mock_registry
 
@@ -164,13 +166,15 @@ class TestWikiToolRouting:
         assert not result.isError
 
     @patch("trac_mcp_server.mcp.server.get_registry")
-    @patch("trac_mcp_server.mcp.server.get_client")
+    @patch("trac_mcp_server.mcp.server.get_instances")
     def test_wiki_write_tools_route_to_registry(
-        self, mock_get_client, mock_get_registry
+        self, mock_get_instances, mock_get_registry
     ):
         """wiki_create routes through ToolRegistry.call_tool."""
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_get_instances.return_value.get_client.return_value = (
+            mock_client
+        )
         mock_registry = MagicMock()
         mock_get_registry.return_value = mock_registry
 
@@ -197,10 +201,12 @@ class TestWikiToolRouting:
         )
         assert not result.isError
 
-    @patch("trac_mcp_server.mcp.server.get_client")
-    def test_unknown_wiki_tool_returns_error(self, mock_get_client):
+    @patch("trac_mcp_server.mcp.server.get_instances")
+    def test_unknown_wiki_tool_returns_error(self, mock_get_instances):
         """Unknown wiki_* tool returns error response."""
-        mock_get_client.return_value = MagicMock()
+        mock_get_instances.return_value.get_client.return_value = (
+            MagicMock()
+        )
 
         result = asyncio.run(handle_call_tool("wiki_unknown", {}))
 

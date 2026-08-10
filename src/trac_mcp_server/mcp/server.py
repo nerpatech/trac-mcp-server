@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from urllib.parse import parse_qs
 
 import mcp.server.stdio
 import mcp.types as types
@@ -23,6 +24,11 @@ from pydantic_core import Url
 from .. import __version__
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
+from ..instances import (
+    InstanceRegistry,
+    UnknownInstanceError,
+    load_declared_instances,
+)
 from ..logger import setup_logging
 from ..version import check_version_consistency
 from .lifespan import server_lifespan
@@ -36,15 +42,16 @@ from .tools import (
     build_error_response,
     load_permissions_file,
 )
-from .tools.registry import ToolSpec
+from .tools.instances import set_instance_registry
+from .tools.registry import ToolSpec, with_instance_param
 
 logger = logging.getLogger(__name__)
 
 # Initialize server instance
 server = Server("trac-mcp-server")
 
-# Global client instance (initialized in lifespan)
-_trac_client: TracClient | None = None
+# Global instance registry (initialized in lifespan)
+_instances: InstanceRegistry | None = None
 
 # Global registry instance (initialized in main)
 _registry: ToolRegistry | None = None
@@ -101,30 +108,30 @@ PING_SPEC = ToolSpec(
 # ---------------------------------------------------------------------------
 
 
-def get_client() -> TracClient:
-    """Get the global TracClient instance.
+def get_instances() -> InstanceRegistry:
+    """Get the global InstanceRegistry instance.
 
     Returns:
-        TracClient instance
+        InstanceRegistry instance
 
     Raises:
-        RuntimeError: If client is not initialized
+        RuntimeError: If the registry is not initialized
     """
-    if _trac_client is None:
+    if _instances is None:
         raise RuntimeError(
-            "TracClient not initialized. Server lifespan not started."
+            "InstanceRegistry not initialized. Server lifespan not started."
         )
-    return _trac_client
+    return _instances
 
 
-def set_client(client: TracClient | None) -> None:
-    """Set the global TracClient instance.
+def set_instances(instances: InstanceRegistry | None) -> None:
+    """Set the global InstanceRegistry instance.
 
     Args:
-        client: TracClient instance to set, or None to clear
+        instances: InstanceRegistry instance to set, or None to clear
     """
-    global _trac_client
-    _trac_client = client
+    global _instances
+    _instances = instances
 
 
 def get_registry() -> ToolRegistry:
@@ -182,6 +189,7 @@ async def handle_read_resource(uri: Url) -> str:
     - trac://wiki/{page_name} - Read wiki page (Markdown by default)
     - trac://wiki/{page_name}?format=tracwiki - Read raw TracWiki
     - trac://wiki/{page_name}?version=N - Read historical version
+    - trac://wiki/{page_name}?instance=/project - Read from another instance
     - trac://wiki/_index - List all wiki pages with tree structure
 
     Args:
@@ -199,10 +207,26 @@ async def handle_read_resource(uri: Url) -> str:
 
     # Route by resource type (host portion of URI)
     if uri.host == "wiki":
-        client = get_client()
+        instance = _instance_from_query(uri.query)
+        try:
+            client = get_instances().get_client(instance)
+        except ValueError as e:
+            error_type = (
+                "unknown_instance"
+                if isinstance(e, UnknownInstanceError)
+                else "validation_error"
+            )
+            return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
         return await handle_read_wiki_resource(uri, client)
 
     raise ValueError(f"Unknown resource type: {uri.host}")
+
+
+def _instance_from_query(query: str | None) -> str | None:
+    """Extract the ``instance`` query param from a resource URI, if present."""
+    params = parse_qs(query or "")
+    values = params.get("instance")
+    return values[0] if values else None
 
 
 @server.call_tool()
@@ -211,6 +235,10 @@ async def handle_call_tool(
 ) -> types.CallToolResult:
     """Handle tool execution via ToolRegistry dispatch.
 
+    Pops the optional ``instance`` argument before dispatch so no handler
+    ever sees an unexpected key, and resolves it against the InstanceRegistry
+    to pick which Trac project's client to use.
+
     Args:
         name: The name of the tool to execute.
         arguments: Tool arguments (optional).
@@ -218,9 +246,24 @@ async def handle_call_tool(
     Returns:
         CallToolResult with tool output content and optional isError flag.
     """
-    client = get_client()
+    args = dict(arguments or {})
+    instance = args.pop("instance", None)
     try:
-        return await get_registry().call_tool(name, arguments, client)
+        client = get_instances().get_client(instance)
+    except ValueError as e:
+        error_type = (
+            "unknown_instance"
+            if isinstance(e, UnknownInstanceError)
+            else "validation_error"
+        )
+        return build_error_response(
+            error_type,
+            str(e),
+            "Call list_instances to see what is reachable.",
+        )
+
+    try:
+        return await get_registry().call_tool(name, args, client)
     except ValueError as e:
         # Unknown or filtered-out tool name
         return build_error_response(
@@ -278,7 +321,13 @@ async def main(config_overrides: dict | None = None):
             permissions_file,
         )
 
-    all_specs = [PING_SPEC] + ALL_SPECS
+    # Declared-instance names are needed for the `instance` schema
+    # description; this is a cheap, side-effect-free re-parse of the same
+    # YAML the lifespan will load momentarily (no live connection required).
+    declared_names = sorted(load_declared_instances())
+    all_specs = with_instance_param(
+        [PING_SPEC] + ALL_SPECS, declared_names
+    )
     registry = ToolRegistry(all_specs, allowed_permissions)
     logger.info(
         "Registered %d tools (of %d total)",
@@ -296,16 +345,17 @@ async def main(config_overrides: dict | None = None):
     set_registry(registry)
 
     # Use lifespan manager for startup validation with config overrides.
-    # NOTE: We call set_client() directly here rather than in the lifespan
+    # NOTE: We call set_instances() directly here rather than in the lifespan
     # to avoid the Python __main__ module duplication bug. When this file
     # is run via `python -m trac_mcp_server.mcp.server`, the module is
     # loaded as __main__, but `from . import server` in lifespan.py would
     # re-import it as trac_mcp_server.mcp.server (a separate copy),
-    # causing set_client() to modify the wrong module's _trac_client.
+    # causing set_instances() to modify the wrong module's _instances.
     async with server_lifespan(
         config_overrides=config_overrides
     ) as ctx:
-        set_client(ctx["client"])
+        set_instances(ctx["instances"])
+        set_instance_registry(ctx["instances"])
         try:
             async with mcp.server.stdio.stdio_server() as (
                 read_stream,
@@ -323,7 +373,8 @@ async def main(config_overrides: dict | None = None):
                     read_stream, write_stream, init_options
                 )
         finally:
-            set_client(None)
+            set_instances(None)
+            set_instance_registry(None)
             set_registry(None)
 
 

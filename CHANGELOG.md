@@ -4,6 +4,15 @@ All notable changes to trac-mcp-server will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+- Multi-instance Trac support (Trac #18): every MCP tool and the `trac://wiki/*` resource now accept an optional `instance` argument that routes the call to another Trac project instead of the default one, with no server restart required
+  - Named instances declared via a new `instances:` section in config files, or an out-of-band `TRAC_INSTANCES` file (YAML/JSON), with live reload on edit
+  - Ad-hoc addressing (`instance: "/project-path"`) reaches any project on the same Trac host as the default instance using the default's credentials, restricted to the default instance's exact scheme+host so credentials can never be sent to another host
+  - New `list_instances` tool (28th documented tool, 43rd registered including `ping`) surfaces configured instances plus, via a new `scrape_project_index()` web-scraping helper, other projects discoverable on the host's "Available Projects" index
+  - `src/trac_mcp_server/instances.py`: `InstanceSpec`, `InstanceRegistry` (resolve/get_client/describe, with per-URL client caching and mtime-gated live reload), `UnknownInstanceError`, `load_declared_instances()`
+
 ## [2.2.0] - 2026-07-26
 
 ### Added

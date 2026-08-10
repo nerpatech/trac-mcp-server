@@ -6,6 +6,7 @@ Scrapes the /about page to extract version and plugin information.
 
 import logging
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from lxml import html
@@ -113,3 +114,65 @@ def scrape_about_page(
     except Exception as e:
         logger.warning("Web scraping failed: unexpected error - %s", e)
         return {}
+
+
+def scrape_project_index(
+    host_url: str, auth_tuple: tuple[str, str] | None = None
+) -> list[dict[str, Any]]:
+    """
+    Scrape a multi-project Trac host's root "Available Projects" page.
+
+    Args:
+        host_url: Trac host root URL (e.g. "http://host:8000/")
+        auth_tuple: Optional (username, password) for HTTP Basic authentication.
+            The root page is typically unauthenticated, but auth is passed
+            through when available in case a deployment restricts it.
+
+    Returns:
+        List of dicts with keys: path, title, description, url -- one per
+        project link found in the page's ``<ul><li><a>`` listing.
+        Returns an empty list on any failure (never raises).
+    """
+    try:
+        response = requests.get(host_url, auth=auth_tuple, timeout=10)
+        response.raise_for_status()
+
+        tree = html.fromstring(response.content)
+
+        results = []
+        for link in tree.xpath("//ul/li/a"):
+            href = link.get("href")
+            if not href:
+                continue
+            results.append(
+                {
+                    "path": href,
+                    "title": link.text_content().strip(),
+                    "description": link.get("title", ""),
+                    "url": urljoin(host_url, href),
+                }
+            )
+
+        logger.debug(
+            "Discovered %d projects at %s", len(results), host_url
+        )
+        return results
+
+    except requests.HTTPError as e:
+        logger.warning(
+            "Project index scrape failed: HTTP %d",
+            e.response.status_code,
+        )
+        return []
+
+    except requests.RequestException as e:
+        logger.warning(
+            "Project index scrape failed: connection error - %s", e
+        )
+        return []
+
+    except Exception as e:
+        logger.warning(
+            "Project index scrape failed: unexpected error - %s", e
+        )
+        return []

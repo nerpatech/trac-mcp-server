@@ -9,6 +9,7 @@ from typing import Any
 from ..config_bootstrap import bootstrap_config
 from ..core.async_utils import init_semaphore, run_sync
 from ..core.client import TracClient
+from ..instances import InstanceRegistry, load_declared_instances
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +83,6 @@ async def server_lifespan(
         _stderr_print(
             f"  Parallel requests: {config.max_parallel_requests}"
         )
-        _stderr_print(
-            "Server ready. Waiting for MCP client connection..."
-        )
     except Exception as e:
         logger.error("Failed to connect to Trac: %s", e)
         _stderr_print("ERROR: Trac connection failed.")
@@ -94,8 +92,19 @@ async def server_lifespan(
             f"Trac connection failed: {e}. Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD."
         ) from e
 
-    # Server is ready - yield client for caller to install
-    yield {"client": client}
+    instances = InstanceRegistry(config, load_declared_instances())
+    instances.seed_default(client)
+    declared_names = instances.declared_names()
+    if declared_names:
+        _stderr_print(
+            f"  Configured instances: default, {', '.join(declared_names)}"
+        )
+    else:
+        _stderr_print("  Configured instances: default only")
+    _stderr_print("Server ready. Waiting for MCP client connection...")
+
+    # Server is ready - yield client and instance registry for caller to install
+    yield {"client": client, "instances": instances}
 
     # Shutdown
     logger.info("MCP server shutting down")

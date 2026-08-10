@@ -166,18 +166,29 @@ async def handle_ticket_read_tool(name: str, arguments: dict | None, client: Tra
 `tools/__init__.py` collects specs from all modules:
 
 ```python
-TICKET_SPECS = TICKET_READ_SPECS + TICKET_WRITE_SPECS + TICKET_BATCH_SPECS
-WIKI_SPECS   = WIKI_READ_SPECS + WIKI_WRITE_SPECS + WIKI_FILE_SPECS
+TICKET_SPECS = (
+    TICKET_READ_SPECS + TICKET_WRITE_SPECS
+    + TICKET_BATCH_SPECS + TICKET_ATTACHMENT_SPECS
+)
+WIKI_SPECS = (
+    WIKI_READ_SPECS + WIKI_WRITE_SPECS
+    + WIKI_FILE_SPECS + WIKI_ATTACHMENT_SPECS
+)
 
 ALL_SPECS: list[ToolSpec] = (
     SYSTEM_SPECS + TICKET_SPECS + WIKI_SPECS + MILESTONE_SPECS
+    + TICKET_ADMIN_SPECS + INSTANCE_SPECS
 )
 ```
 
-`server.py` adds the `PING_SPEC` (defined in server.py itself) and constructs the registry:
+`server.py` adds the `PING_SPEC` (defined in server.py itself), augments every
+spec's schema with the optional `instance` parameter (`with_instance_param()`,
+see [Multiple Instances](configuration.md#multiple-instances)), and constructs
+the registry:
 
 ```python
-all_specs = [PING_SPEC] + ALL_SPECS       # 27 total
+declared_names = sorted(load_declared_instances())
+all_specs = with_instance_param([PING_SPEC] + ALL_SPECS, declared_names)
 registry = ToolRegistry(all_specs, allowed_permissions)
 ```
 
@@ -186,11 +197,15 @@ registry = ToolRegistry(all_specs, allowed_permissions)
 ```
 MCP Client
     │
-    │  call_tool("ticket_search", {"query": "status=new"})
+    │  call_tool("ticket_search", {"query": "status=new", "instance": "/bcs"})
     ▼
 server.py::handle_call_tool(name, arguments)
+    │  1. Pop "instance" out of a copy of arguments
+    │  2. get_instances().get_client(instance) → InstanceRegistry.resolve()
+    │     (default / declared name / same-host ad-hoc path or URL;
+    │     UnknownInstanceError → structured "unknown_instance" response)
     │
-    │  get_registry().call_tool(name, arguments, client)
+    │  get_registry().call_tool(name, args, client)
     ▼
 registry.py::ToolRegistry.call_tool()
     │  1. Look up ToolSpec by name
