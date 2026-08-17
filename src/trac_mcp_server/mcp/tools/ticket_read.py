@@ -25,6 +25,12 @@ TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_search",
         description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -46,6 +52,12 @@ TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_get",
         description="Get full ticket details including summary, description, status, and owner. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -66,6 +78,12 @@ TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_changelog",
         description="Get ticket change history. Use this to investigate who changed what and when. Set raw=true to get comment content in original TracWiki format without conversion.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -86,6 +104,12 @@ TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_fields",
         description="Get all ticket field definitions (standard + custom fields). Returns field metadata including name, type, label, options (for select fields), and custom flag. Use to discover instance-specific ticket schema.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {},
@@ -95,6 +119,12 @@ TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_actions",
         description="Get valid workflow actions for a ticket's current state. Returns available state transitions (e.g., accept, resolve, reassign). Essential for agents to know which actions are possible before updating ticket status.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {

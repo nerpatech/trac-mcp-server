@@ -14,6 +14,8 @@ from unittest.mock import MagicMock
 
 import mcp.types as types
 
+from trac_mcp_server.mcp.server import PING_SPEC
+from trac_mcp_server.mcp.tools import ALL_SPECS
 from trac_mcp_server.mcp.tools.registry import (
     ToolRegistry,
     ToolSpec,
@@ -330,6 +332,59 @@ class TestLoadPermissionsFile(unittest.TestCase):
             )
         finally:
             Path(path).unlink()
+
+
+class TestAllToolsCarryReadOnlyHint(unittest.TestCase):
+    """Regression test for ticket #23.
+
+    Every registered tool must declare ``annotations.readOnlyHint``
+    explicitly. Without it, Claude Code plan mode can't prove a tool is
+    read-only from the MCP listing alone, so it prompts for confirmation
+    on every call even when the caller's permission allowlist already
+    covers it -- defeating plan mode for exactly the read-only research
+    tools (ticket_get, wiki_get, ...) it's most wanted for.
+    """
+
+    def test_every_tool_declares_read_only_hint(self):
+        missing = [
+            spec.tool.name
+            for spec in [PING_SPEC] + ALL_SPECS
+            if spec.tool.annotations is None
+            or spec.tool.annotations.readOnlyHint is None
+        ]
+        self.assertEqual(
+            missing,
+            [],
+            f"Tools missing annotations.readOnlyHint: {missing}",
+        )
+
+    def test_read_only_hint_matches_write_tool_naming(self):
+        """Sanity-check the hint direction, not just its presence.
+
+        A tool named *_create/_update/_delete must be readOnlyHint=False;
+        every other registered tool must be readOnlyHint=True. Catches an
+        annotation copy-pasted onto the wrong tool.
+        """
+        write_suffixes = ("_create", "_update", "_delete")
+        for spec in [PING_SPEC] + ALL_SPECS:
+            name = spec.tool.name
+            assert spec.tool.annotations is not None, name
+            read_only = spec.tool.annotations.readOnlyHint
+            if name.endswith(write_suffixes) or name in {
+                "ticket_attachment_put",
+                "ticket_attachment_get",
+                "wiki_attachment_put",
+                "wiki_attachment_get",
+                "wiki_file_push",
+                "wiki_file_pull",
+            }:
+                self.assertFalse(
+                    read_only, f"{name} should be readOnlyHint=False"
+                )
+            else:
+                self.assertTrue(
+                    read_only, f"{name} should be readOnlyHint=True"
+                )
 
 
 if __name__ == "__main__":

@@ -95,6 +95,12 @@ PING_SPEC = ToolSpec(
     tool=types.Tool(
         name="ping",
         description="Test Trac MCP server connectivity and return API version",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {},

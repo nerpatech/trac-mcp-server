@@ -25,6 +25,12 @@ def _build_ticket_create_tool() -> types.Tool:
     return types.Tool(
         name="ticket_create",
         description="Create a new ticket. Accepts Markdown for description (auto-converted to TracWiki).",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -81,6 +87,12 @@ TICKET_WRITE_TOOLS = [
     types.Tool(
         name="ticket_update",
         description="Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -149,6 +161,12 @@ TICKET_WRITE_TOOLS = [
     types.Tool(
         name="ticket_delete",
         description="Delete a ticket permanently. Warning: This cannot be undone. Requires TICKET_ADMIN permission and 'tracopt.ticket.deleter' enabled in trac.ini.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
