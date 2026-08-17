@@ -304,6 +304,47 @@ async def _handle_update(
         if key.startswith("action_"):
             attributes[key] = value
 
+    # A plain `resolution` and a workflow `action` silently conflict:
+    # ConfigurableTicketWorkflow sets `resolution` from the action's own
+    # input field (e.g. `action_resolve_resolve_resolution`), and that
+    # assignment wins over the bare `resolution` attribute -- even though
+    # `resolution` is the documented, discoverable parameter. The call
+    # still reports success with the ticket closed but unresolved
+    # (ticket #32). If the caller already supplied the action's own
+    # field explicitly, leave it alone -- it already wins on the wire,
+    # so remapping would just overwrite an intentional value. Otherwise
+    # look up the action's real input fields via ticket_actions (rather
+    # than guessing the "resolve" name) and remap the bare `resolution`
+    # onto whichever field ends in "resolution", so the transition and
+    # the resolution land in one call.
+    action = args.get("action")
+    if action and "resolution" in attributes:
+        action_prefix = f"action_{action}_"
+        already_explicit = any(
+            key.startswith(action_prefix) and key.endswith("resolution")
+            for key in attributes
+        )
+        if not already_explicit:
+            try:
+                actions = await run_sync(
+                    client.get_ticket_actions, ticket_id
+                )
+            except Exception:
+                actions = []
+            for entry in actions or []:
+                if not isinstance(entry, (list, tuple)) or not entry:
+                    continue
+                if entry[0] != action:
+                    continue
+                input_fields = entry[3] if len(entry) > 3 else []
+                for field in input_fields or []:
+                    if str(field).endswith("resolution"):
+                        attributes[f"action_{action}_{field}"] = (
+                            attributes.pop("resolution")
+                        )
+                        break
+                break
+
     # Update ticket (client handles optimistic locking)
     await run_sync(client.update_ticket, ticket_id, comment, attributes)
 
