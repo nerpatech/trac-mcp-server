@@ -5,8 +5,6 @@ timestamp access from Trac server.
 """
 
 import logging
-import time
-from datetime import datetime
 
 import mcp.types as types
 
@@ -43,52 +41,22 @@ async def _handle_get_server_time(
 ) -> types.CallToolResult:
     """Handle get_server_time tool.
 
-    Uses wiki.getPageInfo("WikiStart") to retrieve server timestamp from a page
-    that exists by default in Trac installations. Falls back to first available
-    page if WikiStart doesn't exist.
+    Reads the Trac server's current wall-clock time from the HTTP Date
+    response header of a lightweight RPC round trip. Previously this
+    inferred "current time" from a wiki page's lastModified timestamp,
+    which only reflects when that page was last edited -- observed
+    ~4 months stale in production once WikiStart went that long without
+    an edit (ticket #33).
 
     Returns:
         CallToolResult with ISO 8601 timestamp text and structured JSON with
         server_time (ISO), unix_timestamp (int), and timezone ("server")
     """
     try:
-        # Try WikiStart first (default page in Trac)
-        def get_page_info():
-            try:
-                return client.get_wiki_page_info("WikiStart")
-            except Exception:
-                # Fallback: get first available page
-                pages = client.list_wiki_pages()
-                if not pages:
-                    raise RuntimeError(
-                        "No wiki pages available to query server time"
-                    ) from None
-                return client.get_wiki_page_info(pages[0])
+        dt = await run_sync(client.get_server_time)
+        iso_timestamp = dt.isoformat()
+        unix_timestamp = int(dt.timestamp())
 
-        page_info = await run_sync(get_page_info)
-
-        # Extract lastModified field (string in format YYYYMMDDTHH:MM:SS)
-        last_modified = page_info.get("lastModified")
-        if not last_modified:
-            return build_error_response(
-                "server_error",
-                "Server did not return lastModified timestamp",
-                "This may indicate a Trac server configuration issue.",
-            )
-
-        # Parse timestamp - can be either string or DateTime object
-        if isinstance(last_modified, str):
-            # String format: 20260205T20:51:27
-            dt = datetime.strptime(last_modified, "%Y%m%dT%H:%M:%S")
-            unix_timestamp = int(dt.timestamp())
-            iso_timestamp = dt.isoformat()
-        else:
-            # xmlrpc.client.DateTime object
-            unix_timestamp = int(time.mktime(last_modified.timetuple()))
-            dt = datetime.fromtimestamp(unix_timestamp)
-            iso_timestamp = dt.isoformat()
-
-        # Build response
         text_content = f"Server time: {iso_timestamp}"
 
         structured_json = {

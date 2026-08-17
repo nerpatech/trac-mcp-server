@@ -5,13 +5,10 @@ These tests verify system tool definitions and handler behavior with mocked Trac
 """
 
 import asyncio
-import time
 import unittest
-import xmlrpc.client
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-from trac_mcp_server.config import Config
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.system import (
     SYSTEM_SPECS,
@@ -40,165 +37,71 @@ class TestSystemTools(unittest.TestCase):
 
 
 class TestGetServerTimeHandler(unittest.TestCase):
-    """Test get_server_time handler behavior."""
+    """Test get_server_time handler behavior.
+
+    ticket #33: get_server_time used to infer "current time" from a
+    wiki page's lastModified timestamp -- stale the moment nothing on
+    that page changes -- instead of the server's actual clock. The
+    fixed handler just awaits client.get_server_time() (TracClient.
+    get_server_time, exercised separately in test_client.py) and
+    formats whatever datetime it returns.
+    """
 
     def setUp(self):
         """Set up test fixtures."""
-        self.config = Config(
-            trac_url="https://trac.example.com",
-            username="testuser",
-            password="testpass",
-            insecure=False,
-        )
+        self.mock_client = MagicMock()
 
-    @patch("trac_mcp_server.mcp.tools.system.TracClient")
     @patch("trac_mcp_server.mcp.tools.system.run_sync")
-    def test_get_server_time_success(
-        self, mock_run_sync, mock_client_class
-    ):
-        """Test get_server_time returns valid timestamp."""
-        # Create mock DateTime object
-        now = datetime.now()
-        mock_datetime = xmlrpc.client.DateTime()
-        mock_datetime.value = now.strftime("%Y%m%dT%H:%M:%S")
+    def test_get_server_time_success(self, mock_run_sync):
+        """get_server_time returns the client's reported timestamp."""
+        server_dt = datetime(2026, 8, 17, 17, 6, 7, tzinfo=timezone.utc)
+        mock_run_sync.return_value = server_dt
 
-        # Mock page info response
-        mock_page_info = {
-            "name": "WikiStart",
-            "author": "admin",
-            "version": 1,
-            "lastModified": mock_datetime,
-        }
-
-        # Mock TracClient
-        mock_client = MagicMock()
-        mock_client_class.return_value = mock_client
-
-        # Mock run_sync to return page info directly (not a coroutine)
-        mock_run_sync.return_value = mock_page_info
-
-        # Call handler
         result = asyncio.run(
             ToolRegistry(SYSTEM_SPECS).call_tool(
-                "get_server_time", {}, self.config
+                "get_server_time", {}, self.mock_client
             )
         )
 
-        # Verify result structure
         self.assertTrue(hasattr(result, "content"))
         self.assertTrue(hasattr(result, "structuredContent"))
 
-        # Verify text content
         text_content = result.content[0].text
         self.assertIn("Server time:", text_content)
 
-        # Verify structured content
         structured = result.structuredContent
-        self.assertIn("server_time", structured)
-        self.assertIn("unix_timestamp", structured)
-        self.assertIn("timezone", structured)
-
-        # Verify ISO 8601 format
-        server_time = structured["server_time"]
-        # Should be parseable as datetime
-        datetime.fromisoformat(server_time)
-
-        # Verify unix_timestamp is integer
-        self.assertIsInstance(structured["unix_timestamp"], int)
-
-        # Verify timezone field
+        self.assertEqual(
+            structured["server_time"], "2026-08-17T17:06:07+00:00"
+        )
+        self.assertEqual(
+            structured["unix_timestamp"], int(server_dt.timestamp())
+        )
         self.assertEqual(structured["timezone"], "server")
 
-    @patch("trac_mcp_server.mcp.tools.system.TracClient")
+        # Verify run_sync was handed client.get_server_time, not the old
+        # wiki-page lastModified lookup.
+        mock_run_sync.assert_called_once_with(
+            self.mock_client.get_server_time
+        )
+
     @patch("trac_mcp_server.mcp.tools.system.run_sync")
-    def test_get_server_time_wikistart_fallback(
-        self, mock_run_sync, mock_client_class
-    ):
-        """Test get_server_time falls back to first page if WikiStart missing."""
-        # Create mock DateTime object
-        now = datetime.now()
-        mock_datetime = xmlrpc.client.DateTime()
-        mock_datetime.value = now.strftime("%Y%m%dT%H:%M:%S")
+    def test_get_server_time_no_date_header(self, mock_run_sync):
+        """A response with no Date header surfaces as a server_error,
+        not a silently wrong timestamp.
+        """
+        mock_run_sync.side_effect = RuntimeError(
+            "Trac server response did not include an HTTP Date header"
+        )
 
-        # Mock page info response for fallback page
-        mock_page_info = {
-            "name": "SomePage",
-            "author": "admin",
-            "version": 1,
-            "lastModified": mock_datetime,
-        }
-
-        # Mock TracClient
-        mock_client = MagicMock()
-        mock_client_class.return_value = mock_client
-
-        # Mock run_sync to return page info directly (simulates successful fallback)
-        mock_run_sync.return_value = mock_page_info
-
-        # Call handler
         result = asyncio.run(
             ToolRegistry(SYSTEM_SPECS).call_tool(
-                "get_server_time", {}, self.config
+                "get_server_time", {}, self.mock_client
             )
         )
 
-        # Verify result structure exists (fallback worked)
-        self.assertTrue(hasattr(result, "content"))
-        self.assertTrue(hasattr(result, "structuredContent"))
-
-    @patch("trac_mcp_server.mcp.tools.system.TracClient")
-    @patch("trac_mcp_server.mcp.tools.system.run_sync")
-    def test_get_server_time_no_timestamp(
-        self, mock_run_sync, mock_client_class
-    ):
-        """Test get_server_time handles missing lastModified field."""
-        # Mock page info without lastModified
-        mock_page_info = {
-            "name": "WikiStart",
-            "author": "admin",
-            "version": 1,
-        }
-
-        # Mock TracClient
-        mock_client = MagicMock()
-        mock_client_class.return_value = mock_client
-
-        # Mock run_sync to return page info without timestamp directly
-        mock_run_sync.return_value = mock_page_info
-
-        # Call handler
-        result = asyncio.run(
-            ToolRegistry(SYSTEM_SPECS).call_tool(
-                "get_server_time", {}, self.config
-            )
-        )
-
-        # Should return CallToolResult with isError=True
-        from mcp.types import CallToolResult
-
-        self.assertIsInstance(result, CallToolResult)
         self.assertTrue(result.isError)
-        self.assertTrue(len(result.content) > 0)
-        error_text = result.content[0].text
-        self.assertIn("Error", error_text)
-
-    def test_datetime_conversion_accuracy(self):
-        """Test DateTime to unix timestamp conversion is accurate."""
-        # Create a known datetime
-        test_datetime = datetime(2025, 1, 15, 14, 30, 0)
-
-        # Create XML-RPC DateTime object
-        mock_datetime = xmlrpc.client.DateTime()
-        mock_datetime.value = test_datetime.strftime("%Y%m%dT%H:%M:%S")
-
-        # Convert using the same method as our code
-        unix_timestamp = int(time.mktime(mock_datetime.timetuple()))
-
-        # Verify conversion is accurate (within 1 second tolerance for timezone)
-        expected_timestamp = int(test_datetime.timestamp())
-        self.assertAlmostEqual(
-            unix_timestamp, expected_timestamp, delta=1
-        )
+        self.assertIn("Error", result.content[0].text)
+        self.assertIn("Date header", result.content[0].text)
 
 
 if __name__ == "__main__":

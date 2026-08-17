@@ -5,6 +5,7 @@ import threading
 import time
 import xmlrpc.client
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 from xml.etree import ElementTree
 
@@ -143,9 +144,14 @@ class TracClient:
         session.mount("https://", adapter)
         return session
 
-    def _rpc_request(self, service: str, method: str, *params):
-        """
-        Make an XML-RPC request to the Trac server.
+    def _rpc_call(
+        self, service: str, method: str, *params
+    ) -> requests.Response:
+        """POST an XML-RPC request and return the raw HTTP response.
+
+        Split out of _rpc_request() so callers that need the transport
+        response itself (e.g. get_server_time()'s HTTP Date header) don't
+        have to duplicate the request-building/sending logic.
         """
         payload = xmlrpc.client.dumps(
             params, methodname=f"{service}.{method}"
@@ -160,6 +166,13 @@ class TracClient:
             timeout=(10, self.config.rpc_timeout),
         )
         response.raise_for_status()
+        return response
+
+    def _rpc_request(self, service: str, method: str, *params):
+        """
+        Make an XML-RPC request to the Trac server.
+        """
+        response = self._rpc_call(service, method, *params)
 
         # Parse the response
         tree = ElementTree.fromstring(response.content)
@@ -256,6 +269,35 @@ class TracClient:
         """
         version = self._rpc_request("system", "getAPIVersion")
         return str(version) if version is not None else ""
+
+    def get_server_time(self) -> datetime:
+        """
+        Get the Trac server's current wall-clock time.
+
+        Reads the HTTP ``Date`` response header of a lightweight RPC
+        round trip, not any Trac resource's ``lastModified`` timestamp.
+        A resource's last-modified time only reflects when it was last
+        edited -- it drifts stale the moment nothing on it changes, and
+        was found to be ~4 months behind actual server time when this
+        server used a wiki page's lastModified as a stand-in (ticket
+        #33). The ``Date`` header is set by the web server on every
+        response and requires no dedicated "get current time" RPC
+        method, which Trac's XML-RPC API doesn't provide.
+
+        Returns:
+            Timezone-aware datetime (UTC) of the server's response.
+
+        Raises:
+            RuntimeError: If the response has no Date header.
+            requests.exceptions.RequestException: On connection failure.
+        """
+        response = self._rpc_call("system", "getAPIVersion")
+        date_header = response.headers.get("Date")
+        if not date_header:
+            raise RuntimeError(
+                "Trac server response did not include an HTTP Date header"
+            )
+        return parsedate_to_datetime(date_header)
 
     def list_methods(self) -> Any:
         """
