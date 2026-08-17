@@ -61,6 +61,7 @@ class TracWikiParser:
         self.warnings: list[str] = []
         self._unknown_macros = unknown_macros
         self._link_placeholders: list[str] = []
+        self._code_placeholders: list[str] = []
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -77,6 +78,7 @@ class TracWikiParser:
         """
         self.warnings = []
         self._link_placeholders = []
+        self._code_placeholders = []
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -91,6 +93,7 @@ class TracWikiParser:
         text = self._convert_tables(text)
         text = self._restore_macro_placeholders(text)
         text = self._restore_link_placeholders(text)
+        text = self._restore_code_placeholders(text)
 
         return ConversionResult(
             text=text,
@@ -179,14 +182,30 @@ class TracWikiParser:
 
         Code block with language: {{{#!lang\ncode\n}}} -> ```lang\ncode\n```
         Code block without language: {{{\ncode\n}}} -> ```\ncode\n```
+        Inline code span: `code` -> `code` (already valid Markdown; the
+        body still needs shielding -- see below).
+
+        Every code body is stashed behind an opaque \x00CODE<n>\x00
+        placeholder and restored verbatim by _restore_code_placeholders(),
+        after every other pass in parse() has run. Without this, the
+        seven passes that used to run right after this one (macros,
+        headings, formatting, links, lists, other-elements, tables) walked
+        straight through the fence/span they had just created and
+        rewrote any TracWiki-shaped markup inside -- silently corrupting
+        config/log/terminal excerpts that only *resemble* wiki syntax
+        (ticket #31).
         """
+
+        def stash(body: str) -> str:
+            self._code_placeholders.append(body)
+            return f"\x00CODE{len(self._code_placeholders) - 1}\x00"
 
         # Map TracWiki processor directive to Markdown language (e.g., 'sh' -> 'bash')
         def convert_code_block_with_lang(match: re.Match[str]) -> str:
             tracwiki_lang = match.group(1)
             code = match.group(2)
             md_lang = tracwiki_to_markdown_lang(tracwiki_lang)
-            return f"```{md_lang}\n{code}\n```"
+            return f"```{md_lang}\n{stash(code)}\n```"
 
         text = re.sub(
             r"\{\{\{#!(\w+)\n(.*?)\n\}\}\}",
@@ -197,9 +216,18 @@ class TracWikiParser:
         # Code block without language
         text = re.sub(
             r"\{\{\{\n(.*?)\n\}\}\}",
-            r"```\n\1\n```",
+            lambda m: f"```\n{stash(m.group(1))}\n```",
             text,
             flags=re.DOTALL,
+        )
+        # Inline code span: `code`. Not TracWiki syntax on its own (Trac's
+        # WikiFormatting doesn't recognize a bare backtick), so it already
+        # passes through unchanged -- but its contents are still ordinary
+        # text to every later pass unless shielded the same way.
+        text = re.sub(
+            r"`([^`\n]+)`",
+            lambda m: f"`{stash(m.group(1))}`",
+            text,
         )
         return text
 
@@ -218,8 +246,20 @@ class TracWikiParser:
             flags=re.IGNORECASE,
         )
 
-        # Line break
-        text = re.sub(r"\[\[BR\]\]", "\n", text, flags=re.IGNORECASE)
+        # Line break: emit a CommonMark hard break (two trailing spaces +
+        # a single newline), not a bare "\n". A bare "\n" is only a soft
+        # break in Markdown, and when [[BR]] terminates a line that
+        # already has its own trailing "\n" in the source (e.g. one
+        # field per line, each ended with the macro), the extra "\n"
+        # this substitution used to add stacked with that existing one
+        # into a blank line -- silently downgrading the hard break to a
+        # paragraph break and losing round-trip fidelity on read
+        # (ticket #30). Consuming any newline (and trailing whitespace)
+        # that immediately follows the macro in the source avoids
+        # emitting a second one.
+        text = re.sub(
+            r"\[\[BR\]\][ \t]*\r?\n?", "  \n", text, flags=re.IGNORECASE
+        )
 
         # TracLinks: Keep as-is since Markdown has no equivalent
         # Examples: #123, ticket:1, wiki:Page, changeset:abc123
@@ -619,6 +659,19 @@ class TracWikiParser:
             return self._link_placeholders[int(m.group(1))]
 
         return re.sub(r"\x00LINK(\d+)\x00", restore, text)
+
+    def _restore_code_placeholders(self, text: str) -> str:
+        """Restore code-body placeholders stashed by ``_convert_code_blocks``.
+
+        Runs last, after every pass that could otherwise mistake a code
+        body for TracWiki markup, so the restored text is byte-identical
+        to the original source (ticket #31).
+        """
+
+        def restore(m: re.Match[str]) -> str:
+            return self._code_placeholders[int(m.group(1))]
+
+        return re.sub(r"\x00CODE(\d+)\x00", restore, text)
 
 
 def tracwiki_to_markdown(

@@ -588,14 +588,14 @@ plain code
         self.assertEqual(result.text, "---")
 
     def test_line_break(self):
-        """Test line break conversion."""
+        """[[BR]] converts to a CommonMark hard break, not a soft break."""
         result = tracwiki_to_markdown("Line one[[BR]]Line two")
-        self.assertEqual(result.text, "Line one\nLine two")
+        self.assertEqual(result.text, "Line one  \nLine two")
 
     def test_line_break_case_insensitive(self):
         """Test line break is case insensitive."""
         result = tracwiki_to_markdown("Line one[[br]]Line two")
-        self.assertEqual(result.text, "Line one\nLine two")
+        self.assertEqual(result.text, "Line one  \nLine two")
 
     def test_image(self):
         """Test image conversion."""
@@ -1959,6 +1959,89 @@ class TestConverterTicketRegressions(unittest.TestCase):
         """
         result = markdown_to_tracwiki("global  \nnext line")
         self.assertIn("global [[BR]]", result)
+
+
+class TestReadPathConverterTicketRegressions(unittest.TestCase):
+    """Regression tests for tickets against the tracwiki_to_markdown
+    (read-path) converter, kept together since they were found and
+    fixed in the same sweep.
+    """
+
+    def test_ticket_30_br_terminated_line_no_blank_line(self):
+        """A [[BR]]-terminated line followed by the source's own "\\n"
+        must become a single hard-break line, not a blank-line paragraph
+        break -- the exact `auto_pm` #10 symptom this ticket reintroduced
+        via the read path.
+        """
+        tracwiki = (
+            "**Scope:** `substrate:trac`[[BR]]\n"
+            "**Type:** hard-rule[[BR]]\n"
+            "**Status:** active"
+        )
+        result = tracwiki_to_markdown(tracwiki)
+        self.assertEqual(
+            result.text,
+            "**Scope:** `substrate:trac`  \n"
+            "**Type:** hard-rule  \n"
+            "**Status:** active",
+        )
+        # No blank line anywhere -- that would be a paragraph break.
+        self.assertNotIn("\n\n", result.text)
+
+    def test_ticket_30_br_without_trailing_newline(self):
+        """[[BR]] with no following source newline still produces a
+        hard break, not a bare (soft-break) "\\n".
+        """
+        result = tracwiki_to_markdown("Line one[[BR]]Line two")
+        self.assertEqual(result.text, "Line one  \nLine two")
+
+    def test_ticket_31_code_block_body_byte_identical(self):
+        """A {{{ }}} code block body that merely resembles TracWiki
+        markup must survive conversion byte-identical -- the fixture
+        from the ticket's own "Test coverage to add" section.
+        """
+        body = (
+            "<Target>\n"
+            "[Label](Target)\n"
+            " * not a bullet\n"
+            "||a||b||\n"
+            "''italics'' and '''bold'''\n"
+            "= heading =\n"
+            "trailing backslash \\"
+        )
+        tracwiki = "{{{\n" + body + "\n}}}"
+        result = tracwiki_to_markdown(tracwiki)
+        self.assertEqual(result.text, f"```\n{body}\n```")
+
+    def test_ticket_31_code_block_body_uwsgi_log(self):
+        """The exact uWSGI log excerpt from the ticket: bracket-shaped
+        log text must not be reparsed as a TracWiki [url text] link.
+        """
+        body = (
+            "<uWSGI> getting INI configuration from /tmp/trac-fg.ini\n"
+            "*** Starting uWSGI on [Aug 17 08:18:13 2026](Mon) ***\n"
+            'open("--master"): Permission denied [line 288](core/logging.c)'
+        )
+        tracwiki = "{{{\n" + body + "\n}}}"
+        result = tracwiki_to_markdown(tracwiki)
+        self.assertEqual(result.text, f"```\n{body}\n```")
+
+    def test_ticket_31_code_block_with_language_body_byte_identical(
+        self,
+    ):
+        """Same shielding applies to {{{#!lang ... }}} blocks."""
+        body = "* not a bullet\n''not italic''"
+        tracwiki = "{{{#!text\n" + body + "\n}}}"
+        result = tracwiki_to_markdown(tracwiki)
+        self.assertEqual(result.text, f"```text\n{body}\n```")
+
+    def test_ticket_31_inline_code_span_shielded(self):
+        """Inline `code` spans get the same shielding as fenced blocks."""
+        result = tracwiki_to_markdown(
+            "Config uses `[[BR]]` and `''never italic''` here."
+        )
+        self.assertIn("`[[BR]]`", result.text)
+        self.assertIn("`''never italic''`", result.text)
 
 
 if __name__ == "__main__":
