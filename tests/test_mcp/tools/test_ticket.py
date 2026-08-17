@@ -939,6 +939,111 @@ class TestHandleTicketUpdate(unittest.TestCase):
                 attrs["action_reassign_reassign_owner"], "bob"
             )
 
+    def test_update_resolve_action_with_resolution_maps_to_action_field(
+        self,
+    ):
+        """action='resolve' + resolution='fixed' lands as a single call
+        that both closes the ticket AND sets the resolution -- not a
+        bare `resolution` attribute the workflow action then silently
+        overwrites with an empty string (ticket #32).
+        """
+
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_actions:
+                return [
+                    ["leave", "leave", [], []],
+                    [
+                        "resolve",
+                        "resolve",
+                        ["closed"],
+                        ["resolve_resolution"],
+                    ],
+                ]
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 21,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                    },
+                )
+            )
+
+            self.assertIsInstance(result, types.CallToolResult)
+            update_call = next(
+                c
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            )
+            attrs = update_call.args[3]
+            self.assertEqual(attrs["action"], "resolve")
+            self.assertEqual(
+                attrs["action_resolve_resolve_resolution"], "fixed"
+            )
+            self.assertNotIn("resolution", attrs)
+
+    def test_update_resolution_alone_still_sets_bare_field(self):
+        """resolution with no action still sets the plain attribute,
+        as it did before ticket #32's fix -- no action means no
+        workflow field to look up or conflict with.
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {"ticket_id": 22, "resolution": "wontfix"},
+                )
+            )
+
+            attrs = mock_run_sync.call_args[0][3]
+            self.assertEqual(attrs, {"resolution": "wontfix"})
+
+    def test_update_explicit_action_resolution_field_wins(self):
+        """An explicit action_resolve_resolve_resolution still wins over
+        a plain resolution if both are given -- and the lookup is
+        skipped entirely since there's nothing to remap.
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 23,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                        "action_resolve_resolve_resolution": "wontfix",
+                    },
+                )
+            )
+
+            attrs = mock_run_sync.call_args[0][3]
+            self.assertEqual(
+                attrs["action_resolve_resolve_resolution"], "wontfix"
+            )
+            # The lookup is skipped entirely -- run_sync is only called
+            # once, for the final update_ticket call.
+            self.assertEqual(mock_run_sync.call_count, 1)
+            self.assertIs(
+                mock_run_sync.call_args[0][0],
+                self.mock_client.update_ticket,
+            )
+
     def test_update_unknown_kwargs_still_dropped(self):
         """Non-allowlisted, non-action_-prefixed kwargs are silently dropped.
 
