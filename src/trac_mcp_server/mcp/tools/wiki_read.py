@@ -25,6 +25,12 @@ WIKI_READ_TOOLS = [
     types.Tool(
         name="wiki_get",
         description="Get wiki page content with Markdown output. Returns full content with metadata (version, author, modified date). Set raw=true to get original TracWiki format without conversion.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -49,6 +55,12 @@ WIKI_READ_TOOLS = [
     types.Tool(
         name="wiki_search",
         description="Search wiki pages by content with relevance ranking. Returns snippets showing matched text. Set raw=true to get snippets in original TracWiki format without conversion.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -83,6 +95,12 @@ WIKI_READ_TOOLS = [
     types.Tool(
         name="wiki_recent_changes",
         description="Get recently modified wiki pages. Returns pages sorted by modification date (newest first). Useful for finding stale or recently updated documentation.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -106,6 +124,12 @@ WIKI_READ_TOOLS = [
     types.Tool(
         name="wiki_get_history",
         description="Get wiki page revision history newest-first. Returns list of revisions with version, author, lastModified, and comment (commit message). Useful for detecting prior edits or scanning attribution markers in change comments.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {

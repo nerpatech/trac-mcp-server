@@ -29,6 +29,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "Create a new ticket component. Requires TICKET_ADMIN "
             "permission. Component must not already exist."
         ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -56,6 +62,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "List all ticket components with their attributes "
             "(name, description, owner). Requires TICKET_VIEW."
         ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {},
@@ -67,6 +79,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "Create a new value for a Trac enum field (priority, "
             "resolution, severity, type, or version). Requires "
             "TICKET_ADMIN permission."
+        ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
         ),
         inputSchema={
             "type": "object",
@@ -93,6 +111,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "List all values for a Trac enum field. Returns values in "
             "Trac's configured order. Requires TICKET_VIEW permission."
         ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -114,6 +138,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "Delete a ticket component. Requires TICKET_ADMIN "
             "permission."
         ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -131,6 +161,12 @@ TICKET_ADMIN_TOOLS: list[types.Tool] = [
             "Delete a value from a ticket enum field (priority, "
             "resolution, severity, type, or version). Requires "
             "TICKET_ADMIN permission."
+        ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
         ),
         inputSchema={
             "type": "object",

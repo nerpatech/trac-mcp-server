@@ -26,6 +26,12 @@ INSTANCE_TOOLS = [
             "path (e.g. '/project') as the 'instance' argument on any other "
             "tool to target that project."
         ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {

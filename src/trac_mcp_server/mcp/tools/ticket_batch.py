@@ -27,6 +27,12 @@ TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_create",
         description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -56,6 +62,12 @@ TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_delete",
         description="Delete multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Requires TICKET_ADMIN permission.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -71,6 +83,12 @@ TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_update",
         description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {

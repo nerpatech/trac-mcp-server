@@ -23,6 +23,12 @@ MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_list",
         description="List all milestone names. Returns array of milestone names (e.g., ['v1.0', 'v2.0', 'Future']). Requires TICKET_VIEW permission.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {},
@@ -32,6 +38,12 @@ MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_get",
         description="Get milestone details by name. Returns name, due date, completion date, and description. Requires TICKET_VIEW permission. Set raw=true to get description in original TracWiki format without conversion.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -51,6 +63,12 @@ MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_create",
         description="Create a new milestone. Requires TICKET_ADMIN permission. Attributes: due (ISO 8601 date), completed (ISO 8601 date or 0), description (string).",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -82,6 +100,12 @@ MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_update",
         description="Update an existing milestone. Requires TICKET_ADMIN permission. Attributes: due (ISO 8601 date), completed (ISO 8601 date or 0), description (string).",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -113,6 +137,12 @@ MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_delete",
         description="Delete a milestone by name. Requires TICKET_ADMIN permission. Warning: This cannot be undone.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {

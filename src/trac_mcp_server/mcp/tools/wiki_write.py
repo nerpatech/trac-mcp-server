@@ -24,6 +24,12 @@ WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_create",
         description="Create new wiki page from Markdown input. Fails if page exists (use wiki_update instead).",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -46,6 +52,12 @@ WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_update",
         description="Update existing wiki page with optimistic locking. Requires version for conflict detection.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
@@ -73,6 +85,12 @@ WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_delete",
         description="Delete a wiki page. Warning: This cannot be undone. Requires WIKI_DELETE permission.",
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
         inputSchema={
             "type": "object",
             "properties": {
