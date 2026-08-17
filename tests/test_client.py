@@ -1,6 +1,6 @@
 import calendar
 import socket
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -320,6 +320,66 @@ def test_validate_connection(mock_post, mock_config):
     mock_post.assert_called_once()
     payload = mock_post.call_args[1]["data"]
     assert "system.getAPIVersion" in payload
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_server_time_reads_http_date_header(mock_post, mock_config):
+    """get_server_time returns the HTTP Date header of the RPC
+    response, not any Trac resource's lastModified timestamp
+    (ticket #33) -- the Date header reflects the server's actual
+    clock at response time, while a resource's lastModified only
+    reflects when that resource was last edited and goes stale the
+    moment nothing on it changes.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Date": "Mon, 17 Aug 2026 17:06:07 GMT"}
+    mock_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value><string>1.0</string></value>
+    </param>
+  </params>
+</methodResponse>"""
+    mock_post.return_value = mock_response
+
+    client = TracClient(mock_config)
+    result = client.get_server_time()
+
+    assert result == datetime(
+        2026, 8, 17, 17, 6, 7, tzinfo=timezone.utc
+    )
+
+    # Uses a lightweight RPC call, not a wiki/ticket resource lookup.
+    mock_post.assert_called_once()
+    payload = mock_post.call_args[1]["data"]
+    assert "system.getAPIVersion" in payload
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_server_time_missing_date_header_raises(
+    mock_post, mock_config
+):
+    """No Date header on the response surfaces as a clear error
+    instead of silently returning a wrong timestamp.
+    """
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {}
+    mock_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value><string>1.0</string></value>
+    </param>
+  </params>
+</methodResponse>"""
+    mock_post.return_value = mock_response
+
+    client = TracClient(mock_config)
+    with pytest.raises(RuntimeError, match="Date header"):
+        client.get_server_time()
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
