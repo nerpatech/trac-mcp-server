@@ -1940,6 +1940,29 @@ class TestConverterTicketRegressions(unittest.TestCase):
             markdown_to_tracwiki("<wiki:SomePage>"), "[wiki:SomePage]"
         )
 
+    def test_ticket_37_acronym_tailed_words_not_escaped(self):
+        """An acronym-tailed word like "PyVISA" or "NASA" must NOT get
+        the defensive "!" prefix -- Trac's own WikiFormatting grammar
+        requires every hump after the first to carry a real lowercase
+        letter, so it never auto-links these in the first place. Only
+        genuine multi-hump CamelCase words (WiFi, LoRa, WiFiConfig) are
+        still escaped.
+        """
+        result = markdown_to_tracwiki(
+            "PyVISA should show whether Trac auto-links acronym-tailed "
+            "words. NASA alone, all caps, for comparison."
+        )
+        self.assertIn("PyVISA", result)
+        self.assertNotIn("!PyVISA", result)
+        self.assertIn("NASA", result)
+        self.assertNotIn("!NASA", result)
+        # Regression guard: genuine multi-hump words are still escaped.
+        result = markdown_to_tracwiki(
+            "WiFi credentials and the LoRa wire format."
+        )
+        self.assertIn("!WiFi", result)
+        self.assertIn("!LoRa", result)
+
     def test_ticket_29_br_gets_leading_space_after_colon_token(self):
         """A hard line break directly after a colon-valued token (e.g.
         "substrate:trac") gets a leading space before [[BR]] -- without
