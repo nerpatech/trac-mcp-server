@@ -1071,6 +1071,106 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertNotIn("not_a_field", attrs)
             self.assertNotIn("act", attrs)
 
+    def test_update_reply_to_prepends_quote_block(self):
+        """reply_to=N prepends Trac's standard "Replying to
+        [comment:N author]:" quote block, quoting that comment's own
+        text, before the new comment.
+        """
+
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_changelog:
+                return [
+                    (
+                        1700000000,
+                        "alice",
+                        "comment",
+                        "3",
+                        "First line.\nSecond line.",
+                        1,
+                    ),
+                ]
+            return True
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
+            ) as mock_convert,
+        ):
+            mock_run_sync.side_effect = run_sync_side_effect
+            mock_convert.return_value = "New reply text"
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "comment": "New reply text",
+                        "reply_to": 3,
+                    },
+                )
+            )
+
+            self.assertIsInstance(result, types.CallToolResult)
+            update_call = next(
+                c
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            )
+            posted_comment = update_call.args[2]
+            self.assertIn(
+                "Replying to [comment:3 alice]:", posted_comment
+            )
+            self.assertIn("> First line.", posted_comment)
+            self.assertIn("> Second line.", posted_comment)
+            self.assertIn("New reply text", posted_comment)
+
+    def test_update_reply_to_missing_comment_number_errors(self):
+        """reply_to pointing at a comment number that doesn't exist in
+        the changelog returns a not_found error instead of silently
+        posting an unquoted comment.
+        """
+
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_changelog:
+                return []
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "comment": "New reply text",
+                        "reply_to": 99,
+                    },
+                )
+            )
+
+            self.assertTrue(result.isError)
+            self.assertIn("Comment #99", result.content[0].text)
+
+    def test_update_reply_to_without_comment_errors(self):
+        """reply_to without a comment is rejected -- there's nothing to
+        post as the reply.
+        """
+        result = asyncio.run(
+            _handle_update(
+                self.mock_client,
+                {"ticket_id": 42, "reply_to": 3},
+            )
+        )
+
+        self.assertTrue(result.isError)
+        self.assertIn("comment is required", result.content[0].text)
+
 
 # ---------------------------------------------------------------------------
 # Ticket Write Tool Dispatcher tests

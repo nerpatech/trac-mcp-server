@@ -86,7 +86,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments.",
+        description="Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -153,6 +153,11 @@ TICKET_WRITE_TOOLS = [
                 "keywords": {
                     "type": "string",
                     "description": "Keywords/tags",
+                },
+                "reply_to": {
+                    "type": "integer",
+                    "description": "Comment number to reply to. Prepends Trac's standard \"Replying to [comment:N author]:\" quote block (quoting that comment's own text) before the new comment. Requires 'comment' to also be provided.",
+                    "minimum": 1,
                 },
             },
             "required": ["ticket_id"],
@@ -280,6 +285,42 @@ async def _handle_update(
     comment = args.get("comment", "")
     if comment:
         comment = markdown_to_tracwiki(comment)
+
+    # Reply-to: prepend Trac's standard "Replying to [comment:N author]:"
+    # quote block before the new comment. Trac's XML-RPC API on this host
+    # has no ticket.editComment/deleteComment methods (verified via
+    # system.listMethods) -- existing comments can only be edited/deleted
+    # via the Trac web UI, so this tool only ever adds new comments.
+    reply_to = args.get("reply_to")
+    if reply_to is not None:
+        if not comment:
+            return build_error_response(
+                "validation_error",
+                "comment is required when reply_to is set",
+                "Provide a comment parameter along with reply_to.",
+            )
+        changelog = await run_sync(
+            client.get_ticket_changelog, ticket_id
+        )
+        quoted_author = None
+        quoted_text = None
+        for entry in changelog or []:
+            if entry[2] == "comment" and str(entry[3]) == str(reply_to):
+                quoted_author = entry[1]
+                quoted_text = entry[4]
+        if quoted_text is None:
+            return build_error_response(
+                "not_found",
+                f"Comment #{reply_to} not found on ticket #{ticket_id}",
+                "Use ticket_changelog to see valid comment numbers.",
+            )
+        quote_lines = "\n".join(
+            f"> {line}" for line in quoted_text.strip().split("\n")
+        )
+        comment = (
+            f"Replying to [comment:{reply_to} {quoted_author}]:\n"
+            f"{quote_lines}\n\n{comment}"
+        )
 
     # Build attributes dict (skip None values)
     attributes: dict[str, Any] = {}
