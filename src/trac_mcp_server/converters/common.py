@@ -147,6 +147,90 @@ def tracwiki_to_markdown_lang(processor: str) -> str:
     return processor
 
 
+# =============================================================================
+# Link target validation
+# =============================================================================
+#
+# Both converters need the same answer to one question: "is this string a
+# real link target, or is it prose that merely looks bracket-shaped?"
+# Keeping the rule in one place is what makes the two directions symmetric —
+# a target that markdown_to_tracwiki emits verbatim must not be re-parsed as
+# a link by tracwiki_to_markdown on the way back (tickets #13, #14, #17).
+# =============================================================================
+
+# TracLink resolvers that Trac understands natively as the target of
+# `[target text]`. Deliberately an explicit allowlist rather than "anything
+# scheme-shaped": non-URL sentinels such as ``auto-pm:`` or ``foo:bar`` must
+# stay literal (ticket #8).
+TRACLINK_SCHEMES: frozenset[str] = frozenset(
+    {
+        "attachment",
+        "browser",
+        "changeset",
+        "comment",
+        "diff",
+        "export",
+        "htdocs",
+        "log",
+        "milestone",
+        "query",
+        "raw-attachment",
+        "report",
+        "repos",
+        "search",
+        "source",
+        "ticket",
+        "timeline",
+        "wiki",
+    }
+)
+
+# Transport schemes valid as a link target in either format.
+URL_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "ftp", "ftps", "mailto", "irc", "news"}
+)
+
+# scheme:target — target must be non-empty, so a bare ``auto-pm:`` sentinel
+# never matches even if its scheme were listed above.
+SCHEME_RE = re.compile(
+    r"(?P<scheme>[A-Za-z][\w+.-]*):(?P<target>\S.*)\Z"
+)
+
+
+def is_link_target(candidate: str) -> bool:
+    """Return True if ``candidate`` is a usable link target.
+
+    A target qualifies when it either carries no ``:`` at all (a wiki page
+    name or relative path — Trac reserves ``:`` for resolvers, so page names
+    never contain one), or carries a ``scheme:`` prefix drawn from
+    :data:`TRACLINK_SCHEMES` or :data:`URL_SCHEMES` followed by a non-empty
+    target.
+
+    Everything else is prose that happens to sit inside brackets — sentinel
+    markers like ``auto-pm:`` or ``[label](foo:bar)``. Callers must emit
+    those verbatim rather than rewriting them into a broken link.
+
+    Examples:
+        >>> is_link_target("WikiPage")
+        True
+        >>> is_link_target("wiki:WikiPage")
+        True
+        >>> is_link_target("https://example.com")
+        True
+        >>> is_link_target("auto-pm:")
+        False
+        >>> is_link_target("foo:bar")
+        False
+    """
+    if ":" not in candidate:
+        return True
+    match = SCHEME_RE.match(candidate)
+    if match is None:
+        return False
+    scheme = match.group("scheme").lower()
+    return scheme in TRACLINK_SCHEMES or scheme in URL_SCHEMES
+
+
 @dataclass
 class ConversionResult:
     """Result of format conversion with metadata and warnings.

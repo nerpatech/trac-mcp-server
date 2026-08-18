@@ -171,6 +171,8 @@ Markdown:  [Wiki Link](wiki:WikiPage)
 
 > **Note:** Non-URL-shaped "links" (URL portion contains a `:` that is not a known TracLink resolver, e.g. sentinel tokens like `[auto-pm: state NEEDS_CODE]` or `[label](foo:bar)`) are emitted verbatim as Markdown rather than wrapped as TracWiki wiki links. This preserves machine-readable state markers through round-trip conversion.
 
+> **Note:** The same rule applies in the TracWiki -> Markdown direction. A `[target label]` construct is only rewritten as a Markdown link when `target` is a real link target -- a known TracLink resolver, a URL scheme, or a name with no `:` at all. Bracketed prose such as `[auto-pm: state NEEDS_EDIT]` or `[note: see below]` stays literal instead of becoming `[state NEEDS_EDIT](auto-pm:)` with an empty URL. A construct also never spans a line break, so an orphan `[text]` cannot absorb a `(...)` parenthetical from a following line.
+
 **Images:**
 ```
 Markdown:  ![alt](image.png)

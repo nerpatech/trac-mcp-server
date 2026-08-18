@@ -3,7 +3,11 @@
 import re
 from typing import Literal
 
-from .common import ConversionResult, tracwiki_to_markdown_lang
+from .common import (
+    ConversionResult,
+    is_link_target,
+    tracwiki_to_markdown_lang,
+)
 
 # Type alias for the unknown_macros rendering mode.
 UnknownMacros = Literal["bracket", "preserve", "drop"]
@@ -352,25 +356,49 @@ class TracWikiParser:
 
         Link with text: [url text] -> [text](url)
         Link without text: [url] -> <url>
-        """
-        # Link with text. The URL half is restricted to non-"]" characters
-        # (not just non-whitespace) so a greedy match can't run past this
-        # link's closing "]" into a neighboring bracket construct -- e.g.
-        # the [text](wiki:Page) links _convert_macros emits for WikiLinks
-        # (ticket #28), or a second [url text] link later on the same line.
-        text = re.sub(r"\[([^\]\s]+)\s+([^\]]+)\]", r"[\2](\1)", text)
 
-        # Link without text
-        # Must not match if followed by (url), which would be a Markdown link we just created
-        # Must not match if content starts with [, which would be a macro like [[TOC]]
-        def convert_simple_link(match):
+        Both patterns are constrained so a bracket construct is only rewritten
+        when it is genuinely a link:
+
+        * The target may not contain ``]`` or whitespace, so it cannot swallow
+          a complete preceding link. The old ``\\S+`` target matched ``]`` and
+          ``(``, letting ``[a](b)`` on one line and ``[c]`` on the next collapse
+          into a single mangled construct (ticket #14).
+        * Target and label are separated by *horizontal* whitespace only, so a
+          match can never span a line break (ticket #14).
+        * The target must satisfy :func:`is_link_target`, so sentinel markers
+          like ``[auto-pm: state NEEDS_EDIT]`` stay literal instead of being
+          rewritten as ``[state NEEDS_EDIT](auto-pm:)`` (ticket #13).
+        """
+
+        # Link with text: [target label]
+        def convert_link_with_text(match: re.Match[str]) -> str:
+            target = match.group("target")
+            if not is_link_target(target):
+                # Bracketed prose, not a link — leave it exactly as written.
+                return match.group(0)
+            return f"[{match.group('label')}]({target})"
+
+        text = re.sub(
+            r"\[(?P<target>[^\s\]]+)[^\S\n]+(?P<label>[^\]\n]+)\]",
+            convert_link_with_text,
+            text,
+        )
+
+        # Link without text: [target]
+        # Must not match if followed by (url), which would be a Markdown link
+        # we just created. Must not match if content starts with [, which would
+        # be a macro like [[TOC]].
+        def convert_simple_link(match: re.Match[str]) -> str:
             content = match.group(1)
             if content.startswith("["):
                 return match.group(0)  # Keep macros unchanged
+            if not is_link_target(content):
+                return match.group(0)  # Bracketed prose, not a link
             return f"<{content}>"
 
         text = re.sub(
-            r"\[([^\]\s]+)\](?!\()", convert_simple_link, text
+            r"\[([^\s\]]+)\](?!\()", convert_simple_link, text
         )
         return text
 
