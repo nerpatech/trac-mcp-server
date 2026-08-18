@@ -58,3 +58,6 @@ scripts/*log
 .auto-pm/snapshots.db
 .auto-pm/snapshots.db-wal
 .auto-pm/snapshots.db-shm
+
+# OpenCode pilot scratch files (plans/outputs, not source)
+.opencode-pilot/

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/nemotron-3-ultra-free",
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "deny",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "git log*": "allow"
+    },
+    "webfetch": "deny",
+    "websearch": "deny"
+  },
+  "agent": {
+    "executor": {
+      "description": "Ticket pilot executor: implements a pre-written plan against this repo's source/tests only. No network access, bash limited to read-only git inspection. Claude Code runs lint/tests/build and verifies the diff before anything is committed.",
+      "model": "opencode/nemotron-3-ultra-free",
+      "tools": {
+        "webfetch": false,
+        "websearch": false
+      }
+    }
+  }
+}
