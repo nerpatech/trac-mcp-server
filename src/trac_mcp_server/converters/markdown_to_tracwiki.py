@@ -38,7 +38,7 @@ _PLACEHOLDER_RE = re.compile(r"\x00WK(\d+)\x00")
 # PageOutline. Deliberately excludes pure-acronym runs like IPAddress (no
 # lowercase between the leading capitals) to match Trac's real behavior.
 # `(?<!!)` skips words the author already escaped by hand.
-_CAMELCASE_RE = re.compile(r"(?<!!)\b[A-Z][a-z]+(?:[A-Z][a-z]*)+\b")
+_CAMELCASE_RE = re.compile(r"(?<!!)\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b")
 
 # Matches exactly the "!" a `_CAMELCASE_RE` substitution would have added
 # (a "!" directly before a CamelCase-shaped word), so `link()` can undo it
