@@ -35,6 +35,7 @@ from ..logger import setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
+from .oidc import OIDC_TOKEN_HEADER, OidcClientCache
 from .resources.wiki import (
     handle_list_wiki_resources,
     handle_read_wiki_resource,
@@ -58,6 +59,12 @@ _instances: InstanceRegistry | None = None
 
 # Global registry instance (initialized in main)
 _registry: ToolRegistry | None = None
+
+# Per-user OIDC client cache (initialized in main() only when the http
+# transport is configured with server_config.oidc_rpc_url). None means
+# "OIDC per-user mode is not active" -- the normal InstanceRegistry path is
+# used unconditionally in that case, same as before this mode existed.
+_oidc_cache: OidcClientCache | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +174,52 @@ def set_registry(registry: ToolRegistry | None) -> None:
     _registry = registry
 
 
+def set_oidc_cache(cache: OidcClientCache | None) -> None:
+    """Set the global OIDC per-user client cache.
+
+    Args:
+        cache: OidcClientCache to set, or None to disable per-user OIDC
+            auth (the default -- see module docstring in mcp/oidc.py).
+    """
+    global _oidc_cache
+    _oidc_cache = cache
+
+
+async def _resolve_client(instance: str | None) -> TracClient:
+    """Resolve the TracClient for the current tool/resource call.
+
+    When OIDC per-user auth is active (``_oidc_cache`` set), this is the
+    *only* path a call can use to reach Trac: it reads the caller's own
+    token from the current request and never touches the InstanceRegistry
+    or any shared identity. Otherwise, behavior is unchanged from before
+    this mode existed: resolve via the InstanceRegistry.
+
+    Raises:
+        ValueError: If ``instance`` is used together with OIDC per-user
+            auth (unsupported -- see module docstring in mcp/oidc.py), or
+            if the per-user token header is missing. Both are translated
+            into a normal tool-error response by existing callers, exactly
+            like an UnknownInstanceError from the InstanceRegistry path.
+    """
+    if _oidc_cache is not None:
+        if instance not in (None, "default"):
+            raise ValueError(
+                "The 'instance' argument is not supported when OIDC "
+                "per-user authentication is configured -- this deployment "
+                "serves only its single configured Trac endpoint."
+            )
+        try:
+            request = server.request_context.request
+        except LookupError:
+            request = None
+        token = (
+            request.headers.get(OIDC_TOKEN_HEADER) if request else None
+        )
+        return _oidc_cache.get_client(token or "")
+
+    return get_instances().get_client(instance)
+
+
 # ---------------------------------------------------------------------------
 # MCP protocol handlers
 # ---------------------------------------------------------------------------
@@ -218,7 +271,7 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = get_instances().get_client(instance)
+            client = await _resolve_client(instance)
         except ValueError as e:
             error_type = (
                 "unknown_instance"
@@ -258,17 +311,23 @@ async def handle_call_tool(
     args = dict(arguments or {})
     instance = args.pop("instance", None)
     try:
-        client = get_instances().get_client(instance)
+        client = await _resolve_client(instance)
     except ValueError as e:
         error_type = (
             "unknown_instance"
             if isinstance(e, UnknownInstanceError)
             else "validation_error"
         )
+        corrective_action = (
+            f"Set the {OIDC_TOKEN_HEADER!r} header to your own Trac OIDC "
+            "access token."
+            if _oidc_cache is not None
+            else "Call list_instances to see what is reachable."
+        )
         return build_error_response(
             error_type,
             str(e),
-            "Call list_instances to see what is reachable.",
+            corrective_action,
         )
 
     try:
@@ -377,6 +436,18 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
+        oidc_rpc_url = (
+            server_config.oidc_rpc_url
+            if server_config.transport == "http"
+            else None
+        )
+        if oidc_rpc_url:
+            logger.info(
+                "OIDC per-user auth active: requests must carry their own "
+                "%r header; no shared identity is used for tool calls.",
+                OIDC_TOKEN_HEADER,
+            )
+            set_oidc_cache(OidcClientCache(ctx["config"], oidc_rpc_url))
         try:
             if server_config.transport == "stdio":
                 await _run_stdio()
@@ -386,6 +457,7 @@ async def main(config_overrides: dict | None = None):
             set_instances(None)
             set_instance_registry(None)
             set_registry(None)
+            set_oidc_cache(None)
 
 
 async def _run_stdio() -> None:

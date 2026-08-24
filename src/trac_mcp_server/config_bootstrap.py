@@ -190,6 +190,10 @@ def bootstrap_server_config(
         "auth_token"
     )
 
+    oidc_rpc_url = os.getenv(
+        "TRAC_MCP_OIDC_RPC_URL"
+    ) or yaml_server.get("oidc_rpc_url")
+
     allow_unauthenticated = bool(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
@@ -203,6 +207,7 @@ def bootstrap_server_config(
         port=port,
         path=path,
         auth_token=auth_token,
+        oidc_rpc_url=oidc_rpc_url,
         allow_unauthenticated=allow_unauthenticated,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,

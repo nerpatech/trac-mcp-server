@@ -13,7 +13,7 @@ TRAC_MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
 
 | Method + Path | Auth required? | Description |
 |----------------|-----------------|--------------|
-| `POST/GET/DELETE <path>` (default `/mcp`) | Yes, if `auth_token` is configured | The MCP JSON-RPC endpoint (streamable HTTP: `POST` for requests, `GET` for the SSE stream, `DELETE` to end a session) |
+| `POST/GET/DELETE <path>` (default `/mcp`) | Yes, if `auth_token` is configured; also requires `X-Trac-OIDC-Token` if `oidc_rpc_url` is configured (see [OIDC Per-User Auth](#oidc-per-user-auth)) | The MCP JSON-RPC endpoint (streamable HTTP: `POST` for requests, `GET` for the SSE stream, `DELETE` to end a session) |
 | `GET /healthz` | No, always open | Liveness/readiness probe. Returns `{"status": "ok"}`. |
 
 Sessions are **stateful** (the SDK default): the server returns an `Mcp-Session-Id` response header on `initialize`, and clients send it back on subsequent requests. Each session gets its own MCP protocol state; multiple concurrent sessions are supported, including calls that pass different `instance` arguments (see [Configuration: Multiple Instances](configuration.md#multiple-instances)).
@@ -31,6 +31,7 @@ Same precedence as the rest of the server's config: CLI flag > env var (`TRAC_MC
 | Bind port | `--port` | `TRAC_MCP_PORT` | `port` | `8080` |
 | Mount path | `--path` | `TRAC_MCP_PATH` | `path` | `/mcp` |
 | Bearer token | *(none -- see below)* | `TRAC_MCP_AUTH_TOKEN` | `auth_token` | unset |
+| OIDC per-user RPC URL | -- | `TRAC_MCP_OIDC_RPC_URL` | `oidc_rpc_url` | unset |
 | Allow unauthenticated non-loopback bind | `--allow-unauthenticated` | -- | `allow_unauthenticated` | `false` |
 | Extra allowed `Host` headers | -- | -- | `allowed_hosts` | `[]` |
 | Extra allowed `Origin` headers | -- | -- | `allowed_origins` | `[]` |
@@ -61,6 +62,60 @@ Authorization: Bearer <token>
 A missing or incorrect token gets `401 Unauthorized` with a `WWW-Authenticate: Bearer` header. The comparison uses `secrets.compare_digest` (constant-time). When no token is configured, the endpoint is open to anyone who can reach it -- see Bind Safety below for when that's disallowed.
 
 This is a single static shared secret, not per-user OAuth. The MCP SDK's OAuth machinery (`mcp.server.auth.*`) is a separate, larger feature and is out of scope here.
+
+## OIDC Per-User Auth
+
+For a shared deployment where a single `trac-mcp-server` process serves many different people through one gateway (e.g. LibreChat, where each person already has their own Keycloak/OIDC login), the static bearer token above is the wrong tool -- it authenticates *the gateway*, not the individual user, so every Trac action would be attributed to (and limited by the permissions of) one shared identity.
+
+`TRAC_MCP_OIDC_RPC_URL` switches the server into per-user mode instead: every request must carry the caller's own OIDC access token in an `X-Trac-OIDC-Token` header, and that token is forwarded verbatim as `Authorization: Bearer <token>` to the URL configured there. `trac-mcp-server` does not decode, verify, or cache the token's contents -- it trusts whatever sits in front of that URL (typically Apache + `mod_auth_openidc`, validating the token against your identity provider's JWKS and mapping it to a Trac username) to accept or reject it. There is no fallback: a request without the header gets `401 Unauthorized` before it ever reaches tool dispatch, and `TRAC_USERNAME`/`TRAC_PASSWORD` are not required in this mode -- there is deliberately no shared service-account identity for a call to silently fall back to.
+
+```bash
+TRAC_MCP_OIDC_RPC_URL=https://trac.example.com/trac-api/login/xmlrpc \
+  trac-mcp-server --transport http --host 127.0.0.1 --port 8080
+```
+
+```yaml
+# .trac_mcp/config.yaml
+server:
+  transport: http
+  oidc_rpc_url: ${TRAC_MCP_OIDC_RPC_URL}
+```
+
+**Trac/Apache side.** This needs a *second* WSGI entry point onto the same Trac environment, distinct from the one used for the Basic/LDAP path, protected by `mod_auth_openidc` instead:
+
+```apache
+OIDCOAuthVerifyJwksUri   https://your-idp.example.com/realms/YOUR_REALM/protocol/openid-connect/certs
+OIDCOAuthRemoteUserClaim preferred_username
+
+WSGIScriptAlias /trac-api /path/to/trac.wsgi
+<Location "/trac-api">
+    AuthType oauth20
+    AuthName "trac-api"
+    Require claim aud:trac-mcp-api
+    # ... plus whatever authorizes the mapped REMOTE_USER (LDAP group, etc.)
+</Location>
+```
+
+`TRAC_MCP_OIDC_RPC_URL` must point at that Location's XML-RPC endpoint (here, `.../trac-api/login/xmlrpc`) -- not necessarily the same path suffix as the default Basic/LDAP endpoint (`.../login/rpc`), since it's a separate Apache `Location` block that can be mounted and routed however your Trac/XML-RPC plugin setup requires.
+
+**Combining with the static bearer token.** `TRAC_MCP_AUTH_TOKEN` and `TRAC_MCP_OIDC_RPC_URL` are independent and can both be set: the static token gates *who may reach this MCP server at all* (e.g. only your LibreChat backend), while `X-Trac-OIDC-Token` determines *which Trac identity a given call uses*. A request needs both headers when both are configured.
+
+**Multiple instances (`instance` argument) are not supported in this mode.** OIDC per-user auth serves only its single configured Trac endpoint; a tool call passing `instance` (other than `"default"`) is rejected with a clear error rather than silently ignored.
+
+**Caching.** A `TracClient` is built once per distinct token and reused for subsequent calls (bounded to the 256 most recently used tokens, evicted oldest-first) -- so a user's session doesn't pay the cost of a new HTTP connection pool on every tool call, without holding tokens past their natural turnover.
+
+```bash
+# Missing X-Trac-OIDC-Token -> 401, before JSON-RPC dispatch:
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+
+# With it, the caller's own Keycloak/OIDC access token is forwarded to Trac:
+curl -s -XPOST http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H "X-Trac-OIDC-Token: $USER_OIDC_ACCESS_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
 
 ## Bind Safety
 

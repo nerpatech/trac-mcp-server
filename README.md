@@ -37,8 +37,8 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TRAC_URL` | Yes | -- | Trac instance URL |
-| `TRAC_USERNAME` | Yes | -- | Trac username |
-| `TRAC_PASSWORD` | Yes | -- | Trac password |
+| `TRAC_USERNAME` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac username |
+| `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
 | `TRAC_DEBUG` | No | `false` | Enable debug logging |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
@@ -48,6 +48,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_HOST` | No | `127.0.0.1` | Bind host for the `http` transport |
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
+| `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
 
 For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, see [HTTP Transport](docs/reference/http-transport.md).
 

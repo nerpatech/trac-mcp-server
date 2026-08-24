@@ -127,6 +127,18 @@ class ServerConfig(BaseModel):
         default=None,
         description="Static bearer token required for http transport requests",
     )
+    oidc_rpc_url: str | None = Field(
+        default=None,
+        description=(
+            "Full XML-RPC URL of an OIDC-protected Trac endpoint (e.g. "
+            "https://trac.example.com/trac-api/login/xmlrpc). When set, "
+            "every http-transport request must carry its own "
+            "X-Trac-OIDC-Token header -- the caller's own OIDC access "
+            "token -- forwarded verbatim as 'Authorization: Bearer <token>' "
+            "to this URL. There is no fallback to a shared service-account "
+            "identity: a request without the header is rejected outright."
+        ),
+    )
     allow_unauthenticated: bool = Field(
         default=False,
         description="Allow binding a non-loopback host without an auth_token",

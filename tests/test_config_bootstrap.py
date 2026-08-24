@@ -261,6 +261,7 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_PORT",
         "TRAC_MCP_PATH",
         "TRAC_MCP_AUTH_TOKEN",
+        "TRAC_MCP_OIDC_RPC_URL",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -283,6 +284,7 @@ def test_server_config_defaults_with_no_sources(monkeypatch):
     assert server_config.port == 8080
     assert server_config.path == "/mcp"
     assert server_config.auth_token is None
+    assert server_config.oidc_rpc_url is None
 
 
 def test_env_vars_populate_server_config(monkeypatch):
@@ -308,6 +310,30 @@ def test_env_vars_populate_server_config(monkeypatch):
     assert server_config.port == 9090
     assert server_config.path == "/api/mcp"
     assert server_config.auth_token == "envtoken"
+
+
+def test_env_var_populates_oidc_rpc_url(monkeypatch):
+    """TRAC_MCP_OIDC_RPC_URL populates ServerConfig.oidc_rpc_url."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_TRANSPORT", "http")
+    monkeypatch.setenv(
+        "TRAC_MCP_OIDC_RPC_URL",
+        "https://trac.example.com/trac-api/login/xmlrpc",
+    )
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert (
+        server_config.oidc_rpc_url
+        == "https://trac.example.com/trac-api/login/xmlrpc"
+    )
 
 
 def test_cli_overrides_win_over_env_for_server_config(monkeypatch):

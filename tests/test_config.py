@@ -104,6 +104,32 @@ class TestValidateConfig:
         ):
             validate_config(config)
 
+    # --- oidc_only: no shared service-account identity by design ---
+
+    def test_oidc_only_allows_empty_username_and_password(self):
+        """OIDC-only deployments (see mcp/oidc.py) never have a shared
+        identity to validate -- empty username/password must not raise."""
+        config = Config(
+            trac_url="https://trac.example.com",
+            username="",
+            password="",
+            oidc_only=True,
+        )
+        validate_config(config)  # should not raise
+
+    def test_non_oidc_only_still_rejects_empty_credentials(self):
+        """Regression guard: oidc_only=False (the default) keeps the
+        existing strict requirement."""
+        config = Config(
+            trac_url="https://trac.example.com",
+            username="",
+            password="",
+        )
+        with pytest.raises(
+            ValueError, match="username cannot be empty"
+        ):
+            validate_config(config)
+
     # --- URL structure validation (empty host) ---
 
     def test_empty_host_url_http(self):
@@ -287,6 +313,60 @@ class TestLoadConfig:
 
         with pytest.raises(ValueError, match="Trac password not found"):
             load_config()
+
+    # --- TRAC_MCP_OIDC_RPC_URL: no shared service-account identity ---
+
+    def test_oidc_rpc_url_allows_missing_username_and_password(
+        self, monkeypatch
+    ):
+        """TRAC_MCP_OIDC_RPC_URL set -> missing TRAC_USERNAME/TRAC_PASSWORD
+        does not raise; this is an OIDC-only deployment (mcp/oidc.py)."""
+        monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+        monkeypatch.delenv("TRAC_USERNAME", raising=False)
+        monkeypatch.delenv("TRAC_PASSWORD", raising=False)
+        monkeypatch.setenv(
+            "TRAC_MCP_OIDC_RPC_URL",
+            "https://trac.example.com/trac-api/login/xmlrpc",
+        )
+
+        config = load_config()
+
+        assert config.oidc_only is True
+        assert config.username == ""
+        assert config.password == ""
+
+    def test_oidc_rpc_url_unset_still_requires_credentials(
+        self, monkeypatch
+    ):
+        """Regression guard: without TRAC_MCP_OIDC_RPC_URL, behavior is
+        exactly as before this mode existed."""
+        monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+        monkeypatch.delenv("TRAC_USERNAME", raising=False)
+        monkeypatch.delenv("TRAC_PASSWORD", raising=False)
+        monkeypatch.delenv("TRAC_MCP_OIDC_RPC_URL", raising=False)
+
+        with pytest.raises(ValueError, match="Trac username not found"):
+            load_config()
+
+    def test_oidc_rpc_url_does_not_override_explicit_credentials(
+        self, monkeypatch
+    ):
+        """A configured service account still wins when both are set --
+        oidc_only only kicks in when credentials are actually absent, so
+        the startup connectivity self-test (mcp/lifespan.py) stays on."""
+        monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+        monkeypatch.setenv("TRAC_USERNAME", "admin")
+        monkeypatch.setenv("TRAC_PASSWORD", "secret")
+        monkeypatch.setenv(
+            "TRAC_MCP_OIDC_RPC_URL",
+            "https://trac.example.com/trac-api/login/xmlrpc",
+        )
+
+        config = load_config()
+
+        assert config.oidc_only is False
+        assert config.username == "admin"
+        assert config.password == "secret"
 
     def test_max_batch_default(self, monkeypatch):
         """Default max_batch_size is 500 when env var is unset."""

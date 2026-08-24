@@ -121,7 +121,13 @@ class TracClient:
         return self._get_session()
 
     def _get_rpc_url(self) -> str:
-        # Construct path to XML-RPC endpoint
+        # OIDC per-user auth targets a distinct, operator-supplied endpoint
+        # (see Config.rpc_url_override) rather than the usual .../login/rpc
+        # derived from trac_url -- its URL structure is whatever the
+        # OIDC-protected Apache Location is mounted at, not necessarily the
+        # same path as the default Basic/LDAP endpoint.
+        if self.config.rpc_url_override:
+            return self.config.rpc_url_override
         return f"{self.config.trac_url.rstrip('/')}/login/rpc"
 
     def _get_session(self) -> requests.Session:
@@ -132,7 +138,17 @@ class TracClient:
 
     def _create_session(self) -> requests.Session:
         session = requests.Session()
-        session.auth = (self.config.username, self.config.password)
+        if self.config.bearer_token:
+            # OIDC per-user auth: forward the caller's own access token
+            # verbatim. Trac's Apache layer (mod_auth_openidc) validates it
+            # and maps it to a Trac username -- this client does not decode
+            # or verify it, matching how session.auth below is likewise a
+            # blind credential pass-through.
+            session.headers["Authorization"] = (
+                f"Bearer {self.config.bearer_token}"
+            )
+        else:
+            session.auth = (self.config.username, self.config.password)
         session.verify = not self.config.insecure
 
         # Keep pooled connections alive at the TCP level. Without this a

@@ -8,12 +8,16 @@ Precedence (highest to lowest):
 
 Environment variables:
     TRAC_URL: Trac instance URL (required)
-    TRAC_USERNAME: Trac username (required)
-    TRAC_PASSWORD: Trac password (required)
+    TRAC_USERNAME: Trac username (required, unless TRAC_MCP_OIDC_RPC_URL is set)
+    TRAC_PASSWORD: Trac password (required, unless TRAC_MCP_OIDC_RPC_URL is set)
     TRAC_INSECURE: Skip SSL verification (optional, default: false)
     TRAC_MAX_PARALLEL_REQUESTS: Max parallel XML-RPC requests (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
+    TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint
+        (optional). When set, TRAC_USERNAME/TRAC_PASSWORD are not required --
+        this deployment mode never uses a shared service-account identity;
+        see mcp/oidc.py and docs/reference/http-transport.md.
 """
 
 import ipaddress
@@ -39,6 +43,16 @@ class Config:
     max_parallel_requests: int = 5
     max_batch_size: int = 500
     rpc_timeout: int = 60
+    # OIDC per-user auth (HTTP transport only; see mcp/oidc.py). bearer_token
+    # and rpc_url_override are set per-request on a *synthesized* Config for
+    # one caller's own token -- never on the shared default Config. oidc_only
+    # marks the shared default Config as loaded without a service-account
+    # identity (TRAC_MCP_OIDC_RPC_URL was set instead), which relaxes
+    # username/password validation and skips the startup connectivity
+    # self-test, since there are no credentials to test with.
+    bearer_token: str | None = None
+    rpc_url_override: str | None = None
+    oidc_only: bool = False
 
 
 def validate_config(config: Config) -> None:
@@ -67,15 +81,19 @@ def validate_config(config: Config) -> None:
     # Strip trailing slash after validation (safe now that scheme/host are verified)
     config.trac_url = config.trac_url.removesuffix("/")
 
-    if not config.username.strip():
-        raise ValueError(
-            "Trac username cannot be empty. Set TRAC_USERNAME environment variable."
-        )
+    # oidc_only deployments have no service-account identity by design --
+    # see the Config.oidc_only docstring comment. username/password are
+    # meaningless there and stay empty.
+    if not config.oidc_only:
+        if not config.username.strip():
+            raise ValueError(
+                "Trac username cannot be empty. Set TRAC_USERNAME environment variable."
+            )
 
-    if not config.password.strip():
-        raise ValueError(
-            "Trac password cannot be empty. Set TRAC_PASSWORD environment variable."
-        )
+        if not config.password.strip():
+            raise ValueError(
+                "Trac password cannot be empty. Set TRAC_PASSWORD environment variable."
+            )
 
     if config.insecure:
         logger.warning(
@@ -159,6 +177,19 @@ def load_config(
     """
     fb = yaml_fallbacks or {}
 
+    # TRAC_MCP_OIDC_RPC_URL relaxes the TRAC_USERNAME/TRAC_PASSWORD
+    # requirement below -- an OIDC-only deployment (see Config.oidc_only)
+    # has no shared service-account identity by design; every request
+    # carries its own token instead (mcp/oidc.py). Read directly via
+    # os.getenv rather than threading ServerConfig through this call:
+    # TRAC_MCP_OIDC_RPC_URL is only ever meaningful for the http transport,
+    # so an operator running stdio while it happens to be set just gets a
+    # (harmless) relaxed check. Config.oidc_only itself is computed further
+    # down, once we know whether real credentials ended up configured
+    # anyway -- so setting TRAC_MCP_OIDC_RPC_URL *alongside* a real
+    # TRAC_USERNAME/TRAC_PASSWORD keeps the startup self-test enabled.
+    oidc_rpc_configured = bool(os.getenv("TRAC_MCP_OIDC_RPC_URL"))
+
     # --- String fields: CLI > env > YAML > error ---
 
     trac_url = url or os.getenv("TRAC_URL") or fb.get("url")
@@ -173,21 +204,38 @@ def load_config(
         username or os.getenv("TRAC_USERNAME") or fb.get("username")
     )
     if not trac_username:
-        raise ValueError(
-            "Trac username not found. Set TRAC_USERNAME environment variable, "
-            "pass --username CLI argument, or add 'username' to config.yaml."
-        )
-    trac_username = trac_username.strip()
+        if oidc_rpc_configured:
+            trac_username = ""
+        else:
+            raise ValueError(
+                "Trac username not found. Set TRAC_USERNAME environment variable, "
+                "pass --username CLI argument, or add 'username' to config.yaml."
+            )
+    else:
+        trac_username = trac_username.strip()
 
     trac_password = (
         password or os.getenv("TRAC_PASSWORD") or fb.get("password")
     )
     if not trac_password:
-        raise ValueError(
-            "Trac password not found. Set TRAC_PASSWORD environment variable, "
-            "pass --password CLI argument, or add 'password' to config.yaml."
-        )
-    trac_password = trac_password.strip()
+        if oidc_rpc_configured:
+            trac_password = ""
+        else:
+            raise ValueError(
+                "Trac password not found. Set TRAC_PASSWORD environment variable, "
+                "pass --password CLI argument, or add 'password' to config.yaml."
+            )
+    else:
+        trac_password = trac_password.strip()
+
+    # True only when TRAC_MCP_OIDC_RPC_URL is configured AND no real
+    # credentials ended up available -- setting it alongside a working
+    # TRAC_USERNAME/TRAC_PASSWORD keeps the shared-identity self-test in
+    # mcp/lifespan.py enabled; tool-call gating in that mode is governed
+    # separately, by ServerConfig.oidc_rpc_url in mcp/server.py.
+    oidc_only = (
+        oidc_rpc_configured and not trac_username and not trac_password
+    )
 
     # --- Boolean fields: CLI > env > YAML > default ---
 
@@ -279,6 +327,7 @@ def load_config(
         max_parallel_requests=final_max_parallel,
         max_batch_size=final_max_batch,
         rpc_timeout=final_rpc_timeout,
+        oidc_only=oidc_only,
     )
 
     validate_config(config)

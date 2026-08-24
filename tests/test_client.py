@@ -61,6 +61,51 @@ def test_session_creation_insecure():
     assert not client.session.verify
 
 
+def test_rpc_url_uses_override_when_set():
+    """rpc_url_override wins over the derived .../login/rpc path -- used
+    by OIDC per-user auth, whose endpoint is not necessarily reachable
+    at the same path as the default Basic/LDAP one (see mcp/oidc.py)."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="user",
+        password="pass",
+        rpc_url_override="https://trac.example.com/trac-api/login/xmlrpc",
+    )
+    client = TracClient(config)
+    assert (
+        client.rpc_url
+        == "https://trac.example.com/trac-api/login/xmlrpc"
+    )
+
+
+def test_session_uses_bearer_auth_when_token_set():
+    """A bearer_token config forwards Authorization: Bearer <token>
+    instead of Basic auth -- OIDC per-user auth never sends the empty
+    username/password an oidc_only Config carries."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="",
+        password="",
+        bearer_token="the-users-own-token",
+        rpc_url_override="https://trac.example.com/trac-api/login/xmlrpc",
+        oidc_only=True,
+    )
+    client = TracClient(config)
+    assert client.session.auth is None
+    assert (
+        client.session.headers["Authorization"]
+        == "Bearer the-users-own-token"
+    )
+
+
+def test_session_uses_basic_auth_when_no_bearer_token(mock_config):
+    """Regression guard: the default (non-OIDC) path is unaffected --
+    still plain Basic auth, no stray Authorization header."""
+    client = TracClient(mock_config)
+    assert client.session.auth == ("testuser", "testpass")
+    assert "Authorization" not in client.session.headers
+
+
 def test_session_mounts_keepalive_adapter(mock_config):
     """Both schemes get the keepalive adapter, not requests' default one."""
     client = TracClient(mock_config)

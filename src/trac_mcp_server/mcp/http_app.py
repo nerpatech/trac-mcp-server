@@ -25,6 +25,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config_schema import ServerConfig
+from .oidc import OIDC_TOKEN_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,54 @@ class BearerAuthMiddleware:
                 "Unauthorized",
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
+
+
+class OidcTokenRequiredMiddleware:
+    """Requires ``X-Trac-OIDC-Token`` when OIDC per-user auth is configured.
+
+    No-op when ``oidc_rpc_url`` is falsy -- most deployments don't use this
+    mode. When it *is* configured, this is the enforcement point for "no
+    fallback to a shared identity, ever": every request to the MCP endpoint
+    (not ``/healthz``) must carry the header, checked here at the transport
+    boundary rather than deep in tool-dispatch logic, so no future code path
+    can accidentally skip it. The header's value is not validated here --
+    that happens downstream when Trac's own web server (mod_auth_openidc)
+    receives it as the forwarded ``Authorization: Bearer`` token.
+    """
+
+    def __init__(self, app: ASGIApp, oidc_rpc_url: str | None) -> None:
+        self._app = app
+        self._enabled = bool(oidc_rpc_url)
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if (
+            scope["type"] != "http"
+            or not self._enabled
+            or scope["path"] == "/healthz"
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        headers = dict(scope["headers"])
+        token = (
+            headers.get(OIDC_TOKEN_HEADER.encode("latin-1"), b"")
+            .decode("latin-1")
+            .strip()
+        )
+        if not token:
+            response = Response(
+                f"Unauthorized: missing {OIDC_TOKEN_HEADER!r} header. This "
+                "server requires each request to carry its own per-user "
+                "Trac OIDC access token; there is no shared fallback "
+                "identity.",
+                status_code=401,
             )
             await response(scope, receive, send)
             return
@@ -154,7 +203,11 @@ def build_http_app(
         middleware=[
             Middleware(
                 BearerAuthMiddleware, token=server_config.auth_token
-            )
+            ),
+            Middleware(
+                OidcTokenRequiredMiddleware,
+                oidc_rpc_url=server_config.oidc_rpc_url,
+            ),
         ],
         lifespan=lifespan,
     )
