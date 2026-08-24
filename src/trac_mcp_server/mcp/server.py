@@ -35,7 +35,7 @@ from ..logger import setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
-from .oidc import OIDC_TOKEN_HEADER, OidcClientCache
+from .oidc import OidcClientCache, extract_bearer_token
 from .resources.wiki import (
     handle_list_wiki_resources,
     handle_read_wiki_resource,
@@ -197,9 +197,10 @@ async def _resolve_client(instance: str | None) -> TracClient:
     Raises:
         ValueError: If ``instance`` is used together with OIDC per-user
             auth (unsupported -- see module docstring in mcp/oidc.py), or
-            if the per-user token header is missing. Both are translated
-            into a normal tool-error response by existing callers, exactly
-            like an UnknownInstanceError from the InstanceRegistry path.
+            if the caller's Authorization header is missing/malformed.
+            Both are translated into a normal tool-error response by
+            existing callers, exactly like an UnknownInstanceError from
+            the InstanceRegistry path.
     """
     if _oidc_cache is not None:
         if instance not in (None, "default"):
@@ -212,10 +213,10 @@ async def _resolve_client(instance: str | None) -> TracClient:
             request = server.request_context.request
         except LookupError:
             request = None
-        token = (
-            request.headers.get(OIDC_TOKEN_HEADER) if request else None
+        auth_header = (
+            request.headers.get("authorization") if request else None
         )
-        return _oidc_cache.get_client(token or "")
+        return _oidc_cache.get_client(extract_bearer_token(auth_header))
 
     return get_instances().get_client(instance)
 
@@ -319,8 +320,8 @@ async def handle_call_tool(
             else "validation_error"
         )
         corrective_action = (
-            f"Set the {OIDC_TOKEN_HEADER!r} header to your own Trac OIDC "
-            "access token."
+            "Set the 'Authorization: Bearer <token>' header to your own "
+            "Trac OIDC access token."
             if _oidc_cache is not None
             else "Call list_instances to see what is reachable."
         )
@@ -444,8 +445,8 @@ async def main(config_overrides: dict | None = None):
         if oidc_rpc_url:
             logger.info(
                 "OIDC per-user auth active: requests must carry their own "
-                "%r header; no shared identity is used for tool calls.",
-                OIDC_TOKEN_HEADER,
+                "'Authorization: Bearer <token>'; no shared identity is "
+                "used for tool calls."
             )
             set_oidc_cache(OidcClientCache(ctx["config"], oidc_rpc_url))
         try:

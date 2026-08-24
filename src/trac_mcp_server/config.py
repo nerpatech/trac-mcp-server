@@ -115,21 +115,40 @@ def validate_server_config(server_config: "ServerConfig") -> None:
     """Validate MCP server (transport) configuration.
 
     Refuses to bind a non-loopback host for the http transport unless an
-    auth token is configured or the operator explicitly opts out --
-    otherwise "add HTTP" silently becomes "expose the operator's Trac
-    credentials to the network".
+    auth token is configured, OIDC per-user auth is configured, or the
+    operator explicitly opts out -- otherwise "add HTTP" silently becomes
+    "expose the operator's Trac credentials to the network".
+
+    Also refuses ``auth_token`` and ``oidc_rpc_url`` together: both are
+    read off the same ``Authorization`` header for different purposes (see
+    mcp/oidc.py), so combining them isn't a stronger gate, just an
+    always-losing static-token comparison against a per-user token no
+    caller could ever satisfy.
 
     Args:
         server_config: ServerConfig instance to validate.
 
     Raises:
-        ValueError: If an unauthenticated http transport would bind a
-            non-loopback host.
+        ValueError: If auth_token and oidc_rpc_url are both set, or if an
+            unauthenticated http transport would bind a non-loopback host.
     """
     if server_config.transport != "http":
         return
 
-    if server_config.auth_token or server_config.allow_unauthenticated:
+    if server_config.auth_token and server_config.oidc_rpc_url:
+        raise ValueError(
+            "TRAC_MCP_AUTH_TOKEN and TRAC_MCP_OIDC_RPC_URL cannot both be "
+            "set: OIDC per-user auth reads the caller's own token from the "
+            "same Authorization header a static bearer token would occupy, "
+            "so every request would fail the static-token comparison. "
+            "Remove one of the two."
+        )
+
+    if (
+        server_config.auth_token
+        or server_config.oidc_rpc_url
+        or server_config.allow_unauthenticated
+    ):
         return
 
     if _is_loopback_host(server_config.host):

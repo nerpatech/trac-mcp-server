@@ -255,6 +255,31 @@ class TestValidateServerConfig:
         )
         validate_server_config(config)  # should not raise
 
+    # --- oidc_rpc_url: bind safety and mutual exclusivity with auth_token ---
+
+    def test_http_non_loopback_with_oidc_rpc_url_allowed(self):
+        """oidc_rpc_url alone permits a non-loopback bind -- every request
+        still needs its own bearer token (mcp/oidc.py), so this isn't a
+        weaker gate than auth_token."""
+        config = ServerConfig(
+            transport="http",
+            host="0.0.0.0",
+            oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc",
+        )
+        validate_server_config(config)  # should not raise
+
+    def test_auth_token_and_oidc_rpc_url_together_raises(self):
+        """Both are read off the same Authorization header for different
+        purposes -- combining them can only ever reject every caller."""
+        config = ServerConfig(
+            transport="http",
+            host="127.0.0.1",
+            auth_token="secret",
+            oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc",
+        )
+        with pytest.raises(ValueError, match="cannot both be set"):
+            validate_server_config(config)
+
 
 # -------------------------------------------------------------------------
 # load_config()

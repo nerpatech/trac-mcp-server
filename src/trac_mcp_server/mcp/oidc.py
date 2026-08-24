@@ -3,15 +3,25 @@
 Lets a shared deployment (e.g. one trac-mcp-server serving many LibreChat
 users behind a single Keycloak-backed Trac endpoint) act as *each caller's
 own* Trac identity instead of one shared service account. Every request
-must carry the caller's own OIDC access token in the ``X-Trac-OIDC-Token``
-header; that token is forwarded verbatim as ``Authorization: Bearer
-<token>`` to the operator-configured OIDC-protected Trac endpoint
+must carry the caller's own OIDC access token in the standard
+``Authorization: Bearer <token>`` header; that token is forwarded verbatim
+to the operator-configured OIDC-protected Trac endpoint
 (``ServerConfig.oidc_rpc_url``). Trac's own web server (mod_auth_openidc)
 validates the token and maps it to a Trac username -- this module does not
 decode, verify, or cache anything about the token's contents.
 
+The standard header is used deliberately, not a custom one: an MCP client
+that performs its own OAuth flow per server (LibreChat's ``oauth:`` config,
+matching the MCP spec's authorization flow) has no way to attach anything
+but a normal ``Authorization`` header -- it isn't driving a bespoke
+per-server header scheme, it's acting as a generic OAuth client. Because of
+that, this mode and ``ServerConfig.auth_token`` (the static shared-secret
+gate) are mutually exclusive -- both would need the same header for
+different purposes; see ``config.validate_server_config``.
+
 There is deliberately no fallback to a shared identity anywhere in this
-module: a missing token is always an error, never a silent substitution.
+module: a missing or malformed token is always an error, never a silent
+substitution.
 """
 
 from __future__ import annotations
@@ -26,16 +36,29 @@ from ..core.client import TracClient
 
 logger = logging.getLogger(__name__)
 
-# Starlette normalizes header names to lowercase in Headers/Request.headers,
-# and raw ASGI scope headers arrive as lowercase byte strings -- this
-# constant is used both ways, so keep it lowercase at the source.
-OIDC_TOKEN_HEADER = "x-trac-oidc-token"
-
 # Bounds memory for a long-running process seeing many distinct short-lived
 # Keycloak tokens (roughly one per user session). Plain FIFO eviction is
 # enough here -- this is a connection-pooling cache, not a security
 # boundary, so an imperfect LRU is not worth the extra bookkeeping.
 _MAX_CACHED_CLIENTS = 256
+
+
+def extract_bearer_token(
+    authorization_header: str | None,
+) -> str | None:
+    """Pull the token out of an ``Authorization: Bearer <token>`` value.
+
+    Returns None if the header is missing, blank, uses a different scheme,
+    or has an empty token -- callers treat all of those identically (see
+    OidcClientCache.get_client's MissingOidcTokenError).
+    """
+    if not authorization_header:
+        return None
+    scheme, _, token = authorization_header.partition(" ")
+    if scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
 
 
 class MissingOidcTokenError(ValueError):
@@ -56,17 +79,18 @@ class OidcClientCache:
         self._clients: OrderedDict[str, TracClient] = OrderedDict()
         self._lock = threading.Lock()
 
-    def get_client(self, token: str) -> TracClient:
+    def get_client(self, token: str | None) -> TracClient:
         """Return the cached client for ``token``, creating one if needed.
 
         Raises:
-            MissingOidcTokenError: If ``token`` is empty/blank.
+            MissingOidcTokenError: If ``token`` is empty/blank/None.
         """
         if not token or not token.strip():
             raise MissingOidcTokenError(
-                f"Missing {OIDC_TOKEN_HEADER!r} header. This server requires "
-                "each request to carry its own per-user Trac OIDC access "
-                "token; there is no shared fallback identity."
+                "Missing or malformed 'Authorization: Bearer <token>' "
+                "header. This server requires each request to carry its "
+                "own per-user Trac OIDC access token; there is no shared "
+                "fallback identity."
             )
         token = token.strip()
         with self._lock:

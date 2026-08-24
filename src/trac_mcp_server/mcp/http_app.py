@@ -25,7 +25,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config_schema import ServerConfig
-from .oidc import OIDC_TOKEN_HEADER
+from .oidc import extract_bearer_token
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +73,27 @@ class BearerAuthMiddleware:
 
 
 class OidcTokenRequiredMiddleware:
-    """Requires ``X-Trac-OIDC-Token`` when OIDC per-user auth is configured.
+    """Requires ``Authorization: Bearer <token>`` when OIDC per-user auth is
+    configured.
 
     No-op when ``oidc_rpc_url`` is falsy -- most deployments don't use this
     mode. When it *is* configured, this is the enforcement point for "no
     fallback to a shared identity, ever": every request to the MCP endpoint
-    (not ``/healthz``) must carry the header, checked here at the transport
-    boundary rather than deep in tool-dispatch logic, so no future code path
-    can accidentally skip it. The header's value is not validated here --
-    that happens downstream when Trac's own web server (mod_auth_openidc)
-    receives it as the forwarded ``Authorization: Bearer`` token.
+    (not ``/healthz``) must carry a bearer token, checked here at the
+    transport boundary rather than deep in tool-dispatch logic, so no
+    future code path can accidentally skip it. The token's value is not
+    validated here -- that happens downstream when Trac's own web server
+    (mod_auth_openidc) receives it forwarded as its own ``Authorization:
+    Bearer`` header.
+
+    This reuses the standard ``Authorization`` header rather than a custom
+    one: an MCP client's own OAuth flow per server (e.g. LibreChat's
+    ``oauth:`` config) can only attach a normal bearer header, not a
+    bespoke one. Consequently this is mutually exclusive with
+    ``BearerAuthMiddleware``'s static token -- ``config.validate_server_config``
+    rejects a ``ServerConfig`` that sets both, so in practice at most one of
+    the two middlewares is ever actually checking anything on a given
+    deployment.
     """
 
     def __init__(self, app: ASGIApp, oidc_rpc_url: str | None) -> None:
@@ -101,18 +112,18 @@ class OidcTokenRequiredMiddleware:
             return
 
         headers = dict(scope["headers"])
-        token = (
-            headers.get(OIDC_TOKEN_HEADER.encode("latin-1"), b"")
-            .decode("latin-1")
-            .strip()
+        auth_header = headers.get(b"authorization", b"").decode(
+            "latin-1"
         )
+        token = extract_bearer_token(auth_header)
         if not token:
             response = Response(
-                f"Unauthorized: missing {OIDC_TOKEN_HEADER!r} header. This "
-                "server requires each request to carry its own per-user "
-                "Trac OIDC access token; there is no shared fallback "
-                "identity.",
+                "Unauthorized: missing 'Authorization: Bearer <token>' "
+                "header. This server requires each request to carry its "
+                "own per-user Trac OIDC access token; there is no shared "
+                "fallback identity.",
                 status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
             )
             await response(scope, receive, send)
             return

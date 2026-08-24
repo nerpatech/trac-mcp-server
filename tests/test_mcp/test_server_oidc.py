@@ -3,10 +3,11 @@ and its effect on handle_call_tool()/handle_read_resource().
 
 These run outside a real ASGI request, so server.request_context.request
 raises LookupError exactly like a stdio call would -- that's the same
-"no token available" case as a genuinely missing header, and it must fail
-the same way: no fallback to any shared identity. The "header present"
-path is covered end-to-end in test_http_app.py::TestOidcTokenRequired plus
-the Config/TracClient wiring unit tests in test_oidc.py.
+"no token available" case as a genuinely missing Authorization header, and
+it must fail the same way: no fallback to any shared identity. The
+"header present" path is covered end-to-end in
+test_http_app.py::TestOidcTokenRequired plus the Config/TracClient wiring
+unit tests in test_oidc.py.
 """
 
 import asyncio
@@ -57,8 +58,9 @@ class TestResolveClientOidcMode:
 
     def test_no_request_context_is_treated_as_missing_token(self):
         """Outside an ASGI request (as happens here, and as stdio always
-        is), there is no header to read -- this must fail exactly like a
-        missing header would, never fall back to get_instances()."""
+        is), there is no Authorization header to read -- this must fail
+        exactly like a missing header would, never fall back to
+        get_instances()."""
         set_oidc_cache(_oidc_cache())
 
         with patch(

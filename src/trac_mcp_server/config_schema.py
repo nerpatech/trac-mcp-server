@@ -125,7 +125,11 @@ class ServerConfig(BaseModel):
     )
     auth_token: str | None = Field(
         default=None,
-        description="Static bearer token required for http transport requests",
+        description=(
+            "Static bearer token required for http transport requests. "
+            "Mutually exclusive with oidc_rpc_url -- both are read off the "
+            "same Authorization header for different purposes."
+        ),
     )
     oidc_rpc_url: str | None = Field(
         default=None,
@@ -133,10 +137,12 @@ class ServerConfig(BaseModel):
             "Full XML-RPC URL of an OIDC-protected Trac endpoint (e.g. "
             "https://trac.example.com/trac-api/login/xmlrpc). When set, "
             "every http-transport request must carry its own "
-            "X-Trac-OIDC-Token header -- the caller's own OIDC access "
-            "token -- forwarded verbatim as 'Authorization: Bearer <token>' "
-            "to this URL. There is no fallback to a shared service-account "
-            "identity: a request without the header is rejected outright."
+            "'Authorization: Bearer <token>' header -- the caller's own "
+            "OIDC access token, typically attached by an MCP client's own "
+            "OAuth flow per server (e.g. LibreChat's oauth: config) -- "
+            "forwarded verbatim to this URL. There is no fallback to a "
+            "shared service-account identity: a request without a bearer "
+            "token is rejected outright."
         ),
     )
     allow_unauthenticated: bool = Field(

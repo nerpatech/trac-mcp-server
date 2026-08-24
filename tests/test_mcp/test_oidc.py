@@ -1,8 +1,9 @@
 """Tests for mcp/oidc.py -- the per-user OIDC bearer-token client cache.
 
-Covers OidcClientCache in isolation: token -> Config/TracClient wiring,
-missing-token rejection, and caching/eviction. The transport-level "is the
-header even present" enforcement is tested separately in
+Covers extract_bearer_token() and OidcClientCache in isolation: header
+parsing, token -> Config/TracClient wiring, missing-token rejection, and
+caching/eviction. The transport-level "is a bearer token even present"
+enforcement is tested separately in
 test_http_app.py::TestOidcTokenRequired.
 """
 
@@ -10,10 +11,40 @@ import pytest
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.mcp.oidc import (
-    OIDC_TOKEN_HEADER,
     MissingOidcTokenError,
     OidcClientCache,
+    extract_bearer_token,
 )
+
+
+class TestExtractBearerToken:
+    def test_none_header(self):
+        assert extract_bearer_token(None) is None
+
+    def test_empty_header(self):
+        assert extract_bearer_token("") is None
+
+    def test_missing_scheme(self):
+        assert extract_bearer_token("just-a-token") is None
+
+    def test_wrong_scheme(self):
+        assert extract_bearer_token("Basic dXNlcjpwYXNz") is None
+
+    def test_scheme_is_case_insensitive(self):
+        assert extract_bearer_token("bearer the-token") == "the-token"
+        assert extract_bearer_token("BEARER the-token") == "the-token"
+
+    def test_extracts_token(self):
+        assert extract_bearer_token("Bearer the-token") == "the-token"
+
+    def test_blank_token_after_scheme(self):
+        assert extract_bearer_token("Bearer ") is None
+        assert extract_bearer_token("Bearer    ") is None
+
+    def test_strips_whitespace(self):
+        assert (
+            extract_bearer_token("Bearer   the-token  ") == "the-token"
+        )
 
 
 @pytest.fixture
@@ -26,10 +57,13 @@ def base_config() -> Config:
 
 
 class TestOidcClientCache:
-    def test_header_name_is_lowercase(self):
-        """Starlette Headers/scope both key on lowercase; a wrong case here
-        would make lookups silently miss."""
-        assert OIDC_TOKEN_HEADER == OIDC_TOKEN_HEADER.lower()
+    def test_none_token_raises(self, base_config):
+        cache = OidcClientCache(
+            base_config,
+            "https://trac.example.com/trac-api/login/xmlrpc",
+        )
+        with pytest.raises(MissingOidcTokenError):
+            cache.get_client(None)
 
     def test_empty_token_raises(self, base_config):
         cache = OidcClientCache(
