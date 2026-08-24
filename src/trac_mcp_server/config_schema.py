@@ -149,6 +149,15 @@ class ServerConfig(BaseModel):
         default=False,
         description="Allow binding a non-loopback host without an auth_token",
     )
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Expose only read-only tools (Tool.annotations.readOnlyHint), "
+            "regardless of transport. A stricter, coarser alternative to "
+            "--permissions-file's Trac-permission-based filtering -- "
+            "combinable with it."
+        ),
+    )
     allowed_hosts: list[str] = Field(
         default_factory=list,
         description="Extra Host header values to accept, beyond the loopback/host:port defaults",

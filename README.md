@@ -49,6 +49,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
 | `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
+| `TRAC_MCP_READ_ONLY` | No | `false` | Expose only read-only tools, regardless of transport -- see [Tool Architecture: Read-Only Filtering](docs/reference/tool-architecture.md#read-only-filtering---read-only) |
 
 For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, see [HTTP Transport](docs/reference/http-transport.md).
 

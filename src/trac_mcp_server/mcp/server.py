@@ -409,7 +409,11 @@ async def main(config_overrides: dict | None = None):
     all_specs = with_instance_param(
         [PING_SPEC] + ALL_SPECS, declared_names
     )
-    registry = ToolRegistry(all_specs, allowed_permissions)
+    registry = ToolRegistry(
+        all_specs,
+        allowed_permissions,
+        read_only=server_config.read_only,
+    )
     logger.info(
         "Registered %d tools (of %d total)",
         registry.tool_count(),
@@ -420,6 +424,18 @@ async def main(config_overrides: dict | None = None):
         print(
             f"Permissions file: {permissions_file} "
             f"({registry.tool_count()} of {len(all_specs)} tools enabled)",
+            file=sys.stderr,
+        )
+
+    if server_config.read_only:
+        logger.info(
+            "Read-only mode active: %d of %d tools exposed.",
+            registry.tool_count(),
+            len(all_specs),
+        )
+        print(
+            f"Read-only mode: {registry.tool_count()} of "
+            f"{len(all_specs)} tools enabled",
             file=sys.stderr,
         )
 
@@ -569,6 +585,14 @@ must not be piped manually. This does not apply to --transport http.
         "Prefer setting TRAC_MCP_AUTH_TOKEN instead.",
     )
     parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Expose only read-only tools (view/search/list/get), "
+        "regardless of transport. Also settable via TRAC_MCP_READ_ONLY "
+        "env var or config.yaml server.read_only. Combinable with "
+        "--permissions-file.",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"trac-mcp-server version {__version__}",
@@ -605,6 +629,8 @@ def run() -> None:
         config_overrides["path"] = args.path
     if args.allow_unauthenticated:
         config_overrides["allow_unauthenticated"] = True
+    if args.read_only:
+        config_overrides["read_only"] = True
 
     # Log config overrides to stderr (before stdio transport starts)
     if config_overrides:

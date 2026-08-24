@@ -114,10 +114,14 @@ def bootstrap_server_config(
     CLI > env var (``TRAC_MCP_*``) > YAML ``server:`` section > default.
 
     Accepted ``cli_overrides`` keys: ``transport``, ``host``, ``port``,
-    ``path``, ``allow_unauthenticated``. ``auth_token`` is intentionally
-    not accepted here -- it must come from ``TRAC_MCP_AUTH_TOKEN`` or the
-    YAML ``server:`` section, never a CLI flag, so it never appears in the
-    process list.
+    ``path``, ``allow_unauthenticated``, ``read_only``. ``auth_token`` is
+    intentionally not accepted here -- it must come from
+    ``TRAC_MCP_AUTH_TOKEN`` or the YAML ``server:`` section, never a CLI
+    flag, so it never appears in the process list.
+
+    ``TRAC_MCP_READ_ONLY`` (or ``--read-only``) restricts the tool list to
+    read-only tools only (``Tool.annotations.readOnlyHint``), regardless
+    of transport -- applies both stdio and http.
 
     ``TRAC_MCP_ALLOWED_HOSTS``/``TRAC_MCP_ALLOWED_ORIGINS`` (comma-separated,
     e.g. ``trac-mcp:8080,trac-mcp:*``) extend the DNS-rebinding-protection
@@ -204,6 +208,24 @@ def bootstrap_server_config(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
 
+    def _parse_bool_env(key: str) -> bool | None:
+        """Env var -> bool, or None if unset. Same truthy-string set as
+        TRAC_INSECURE/TRAC_DEBUG in config.py, for consistency."""
+        val = os.getenv(key)
+        if val is None:
+            return None
+        return val.lower() in ("true", "1", "yes", "on")
+
+    if overrides.get("read_only"):
+        read_only = True
+    else:
+        read_only_env = _parse_bool_env("TRAC_MCP_READ_ONLY")
+        read_only = (
+            read_only_env
+            if read_only_env is not None
+            else bool(yaml_server.get("read_only", False))
+        )
+
     def _parse_csv_env(key: str) -> list[str] | None:
         """Comma-separated env var -> list, or None if unset.
 
@@ -238,6 +260,7 @@ def bootstrap_server_config(
         auth_token=auth_token,
         oidc_rpc_url=oidc_rpc_url,
         allow_unauthenticated=allow_unauthenticated,
+        read_only=read_only,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
     )
