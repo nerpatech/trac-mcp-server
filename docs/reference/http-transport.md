@@ -33,8 +33,8 @@ Same precedence as the rest of the server's config: CLI flag > env var (`TRAC_MC
 | Bearer token | *(none -- see below)* | `TRAC_MCP_AUTH_TOKEN` | `auth_token` | unset |
 | OIDC per-user RPC URL | -- | `TRAC_MCP_OIDC_RPC_URL` | `oidc_rpc_url` | unset |
 | Allow unauthenticated non-loopback bind | `--allow-unauthenticated` | -- | `allow_unauthenticated` | `false` |
-| Extra allowed `Host` headers | -- | -- | `allowed_hosts` | `[]` |
-| Extra allowed `Origin` headers | -- | -- | `allowed_origins` | `[]` |
+| Extra allowed `Host` headers | -- | `TRAC_MCP_ALLOWED_HOSTS` (comma-separated) | `allowed_hosts` | `[]` |
+| Extra allowed `Origin` headers | -- | `TRAC_MCP_ALLOWED_ORIGINS` (comma-separated) | `allowed_origins` | `[]` |
 
 ```yaml
 # .trac_mcp/config.yaml
@@ -159,7 +159,11 @@ This exists because the server holds the operator's Trac credentials -- an open,
 
 ## DNS-Rebinding Protection
 
-The MCP endpoint validates the `Host` header (and, if present, `Origin`) against an allow-list, rejecting mismatches with `421`. The default allow-list covers loopback on any port (`127.0.0.1:*`, `localhost:*`) plus the exact configured `host:port`. If you front the server with a reverse proxy that changes the `Host` header the server sees (a public hostname, a different port), add it to `allowed_hosts` (and, for browser clients, `allowed_origins`) in the YAML `server:` section.
+The MCP endpoint validates the `Host` header (and, if present, `Origin`) against an allow-list, rejecting mismatches with `421`. The default allow-list covers loopback on any port (`127.0.0.1:*`, `localhost:*`) plus the exact configured `host:port`. If a client reaches this server by a name other than what it's bound to -- a reverse proxy that changes the `Host` header, or a docker-compose service name like `trac-mcp:8080` -- add it via `TRAC_MCP_ALLOWED_HOSTS` (and, for browser clients, `TRAC_MCP_ALLOWED_ORIGINS`), or the YAML `server:` section's `allowed_hosts`/`allowed_origins`.
+
+```bash
+TRAC_MCP_ALLOWED_HOSTS=trac-mcp:8080
+```
 
 `/healthz` is not subject to this check, so container health probes work regardless of the `Host` header they send.
 

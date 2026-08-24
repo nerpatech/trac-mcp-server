@@ -119,6 +119,12 @@ def bootstrap_server_config(
     YAML ``server:`` section, never a CLI flag, so it never appears in the
     process list.
 
+    ``TRAC_MCP_ALLOWED_HOSTS``/``TRAC_MCP_ALLOWED_ORIGINS`` (comma-separated,
+    e.g. ``trac-mcp:8080,trac-mcp:*``) extend the DNS-rebinding-protection
+    allow-list beyond loopback and the configured bind address -- needed
+    whenever a client reaches this server by a name other than what it's
+    bound to, such as a docker-compose service name.
+
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
 
@@ -198,8 +204,31 @@ def bootstrap_server_config(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
 
-    allowed_hosts = list(yaml_server.get("allowed_hosts", []))
-    allowed_origins = list(yaml_server.get("allowed_origins", []))
+    def _parse_csv_env(key: str) -> list[str] | None:
+        """Comma-separated env var -> list, or None if unset.
+
+        Blank entries (from a trailing comma or stray whitespace) are
+        dropped rather than turning into an empty-string allow-list entry
+        that could never match a real Host/Origin header.
+        """
+        raw = os.getenv(key)
+        if raw is None:
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()]
+
+    allowed_hosts_env = _parse_csv_env("TRAC_MCP_ALLOWED_HOSTS")
+    allowed_hosts = (
+        allowed_hosts_env
+        if allowed_hosts_env is not None
+        else list(yaml_server.get("allowed_hosts", []))
+    )
+
+    allowed_origins_env = _parse_csv_env("TRAC_MCP_ALLOWED_ORIGINS")
+    allowed_origins = (
+        allowed_origins_env
+        if allowed_origins_env is not None
+        else list(yaml_server.get("allowed_origins", []))
+    )
 
     server_config = ServerConfig(
         transport=transport,

@@ -262,6 +262,8 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_PATH",
         "TRAC_MCP_AUTH_TOKEN",
         "TRAC_MCP_OIDC_RPC_URL",
+        "TRAC_MCP_ALLOWED_HOSTS",
+        "TRAC_MCP_ALLOWED_ORIGINS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -334,6 +336,114 @@ def test_env_var_populates_oidc_rpc_url(monkeypatch):
         server_config.oidc_rpc_url
         == "https://trac.example.com/trac-api/login/xmlrpc"
     )
+
+
+def test_env_vars_populate_allowed_hosts_and_origins(monkeypatch):
+    """TRAC_MCP_ALLOWED_HOSTS/ORIGINS are comma-separated lists -- needed
+    whenever a client reaches this server by a name other than what it's
+    bound to, e.g. a docker-compose service name."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv(
+        "TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080, trac-mcp:*"
+    )
+    monkeypatch.setenv(
+        "TRAC_MCP_ALLOWED_ORIGINS", "https://assistant.example.com"
+    )
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.allowed_hosts == [
+        "trac-mcp:8080",
+        "trac-mcp:*",
+    ]
+    assert server_config.allowed_origins == [
+        "https://assistant.example.com"
+    ]
+
+
+def test_allowed_hosts_env_blank_entries_dropped(monkeypatch):
+    """A trailing comma or stray whitespace must not produce an empty-
+    string allow-list entry that could never match a real Host header."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080,, ")
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.allowed_hosts == ["trac-mcp:8080"]
+
+
+def test_allowed_hosts_env_overrides_yaml(monkeypatch):
+    """Env wins over YAML, consistent with every other field's precedence."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "from-env:8080")
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=["/fake/config.yaml"],
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value={
+                "server": {"allowed_hosts": ["from-yaml:8080"]}
+            },
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.allowed_hosts == ["from-env:8080"]
+
+
+def test_allowed_hosts_falls_back_to_yaml_when_env_unset(monkeypatch):
+    _clear_server_env(monkeypatch)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=["/fake/config.yaml"],
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value={
+                "server": {"allowed_hosts": ["from-yaml:8080"]}
+            },
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.allowed_hosts == ["from-yaml:8080"]
+
+
+def test_allowed_hosts_defaults_to_empty_list(monkeypatch):
+    _clear_server_env(monkeypatch)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.allowed_hosts == []
+    assert server_config.allowed_origins == []
 
 
 def test_cli_overrides_win_over_env_for_server_config(monkeypatch):
