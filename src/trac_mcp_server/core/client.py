@@ -110,6 +110,12 @@ class TicketCreateTimeout(Exception):
 
 
 class TracClient:
+    # Declared at class level (not just assigned in __init__) so that
+    # unittest.mock.MagicMock(spec=TracClient) recognizes .config as a
+    # valid attribute -- spec introspects the class, not instance
+    # attributes __init__ happens to assign.
+    config: Config
+
     def __init__(self, config: Config):
         self.config = config
         self._thread_local = threading.local()

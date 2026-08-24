@@ -1359,18 +1359,21 @@ class TestHandleTicketSearch:
                 "summary": "Bug A",
                 "status": "new",
                 "owner": "alice",
+                "url": "https://trac.example.com/ticket/1",
             },
             {
                 "id": 2,
                 "summary": "Bug B",
                 "status": "assigned",
                 "owner": "bob",
+                "url": "https://trac.example.com/ticket/2",
             },
             {
                 "id": 3,
                 "summary": "Bug C",
                 "status": "new",
                 "owner": "charlie",
+                "url": "https://trac.example.com/ticket/3",
             },
         ]
 
@@ -1414,30 +1417,35 @@ class TestHandleTicketSearch:
                 "summary": "T10",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/10",
             },
             {
                 "id": 20,
                 "summary": "T20",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/20",
             },
             {
                 "id": 30,
                 "summary": "T30",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/30",
             },
             {
                 "id": 40,
                 "summary": "T40",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/40",
             },
             {
                 "id": 50,
                 "summary": "T50",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/50",
             },
         ]
 
@@ -1501,12 +1509,14 @@ class TestHandleTicketSearch:
                 "summary": "Feature request",
                 "status": "new",
                 "owner": "dev1",
+                "url": "https://trac.example.com/ticket/7",
             },
             {
                 "id": 8,
                 "summary": "Enhancement",
                 "status": "accepted",
                 "owner": "dev2",
+                "url": "https://trac.example.com/ticket/8",
             },
         ]
 
@@ -1543,6 +1553,11 @@ class TestHandleTicketSearch:
         total=2, showing=1 with no indication a fetch failed.
         """
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
 
         def _get_ticket_side_effect(tid):
             if tid == 15:
@@ -1619,6 +1634,11 @@ class TestHandleTicketGet:
     def test_get_success(self):
         """Get ticket returns full details with Markdown-converted description."""
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -1661,15 +1681,25 @@ class TestHandleTicketGet:
             assert "# Problem" in text  # converted description
             assert "new" in text
             assert "alice" in text
+            assert "https://trac.example.com/ticket/42" in text
             # Structured content
             assert result.structuredContent["id"] == 42
             assert (
                 result.structuredContent["summary"] == "Fix login bug"
             )
+            assert (
+                result.structuredContent["url"]
+                == "https://trac.example.com/ticket/42"
+            )
 
     def test_get_raw_mode(self):
         """Raw mode returns TracWiki description without conversion."""
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 

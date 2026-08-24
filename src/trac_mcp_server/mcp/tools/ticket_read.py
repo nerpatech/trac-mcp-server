@@ -24,7 +24,7 @@ from .registry import ToolSpec
 TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_search",
-        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries.",
+        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries and their web URLs.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -51,7 +51,7 @@ TICKET_READ_TOOLS = [
     ),
     types.Tool(
         name="ticket_get",
-        description="Get full ticket details including summary, description, status, and owner. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
+        description="Get full ticket details including summary, description, status, owner, and web URL. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -140,6 +140,19 @@ TICKET_READ_TOOLS = [
 ]
 
 
+def _ticket_url(client: TracClient, ticket_id: int) -> str:
+    """Build the web-facing URL for a ticket.
+
+    Without this, an agent asked to "include links" has no way to know --
+    ticket_search/ticket_get results carried no URL at all, so it either
+    guesses (often wrong: the MCP client's own host, not Trac's) or omits
+    links entirely. client.config.trac_url is correct even for a per-user
+    OIDC client (see mcp/oidc.py) -- OidcClientCache.get_client() clones
+    the base Config and only overrides identity fields, never trac_url.
+    """
+    return f"{client.config.trac_url.rstrip('/')}/ticket/{ticket_id}"
+
+
 async def _handle_search(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -187,6 +200,7 @@ async def _handle_search(
                 "summary": attrs.get("summary", ""),
                 "status": attrs.get("status", ""),
                 "owner": attrs.get("owner", ""),
+                "url": _ticket_url(client, tid),
             }
         except Exception:
             failed_ids.append(tid)
@@ -202,7 +216,7 @@ async def _handle_search(
         if item is None:
             continue
         results.append(
-            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']})"
+            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}) - {item['url']}"
         )
         tickets_json.append(item)
 
@@ -289,6 +303,7 @@ async def _handle_get(
     # Format timestamps
     created_str = format_timestamp(created)
     modified_str = format_timestamp(modified)
+    url = _ticket_url(client, ticket_id_resp)
 
     # Build response
     format_note = " (TracWiki)" if raw else ""
@@ -299,6 +314,7 @@ async def _handle_get(
         f"Keywords: {keywords} | Cc: {cc}"
         + (f" | Resolution: {resolution}" if resolution else ""),
         f"Created: {created_str} | Modified: {modified_str}",
+        f"URL: {url}",
         "",
         f"## Description{format_note}",
         description_output,
@@ -321,6 +337,7 @@ async def _handle_get(
         "resolution": resolution,
         "created": created_str,
         "modified": modified_str,
+        "url": url,
     }
 
     return types.CallToolResult(
