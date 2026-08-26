@@ -1984,6 +1984,36 @@ class TestConverterTicketRegressions(unittest.TestCase):
         result = markdown_to_tracwiki("global  \nnext line")
         self.assertIn("global [[BR]]", result)
 
+    def test_ticket_40_server_relative_link_target_survives(self):
+        """A server-relative link target (`//other_instance/ticket/13`)
+        must pass through verbatim, not get `wiki:`-prefixed.
+
+        Regression test for ticket #40: this is the sanctioned way to
+        cross-link between Trac instances on the same host without
+        hardcoding scheme/host/port into the content. The target has no
+        ":" and previously fell into the "internal wiki page" branch,
+        producing the dead-link `[wiki://trac_mcp_server/ticket/13 ...]`.
+        """
+        result = markdown_to_tracwiki(
+            "[trac_mcp_server ticket 13](//trac_mcp_server/ticket/13)"
+        )
+        self.assertEqual(
+            result,
+            "[//trac_mcp_server/ticket/13 trac_mcp_server ticket 13]",
+        )
+        self.assertNotIn("wiki:", result)
+
+    def test_ticket_40_server_relative_link_round_trips(self):
+        """The target survives a markdown -> tracwiki -> markdown round
+        trip byte-for-byte, mirroring the existing TracLink round-trip
+        guard (`test_traclink_round_trips_through_both_converters`).
+        """
+        markdown = (
+            "[trac_mcp_server ticket 13](//trac_mcp_server/ticket/13)"
+        )
+        tracwiki = markdown_to_tracwiki(markdown)
+        self.assertEqual(tracwiki_to_markdown(tracwiki).text, markdown)
+
 
 class TestReadPathConverterTicketRegressions(unittest.TestCase):
     """Regression tests for tickets against the tracwiki_to_markdown
