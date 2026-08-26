@@ -103,7 +103,7 @@ class ToolRegistry:
         spec = self._specs.get(name)
         if spec is None:
             raise ValueError(f"Unknown tool: {name}")
-        args = arguments or {}
+        args = _normalize_arg_aliases(name, arguments or {})
         try:
             return await spec.handler(client, args)
         except xmlrpc.client.Fault as e:
@@ -126,6 +126,31 @@ class ToolRegistry:
                 str(e),
                 "Contact Trac administrator or retry later.",
             )
+
+
+# Prefix -> {alias: canonical}. Applied at dispatch so every handler and
+# error-message helper only ever needs to know the canonical key.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "wiki_": {"page": "page_name"},
+}
+
+
+def _normalize_arg_aliases(name: str, args: dict) -> dict:
+    """Fill in canonical argument keys from known aliases.
+
+    Never overwrites an explicitly supplied canonical value; only fills it
+    in when absent. E.g. a ``wiki_*`` call passing ``page`` instead of the
+    documented ``page_name`` is normalized here, once, so handlers and
+    ``_entity_name_from_args`` keep reading only ``page_name``.
+    """
+    for prefix, aliases in _ARG_ALIASES.items():
+        if not name.startswith(prefix):
+            continue
+        for alias, canonical in aliases.items():
+            if alias in args and canonical not in args:
+                args = {**args, canonical: args[alias]}
+        break
+    return args
 
 
 def _entity_name_from_args(name: str, args: dict) -> str | None:

@@ -202,6 +202,73 @@ class TestToolRegistry(unittest.TestCase):
 
         self.assertEqual(calls[0], {})
 
+    def test_call_tool_normalizes_page_alias(self):
+        """call_tool() fills page_name from page for wiki_* tools."""
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("wiki_get", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get", {"page": "Index"}, MagicMock()
+            )
+        )
+
+        self.assertEqual(
+            calls[0], {"page": "Index", "page_name": "Index"}
+        )
+
+    def test_call_tool_alias_does_not_override_canonical(self):
+        """An explicit page_name always wins over the page alias."""
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("wiki_get", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get",
+                {"page": "Wrong", "page_name": "Right"},
+                MagicMock(),
+            )
+        )
+
+        self.assertEqual(calls[0]["page_name"], "Right")
+
+    def test_call_tool_alias_not_applied_outside_wiki(self):
+        """The page alias is scoped to wiki_* tools only."""
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("ticket_search", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "ticket_search", {"page": "Index"}, MagicMock()
+            )
+        )
+
+        self.assertNotIn("page_name", calls[0])
+
     def test_call_tool_unknown_raises(self):
         """Calling unknown tool raises ValueError."""
         registry = ToolRegistry(self.specs)
