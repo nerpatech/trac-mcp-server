@@ -339,6 +339,17 @@ class TracWikiRenderer(mistune.BaseRenderer):
         if url.startswith("#"):
             return f"[{url} {text}]"
 
+        # Server-relative targets (`//other_instance/ticket/13`) are the
+        # sanctioned way to link across Trac instances on the same host
+        # without hardcoding scheme/host/port. A leading "//" with no
+        # scheme is a valid URL reference (protocol-relative in the
+        # general case, server-relative as Trac uses it) -- pass it
+        # through verbatim rather than falling into the "no ':'" internal
+        # wiki-page branch below, which would wrongly wiki:-prefix it into
+        # a dead link (ticket #40).
+        if url.startswith("//"):
+            return f"[{url} {text}]"
+
         # Already-resolved TracLinks (`wiki:Page`, `ticket:42`,
         # `source:trunk/f.py`, ...) are valid TracWiki targets as they
         # stand — emit them verbatim. This is what `tracwiki_to_markdown`
