@@ -38,6 +38,7 @@ _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
 # Sentinel used by `_stash_bracket_syntax`/`_restore_bracket_syntax`.
 _PLACEHOLDER_RE = re.compile(r"\x00WK(\d+)\x00")
 
+
 # Trac's own WikiCamelCase auto-link pattern: a word with two or more
 # "humps" (uppercase letter, then a lowercase run), e.g. WiFi, LoRa,
 # PageOutline. Deliberately excludes pure-acronym runs like IPAddress (no
@@ -49,6 +50,36 @@ _CAMELCASE_RE = re.compile(r"(?<!!)\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b")
 # (a "!" directly before a CamelCase-shaped word), so `link()` can undo it
 # for its own `text` argument -- see `_unescape_camelcase`.
 _CAMELCASE_ESCAPE_RE = re.compile(r"!(?=[A-Z][a-z]+(?:[A-Z][a-z]*)+\b)")
+
+# A bare absolute URL sitting directly in prose (no Markdown link syntax
+# around it, no backticks). A resolved `[text](url)`/autolink never
+# reaches `text()` at all -- mistune hands its url straight to `link()`
+# -- so any URL text() sees here is one mistune left as literal prose. A
+# CamelCase-shaped path segment inside it is part of the address, not a
+# word Trac's WikiCamelCase grammar should ever see (ticket #44).
+_URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?)://\S+", re.IGNORECASE)
+
+# An unresolved single-bracket TracWiki/InterTrac link typed directly in
+# Markdown source: `[scheme:target label]`, `[prefix:realm:target label]`,
+# `[url]`, `[url label]`. Not valid Markdown link syntax (no trailing
+# "(url)"), so mistune would otherwise render the brackets and their
+# contents as literal text -- both the target and the label arriving at
+# text() as plain prose, where the CamelCase pass would turn a
+# WikiPageNames-shaped word in the target into a dead link, and put a
+# stray "!" in the visible label (ticket #44).
+#
+# Stashed on the *raw* source, like `[[...]]` below, rather than handled
+# from within text(): mistune's link-scanner splits an unresolved "[...]"
+# into separate text() fragments (a lone "[" as one call, the rest as
+# another), so the target-plus-label span never arrives at text() as one
+# contiguous string to recognize -- the brackets have to be protected
+# before that split happens. The `(?!\()` guard excludes anything
+# immediately followed by "(", which is a real Markdown link whose label
+# merely looks scheme-shaped (`[wiki:Page](url)`) -- must reach mistune's
+# link parser untouched.
+_SINGLE_BRACKET_LINK_RE = re.compile(
+    r"\[(?:[A-Za-z][\w+.-]*:)+[^\s\]]+(?:[ \t]+[^\]\n]+)?\](?!\()"
+)
 
 
 def _unescape_camelcase(text: str) -> str:
@@ -83,6 +114,11 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     on its own, the surrounding brackets that would identify it as
     macro/link syntax are already gone. The placeholder has to exist
     before mistune ever sees the "[" character (ticket #19/#27 interaction).
+
+    Single-bracket TracWiki/InterTrac link syntax (`_SINGLE_BRACKET_LINK_RE`,
+    ticket #44) is stashed last, after `[[...]]` is already out of the way,
+    so a double-bracket span never has its own outer brackets mistaken for
+    the single-bracket form's opening/closing pair.
     """
     placeholders: list[str] = []
 
@@ -96,6 +132,7 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
 
     text = _MACRO_PLACEHOLDER_RE.sub(stash_macro, markdown_text)
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
+    text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
 
 
@@ -178,8 +215,30 @@ class TracWikiRenderer(mistune.BaseRenderer):
         mistune even starts parsing (ticket #19), so a macro/page name
         that happens to be CamelCase-shaped is never escaped inside its
         brackets.
+
+        A bare URL DOES still reach this method as literal text -- it
+        can't be pre-stashed the way `[[...]]` is without risking a real
+        Markdown link's own `(url)` destination, so it's located and
+        skipped inline instead (ticket #44); see `_URL_IN_TEXT_RE`. The
+        single-bracket TracWiki/InterTrac link form is handled earlier,
+        by pre-stashing (`_SINGLE_BRACKET_LINK_RE`) rather than here --
+        mistune splits an unresolved "[...]" into separate text() calls
+        (the "[" on its own), so this method never sees that span whole.
         """
-        return _CAMELCASE_RE.sub(lambda m: f"!{m.group(0)}", text)
+
+        def escape(segment: str) -> str:
+            return _CAMELCASE_RE.sub(
+                lambda m: f"!{m.group(0)}", segment
+            )
+
+        out: list[str] = []
+        last = 0
+        for m in _URL_IN_TEXT_RE.finditer(text):
+            out.append(escape(text[last : m.start()]))
+            out.append(m.group(0))
+            last = m.end()
+        out.append(escape(text[last:]))
+        return "".join(out)
 
     def emphasis(self, text: str) -> str:
         """Render italic text (single emphasis)."""
@@ -665,8 +724,9 @@ def markdown_to_tracwiki(
         renderer=renderer, plugins=["table"]
     )
 
-    # Stash [MACRO: ...] / [[...]] spans before mistune ever sees a "["
-    # (see _stash_bracket_syntax for why this can't happen inside text()).
+    # Stash [MACRO: ...] / [[...]] / single-bracket link spans before
+    # mistune ever sees a "[" (see _stash_bracket_syntax for why this
+    # can't happen inside text()).
     stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
 
     # Parse and render

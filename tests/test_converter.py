@@ -2014,6 +2014,71 @@ class TestConverterTicketRegressions(unittest.TestCase):
         tracwiki = markdown_to_tracwiki(markdown)
         self.assertEqual(tracwiki_to_markdown(tracwiki).text, markdown)
 
+    def test_ticket_44_bare_url_target_not_escaped(self):
+        """A CamelCase-shaped path segment inside a bare absolute URL
+        (no Markdown link syntax around it) must not be "!"-escaped --
+        the escape would land in the URL itself, producing a dead link.
+        """
+        result = markdown_to_tracwiki(
+            "See http://host:8000/bcs/wiki/b-node/bench/BoardIdentity for details."
+        )
+        self.assertIn(
+            "http://host:8000/bcs/wiki/b-node/bench/BoardIdentity",
+            result,
+        )
+        self.assertNotIn("!BoardIdentity", result)
+
+    def test_ticket_44_intertrac_link_target_and_label_not_escaped(
+        self,
+    ):
+        """An unresolved single-bracket InterTrac link typed directly in
+        Markdown source (`[prefix:realm:target label]`) is not real
+        Markdown link syntax, so mistune renders it as literal text.
+        Neither the target nor the label may be "!"-escaped -- an
+        escaped target resolves to a nonexistent page, and an escaped
+        label shows a stray literal "!" to the reader.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "[bcs:wiki:b-node/bench/BoardIdentity the budget table]"
+            ),
+            "[bcs:wiki:b-node/bench/BoardIdentity the budget table]",
+        )
+        # Label equal to the CamelCase target -- the shape from the
+        # ticket's original (narrower) repro.
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "[bcs:wiki:b-node/bench/BoardIdentity BoardIdentity]"
+            ),
+            "[bcs:wiki:b-node/bench/BoardIdentity BoardIdentity]",
+        )
+
+    def test_ticket_44_real_markdown_link_with_scheme_shaped_label_unaffected(
+        self,
+    ):
+        """A genuine Markdown link `[label](url)` must still parse as a
+        real link even when its label happens to look scheme-shaped
+        (colon-containing) -- the single-bracket-link stash must not
+        swallow it just because it's immediately followed by "(url)".
+        """
+        result = markdown_to_tracwiki(
+            "[wiki:Page](http://example.com/x)"
+        )
+        self.assertEqual(result, "[http://example.com/x wiki:Page]")
+
+    def test_ticket_44_backticked_url_still_unaffected(self):
+        """A URL inside a code span was already safe before this fix
+        (codespan() never escapes) -- regression guard against the new
+        URL-detection logic in text() somehow reaching into code spans.
+        """
+        result = markdown_to_tracwiki(
+            "`http://host:8000/bcs/wiki/b-node/bench/BoardIdentity`"
+        )
+        self.assertEqual(
+            result,
+            "`http://host:8000/bcs/wiki/b-node/bench/BoardIdentity`",
+        )
+
 
 class TestReadPathConverterTicketRegressions(unittest.TestCase):
     """Regression tests for tickets against the tracwiki_to_markdown
