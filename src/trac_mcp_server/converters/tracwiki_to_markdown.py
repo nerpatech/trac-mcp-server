@@ -178,7 +178,9 @@ class TracWikiParser:
         """
 
         def convert_processor_cell(match):
-            if self._is_backtick_wrapped(text, match.start(), match.end()):
+            if self._is_backtick_wrapped(
+                text, match.start(), match.end()
+            ):
                 return match.group(0)
             cell_type = match.group(1)  # 'td' or 'th'
             content = match.group(2).strip()
