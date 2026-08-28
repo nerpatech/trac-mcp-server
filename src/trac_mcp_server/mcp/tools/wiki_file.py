@@ -175,7 +175,7 @@ async def _handle_push(
 
     # Read file
     resolved = await run_sync(validate_file_path, file_path)
-    content, _encoding = await run_sync(
+    content, encoding = await run_sync(
         read_file_with_encoding, resolved
     )
 
@@ -191,6 +191,16 @@ async def _handle_push(
 
     # Convert to TracWiki if needed
     warnings: list[str] = []
+    # read_file_with_encoding only falls back to charset-normalizer's guess
+    # when the file doesn't decode as strict UTF-8, so a non-utf-8 result
+    # here means detection genuinely disagrees with UTF-8. Surface that
+    # instead of letting it stay silent (ticket #48) -- the guess can
+    # still be wrong.
+    if encoding != "utf-8":
+        warnings.append(
+            f"File encoding detected as '{encoding}', not UTF-8 -- "
+            "verify the pushed content isn't corrupted."
+        )
     converted = False
     if source_format == "markdown":
         # Pass source_format explicitly so auto_convert doesn't re-run the
@@ -206,7 +216,7 @@ async def _handle_push(
         )
         wiki_content = conversion.text
         converted = conversion.converted
-        warnings = conversion.warnings
+        warnings.extend(conversion.warnings)
     else:
         # Already TracWiki — pass through
         wiki_content = content

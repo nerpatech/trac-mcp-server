@@ -335,6 +335,67 @@ class TestPush:
         call_args = client.put_wiki_page.call_args
         assert call_args[0][3] is None  # version argument
 
+    @patch(
+        "trac_mcp_server.mcp.tools.wiki_file.read_file_with_encoding"
+    )
+    async def test_push_warns_on_non_utf8_detected_encoding(
+        self, mock_read, tmp_path
+    ):
+        """ticket #48: a non-utf-8 detected encoding must surface as a
+        warning in the tool result rather than staying silent -- the
+        exact "nothing indicates a substitution occurred" complaint the
+        ticket raised about wiki_file_push.
+        """
+        wiki_file = tmp_path / "page.wiki"
+        wiki_file.write_text("= Title =\n'''bold'''")
+        mock_read.return_value = ("= Title =\n'''bold'''", "cp1250")
+
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "not found"
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(wiki_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert isinstance(result, types.CallToolResult)
+        warnings = result.structuredContent["warnings"]
+        assert any("cp1250" in w for w in warnings)
+        assert any("UTF-8" in w for w in warnings)
+        assert "cp1250" in result.content[0].text
+
+    @patch("trac_mcp_server.mcp.tools.wiki_file.auto_convert")
+    async def test_push_no_encoding_warning_for_utf8(
+        self, mock_convert, tmp_path
+    ):
+        """No spurious warning for the ordinary UTF-8 case."""
+        md_file = tmp_path / "page.md"
+        md_file.write_text("# Hello\nWorld")
+
+        mock_result = MagicMock()
+        mock_result.text = "= Hello =\nWorld"
+        mock_result.converted = True
+        mock_result.warnings = []
+        mock_convert.return_value = mock_result
+
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "not found"
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert result.structuredContent["warnings"] == []
+
     async def test_push_missing_file_path(self):
         client = _make_client()
         result = await _registry.call_tool(
