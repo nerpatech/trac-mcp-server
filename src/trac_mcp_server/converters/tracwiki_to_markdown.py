@@ -164,9 +164,22 @@ class TracWikiParser:
 
         {{{#!td ... }}} or {{{#!th ... }}} - these are table cells, not code blocks.
         Convert to regular table cell content with marker for later table processing.
+
+        Runs before _convert_code_blocks' backtick stashing, so a token
+        directly flanked by literal backticks (meant as a code span, not a
+        real processor cell) needs its own backtick-adjacency check here --
+        the same backstop _convert_macros already applies for the same
+        reason (see its docstring re ticket #43). Without it, `{{{#!td}}}`
+        got rewritten to `||` before the code span around it was ever
+        recognized, so the span ended up stashing the rewritten pipes
+        instead of the original token (ticket #46). `#!div`/`#!table`
+        never had this problem because nothing converts them before the
+        code-span stash gets a chance to run.
         """
 
         def convert_processor_cell(match):
+            if self._is_backtick_wrapped(text, match.start(), match.end()):
+                return match.group(0)
             cell_type = match.group(1)  # 'td' or 'th'
             content = match.group(2).strip()
             # Replace newlines with spaces for single-line cell content

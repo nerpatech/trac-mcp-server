@@ -2263,6 +2263,31 @@ class TestReadPathConverterTicketRegressions(unittest.TestCase):
         result = tracwiki_to_markdown("`substrate:trac`[[BR]]Next")
         self.assertEqual(result.text, "`substrate:trac`  \nNext")
 
+    def test_ticket_46_td_processor_token_in_code_span_survives(self):
+        """A `{{{#!td}}}` token meant as a literal code span example must
+        not be rewritten to pipes before the code-span stash recognizes
+        it -- the read-path counterpart of ticket #45. Its siblings
+        `{{{#!div}}}`/`{{{#!table}}}` already survived this because
+        nothing converts them ahead of the code-span stash; `#!td`/`#!th`
+        needed the same backtick-adjacency backstop _convert_macros uses.
+        """
+        result = tracwiki_to_markdown("Example: `{{{#!td}}}` token.")
+        self.assertEqual(result.text, "Example: `{{{#!td}}}` token.")
+
+    def test_ticket_46_th_processor_token_in_code_span_survives(self):
+        result = tracwiki_to_markdown("Example: `{{{#!th}}}` token.")
+        self.assertEqual(result.text, "Example: `{{{#!th}}}` token.")
+
+    def test_ticket_46_td_with_content_in_code_span_survives(self):
+        result = tracwiki_to_markdown("`{{{#!td some text}}}` example")
+        self.assertEqual(result.text, "`{{{#!td some text}}}` example")
+
+    def test_ticket_46_real_td_processor_cell_still_converts(self):
+        """Backstop must not disable genuine (non-backticked) #!td cells."""
+        result = tracwiki_to_markdown("{{{#!td\ncontent\n}}}")
+        self.assertIn("content", result.text)
+        self.assertNotIn("{{{#!td", result.text)
+
 
 class TestIsLinkTarget(unittest.TestCase):
     """Unit tests for the shared link-target predicate (tickets #13, #14)."""
