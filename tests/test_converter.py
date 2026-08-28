@@ -2097,6 +2097,57 @@ class TestReadPathConverterTicketRegressions(unittest.TestCase):
         self.assertIn("`[[BR]]`", result.text)
         self.assertIn("`''never italic''`", result.text)
 
+    def test_ticket_43_br_in_code_span_survives_unbalanced_backtick(
+        self,
+    ):
+        """A well-formed `[[BR]]` code span must survive even when an
+        unrelated, unpaired backtick earlier in the text (e.g. a stray
+        apostrophe-like backtick) throws off the nearest-neighbor pairing
+        that _convert_code_blocks uses to find code spans. Without a
+        backtick-adjacency backstop, that mis-pairing steals one of
+        `[[BR]]`'s own delimiters, leaving the macro's literal backticks
+        in place but the macro itself unshielded and corrupted into a
+        hard break -- the exact `auto_pm` Meta/PageConventions symptom
+        from ticket #43. Minimal case, matching the ticket's own repro.
+        """
+        result = tracwiki_to_markdown(
+            "Note: it`s odd. Then `[[BR]]` appears."
+        )
+        self.assertEqual(
+            result.text, "Note: it`s odd. Then `[[BR]]` appears."
+        )
+
+    def test_ticket_43_br_minimal_case(self):
+        """The ticket's literal minimal-case fixture round-trips."""
+        result = tracwiki_to_markdown("a `[[BR]]` b")
+        self.assertEqual(result.text, "a `[[BR]]` b")
+
+    def test_ticket_43_unknown_macro_in_code_span_survives_unbalanced_backtick(
+        self,
+    ):
+        """The same backstop applies to any `[[...]]` macro, not just
+        `[[BR]]` -- the ticket's remediation section calls this out
+        explicitly.
+        """
+        result = tracwiki_to_markdown(
+            "Note: it`s odd. Then `[[TOC]]` appears."
+        )
+        self.assertEqual(
+            result.text, "Note: it`s odd. Then `[[TOC]]` appears."
+        )
+
+    def test_ticket_43_br_adjacent_to_unrelated_closing_backtick_still_converts(
+        self,
+    ):
+        """The backtick-adjacency backstop must require backticks on
+        *both* sides -- `[[BR]] legitimately follows the closing backtick
+        of a *different*, preceding code span with no space in between
+        (ticket #30's own fixture), and that must still convert to a hard
+        break rather than being mistaken for being wrapped itself.
+        """
+        result = tracwiki_to_markdown("`substrate:trac`[[BR]]Next")
+        self.assertEqual(result.text, "`substrate:trac`  \nNext")
+
 
 class TestIsLinkTarget(unittest.TestCase):
     """Unit tests for the shared link-target predicate (tickets #13, #14)."""
