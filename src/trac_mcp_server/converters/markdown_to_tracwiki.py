@@ -38,6 +38,22 @@ _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
 # Sentinel used by `_stash_bracket_syntax`/`_restore_bracket_syntax`.
 _PLACEHOLDER_RE = re.compile(r"\x00WK(\d+)\x00")
 
+# Bare inline code span (`` `...` ``) typed directly in the Markdown
+# source. Stashed the same way `[[...]]` is below -- must run on the raw
+# source before mistune ever sees a backtick. mistune's own table-row
+# splitter (`CELL_SPLIT` in its bundled `table` plugin) has no concept of
+# code spans: it splits a row on every literal "|" it finds, including
+# ones meant to sit *inside* a backticked cell documenting table markup
+# itself (e.g. `` `||||` ``), so the cell count no longer matches the
+# header and the whole block silently falls back to a plain paragraph
+# instead of a table (ticket #45). Stashing the span's body means the
+# pipe characters simply aren't there yet when mistune's block-level
+# table matcher runs; the original body -- pipes and all -- is restored
+# verbatim afterwards, once the table's cell structure has already been
+# fixed using the correct (higher) column count. Only single-backtick
+# spans are handled, mirroring the equivalent regex on the read-path
+# converter (`tracwiki_to_markdown._convert_code_blocks`).
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 
 # Trac's own WikiCamelCase auto-link pattern: a word with two or more
 # "humps" (uppercase letter, then a lowercase run), e.g. WiFi, LoRa,
@@ -115,6 +131,11 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     macro/link syntax are already gone. The placeholder has to exist
     before mistune ever sees the "[" character (ticket #19/#27 interaction).
 
+    Code spans are stashed first, before the macro/bracket passes, so a
+    macro- or link-shaped example typed literally inside backticks (e.g.
+    `` `[[BR]]` ``) is hidden from those regexes the same way it is hidden
+    from mistune's own table-row splitter (ticket #45) -- see `_CODE_SPAN_RE`.
+
     Single-bracket TracWiki/InterTrac link syntax (`_SINGLE_BRACKET_LINK_RE`,
     ticket #44) is stashed last, after `[[...]]` is already out of the way,
     so a double-bracket span never has its own outer brackets mistaken for
@@ -130,7 +151,12 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
         placeholders.append(m.group(0))
         return f"\x00WK{len(placeholders) - 1}\x00"
 
-    text = _MACRO_PLACEHOLDER_RE.sub(stash_macro, markdown_text)
+    def stash_code_span(m: re.Match[str]) -> str:
+        placeholders.append(m.group(1))
+        return f"`\x00WK{len(placeholders) - 1}\x00`"
+
+    text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
+    text = _MACRO_PLACEHOLDER_RE.sub(stash_macro, text)
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
@@ -178,7 +204,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
     NAME = "tracwiki"
 
-    def __init__(self, heading_anchors: bool = False):
+    def __init__(
+        self,
+        heading_anchors: bool = False,
+        placeholders: list[str] | None = None,
+    ):
         """Initialize renderer with state tracking for table rendering.
 
         Args:
@@ -188,9 +218,20 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 because Trac auto-generates heading anchors and explicit slugs
                 like ``#4-non-goals`` cause ``#4`` to be misread as a ticket
                 reference.
+            placeholders: The sentinel table built by `_stash_bracket_syntax`
+                for the document being rendered, if any. `heading()` needs it
+                to resolve a `\\x00WKn\\x00` sentinel (code span, `[[...]]`,
+                or single-bracket link body) back to real text before
+                slugifying -- the global restore pass that undoes stashing
+                for everything else only runs once, after the whole document
+                has been rendered, which is too late for a slug computed
+                mid-render (ticket #45 regression guard).
         """
         super().__init__()
         self._heading_anchors = heading_anchors
+        self._placeholders = (
+            placeholders if placeholders is not None else []
+        )
         # Track column alignments for current table
         self._table_alignments: list[str | None] = []
         # Last character emitted by the immediately preceding sibling,
@@ -301,7 +342,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # --heading-anchors off: skip slug computation, emit plain heading.
         if not self._heading_anchors:
             return f"{marker} {text} {marker}\n"
-        slug = _heading_slug(text)
+        # Resolve any stash sentinel (code span, [[...]], single-bracket
+        # link) still in `text` at this point -- the global restore pass
+        # for everything else runs once, after the whole document is
+        # rendered, too late for a slug computed here mid-render.
+        slug = _heading_slug(
+            _restore_bracket_syntax(text, self._placeholders)
+        )
         if slug:
             return f"{marker} {text} {marker} #{slug}\n"
         return f"{marker} {text} {marker}\n"
@@ -718,16 +765,20 @@ def markdown_to_tracwiki(
     Returns:
         TracWiki formatted text
     """
+    # Stash code spans / [MACRO: ...] / [[...]] / single-bracket link
+    # spans before mistune ever sees a "`" or a "[" (see
+    # _stash_bracket_syntax for why this can't happen inside text()).
+    # Must run before the renderer is constructed -- heading() needs the
+    # placeholder table to resolve a sentinel before slugifying.
+    stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
+
     # Create renderer and parser with table plugin enabled
-    renderer = TracWikiRenderer(heading_anchors=heading_anchors)
+    renderer = TracWikiRenderer(
+        heading_anchors=heading_anchors, placeholders=placeholders
+    )
     markdown = mistune.create_markdown(
         renderer=renderer, plugins=["table"]
     )
-
-    # Stash [MACRO: ...] / [[...]] / single-bracket link spans before
-    # mistune ever sees a "[" (see _stash_bracket_syntax for why this
-    # can't happen inside text()).
-    stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
 
     # Parse and render
     result: str = markdown(stashed_text)  # type: ignore[assignment]

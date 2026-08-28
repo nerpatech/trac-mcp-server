@@ -2079,6 +2079,56 @@ class TestConverterTicketRegressions(unittest.TestCase):
             "`http://host:8000/bcs/wiki/b-node/bench/BoardIdentity`",
         )
 
+    def test_ticket_45_table_cell_code_span_with_pipes_converts(self):
+        """A Markdown table cell containing a code span whose body is
+        itself pipe-shaped (documenting TracWiki table syntax, e.g.
+        `` `||||` ``) must still be recognized as a table -- mistune's
+        own table-row splitter doesn't know about code spans and would
+        otherwise miscount the cell's columns and reject the whole block.
+        """
+        md = (
+            "| Context | Effect |\n"
+            "|---|---|\n"
+            "| plain prose | consumed |\n"
+            "| `{{{#!div}}}`, `||||`, `{{{#!table}}}` | consumed |\n"
+            "| table cell | consumed |"
+        )
+        result = markdown_to_tracwiki(md)
+        self.assertIn(
+            "||`{{{#!div}}}`, `||||`, `{{{#!table}}}`||consumed||",
+            result,
+        )
+
+    def test_ticket_45_table_round_trip_byte_identical(self):
+        """The exact fixture from the ticket round-trips byte-identical
+        through markdown -> tracwiki -> markdown.
+        """
+        md = (
+            "| Context | Effect |\n"
+            "|---|---|\n"
+            "| plain prose | consumed |\n"
+            "| `{{{#!div}}}`, `||||`, `{{{#!table}}}` | consumed |\n"
+            "| table cell | consumed |"
+        )
+        tracwiki = markdown_to_tracwiki(md)
+        self.assertEqual(tracwiki_to_markdown(tracwiki).text, md)
+
+    def test_ticket_45_heading_slug_unaffected_by_code_span_stash(self):
+        """Regression guard: stashing code-span bodies before parsing
+        (added for #45) must not break heading-anchor slug computation,
+        which runs mid-render on text that may still contain a stash
+        sentinel for a code span inside the heading.
+        """
+        result = markdown_to_tracwiki(
+            "## EvalRef marker fields (`ticket-comment`)",
+            heading_anchors=True,
+        )
+        self.assertEqual(
+            result,
+            "== !EvalRef marker fields (`ticket-comment`) == "
+            "#evalref-marker-fields-ticket-comment",
+        )
+
 
 class TestReadPathConverterTicketRegressions(unittest.TestCase):
     """Regression tests for tickets against the tracwiki_to_markdown
