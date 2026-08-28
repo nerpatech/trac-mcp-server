@@ -117,6 +117,8 @@ class TracWikiParser:
             text,
             re.IGNORECASE,
         ):
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                continue
             if m.group(1).lower() in _KNOWN_MACROS or m.group(2):
                 self.warnings.append(
                     "Unknown macros detected - preserved as [MACRO: ...] notation (not functional in Markdown)"
@@ -235,17 +237,60 @@ class TracWikiParser:
         )
         return text
 
+    @staticmethod
+    def _is_backtick_wrapped(text: str, start: int, end: int) -> bool:
+        """True if text[start:end] is directly flanked by a literal
+        backtick on both sides.
+
+        Used to keep a macro/link literal when it is meant to sit inside a
+        code span -- see the note on _convert_macros for why this can't
+        just rely on the code-span stashing in _convert_code_blocks alone.
+        """
+        return (
+            start > 0
+            and text[start - 1] == "`"
+            and end < len(text)
+            and text[end] == "`"
+        )
+
     def _convert_macros(self, text: str) -> str:
         """Convert macros (before links, since they use square brackets).
 
         Images: [[Image(url)]] -> ![](url)
         Line break: [[BR]] -> newline
         Unknown macros: [[MacroName(args)]] -> placeholder for later restoration
+
+        Every conversion below first checks _is_backtick_wrapped and leaves
+        the macro untouched when both flanking characters are literal
+        backticks. This is a belt-and-suspenders backstop to the code-span
+        stashing in _convert_code_blocks (which runs first and normally
+        hides backticked content from this method entirely): that stashing
+        pairs backticks by simple nearest-neighbor matching, so one stray,
+        unrelated unpaired backtick earlier in the text (a typo, a literal
+        apostrophe-like backtick, an unclosed span) can steal one side of a
+        *different*, well-formed `[[BR]]` span's delimiters, leaving the
+        macro's own two flanking backticks literal in the text but no
+        longer recognized as a matched pair -- exactly the failure mode
+        from ticket #43. Since both flanking backticks are still physically
+        adjacent to the macro at this point even when stashing mis-paired,
+        this check catches it independent of whatever happened upstream.
+
+        The check requires backticks on *both* sides, not just one --
+        `[[BR]] legitimately follows a closing backtick belonging to a
+        *different*, preceding code span with no space in between (e.g.
+        `` `substrate:trac`[[BR]] ``, ticket #30), and that must still
+        convert.
         """
+
         # Images
+        def convert_image(m: re.Match[str]) -> str:
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                return m.group(0)
+            return f"![]({m.group(1)})"
+
         text = re.sub(
             r"\[\[Image\(([^)]+)\)\]\]",
-            r"![](\1)",
+            convert_image,
             text,
             flags=re.IGNORECASE,
         )
@@ -261,8 +306,20 @@ class TracWikiParser:
         # (ticket #30). Consuming any newline (and trailing whitespace)
         # that immediately follows the macro in the source avoids
         # emitting a second one.
+        def convert_br(m: re.Match[str]) -> str:
+            # "[[BR]]" itself is always 6 chars; anything after that in
+            # the match is the consumed trailing whitespace/newline, which
+            # isn't part of the backtick-adjacency check.
+            core_end = m.start() + len("[[BR]]")
+            if self._is_backtick_wrapped(text, m.start(), core_end):
+                return m.group(0)
+            return "  \n"
+
         text = re.sub(
-            r"\[\[BR\]\][ \t]*\r?\n?", "  \n", text, flags=re.IGNORECASE
+            r"\[\[BR\]\][ \t]*\r?\n?",
+            convert_br,
+            text,
+            flags=re.IGNORECASE,
         )
 
         # TracLinks: Keep as-is since Markdown has no equivalent
@@ -282,6 +339,8 @@ class TracWikiParser:
         # macros (Image, BR) are already handled above and are unaffected by
         # this setting.
         def handle_bracket(m: re.Match[str]) -> str:
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                return m.group(0)
             name = m.group(1)
             args = m.group(2) if m.group(2) else ""
             label = m.group(3)
