@@ -55,6 +55,7 @@ HIDDEN_IMPORTS=(
     trac_mcp_server.mcp.server
     trac_mcp_server.mcp.http_app
     trac_mcp_server.mcp.lifespan
+    trac_mcp_server.mcp.oidc
     trac_mcp_server.mcp.tools
     trac_mcp_server.mcp.tools.errors
     trac_mcp_server.mcp.tools.ticket_read

@@ -125,11 +125,38 @@ class ServerConfig(BaseModel):
     )
     auth_token: str | None = Field(
         default=None,
-        description="Static bearer token required for http transport requests",
+        description=(
+            "Static bearer token required for http transport requests. "
+            "Mutually exclusive with oidc_rpc_url -- both are read off the "
+            "same Authorization header for different purposes."
+        ),
+    )
+    oidc_rpc_url: str | None = Field(
+        default=None,
+        description=(
+            "Full XML-RPC URL of an OIDC-protected Trac endpoint (e.g. "
+            "https://trac.example.com/trac-api/login/xmlrpc). When set, "
+            "every http-transport request must carry its own "
+            "'Authorization: Bearer <token>' header -- the caller's own "
+            "OIDC access token, typically attached by an MCP client's own "
+            "OAuth flow per server (e.g. LibreChat's oauth: config) -- "
+            "forwarded verbatim to this URL. There is no fallback to a "
+            "shared service-account identity: a request without a bearer "
+            "token is rejected outright."
+        ),
     )
     allow_unauthenticated: bool = Field(
         default=False,
         description="Allow binding a non-loopback host without an auth_token",
+    )
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Expose only read-only tools (Tool.annotations.readOnlyHint), "
+            "regardless of transport. A stricter, coarser alternative to "
+            "--permissions-file's Trac-permission-based filtering -- "
+            "combinable with it."
+        ),
     )
     allowed_hosts: list[str] = Field(
         default_factory=list,

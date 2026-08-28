@@ -81,15 +81,15 @@ trac-mcp-server supports three configuration sources: CLI flags, environment var
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TRAC_URL` | Yes | -- | Trac instance URL |
-| `TRAC_USERNAME` | Yes | -- | Trac username |
-| `TRAC_PASSWORD` | Yes | -- | Trac password |
+| `TRAC_USERNAME` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac username |
+| `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
 | `TRAC_DEBUG` | No | `false` | Enable debug logging |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 
-Transport/bind settings (`TRAC_MCP_TRANSPORT`, `TRAC_MCP_HOST`, `TRAC_MCP_PORT`, `TRAC_MCP_AUTH_TOKEN`, ...) are covered separately -- see [HTTP Deployment](#http-deployment) below and [HTTP Transport Reference](reference/http-transport.md).
+Transport/bind settings (`TRAC_MCP_TRANSPORT`, `TRAC_MCP_HOST`, `TRAC_MCP_PORT`, `TRAC_MCP_AUTH_TOKEN`, `TRAC_MCP_OIDC_RPC_URL`, ...) are covered separately -- see [HTTP Deployment](#http-deployment) below and [HTTP Transport Reference](reference/http-transport.md#oidc-per-user-auth) (the latter for shared/multi-tenant per-user auth, e.g. behind LibreChat). `TRAC_MCP_READ_ONLY` (applies to both transports) exposes only read-only tools -- see [Tool Architecture: Read-Only Filtering](reference/tool-architecture.md#read-only-filtering---read-only).
 
 ### Config File
 

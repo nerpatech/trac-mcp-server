@@ -25,6 +25,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config_schema import ServerConfig
+from .oidc import extract_bearer_token
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,65 @@ class BearerAuthMiddleware:
         ):
             response = Response(
                 "Unauthorized",
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        await self._app(scope, receive, send)
+
+
+class OidcTokenRequiredMiddleware:
+    """Requires ``Authorization: Bearer <token>`` when OIDC per-user auth is
+    configured.
+
+    No-op when ``oidc_rpc_url`` is falsy -- most deployments don't use this
+    mode. When it *is* configured, this is the enforcement point for "no
+    fallback to a shared identity, ever": every request to the MCP endpoint
+    (not ``/healthz``) must carry a bearer token, checked here at the
+    transport boundary rather than deep in tool-dispatch logic, so no
+    future code path can accidentally skip it. The token's value is not
+    validated here -- that happens downstream when Trac's own web server
+    (mod_auth_openidc) receives it forwarded as its own ``Authorization:
+    Bearer`` header.
+
+    This reuses the standard ``Authorization`` header rather than a custom
+    one: an MCP client's own OAuth flow per server (e.g. LibreChat's
+    ``oauth:`` config) can only attach a normal bearer header, not a
+    bespoke one. Consequently this is mutually exclusive with
+    ``BearerAuthMiddleware``'s static token -- ``config.validate_server_config``
+    rejects a ``ServerConfig`` that sets both, so in practice at most one of
+    the two middlewares is ever actually checking anything on a given
+    deployment.
+    """
+
+    def __init__(self, app: ASGIApp, oidc_rpc_url: str | None) -> None:
+        self._app = app
+        self._enabled = bool(oidc_rpc_url)
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        if (
+            scope["type"] != "http"
+            or not self._enabled
+            or scope["path"] == "/healthz"
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        headers = dict(scope["headers"])
+        auth_header = headers.get(b"authorization", b"").decode(
+            "latin-1"
+        )
+        token = extract_bearer_token(auth_header)
+        if not token:
+            response = Response(
+                "Unauthorized: missing 'Authorization: Bearer <token>' "
+                "header. This server requires each request to carry its "
+                "own per-user Trac OIDC access token; there is no shared "
+                "fallback identity.",
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
@@ -154,7 +214,11 @@ def build_http_app(
         middleware=[
             Middleware(
                 BearerAuthMiddleware, token=server_config.auth_token
-            )
+            ),
+            Middleware(
+                OidcTokenRequiredMiddleware,
+                oidc_rpc_url=server_config.oidc_rpc_url,
+            ),
         ],
         lifespan=lifespan,
     )

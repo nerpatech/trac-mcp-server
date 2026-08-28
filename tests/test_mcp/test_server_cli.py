@@ -104,6 +104,21 @@ def test_allow_unauthenticated_flag_is_store_true():
 
 
 # ---------------------------------------------------------------------------
+# --read-only
+# ---------------------------------------------------------------------------
+
+
+def test_read_only_flag_is_store_true():
+    args = build_parser().parse_args(["--read-only"])
+    assert args.read_only is True
+
+
+def test_read_only_flag_defaults_to_false():
+    args = build_parser().parse_args([])
+    assert args.read_only is False
+
+
+# ---------------------------------------------------------------------------
 # No --auth-token flag exists (auth_token must never be CLI-visible)
 # ---------------------------------------------------------------------------
 

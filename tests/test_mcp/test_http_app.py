@@ -154,6 +154,114 @@ class TestBearerAuth:
 
 
 # ---------------------------------------------------------------------------
+# OIDC per-user token requirement
+# ---------------------------------------------------------------------------
+
+
+class TestOidcTokenRequired:
+    """OidcTokenRequiredMiddleware gating when oidc_rpc_url is configured.
+
+    Mirrors TestBearerAuth's shape -- same no-op-when-unconfigured,
+    healthz-exempt, missing-header-rejected pattern -- but there is no
+    "correct value" to accept: the standard Authorization header only needs
+    to carry *some* bearer token, since validating it is Trac's own Apache
+    layer's job (see mcp/oidc.py). It's the same header
+    BearerAuthMiddleware's static token would otherwise occupy -- the two
+    modes are mutually exclusive (enforced in config.validate_server_config,
+    not here), so a ServerConfig with both set never reaches this app in
+    practice.
+    """
+
+    def test_not_configured_no_bearer_required(self):
+        """oidc_rpc_url unset -> completely unaffected, same as before
+        this mode existed."""
+        app = build_http_app(_make_mcp_server(), _make_server_config())
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
+            )
+        assert response.status_code == 200
+
+    def test_healthz_exempt_when_configured(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.get("/healthz")
+        assert response.status_code == 200
+
+    def test_missing_authorization_header_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
+            )
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+    def test_wrong_scheme_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": "Basic dXNlcjpwYXNz",
+                },
+            )
+        assert response.status_code == 401
+
+    def test_blank_bearer_token_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={**_MCP_HEADERS, "Authorization": "Bearer "},
+            )
+        assert response.status_code == 401
+
+    def test_present_bearer_token_accepted(self):
+        """Any non-empty bearer token is admitted at this layer -- it's
+        forwarded to Trac as-is, which is what actually validates it."""
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": "Bearer the-users-own-keycloak-token",
+                },
+            )
+        assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # DNS-rebinding / Host header validation
 # ---------------------------------------------------------------------------
 

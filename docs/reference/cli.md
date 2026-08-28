@@ -22,6 +22,7 @@ trac-mcp-server --transport http --port 8080   # streamable HTTP instead of stdi
 | `--insecure` | `false` | Skip SSL certificate verification (development only) |
 | `--log-file PATH` | `/tmp/trac-mcp-server.log` | Log file location |
 | `--permissions-file PATH` | -- | Restrict available tools by Trac permissions (see [Tool Architecture](tool-architecture.md#permission-filtering)) |
+| `--read-only` | `false` | Expose only read-only tools (view/search/list/get), regardless of transport. Also settable via `TRAC_MCP_READ_ONLY` env var or `config.yaml` `server.read_only`. Combinable with `--permissions-file` -- a tool must pass both filters. |
 | `--transport {stdio,http}` | `stdio` | MCP transport to serve (also settable via `TRAC_MCP_TRANSPORT` or `config.yaml` `server.transport`) |
 | `--host HOST` | `127.0.0.1` | Bind host for `--transport http` |
 | `--port PORT` | `8080` | Bind port for `--transport http` |
