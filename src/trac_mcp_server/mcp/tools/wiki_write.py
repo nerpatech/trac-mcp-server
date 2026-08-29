@@ -127,9 +127,17 @@ async def _handle_create(
 
     comment = args.get("comment", "")
 
-    # Convert content using auto_convert with server capability detection
+    # Convert content using auto_convert with server capability detection.
+    # source_format is explicit ("markdown") because this tool's own
+    # contract already declares its input as Markdown -- leaving it to
+    # re-detect lets a marker-poor Markdown document (e.g. a bare table
+    # with no heading/bold/fence/link) score as TracWiki and pass through
+    # unconverted (ticket #47).
     conversion = await auto_convert(
-        content, client.config, target_format="tracwiki"
+        content,
+        client.config,
+        target_format="tracwiki",
+        source_format="markdown",
     )
 
     # Log warnings for agent visibility
@@ -217,9 +225,14 @@ async def _handle_update(
 
     comment = args.get("comment", "")
 
-    # Convert content using auto_convert with server capability detection
+    # Convert content using auto_convert with server capability detection.
+    # source_format is explicit -- see the matching comment in
+    # _handle_create (ticket #47).
     conversion = await auto_convert(
-        content, client.config, target_format="tracwiki"
+        content,
+        client.config,
+        target_format="tracwiki",
+        source_format="markdown",
     )
 
     # Log warnings for agent visibility
