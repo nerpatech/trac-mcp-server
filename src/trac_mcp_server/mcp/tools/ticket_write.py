@@ -377,6 +377,7 @@ async def _handle_update(
     # onto whichever field ends in "resolution", so the transition and
     # the resolution land in one call.
     action = args.get("action")
+    resolution_remap_warning = None
     if action and "resolution" in attributes:
         action_prefix = f"action_{action}_"
         already_explicit = any(
@@ -390,19 +391,40 @@ async def _handle_update(
                 )
             except Exception:
                 actions = []
+            remapped = False
             for entry in actions or []:
                 if not isinstance(entry, (list, tuple)) or not entry:
                     continue
                 if entry[0] != action:
                     continue
                 input_fields = entry[3] if len(entry) > 3 else []
+                # Each entry in input_fields is [name, default, options],
+                # not a field name -- read the name out rather than
+                # stringifying the whole list (ticket #49). The name is
+                # already fully qualified (e.g.
+                # "action_resolve_resolve_resolution"), so it is used
+                # as-is rather than re-prefixed.
                 for field in input_fields or []:
-                    if str(field).endswith("resolution"):
-                        attributes[f"action_{action}_{field}"] = (
-                            attributes.pop("resolution")
+                    name = (
+                        field[0]
+                        if isinstance(field, (list, tuple)) and field
+                        else field
+                    )
+                    if str(name).endswith("resolution"):
+                        attributes[str(name)] = attributes.pop(
+                            "resolution"
                         )
+                        remapped = True
                         break
                 break
+            if not remapped and "resolution" in attributes:
+                resolution_remap_warning = (
+                    f"WARNING: could not find an input field for "
+                    f"action '{action}' ending in 'resolution' -- the "
+                    f"plain 'resolution' attribute was sent as-is and "
+                    f"may be silently overwritten by the workflow "
+                    f"action."
+                )
 
     # Update ticket (client handles optimistic locking)
     await run_sync(client.update_ticket, ticket_id, comment, attributes)
@@ -415,6 +437,8 @@ async def _handle_update(
         changes.append(f"updated {len(attributes)} field(s)")
 
     change_summary = ", ".join(changes) if changes else "no changes"
+    if resolution_remap_warning:
+        change_summary = f"{change_summary}; {resolution_remap_warning}"
 
     return types.CallToolResult(
         content=[

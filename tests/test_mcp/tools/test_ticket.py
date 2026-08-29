@@ -946,6 +946,13 @@ class TestHandleTicketUpdate(unittest.TestCase):
         that both closes the ticket AND sets the resolution -- not a
         bare `resolution` attribute the workflow action then silently
         overwrites with an empty string (ticket #32).
+
+        ``get_ticket_actions`` is mocked with the real wire shape: each
+        ``input_fields`` entry is a ``[name, default, options]`` list,
+        not a bare field-name string. Ticket #32's remap block assumed
+        the latter, so ``str(field).endswith("resolution")`` was always
+        False and the remap never fired (ticket #49) -- a defect this
+        test's earlier, string-shaped mock could not have caught.
         """
 
         def run_sync_side_effect(func, *args, **kwargs):
@@ -956,7 +963,19 @@ class TestHandleTicketUpdate(unittest.TestCase):
                         "resolve",
                         "resolve",
                         ["closed"],
-                        ["resolve_resolution"],
+                        [
+                            [
+                                "action_resolve_resolve_resolution",
+                                "fixed",
+                                [
+                                    "fixed",
+                                    "invalid",
+                                    "wontfix",
+                                    "duplicate",
+                                    "worksforme",
+                                ],
+                            ]
+                        ],
                     ],
                 ]
             return True
@@ -1009,6 +1028,46 @@ class TestHandleTicketUpdate(unittest.TestCase):
 
             attrs = mock_run_sync.call_args[0][3]
             self.assertEqual(attrs, {"resolution": "wontfix"})
+
+    def test_update_resolve_action_no_matching_field_warns(self):
+        """If no action input field ends in 'resolution', the bare
+        `resolution` attribute is still sent (unchanged behavior) but
+        the tool result carries a warning rather than reporting quiet
+        success -- ticket #49's "do not fail silently" suggestion.
+        """
+
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_actions:
+                return [
+                    ["resolve", "resolve", ["closed"], []],
+                ]
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 24,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                    },
+                )
+            )
+
+            update_call = next(
+                c
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            )
+            attrs = update_call.args[3]
+            self.assertEqual(attrs["resolution"], "fixed")
+            text = result.content[0].text
+            self.assertIn("WARNING", text)
 
     def test_update_explicit_action_resolution_field_wins(self):
         """An explicit action_resolve_resolve_resolution still wins over
