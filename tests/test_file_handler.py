@@ -141,6 +141,54 @@ class TestReadFileWithEncoding:
         assert encoding is not None
         assert isinstance(encoding, str)
 
+    def test_valid_utf8_bypasses_charset_normalizer(
+        self, tmp_path, monkeypatch
+    ):
+        """ticket #48: a file that decodes cleanly as UTF-8 must not be
+        handed to charset-normalizer's guess at all, even though the
+        prior behavior let a wrong guess (e.g. cp1250) silently override
+        a correct strict decode and corrupt every multi-byte character
+        on write. Mocking from_bytes to blow up if called proves the
+        strict-UTF-8-first order rather than depending on a byte sample
+        charset-normalizer happens to misdetect today.
+        """
+        f = tmp_path / "em_dash.md"
+        text = "Layered config — defaults, then overrides.\n" * 50
+        f.write_bytes(text.encode("utf-8"))
+
+        def fake_from_bytes(_raw):
+            raise AssertionError(
+                "charset-normalizer must not run for a file that "
+                "decodes cleanly as UTF-8"
+            )
+
+        monkeypatch.setattr(
+            "trac_mcp_server.file_handler.from_bytes", fake_from_bytes
+        )
+
+        content, encoding = read_file_with_encoding(f)
+        assert content == text
+        assert encoding == "utf-8"
+
+    def test_non_utf8_file_still_uses_charset_normalizer_fallback(
+        self, tmp_path
+    ):
+        """The charset-normalizer fallback path must still run for bytes
+        that are not valid UTF-8 -- the strict-decode-first change must
+        not disable detection entirely, only skip it when unnecessary.
+        """
+        f = tmp_path / "latin1.txt"
+        text = "Café résumé"
+        raw = text.encode("latin-1")
+        # Sanity: this byte sequence must not be valid UTF-8, or the test
+        # would not actually exercise the fallback path.
+        with pytest.raises(UnicodeDecodeError):
+            raw.decode("utf-8")
+        f.write_bytes(raw)
+        content, encoding = read_file_with_encoding(f)
+        assert "Caf" in content
+        assert encoding != "utf-8"
+
 
 # =============================================================================
 # write_file
