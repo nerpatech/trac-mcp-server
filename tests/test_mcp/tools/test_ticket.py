@@ -646,6 +646,91 @@ class TestHandleTicketUpdate(unittest.TestCase):
                 {"priority": "major", "keywords": "updated"},
             )
 
+    def test_update_forwards_base_ts(self):
+        """base_ts is forwarded to the client call so Trac's optimistic
+        lock actually gets the caller's token (ticket #50)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "priority": "major",
+                        "base_ts": "1788093861682305",
+                    },
+                )
+            )
+
+            call_args = mock_run_sync.call_args[0]
+            self.assertEqual(
+                call_args[0], self.mock_client.update_ticket
+            )
+            self.assertEqual(call_args[-1], "1788093861682305")
+
+    def test_update_omitted_base_ts_forwards_none(self):
+        """Omitting base_ts forwards None, preserving the legacy
+        self-minted-token fallback in TracClient.update_ticket."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {"ticket_id": 42, "priority": "major"},
+                )
+            )
+
+            call_args = mock_run_sync.call_args[0]
+            self.assertIsNone(call_args[-1])
+
+    def test_update_base_ts_conflict_returns_version_conflict(self):
+        """A TicketUpdateConflict from the client becomes a
+        version_conflict error naming what changed, not a bare exception
+        or a silently-accepted write (ticket #50)."""
+        from trac_mcp_server.core.client import TicketUpdateConflict
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = TicketUpdateConflict(
+                "Ticket #42 changed since base_ts=123: comment by operator",
+                ticket_id=42,
+                base_ts="123",
+                changes=[
+                    {
+                        "timestamp": "20260830T12:16:00",
+                        "author": "operator",
+                        "field": "comment",
+                        "oldvalue": "",
+                        "newvalue": "hold off",
+                    }
+                ],
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "status": "accepted",
+                        "base_ts": "123",
+                    },
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("version_conflict", text)
+            self.assertIn("operator", text)
+            self.assertIn("comment", text)
+            self.assertIn("ticket_get(ticket_id=42)", text)
+
     def test_update_comment_and_fields(self):
         """Update ticket with both comment and field changes."""
         with (
@@ -1725,6 +1810,45 @@ class TestHandleTicketGet:
             assert (
                 result.structuredContent["summary"] == "Fix login bug"
             )
+
+    def test_get_exposes_change_token(self):
+        """ticket_get surfaces _ts as the change token callers pass back
+        to ticket_update's base_ts (ticket #50) -- without this, there is
+        no way for a caller to obtain a token to lock against."""
+        client = MagicMock(spec=TracClient)
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        modified = datetime(2026, 1, 15, 14, 30, 0)
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
+            ) as mock_convert,
+        ):
+            mock_run_sync.return_value = [
+                42,
+                created,
+                modified,
+                {
+                    "summary": "Fix login bug",
+                    "description": "text",
+                    "status": "new",
+                    "_ts": "1788093861682305",
+                },
+            ]
+            mock_convert.return_value = ConversionResult(
+                text="text",
+                source_format="tracwiki",
+                target_format="markdown",
+                converted=True,
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 42}))
+
+            assert result.structuredContent["_ts"] == "1788093861682305"
+            assert "1788093861682305" in result.content[0].text
 
     def test_get_raw_mode(self):
         """Raw mode returns TracWiki description without conversion."""

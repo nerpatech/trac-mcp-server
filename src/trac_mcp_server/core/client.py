@@ -109,6 +109,33 @@ class TicketCreateTimeout(Exception):
         self.ticket_id = ticket_id
 
 
+class TicketUpdateConflict(Exception):
+    """A ticket_update's ``base_ts`` was stale: the ticket changed after the
+    caller's read and before this write (Trac's mid-air collision fault).
+
+    Only raised when the caller supplied ``base_ts`` -- that is the only
+    case in which Trac's own lock is actually consulted; see
+    ``TracClient.update_ticket`` (ticket #50).
+
+    ``changes`` lists the changelog entries that landed after ``base_ts``
+    (each ``{timestamp, author, field, oldvalue, newvalue}``), so the
+    caller can see what it would otherwise silently overwrite -- comments
+    especially, since those carry no field-level diff of their own.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        ticket_id: int,
+        base_ts: Any,
+        changes: list[dict[str, Any]],
+    ):
+        super().__init__(message)
+        self.ticket_id = ticket_id
+        self.base_ts = base_ts
+        self.changes = changes
+
+
 class TracClient:
     def __init__(self, config: Config):
         self.config = config
@@ -462,22 +489,44 @@ class TracClient:
         comment: str = "",
         attributes: dict[str, Any] | None = None,
         notify: bool = False,
+        base_ts: str | int | None = None,
     ) -> list[Any]:
         """
-        Update an existing ticket with optimistic locking.
+        Update an existing ticket.
 
         Args:
             ticket_id: Ticket number to update
             comment: Comment to add (supports WikiFormatting, max 10000 chars)
             attributes: Fields to update (status, priority, owner, resolution, etc.)
             notify: Send email notifications
+            base_ts: The ticket's ``_ts`` token as last seen by the caller
+                (from ``get_ticket``'s attributes, or a prior update's
+                result), forwarded to Trac verbatim as the optimistic-lock
+                token. Sent as a string regardless of the type passed in --
+                Trac's ``_ts`` is a microsecond-precision value that
+                overflows XML-RPC's 32-bit ``<int>`` type, so Trac itself
+                represents it as a string on the wire (confirmed against a
+                live ticket.get response). This is the only way this method
+                actually detects a concurrent change: Trac rejects the
+                write if the ticket was touched since ``base_ts`` was read
+                (see ``TicketUpdateConflict`` below). When omitted, this
+                method mints its own token from a fresh ``ticket.get``
+                immediately before writing, which *cannot* fail the check
+                -- it matches by construction and only guards against a
+                change landing in the instant between that read and the
+                write, not anything since the caller's own read (ticket
+                #50). Kept for backward compatibility; prefer passing
+                ``base_ts``.
 
         Returns:
             Updated ticket data [id, created, modified, attributes]
 
         Raises:
             ValueError: If comment exceeds 10000 characters
-            xmlrpc.client.Fault: If ticket not found, validation fails, or concurrent update
+            TicketUpdateConflict: If base_ts was supplied and is stale --
+                the ticket changed since that token was read
+            xmlrpc.client.Fault: If ticket not found, validation fails, or
+                (when base_ts is omitted) another other server-side error
         """
         # Validate comment length
         if comment and len(comment) > 10000:
@@ -485,32 +534,133 @@ class TracClient:
                 "Comment exceeds maximum length of 10000 characters"
             )
 
-        # Get current state for optimistic locking timestamp
-        ticket_data = self._rpc_request("ticket", "get", ticket_id)
-        if not isinstance(ticket_data, list) or len(ticket_data) < 4:
-            raise ValueError("Invalid ticket data format from server")
-        current_attrs = ticket_data[
-            3
-        ]  # [id, created, modified, {attributes}]
-        if not isinstance(current_attrs, dict):
-            raise ValueError(
-                "Invalid ticket attributes format from server"
-            )
-
-        # Build update attributes with timestamp
         update_attrs: dict[str, Any] = (
             attributes.copy() if attributes else {}
         )
-        update_attrs["_ts"] = current_attrs["_ts"]
+
+        if base_ts is not None:
+            # Forward the caller's own token, coerced to str -- see the
+            # base_ts docstring above for why this is the only path that
+            # actually locks anything, and why it must be a string.
+            update_attrs["_ts"] = str(base_ts)
+        else:
+            # Legacy fallback: mint a token immediately before writing.
+            # This can never trip the lock -- see the docstring.
+            ticket_data = self._rpc_request("ticket", "get", ticket_id)
+            if (
+                not isinstance(ticket_data, list)
+                or len(ticket_data) < 4
+            ):
+                raise ValueError(
+                    "Invalid ticket data format from server"
+                )
+            current_attrs = ticket_data[
+                3
+            ]  # [id, created, modified, {attributes}]
+            if not isinstance(current_attrs, dict):
+                raise ValueError(
+                    "Invalid ticket attributes format from server"
+                )
+            update_attrs["_ts"] = current_attrs["_ts"]
 
         # Default action to "leave" for simple field updates (no workflow transition)
         if "action" not in update_attrs:
             update_attrs["action"] = "leave"
 
-        result = self._rpc_request(
-            "ticket", "update", ticket_id, comment, update_attrs, notify
-        )
+        try:
+            result = self._rpc_request(
+                "ticket",
+                "update",
+                ticket_id,
+                comment,
+                update_attrs,
+                notify,
+            )
+        except xmlrpc.client.Fault as err:
+            if base_ts is not None and self._is_mid_air_collision(err):
+                raise self._build_update_conflict(
+                    ticket_id, base_ts, err
+                ) from err
+            raise
         return result
+
+    @staticmethod
+    def _is_mid_air_collision(err: xmlrpc.client.Fault) -> bool:
+        """Whether a ticket.update Fault is Trac's stale-``_ts`` rejection.
+
+        Trac raises faultCode 1 for several unrelated conditions (e.g.
+        "ticket does not exist"), so the message is what actually
+        distinguishes a collision -- Trac's own wording is "has been
+        modified since you started editing".
+        """
+        return (
+            err.faultCode == 1
+            and "modified since" in err.faultString.lower()
+        )
+
+    def _build_update_conflict(
+        self,
+        ticket_id: int,
+        base_ts: Any,
+        err: xmlrpc.client.Fault,
+    ) -> TicketUpdateConflict:
+        """Turn a raw mid-air-collision Fault into a TicketUpdateConflict
+        naming what changed, by diffing the changelog against base_ts.
+
+        Best-effort: if the changelog itself can't be fetched, the
+        conflict is still raised, just without the detail.
+        """
+        changes: list[dict[str, Any]] = []
+        try:
+            # Changelog timestamps only have second resolution; base_ts has
+            # microsecond resolution. Floor base_ts to whole seconds before
+            # comparing, so a change that landed in the *same* second as
+            # the caller's read (its microsecond fraction truncated away)
+            # still compares >= rather than being spuriously excluded --
+            # confirmed against a live ticket where this actually happened
+            # (ticket #50 verification). A false positive here just
+            # over-informs; a false negative hides the exact thing this
+            # exists to surface.
+            base_epoch_floor = int(base_ts) // 1_000_000
+            changelog = self.get_ticket_changelog(ticket_id)
+            for entry in changelog or []:
+                timestamp, author, field, oldvalue, newvalue = entry[:5]
+                entry_epoch = self._parse_trac_time(timestamp)
+                if (
+                    entry_epoch is not None
+                    and entry_epoch >= base_epoch_floor
+                ):
+                    changes.append(
+                        {
+                            "timestamp": timestamp,
+                            "author": author,
+                            "field": field,
+                            "oldvalue": oldvalue,
+                            "newvalue": newvalue,
+                        }
+                    )
+        except Exception:
+            changes = []
+
+        if changes:
+            summary = "; ".join(
+                f"{c['field']} by {c['author']}" for c in changes
+            )
+            message = (
+                f"Ticket #{ticket_id} changed since base_ts={base_ts}: "
+                f"{summary}"
+            )
+        else:
+            message = (
+                f"Ticket #{ticket_id} changed since base_ts={base_ts} "
+                f"({err.faultString})"
+            )
+        return TicketUpdateConflict(
+            message,
+            ticket_id=ticket_id,
+            base_ts=base_ts,
+            changes=changes,
+        )
 
     def get_ticket_actions(self, ticket_id: int) -> list[Any]:
         """

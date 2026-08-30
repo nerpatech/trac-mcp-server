@@ -12,7 +12,11 @@ import mcp.types as types
 
 from ...converters import markdown_to_tracwiki
 from ...core.async_utils import run_sync
-from ...core.client import TicketCreateTimeout, TracClient
+from ...core.client import (
+    TicketCreateTimeout,
+    TicketUpdateConflict,
+    TracClient,
+)
 from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
 from .errors import build_error_response
 from .registry import ToolSpec
@@ -86,7 +90,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
+        description="Update ticket attributes and/or add comments. Accepts Markdown for comments. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -158,6 +162,10 @@ TICKET_WRITE_TOOLS = [
                     "type": "integer",
                     "description": "Comment number to reply to. Prepends Trac's standard \"Replying to [comment:N author]:\" quote block (quoting that comment's own text) before the new comment. Requires 'comment' to also be provided.",
                     "minimum": 1,
+                },
+                "base_ts": {
+                    "type": "string",
+                    "description": "Change token from a prior ticket_get() call's _ts field (a numeric string -- pass it through as-is, don't parse it as a number). When provided, the update is rejected with a version_conflict error (naming what changed) if the ticket was modified since that token was read. Strongly recommended -- without it, this write silently overwrites any concurrent change.",
                 },
             },
             "required": ["ticket_id"],
@@ -426,8 +434,35 @@ async def _handle_update(
                     f"action."
                 )
 
-    # Update ticket (client handles optimistic locking)
-    await run_sync(client.update_ticket, ticket_id, comment, attributes)
+    # Update ticket. base_ts, when supplied, is forwarded verbatim as
+    # Trac's optimistic-lock token -- see TracClient.update_ticket (#50).
+    base_ts = args.get("base_ts")
+    try:
+        await run_sync(
+            client.update_ticket,
+            ticket_id,
+            comment,
+            attributes,
+            False,
+            base_ts,
+        )
+    except TicketUpdateConflict as e:
+        if e.changes:
+            what_changed = "; ".join(
+                f"{c['field']} by {c['author']} at {c['timestamp']}"
+                for c in e.changes
+            )
+        else:
+            what_changed = "unable to determine the exact changes"
+        return build_error_response(
+            "version_conflict",
+            f"Ticket #{ticket_id} was modified since base_ts={base_ts}: "
+            f"{what_changed}",
+            f"Re-read with ticket_get(ticket_id={ticket_id}) and "
+            f"ticket_changelog(ticket_id={ticket_id}) to see the current "
+            f"state, merge your update with it, then retry ticket_update "
+            f"with the fresh base_ts from that ticket_get response.",
+        )
 
     # Build summary of changes
     changes = []

@@ -12,6 +12,7 @@ from trac_mcp_server.core.client import (
     TCP_KEEPALIVE_IDLE_SECONDS,
     KeepAliveHTTPAdapter,
     TicketCreateTimeout,
+    TicketUpdateConflict,
     TracClient,
     _keepalive_socket_options,
 )
@@ -816,8 +817,14 @@ def test_update_ticket_comment_too_long(mock_post, mock_config):
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_update_ticket_uses_optimistic_locking(mock_post, mock_config):
-    """Test update_ticket correctly uses _ts for optimistic locking."""
+def test_update_ticket_without_base_ts_mints_own_token(
+    mock_post, mock_config
+):
+    """Without base_ts, update_ticket forwards whatever ticket.get returns
+    right before the write. This is the legacy fallback path -- it cannot
+    reject anything, since the token it sends is read microseconds before
+    it's used (ticket #50). See test_update_ticket_base_ts_conflict_raises
+    below for the path that can actually reject a stale write."""
     # First mock response for ticket.get with specific _ts
     get_response = Mock()
     get_response.status_code = 200
@@ -872,6 +879,235 @@ def test_update_ticket_uses_optimistic_locking(mock_post, mock_config):
     # Verify the _ts value from get was passed to update
     second_call_payload = mock_post.call_args_list[1][1]["data"]
     assert "SPECIFIC_TIMESTAMP_VALUE" in second_call_payload
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_update_ticket_with_base_ts_skips_extra_get(
+    mock_post, mock_config
+):
+    """When the caller supplies base_ts, it is forwarded verbatim as _ts
+    and no preliminary ticket.get is made -- there is nothing left for
+    that read to accomplish once the caller's own token is used."""
+    update_response = Mock()
+    update_response.status_code = 200
+    update_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value>
+        <array>
+          <data>
+            <value><int>42</int></value>
+          </data>
+        </array>
+      </value>
+    </param>
+  </params>
+</methodResponse>"""
+    mock_post.return_value = update_response
+
+    client = TracClient(mock_config)
+    _ = client.update_ticket(
+        42, attributes={"priority": "high"}, base_ts=1788093861682305
+    )
+
+    assert mock_post.call_count == 1
+    payload = mock_post.call_args[1]["data"]
+    assert "ticket.update" in payload
+    assert "1788093861682305" in payload
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_update_ticket_base_ts_conflict_raises(mock_post, mock_config):
+    """Seeded-defect regression for ticket #50: a stale base_ts must be
+    rejected. This reproduces Trac's real mid-air-collision fault (a
+    concurrent comment landed after base_ts) and asserts update_ticket
+    turns it into a TicketUpdateConflict naming the comment's author,
+    rather than either swallowing the fault or re-raising the bare
+    xmlrpc.client.Fault. Before base_ts existed, nothing could make this
+    fault fire at all -- the client always minted a token that matched by
+    construction."""
+    update_fault_response = Mock()
+    update_fault_response.status_code = 200
+    update_fault_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>1</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>Your changes have not been saved because this ticket has been modified since you started editing.</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>"""
+
+    changelog_response = Mock()
+    changelog_response.status_code = 200
+    changelog_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value>
+        <array>
+          <data>
+            <value>
+              <array>
+                <data>
+                  <value><dateTime.iso8601>20260830T12:44:51</dateTime.iso8601></value>
+                  <value><string>operator</string></value>
+                  <value><string>comment</string></value>
+                  <value><string>1</string></value>
+                  <value><string>Actually, hold off on this.</string></value>
+                  <value><int>1</int></value>
+                </data>
+              </array>
+            </value>
+          </data>
+        </array>
+      </value>
+    </param>
+  </params>
+</methodResponse>"""
+
+    mock_post.side_effect = [update_fault_response, changelog_response]
+
+    client = TracClient(mock_config)
+
+    with pytest.raises(TicketUpdateConflict) as exc_info:
+        client.update_ticket(
+            42,
+            attributes={"status": "accepted"},
+            base_ts=1788093861682305,
+        )
+
+    err = exc_info.value
+    assert err.ticket_id == 42
+    assert err.base_ts == 1788093861682305
+    assert len(err.changes) == 1
+    assert err.changes[0]["author"] == "operator"
+    assert err.changes[0]["field"] == "comment"
+    assert "operator" in str(err)
+
+    # Only two calls: the failed update, then the changelog fetch used to
+    # explain the conflict -- no preliminary ticket.get, per the base_ts
+    # path above.
+    assert mock_post.call_count == 2
+    assert "ticket.update" in mock_post.call_args_list[0][1]["data"]
+    assert "ticket.changeLog" in mock_post.call_args_list[1][1]["data"]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_update_ticket_base_ts_conflict_without_changelog_detail(
+    mock_post, mock_config
+):
+    """If the changelog fetch used to explain a conflict itself fails, the
+    conflict is still raised (never silently swallowed into the bare
+    Fault) -- just without the per-change detail."""
+    update_fault_response = Mock()
+    update_fault_response.status_code = 200
+    update_fault_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>1</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>Your changes have not been saved because this ticket has been modified since you started editing.</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>"""
+
+    changelog_fault_response = Mock()
+    changelog_fault_response.status_code = 200
+    changelog_fault_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>404</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>Ticket does not exist</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>"""
+
+    mock_post.side_effect = [
+        update_fault_response,
+        changelog_fault_response,
+    ]
+
+    client = TracClient(mock_config)
+
+    with pytest.raises(TicketUpdateConflict) as exc_info:
+        client.update_ticket(
+            42,
+            attributes={"status": "accepted"},
+            base_ts=1788093861682305,
+        )
+
+    assert exc_info.value.changes == []
+    assert "42" in str(exc_info.value)
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_update_ticket_base_ts_unrelated_fault_reraises(
+    mock_post, mock_config
+):
+    """A base_ts caller still sees an ordinary Fault (e.g. ticket not
+    found) as a plain xmlrpc.client.Fault, not misreported as a version
+    conflict -- only Trac's specific mid-air-collision wording is
+    reinterpreted."""
+    import xmlrpc.client
+
+    fault_response = Mock()
+    fault_response.status_code = 200
+    fault_response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <fault>
+    <value>
+      <struct>
+        <member>
+          <name>faultCode</name>
+          <value><int>404</int></value>
+        </member>
+        <member>
+          <name>faultString</name>
+          <value><string>Ticket does not exist</string></value>
+        </member>
+      </struct>
+    </value>
+  </fault>
+</methodResponse>"""
+    mock_post.return_value = fault_response
+
+    client = TracClient(mock_config)
+
+    with pytest.raises(xmlrpc.client.Fault) as exc_info:
+        client.update_ticket(
+            42,
+            attributes={"status": "accepted"},
+            base_ts=1788093861682305,
+        )
+
+    assert "does not exist" in str(exc_info.value)
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")

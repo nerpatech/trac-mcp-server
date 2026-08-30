@@ -51,7 +51,7 @@ TICKET_READ_TOOLS = [
     ),
     types.Tool(
         name="ticket_get",
-        description="Get full ticket details including summary, description, status, and owner. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
+        description="Get full ticket details including summary, description, status, and owner. Response includes a change token (_ts) -- pass it to ticket_update's base_ts to detect if the ticket changes before your write lands. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -278,6 +278,7 @@ async def _handle_get(
     keywords = attrs.get("keywords", "")
     cc = attrs.get("cc", "")
     resolution = attrs.get("resolution", "")
+    change_token = attrs.get("_ts")
 
     # Convert description from TracWiki to Markdown unless raw mode is requested
     if raw:
@@ -299,6 +300,9 @@ async def _handle_get(
         f"Keywords: {keywords} | Cc: {cc}"
         + (f" | Resolution: {resolution}" if resolution else ""),
         f"Created: {created_str} | Modified: {modified_str}",
+        f"Change token (base_ts): {change_token}"
+        " -- pass this to ticket_update's base_ts to detect if the "
+        "ticket changes before your write lands.",
         "",
         f"## Description{format_note}",
         description_output,
@@ -321,6 +325,7 @@ async def _handle_get(
         "resolution": resolution,
         "created": created_str,
         "modified": modified_str,
+        "_ts": change_token,
     }
 
     return types.CallToolResult(
