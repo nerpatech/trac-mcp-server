@@ -103,13 +103,6 @@ trac_mcp_server/
 │       └── troubleshooting.md
 ├── scripts/                        # Utility scripts
 │   └── test_trac.py                # Manual Trac testing script (52KB)
-├── .planning/                      # GSD planning artifacts
-│   ├── PROJECT.md
-│   ├── ROADMAP.md
-│   ├── STATE.md
-│   ├── config.json
-│   ├── codebase/                   # Codebase analysis (this file)
-│   └── phases/                     # Phase plans
 ├── .claude/                        # Claude configuration
 ├── pyproject.toml                  # Project metadata, dependencies, scripts
 ├── README.md                       # Project readme
@@ -262,11 +255,6 @@ trac_mcp_server/
 - Purpose: Python virtual environment
 - Generated: Yes
 - Committed: No
-
-**`.planning/`:**
-- Purpose: GSD planning system artifacts (project plans, roadmaps, codebase analysis)
-- Generated: By GSD commands
-- Committed: Yes
 
 **`.claude/`:**
 - Purpose: Claude Code configuration
