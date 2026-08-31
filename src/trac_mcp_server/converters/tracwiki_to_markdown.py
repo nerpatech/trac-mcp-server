@@ -206,6 +206,27 @@ class TracWikiParser:
             flags=re.DOTALL,
         )
 
+    @staticmethod
+    def _fence_for(content: str) -> str:
+        """Return a backtick fence strictly longer than any backtick run
+        already present in ``content``.
+
+        A {{{ }}} block nested inside another is matched innermost-first
+        (the lazy ``.*?`` in the regexes below stops at the nearest
+        ``}}}``), so by the time the *outer* block is converted, its
+        captured ``code`` already contains the inner block's own
+        ```` ``` ```` fence as literal text. Emitting a fixed 3-backtick
+        fence for the outer block too would collide with it: CommonMark
+        closes a fence on the first line with at least as many backticks
+        as the opener, so the inner fence would terminate the outer one
+        early and the rest of the document would be swallowed as raw
+        code (ticket #51).
+        """
+        longest = 0
+        for m in re.finditer(r"`+", content):
+            longest = max(longest, len(m.group(0)))
+        return "`" * max(3, longest + 1)
+
     def _convert_code_blocks(self, text: str) -> str:
         """Convert code blocks (after processor cells).
 
@@ -223,6 +244,10 @@ class TracWikiParser:
         rewrote any TracWiki-shaped markup inside -- silently corrupting
         config/log/terminal excerpts that only *resemble* wiki syntax
         (ticket #31).
+
+        The fence itself is sized by _fence_for() rather than fixed at
+        3 backticks, so a nested {{{ }}} block's fence never collides
+        with the fence enclosing it (ticket #51).
         """
 
         def stash(body: str) -> str:
@@ -234,7 +259,8 @@ class TracWikiParser:
             tracwiki_lang = match.group(1)
             code = match.group(2)
             md_lang = tracwiki_to_markdown_lang(tracwiki_lang)
-            return f"```{md_lang}\n{stash(code)}\n```"
+            fence = self._fence_for(code)
+            return f"{fence}{md_lang}\n{stash(code)}\n{fence}"
 
         text = re.sub(
             r"\{\{\{#!(\w+)\n(.*?)\n\}\}\}",
@@ -242,10 +268,16 @@ class TracWikiParser:
             text,
             flags=re.DOTALL,
         )
+
         # Code block without language
+        def convert_code_block_no_lang(match: re.Match[str]) -> str:
+            code = match.group(1)
+            fence = self._fence_for(code)
+            return f"{fence}\n{stash(code)}\n{fence}"
+
         text = re.sub(
             r"\{\{\{\n(.*?)\n\}\}\}",
-            lambda m: f"```\n{stash(m.group(1))}\n```",
+            convert_code_block_no_lang,
             text,
             flags=re.DOTALL,
         )
