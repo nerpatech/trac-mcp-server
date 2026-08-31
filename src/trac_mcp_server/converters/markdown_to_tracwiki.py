@@ -789,6 +789,14 @@ def markdown_to_tracwiki(
     result = re.sub(r"\n{3,}", "\n\n", result)
     result = result.rstrip("\n")
 
+    if "\x00" in result:
+        raise ValueError(
+            "markdown_to_tracwiki: unrestored placeholder sentinel (NUL "
+            "byte) survived to converter output -- a stash/restore pass "
+            "has a bug; failing loudly instead of emitting corrupted "
+            "content (see ticket #51)"
+        )
+
     return result
 
 

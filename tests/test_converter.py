@@ -563,6 +563,23 @@ plain code
         result = tracwiki_to_markdown(tracwiki)
         self.assertEqual(result.text, expected)
 
+    def test_nested_code_block_no_placeholder_leak(self):
+        """A {{{ }}} block nested inside another restores both bodies
+        fully, with no unresolved \\x00CODEn\\x00 sentinel surviving into
+        the output (ticket #51)."""
+        tracwiki = """{{{
+{{{#!comment
+AGENT: do the thing
+}}}
+}}}"""
+        result = tracwiki_to_markdown(tracwiki)
+        self.assertNotIn("\x00", result.text)
+        self.assertIn("AGENT: do the thing", result.text)
+        self.assertEqual(
+            result.text,
+            "```\n```comment\nAGENT: do the thing\n```\n```",
+        )
+
     def test_unordered_list(self):
         """Test unordered list conversion."""
         tracwiki = """ * item 1
