@@ -177,6 +177,40 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
 
 
+# A backtick-fenced block sitting literally inside another code block's
+# body. CommonMark only lets an *outer* fence be closed by a line with at
+# least as many backticks as the opener, so a properly-nested inner fence
+# (shorter than its enclosing one, per `tracwiki_to_markdown._fence_for`)
+# survives into `block_code`'s `code` argument as plain text rather than
+# being parsed as its own block -- see `_restore_nested_fences` (ticket #51).
+_NESTED_FENCE_RE = re.compile(
+    r"^(`{3,})(\w*)\n(.*?)\n\1[ \t]*$", re.DOTALL | re.MULTILINE
+)
+
+
+def _restore_nested_fences(code: str) -> str:
+    """Recursively convert literal backtick fences inside a code block's
+    body back into TracWiki ``{{{ }}}`` blocks.
+
+    `tracwiki_to_markdown` emits a nested {{{ }}} block by widening the
+    *outer* fence so it never collides with the inner one it contains
+    (ticket #51's fix on the read side). On the way back, mistune hands
+    that inner fence to `block_code` as inert literal text -- it never
+    becomes its own `block_code` call -- so it has to be recognized and
+    restored here instead of by the renderer's normal per-token dispatch.
+    """
+
+    def restore(m: re.Match[str]) -> str:
+        info = m.group(2)
+        inner = _restore_nested_fences(m.group(3))
+        if info:
+            tracwiki_lang = markdown_to_tracwiki_lang(info)
+            return f"{{{{{{#!{tracwiki_lang}\n{inner}\n}}}}}}"
+        return f"{{{{{{\n{inner}\n}}}}}}"
+
+    return _NESTED_FENCE_RE.sub(restore, code)
+
+
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -371,8 +405,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
         Language identifiers are mapped from Markdown to TracWiki equivalents
         (e.g., 'bash' -> 'sh').
+
+        Restores any nested fence first (see `_restore_nested_fences`) --
+        a {{{ }}} block nested inside another arrives here as one
+        `block_code` call whose `code` still contains the inner fence as
+        literal text (ticket #51).
         """
         code = code.rstrip("\n")
+        code = _restore_nested_fences(code)
         if info:
             # Map Markdown language to TracWiki processor directive
             tracwiki_lang = markdown_to_tracwiki_lang(info)

@@ -585,7 +585,13 @@ plain code
     def test_nested_code_block_no_placeholder_leak(self):
         """A {{{ }}} block nested inside another restores both bodies
         fully, with no unresolved \\x00CODEn\\x00 sentinel surviving into
-        the output (ticket #51)."""
+        the output (ticket #51).
+
+        The outer fence must be longer than the inner one -- CommonMark
+        closes a fence on the first line with at least as many backticks
+        as the opener, so an equal-length nested fence would terminate
+        the outer block early and swallow everything after it.
+        """
         tracwiki = """{{{
 {{{#!comment
 AGENT: do the thing
@@ -596,8 +602,33 @@ AGENT: do the thing
         self.assertIn("AGENT: do the thing", result.text)
         self.assertEqual(
             result.text,
-            "```\n```comment\nAGENT: do the thing\n```\n```",
+            "````\n```comment\nAGENT: do the thing\n```\n````",
         )
+
+    def test_nested_code_block_round_trip(self):
+        """The Markdown produced for a nested {{{ }}} block converts back
+        to the original TracWiki nesting, not literal fence text (ticket
+        #51 retest -- a same-length outer/inner fence pair round-tripped
+        as flattened raw content with the block structure destroyed).
+
+        No trailing paragraph after the block: markdown_to_tracwiki drops
+        the blank line between a code block and a following paragraph
+        regardless of nesting (a pre-existing, separately-scoped gap --
+        reproduces the same way for an unnested block on current master),
+        so asserting on that spacing here would conflate two bugs.
+        """
+        tracwiki = """Intro line.
+
+{{{
+{{{#!comment
+AGENT: do the thing
+}}}
+}}}"""
+        markdown = tracwiki_to_markdown(tracwiki).text
+        self.assertNotIn("\x00", markdown)
+        restored = markdown_to_tracwiki(markdown)
+        self.assertNotIn("\x00", restored)
+        self.assertEqual(restored, tracwiki)
 
     def test_unordered_list(self):
         """Test unordered list conversion."""
