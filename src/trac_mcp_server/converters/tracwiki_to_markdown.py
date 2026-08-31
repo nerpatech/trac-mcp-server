@@ -99,6 +99,14 @@ class TracWikiParser:
         text = self._restore_link_placeholders(text)
         text = self._restore_code_placeholders(text)
 
+        if "\x00" in text:
+            raise ValueError(
+                "tracwiki_to_markdown: unrestored placeholder sentinel "
+                "(NUL byte) survived to converter output -- a stash/"
+                "restore pass has a bug; failing loudly instead of "
+                "emitting corrupted content (see ticket #51)"
+            )
+
         return ConversionResult(
             text=text,
             source_format="tracwiki",
@@ -768,12 +776,26 @@ class TracWikiParser:
         Runs last, after every pass that could otherwise mistake a code
         body for TracWiki markup, so the restored text is byte-identical
         to the original source (ticket #31).
+
+        A ``{{{ }}}`` block nested inside another one gets stashed twice:
+        the inner block is replaced by its own ``CODEn`` placeholder first,
+        and then the *outer* block's capture -- which still contains that
+        unresolved placeholder literally -- gets stashed as a second,
+        higher-numbered placeholder whose stored body itself contains the
+        first placeholder's sentinel bytes. ``re.sub`` only scans its input
+        once, so a single restore pass would substitute the outer
+        placeholder and leave the inner sentinel it exposes untouched in
+        the output. Looping to a fixed point resolves arbitrarily deep
+        nesting (ticket #51).
         """
 
         def restore(m: re.Match[str]) -> str:
             return self._code_placeholders[int(m.group(1))]
 
-        return re.sub(r"\x00CODE(\d+)\x00", restore, text)
+        pattern = re.compile(r"\x00CODE(\d+)\x00")
+        while pattern.search(text):
+            text = pattern.sub(restore, text)
+        return text
 
 
 def tracwiki_to_markdown(
