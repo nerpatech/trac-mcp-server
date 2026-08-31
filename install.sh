@@ -1,32 +1,33 @@
 #!/bin/bash
-# Install trac-mcp-server binary to ~/.local/bin
+# Install trac-mcp-server and trac-convert binaries to ~/.local/bin
 
 set -e
 
-BINARY="dist/trac-mcp-server"
-DEST="${HOME}/.local/bin/trac-mcp-server"
+BINARIES=(trac-mcp-server trac-convert)
+BIN_DIR="${HOME}/.local/bin"
 
-# Check binary exists
-if [ ! -f "$BINARY" ]; then
-    echo "ERROR: Binary not found at $BINARY"
-    echo "Run ./build.sh first."
-    exit 1
-fi
+mkdir -p "$BIN_DIR"
 
-# Create destination directory if needed
-mkdir -p "${HOME}/.local/bin"
+for name in "${BINARIES[@]}"; do
+    binary="dist/$name"
+    dest="$BIN_DIR/$name"
 
-# Copy binary
-echo "Installing trac-mcp-server to $DEST..."
-cp "$BINARY" "$DEST"
-chmod +x "$DEST"
+    if [ ! -f "$binary" ]; then
+        echo "ERROR: Binary not found at $binary"
+        echo "Run ./build.sh first."
+        exit 1
+    fi
 
-# Verify
-echo "Verifying installation..."
-"$DEST" --version
+    echo "Installing $name to $dest..."
+    cp "$binary" "$dest"
+    chmod +x "$dest"
 
-echo ""
-echo "Installation complete: $DEST"
+    echo "Verifying installation..."
+    "$dest" --version
+    echo ""
+done
+
+echo "Installation complete: ${BINARIES[*]} in $BIN_DIR"
 echo ""
 echo "Make sure ~/.local/bin is in your PATH:"
 echo '  export PATH="$HOME/.local/bin:$PATH"'
