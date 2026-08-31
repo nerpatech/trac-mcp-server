@@ -402,8 +402,24 @@ class TracWikiRenderer(mistune.BaseRenderer):
         return "----\n"
 
     def list(self, text: str, ordered: bool, **attrs) -> str:
-        """Render list."""
-        return text
+        """Render list.
+
+        Emits a trailing blank line after the list's own content so it is
+        always separated from whatever block follows. This matters when a
+        paragraph sits tight against the list in the Markdown source (no
+        blank line between them): CommonMark then treats that paragraph as
+        a lazy continuation of the *last list item* rather than a sibling
+        block, so it never passes through `paragraph()` (which supplies
+        its own trailing blank line) -- without this, the separator that
+        should terminate that absorbed paragraph gets consumed as the
+        separator that terminated the list instead, silently merging it
+        into whatever real paragraph comes next (ticket #52). Safe for
+        nested lists too: `list_item`'s handling of a nested list already
+        strips all trailing newlines from `nested_text` before splicing it
+        in, so the extra blank line added here never leaks into a parent
+        item.
+        """
+        return text + "\n"
 
     def list_item(self, text: str) -> str:
         """Render list item.

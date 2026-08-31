@@ -367,6 +367,25 @@ plain code
         # Verify no double asterisks appear
         self.assertNotIn(" * *", result)
 
+    def test_paragraph_tight_against_list_keeps_blank_line_after(self):
+        """A paragraph absorbed as a lazy continuation of the last list
+        item (no blank line between the list and it in the Markdown
+        source) still gets separated by a blank line from whatever real
+        paragraph follows it -- otherwise the two paragraphs render as one
+        run-together block (ticket #52)."""
+        markdown = (
+            "- alpha\n"
+            "- beta\n"
+            "**Bold lead:** first paragraph.\n"
+            "\n"
+            "Second paragraph.\n"
+        )
+        result = markdown_to_tracwiki(markdown)
+        self.assertIn(
+            "'''Bold lead:''' first paragraph.\n\nSecond paragraph.",
+            result,
+        )
+
     def test_deeply_nested_unordered_list(self):
         """Test deeply nested (3 levels) unordered list conversion.
 
