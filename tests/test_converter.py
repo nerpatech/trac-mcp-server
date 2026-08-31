@@ -386,6 +386,45 @@ plain code
             result,
         )
 
+    def test_code_block_followed_by_paragraph_keeps_blank_line(self):
+        """A fenced code block ending right before a following paragraph
+        (a proper blank line between them in the Markdown source, unlike
+        #52's lazy-continuation case) still gets separated by a blank
+        line in the TracWiki output -- `block_code()` used to emit only
+        one trailing newline regardless of source spacing, merging it
+        with whatever block came next (ticket #53)."""
+        markdown = "```\nplain code\n```\n\nTail line."
+        result = markdown_to_tracwiki(markdown)
+        self.assertEqual(result, "{{{\nplain code\n}}}\n\nTail line.")
+
+    def test_code_block_with_lang_followed_by_paragraph_keeps_blank_line(
+        self,
+    ):
+        """Same as above for a language-tagged fence (ticket #53)."""
+        markdown = "```python\nx = 1\n```\n\nTail line."
+        result = markdown_to_tracwiki(markdown)
+        self.assertEqual(
+            result, "{{{#!python\nx = 1\n}}}\n\nTail line."
+        )
+
+    def test_blockquote_followed_by_paragraph_keeps_blank_line(self):
+        """A blockquote ending right before a following paragraph still
+        gets separated by a blank line -- `block_quote()` had the same
+        single-trailing-newline gap as `block_code()` (ticket #53)."""
+        markdown = "> quoted text\n\nTail line."
+        result = markdown_to_tracwiki(markdown)
+        self.assertEqual(result, "  quoted text\n\nTail line.")
+
+    def test_horizontal_rule_followed_by_paragraph_keeps_blank_line(
+        self,
+    ):
+        """A horizontal rule ending right before a following paragraph
+        still gets separated by a blank line -- `thematic_break()` had
+        the same gap as `block_code()` (ticket #53)."""
+        markdown = "---\n\nTail line."
+        result = markdown_to_tracwiki(markdown)
+        self.assertEqual(result, "----\n\nTail line.")
+
     def test_deeply_nested_unordered_list(self):
         """Test deeply nested (3 levels) unordered list conversion.
 

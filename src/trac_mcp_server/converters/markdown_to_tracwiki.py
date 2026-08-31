@@ -410,24 +410,38 @@ class TracWikiRenderer(mistune.BaseRenderer):
         a {{{ }}} block nested inside another arrives here as one
         `block_code` call whose `code` still contains the inner fence as
         literal text (ticket #51).
+
+        Ends with a blank line (two trailing newlines), like `paragraph()`
+        and `table()`, so a sibling block immediately following in the
+        Markdown source stays separated after conversion rather than
+        running together with this one on the next read (ticket #53). Any
+        caller that needs this block's own trailing whitespace collapsed
+        -- `list_item()`, `block_quote()` -- already `rstrip("\\n")`s its
+        children's combined text before using it, so the extra newline
+        here never leaks into their output.
         """
         code = code.rstrip("\n")
         code = _restore_nested_fences(code)
         if info:
             # Map Markdown language to TracWiki processor directive
             tracwiki_lang = markdown_to_tracwiki_lang(info)
-            return f"{{{{{{#!{tracwiki_lang}\n{code}\n}}}}}}\n"
+            return f"{{{{{{#!{tracwiki_lang}\n{code}\n}}}}}}\n\n"
         else:
-            return f"{{{{{{\n{code}\n}}}}}}\n"
+            return f"{{{{{{\n{code}\n}}}}}}\n\n"
 
     def block_quote(self, text: str) -> str:
         """Render blockquote.
 
         TracWiki uses two-space indent for quotes.
+
+        Ends with a blank line for the same reason `block_code()` does
+        (ticket #53) -- `text.rstrip("\\n")` before quoting means an
+        extra trailing newline from a nested child never leaks into the
+        quoted lines here.
         """
         lines = text.rstrip("\n").split("\n")
         quoted = "\n".join(f"  {line}" for line in lines)
-        return f"{quoted}\n"
+        return f"{quoted}\n\n"
 
     def block_html(self, html: str) -> str:
         """Render block HTML (pass through)."""
@@ -438,8 +452,12 @@ class TracWikiRenderer(mistune.BaseRenderer):
         return text
 
     def thematic_break(self) -> str:
-        """Render horizontal rule."""
-        return "----\n"
+        """Render horizontal rule.
+
+        Ends with a blank line for the same reason `block_code()` does
+        (ticket #53).
+        """
+        return "----\n\n"
 
     def list(self, text: str, ordered: bool, **attrs) -> str:
         """Render list.
