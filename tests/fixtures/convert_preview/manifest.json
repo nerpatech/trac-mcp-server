@@ -142,5 +142,57 @@
   "row35_prose_build_export": {
     "markdown_input": "build:export:Artifacts",
     "tracwiki": "build:export:Artifacts"
+  },
+  "row36_realm_trailing_hyphen": {
+    "markdown_input": "auto_pm:wiki:Index-",
+    "tracwiki": "auto_pm:wiki:Index-"
+  },
+  "row37_realm_trailing_angle_bracket": {
+    "markdown_input": "<auto_pm:wiki:Index>",
+    "tracwiki": "<auto_pm:wiki:Index>"
+  },
+  "row38_code_span_multiword_prose": {
+    "markdown_input": "`see auto_pm:wiki:Index here`",
+    "tracwiki": "`see auto_pm:wiki:Index here`"
+  },
+  "row39_code_span_multiword_command": {
+    "markdown_input": "`run trac-convert auto_pm:wiki:Index now`",
+    "tracwiki": "`run trac-convert auto_pm:wiki:Index now`"
+  },
+  "row40_bracket_no_label_realm": {
+    "markdown_input": "[auto_pm:wiki:Index]",
+    "tracwiki": "[auto_pm:wiki:Index]"
+  },
+  "row41_bracket_no_label_ticket": {
+    "markdown_input": "[auto_pm:#87]",
+    "tracwiki": "[auto_pm:#87]"
+  },
+  "row42_realm_trailing_slash": {
+    "markdown_input": "auto_pm:wiki:Index/",
+    "tracwiki": "auto_pm:wiki:Index/"
+  },
+  "row43_typo_realm_trailing_period": {
+    "markdown_input": "auto-pm:wiki:Index.",
+    "tracwiki": "auto-pm:wiki:Index."
+  },
+  "row44_typo_ticket_trailing_period": {
+    "markdown_input": "auto-pm:#87.",
+    "tracwiki": "auto-pm:#87."
+  },
+  "row45_typo_realm_parens": {
+    "markdown_input": "(auto-pm:wiki:Rules/trac/RenderVerify)",
+    "tracwiki": "(auto-pm:wiki:Rules/trac/RenderVerify)"
+  },
+  "row46_ticket_code_span": {
+    "markdown_input": "`auto_pm:#87` in prose",
+    "tracwiki": "`auto_pm:#87` in prose"
+  },
+  "row47_bold_realm": {
+    "markdown_input": "'''auto_pm:wiki:Index'''",
+    "tracwiki": "'''auto_pm:wiki:Index'''"
+  },
+  "row48_bracket_same_label_pair": {
+    "markdown_input": "[auto-pm:#87 see] and [auto_pm:#87 see]",
+    "tracwiki": "[auto-pm:#87 see] and [auto_pm:#87 see]"
   }
 }
