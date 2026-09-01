@@ -194,5 +194,61 @@
   "row48_bracket_same_label_pair": {
     "markdown_input": "[auto-pm:#87 see] and [auto_pm:#87 see]",
     "tracwiki": "[auto-pm:#87 see] and [auto_pm:#87 see]"
+  },
+  "row49_code_span_short_link_tms": {
+    "markdown_input": "`trac_mcp_server:#13` in prose",
+    "tracwiki": "`trac_mcp_server:#13` in prose"
+  },
+  "row50_code_span_short_link_bcs": {
+    "markdown_input": "`bcs:#7` in prose",
+    "tracwiki": "`bcs:#7` in prose"
+  },
+  "row51_code_span_bare_ticket_number": {
+    "markdown_input": "`#87` in prose",
+    "tracwiki": "`#87` in prose"
+  },
+  "row52_code_span_placeholder_ticket": {
+    "markdown_input": "`prefix:#N` in prose",
+    "tracwiki": "`prefix:#N` in prose"
+  },
+  "row53_code_span_multiword_ticket": {
+    "markdown_input": "`see auto_pm:#87 here`",
+    "tracwiki": "`see auto_pm:#87 here`"
+  },
+  "row54_pragma_allows_code_span_ref": {
+    "markdown_input": null,
+    "tracwiki": "{{{#!comment\npreview-checks: allow link_ref_in_code_span\n}}}\nBackticked configured ref: `auto_pm:wiki:Index` here."
+  },
+  "row55_pragma_is_code_scoped": {
+    "markdown_input": null,
+    "tracwiki": "{{{#!comment\npreview-checks: allow link_ref_in_code_span\n}}}\nBackticked ref `auto_pm:wiki:Index`, and a typo'd one in prose: zzznotaprefix:wiki:SomePage"
+  },
+  "row56_fence_short_link": {
+    "markdown_input": "```\nauto_pm:#87\n```",
+    "tracwiki": "{{{\nauto_pm:#87\n}}}"
+  },
+  "row57_fence_realm_link": {
+    "markdown_input": "```\nauto_pm:wiki:Index\n```",
+    "tracwiki": "{{{\nauto_pm:wiki:Index\n}}}"
+  },
+  "row58_fence_plus_unconfigured_prose": {
+    "markdown_input": "```\nauto_pm:wiki:Index\n```\n\nzzznotaprefix:wiki:SomePage",
+    "tracwiki": "{{{\nauto_pm:wiki:Index\n}}}\n\nzzznotaprefix:wiki:SomePage"
+  },
+  "row59_ticket_trailing_period": {
+    "markdown_input": "See auto_pm:#87. Done.",
+    "tracwiki": "See auto_pm:#87. Done."
+  },
+  "row60_ticket_trailing_paren": {
+    "markdown_input": "Done (auto_pm:#87) here.",
+    "tracwiki": "Done (auto_pm:#87) here."
+  },
+  "row61_ticket_possessive": {
+    "markdown_input": "Possessive: auto_pm:#87's remediation note.",
+    "tracwiki": "Possessive: auto_pm:#87's remediation note."
+  },
+  "row62_ticket_hyphen_suffix": {
+    "markdown_input": "Hyphen suffix alone: auto_pm:#87-ish here.",
+    "tracwiki": "Hyphen suffix alone: auto_pm:#87-ish here."
   }
 }

@@ -296,6 +296,65 @@ def _strip_code_fences(text: str) -> str:
     return "\n".join(out)
 
 
+def blank_code_fences(text: str) -> str:
+    """Return ``text`` with fenced blocks replaced by spaces, character
+    for character, so the result has the SAME LENGTH as the input.
+
+    Same intent as :func:`_strip_code_fences`, but usable by a caller
+    that scans the blanked copy and then indexes back into the original
+    — ``match.start()``/``match.end()`` stay valid, which
+    ``_check_unconfigured_intertrac_prefix`` needs for its bracketed-
+    label handling (ticket #59). ``_strip_code_fences`` collapses fence
+    lines to empty strings and so cannot be used for that.
+
+    It also differs in one behaviour, deliberately: a fence opened and
+    closed on the SAME line (``{{{ x }}}``) is closed here. In
+    ``_strip_code_fences`` it is not, and everything after such a line
+    reads as fence interior — harmless for that function's callers,
+    which only ask "does this pattern appear anywhere outside a fence",
+    but as a blanking function it would suppress every warning after
+    such a line. That converts ticket #59's false positive into a false
+    negative, the more dangerous sign, so it is fixed here rather than
+    inherited.
+    """
+    out: list[str] = []
+    in_md_fence = False
+    in_tw_fence_depth = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        newline = line[len(body) :]
+        stripped = body.lstrip()
+        blanked = " " * len(body) + newline
+
+        if not in_md_fence and in_tw_fence_depth == 0:
+            if stripped.startswith("```"):
+                in_md_fence = True
+                out.append(blanked)
+                continue
+            if stripped.startswith("{{{"):
+                # Net depth on the opening line itself: `{{{ x }}}` on
+                # one line opens and closes, leaving depth 0.
+                depth = stripped.count("{{{") - stripped.count("}}}")
+                in_tw_fence_depth = max(depth, 0)
+                out.append(blanked)
+                continue
+            out.append(line)
+            continue
+
+        if in_md_fence:
+            if stripped.startswith("```"):
+                in_md_fence = False
+            out.append(blanked)
+            continue
+
+        in_tw_fence_depth += stripped.count("{{{")
+        in_tw_fence_depth -= stripped.count("}}}")
+        if in_tw_fence_depth < 0:
+            in_tw_fence_depth = 0
+        out.append(blanked)
+    return "".join(out)
+
+
 def detect_format_heuristic(text: str) -> str:
     """Heuristic format detection (fallback when capabilities unavailable).
 

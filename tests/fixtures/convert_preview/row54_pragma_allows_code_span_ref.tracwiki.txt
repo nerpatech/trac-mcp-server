@@ -1,0 +1,4 @@
+{{{#!comment
+preview-checks: allow link_ref_in_code_span
+}}}
+Backticked configured ref: `auto_pm:wiki:Index` here.

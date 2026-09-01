@@ -1,0 +1,3 @@
+{{{
+auto_pm:wiki:Index
+}}}

@@ -9,7 +9,11 @@ without a server. Warning codes map one-to-one onto ticket #56 comment 1's
 import re
 from typing import Any
 
-from ..converters.common import TRACLINK_SCHEMES, _strip_code_fences
+from ..converters.common import (
+    TRACLINK_SCHEMES,
+    _strip_code_fences,
+    blank_code_fences,
+)
 from .facts import PreviewFacts
 from .targets import ERROR, MISSING, SKIPPED, is_probeable_wiki_href
 
@@ -38,7 +42,39 @@ _TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{")
 # token that happens to produce no anchor (row 10, must stay silent). See
 # ticket #56 comment 2's calibration note: the `[intertrac]` prefix table
 # isn't exposed over XML-RPC, so this is deliberately narrow.
+#
+# Ticket #58 gave this a second job: it is also the InterTrac SHORT-LINK
+# shape, which `_CODE_SPAN_LINK_RE` structurally cannot match (that one
+# requires a TRACLINK_SCHEMES realm segment, and a short link has no
+# realm). Its narrowness is what makes the two calibration rows fall out
+# for free -- a bare backticked `#87` has no prefix, and a placeholder
+# `prefix:#N` has no digits.
 _PREFIX_TICKET_RE = re.compile(r"\b[A-Za-z][\w.+-]*:#\d+\b")
+
+# Opt-out pragma (ticket #58). A document that DOCUMENTS this syntax has
+# to quote it, and an anti-pattern section has to show what not to write
+# -- measured, `auto_pm:wiki:Reference/trac/InterTrac` returns 8
+# `link_ref_in_code_span` errors on entirely correct content, and #58's
+# widening takes it to 13. Only 2 of those 8 have any mechanical signal
+# (a metavariable placeholder, a deliberately-unconfigured example
+# prefix), so recognising placeholder targets -- the ticket's own first
+# suggestion -- would have left that page at 11 of 13. An author-declared
+# opt-out is the only mechanism that reaches the other 6.
+#
+# Recognised anywhere in the source. The placement that renders as
+# nothing is inside a Trac `#!comment` block (verified live: the block
+# produces no output at all), which is also how this store already
+# carries agent-facing directives on wiki pages. Note that Markdown
+# cannot emit that block -- a Markdown fence around it nests it as a
+# visible code block -- so on a Markdown-authored page the pragma goes in
+# via a formatting-only TracWiki repair, or lives as a visible line.
+#
+# Scoped to the codes it names, never a document-wide mute: a page that
+# opts out of one warning must still be checked for everything else.
+_PRAGMA_RE = re.compile(
+    r"^[ \t>]*preview-checks:[ \t]*allow[ \t]+([A-Za-z0-9_,][A-Za-z0-9_, \t]*?)[ \t]*$",
+    re.MULTILINE,
+)
 
 # Realms recognized by `_PREFIX_REALM_RE` specifically -- narrower than
 # TRACLINK_SCHEMES (which `_CODE_SPAN_LINK_RE` and `is_link_target` keep
@@ -119,10 +155,26 @@ def _check_escaped_link_targets(facts: PreviewFacts) -> list[dict]:
 def _check_link_ref_in_code_span(facts: PreviewFacts) -> list[dict]:
     """A cross-instance/TracLink reference sitting inside a code span:
     inert text where a link was intended (row 11 -- the highest-value
-    warning in the suite, per the ticket)."""
+    warning in the suite, per the ticket).
+
+    Two shapes, not one (ticket #58). The realm form
+    (`auto_pm:wiki:Page`) matches `_CODE_SPAN_LINK_RE`; the InterTrac
+    SHORT-LINK form (`auto_pm:#87`) cannot -- that regex is anchored on a
+    TRACLINK_SCHEMES realm segment and a short link has no realm, so no
+    prefix could ever match it. The short link is the higher-value half:
+    `Rules/trac/HashNumberAutoLinks` leads with exactly that shape, and
+    the shape the rule names first was the one the checker could not see.
+
+    Both are matched against the WHOLE stripped span, not searched
+    within it -- a span carrying more than the token is prose quoting a
+    reference, not a stranded link (rows 38/39/53).
+    """
     warnings = []
     for span in facts.code_spans:
-        if _CODE_SPAN_LINK_RE.match(span.strip()):
+        body = span.strip()
+        is_realm_form = _CODE_SPAN_LINK_RE.match(body) is not None
+        is_short_link = _PREFIX_TICKET_RE.fullmatch(body) is not None
+        if is_realm_form or is_short_link:
             warnings.append(
                 _warning(
                     "link_ref_in_code_span",
@@ -251,6 +303,53 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
     return False
 
 
+def _captured_punctuation_anchor(raw: str, anchors) -> Any | None:
+    """The anchor whose resolved target is `raw` with trailing text Trac
+    swallowed into it, or None (ticket #59 comment 1).
+
+    The exact mirror of `_prefix_boundary_match`: there the ANCHOR's text
+    is a prefix of the token; here the TOKEN is a prefix of the anchor's
+    text, and what follows is not a continuation of the same identifier.
+    Measured against the live daemon: `.`, `,`, `)` and `;` after a short
+    link are NOT captured -- Trac stops the token, the anchor text equals
+    the token, and those stay correctly silent. `'s` and `-ish` ARE
+    captured, producing `intertrac/%2387%27s` -- a link that reads as
+    live and dispatches on a ticket that does not exist.
+
+    The `isalnum()`/underscore tail test is what keeps a genuinely
+    different, longer token out: an anchor for `auto_pm:#871` starts with
+    `auto_pm:#87` too, but continues with a digit, so it is a different
+    reference rather than this defect.
+
+    Non-bracketed occurrences only -- its caller's bracketed branch
+    compares against a label or a resolved suffix, not the token, so
+    "the anchor text starts with the token" carries no meaning there.
+    """
+    for anchor in anchors:
+        text = anchor.text.replace(_ZERO_WIDTH_ICON, "")
+        if not text.startswith(raw) or len(text) == len(raw):
+            continue
+        tail = text[len(raw)]
+        if not (tail.isalnum() or tail == "_"):
+            return anchor
+    return None
+
+
+def _allowed_codes(*sources: str | None) -> set[str]:
+    """Warning codes a `preview-checks: allow ...` pragma opts out of
+    (ticket #58). See `_PRAGMA_RE` for why this exists and where the
+    pragma goes."""
+    allowed: set[str] = set()
+    for source in sources:
+        if not source:
+            continue
+        for match in _PRAGMA_RE.finditer(source):
+            for code in re.split(r"[,\s]+", match.group(1)):
+                if code:
+                    allowed.add(code)
+    return allowed
+
+
 def _bracket_label(
     tracwiki: str, raw: str, token_end: int
 ) -> str | None:
@@ -308,9 +407,22 @@ def _check_unconfigured_intertrac_prefix(
     """
     code_span_texts = list(facts.code_spans)
     anchors = facts.anchors
+    # Fenced blocks are scanned OUT, not scanned over (ticket #59).
+    # Inside a fence Trac renders no anchor at all, so this check's core
+    # inference -- "prefix-shaped token, no anchor, therefore the prefix
+    # is unconfigured" -- is unsound there, and it reported CONFIGURED
+    # prefixes as unconfigured on any page carrying a fenced example of
+    # InterTrac syntax (which includes bug reports about InterTrac
+    # syntax, so it misfired on its own problem domain). Only inline
+    # code spans were ever excluded, via `_code_span_contains` below.
+    #
+    # `blank_code_fences`, not `_strip_code_fences`: the offsets below
+    # index back into `tracwiki` for the bracketed-label logic, so the
+    # scanned copy has to be the same length as the original.
+    scan_text = blank_code_fences(tracwiki)
     warnings = []
     for pattern in (_PREFIX_TICKET_RE, _PREFIX_REALM_RE):
-        for match in pattern.finditer(tracwiki):
+        for match in pattern.finditer(scan_text):
             raw = match.group(0)
 
             if any(
@@ -352,6 +464,29 @@ def _check_unconfigured_intertrac_prefix(
                     )
                     for a in anchors
                 )
+                if not configured:
+                    overrun = _captured_punctuation_anchor(raw, anchors)
+                    if overrun is not None:
+                        warnings.append(
+                            _warning(
+                                "intertrac_target_captured_punctuation",
+                                "error",
+                                f"'{raw}' rendered as a link, but Trac "
+                                f"captured trailing text into the "
+                                f"target: it dispatches on "
+                                f"'{overrun.text.replace(_ZERO_WIDTH_ICON, '')}'"
+                                ", not the reference you wrote. The "
+                                "prefix is fine; the link is dead.",
+                                {
+                                    "token": raw,
+                                    "resolved_as": overrun.text.replace(
+                                        _ZERO_WIDTH_ICON, ""
+                                    ),
+                                    "href": overrun.href,
+                                },
+                            )
+                        )
+                        continue
             if configured:
                 continue
 
@@ -467,6 +602,11 @@ def build_warnings(
         List of warning dicts, each ``{code, severity, message,
         evidence}``. Empty list means clean input, not "not checked" --
         pair with ``target_check_skipped`` for the latter.
+
+        Codes named by a ``preview-checks: allow ...`` pragma in either
+        source are dropped last, after every rule has run (ticket #58) --
+        see ``_PRAGMA_RE``. Scoped to the codes it names, so a page that
+        opts out of one warning is still checked for the rest.
     """
     warnings: list[dict] = []
     warnings.extend(_check_escaped_link_targets(facts))
@@ -481,4 +621,8 @@ def build_warnings(
         _check_unconfigured_intertrac_prefix(tracwiki, facts)
     )
     warnings.extend(_check_target_probes(facts, probes, check_targets))
+
+    allowed = _allowed_codes(markdown_source, tracwiki)
+    if allowed:
+        warnings = [w for w in warnings if w["code"] not in allowed]
     return warnings

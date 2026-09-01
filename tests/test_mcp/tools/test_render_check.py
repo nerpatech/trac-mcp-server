@@ -346,6 +346,25 @@ class TestWikiRenderCheckHandler(unittest.TestCase):
         ]
         self.assertIn("missing_local_target", codes)
 
+    def test_backticked_short_link_surfaces_warning(self):
+        """Ticket #58, pinned on the verify path and not only on
+        `convert_preview`: a backticked InterTrac SHORT LINK
+        (`auto_pm:#87`) is a reference meant to be a link, rendered
+        inert. The check is shared, and the ticket confirmed the same
+        silence reproduced through `wiki_render_check` -- so it is
+        asserted on both paths, or a later change could fix one and
+        leave the other."""
+        client = _mock_wiki_client("row11_code_span_short_link")
+        result = self._run(
+            client, {"page_name": "Foo", "check_targets": False}
+        )
+        codes = [
+            w["code"]
+            for s in result.structuredContent["sections"]
+            for w in s["warnings"]
+        ]
+        self.assertIn("link_ref_in_code_span", codes)
+
     def test_single_page_section(self):
         client = _mock_wiki_client("row01_clean")
         result = self._run(

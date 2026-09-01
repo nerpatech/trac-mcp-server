@@ -72,5 +72,13 @@
     "note": "Stray/unclosed {{{ delimiter survives as literal text.",
     "requires_check_targets": false,
     "tracwiki": "some text {{{ that never closes"
+  },
+  "row11_code_span_short_link": {
+    "must_warn": [
+      "link_ref_in_code_span"
+    ],
+    "note": "Ticket #58: the InterTrac SHORT-LINK form backticked into a code span -- the shape HashNumberAutoLinks names first, which the realm-anchored regex could never match. Pinned in the verify path too, since the same silence reproduced through wiki_render_check.",
+    "requires_check_targets": false,
+    "tracwiki": "see `auto_pm:#87` here"
   }
 }
