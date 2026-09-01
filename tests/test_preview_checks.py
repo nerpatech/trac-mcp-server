@@ -33,13 +33,26 @@ from trac_mcp_server.preview.facts import extract_facts
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "convert_preview"
 MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 
-# Suite 1 (rows 1-10): the escape-regression pass from ticket #44 -- every
+# Suite 1 (rows 1-9): the escape-regression pass from ticket #44 -- every
 # row here MUST stay silent. Suite 2 (rows 11-13): the three defects that
 # motivated this ticket, caught only by a manual round trip -- MUST warn.
 # Suite 3 (rows 14, 16): live-state warnings that don't need a server
 # round-trip to classify -- MUST warn. (Row 15 needs the live probe and is
 # covered separately, in test_mcp/tools/test_convert_preview.py's live
 # test -- it renders identically to row 1 without one.)
+#
+# Suite 4 (rows 17-21, ticket #57): the realm-form counterpart to row 16.
+# Row 10 moves here from the silent half -- it is the reason #57 exists:
+# `zzznotaprefix:wiki:SomePageName` was measured silent against the
+# deployed build (no anchor, no warning), which is the defect. Rows 17-18
+# repeat the same measured-silent-on-deployed-build defect for the
+# `ticket` and `report` realms. Rows 19-21 are the must-stay-silent
+# guardrails from the ticket: `TODO:fix:Later` and `note:see:Below` have
+# a colon-shaped middle segment that isn't a real Trac realm, and
+# `http://host:port/path` renders its own anchor so the no-anchor gate
+# never fires. (`Note: SomeCamelWord` -- prose with a space after the
+# colon, so the realm regex can't match at all -- is already covered by
+# row08_prose_after_colon; no separate row needed for that shape.)
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -50,7 +63,9 @@ SILENT_ROWS = [
     "row07_prose_camelcase",
     "row08_prose_after_colon",
     "row09_prose_after_time",
-    "row10_unknown_prefix_wiki",
+    "row19_prose_fix_colon",
+    "row20_prose_see_colon",
+    "row21_url_with_port",
 ]
 
 WARNING_ROWS = [
@@ -60,6 +75,18 @@ WARNING_ROWS = [
     ("row14_bare_ticket_ref", "bare_ticket_ref"),
     (
         "row16_unconfigured_prefix_ticket",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row10_unknown_prefix_wiki",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row17_unconfigured_prefix_ticket_realm",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row18_unconfigured_prefix_report_realm",
         "unconfigured_intertrac_prefix",
     ),
 ]
@@ -141,10 +168,11 @@ def test_suite_balance_is_roughly_even():
     silent_count = len(SILENT_ROWS)
     # Suite 3 also names row 15 (live-probe, covered by a separate live
     # test rather than this static list), bringing the full ticket table
-    # to 10 silent / 6 warning once it's counted.
+    # to 12 silent / 9 warning once it's counted (ticket #57 moved row 10
+    # into the warning half and added rows 17-21).
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 10
-    assert warning_count == 6
+    assert silent_count == 12
+    assert warning_count == 9
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
