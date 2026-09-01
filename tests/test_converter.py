@@ -1023,6 +1023,67 @@ class TestFormatDetection(unittest.TestCase):
         )
 
 
+class TestBlankCodeFences(unittest.TestCase):
+    """`blank_code_fences` (ticket #59) -- the offset-preserving
+    counterpart to `_strip_code_fences`.
+
+    Its whole reason to exist is that a caller scans the blanked copy
+    and then indexes back into the ORIGINAL, so length preservation is
+    the contract, not an implementation detail.
+    """
+
+    def _blank(self, text):
+        from trac_mcp_server.converters.common import blank_code_fences
+
+        return blank_code_fences(text)
+
+    def test_length_is_preserved(self):
+        """The contract: same length in, same length out, so a match
+        offset taken on the blanked copy is valid on the original."""
+        text = "before\n{{{\nauto_pm:#87\n}}}\nafter\n"
+        self.assertEqual(len(self._blank(text)), len(text))
+
+    def test_fenced_content_is_blanked_and_prose_survives(self):
+        text = "before\n{{{\nauto_pm:#87\n}}}\nafter"
+        blanked = self._blank(text)
+        self.assertNotIn("auto_pm:#87", blanked)
+        self.assertIn("before", blanked)
+        self.assertIn("after", blanked)
+
+    def test_markdown_fence_is_blanked_too(self):
+        text = "before\n```\nauto_pm:#87\n```\nafter"
+        blanked = self._blank(text)
+        self.assertNotIn("auto_pm:#87", blanked)
+        self.assertIn("after", blanked)
+
+    def test_same_line_fence_closes(self):
+        """The deliberate divergence from `_strip_code_fences`, which
+        never closes a fence opened and closed on one line and so treats
+        the whole rest of the document as fence interior. Harmless for
+        its callers, a false-negative generator for this one: everything
+        after such a line would stop being checked at all."""
+        text = "{{{ inline }}}\nauto_pm:#87 after the fence"
+        blanked = self._blank(text)
+        self.assertIn("auto_pm:#87 after the fence", blanked)
+
+    def test_nested_fence_depth_is_tracked(self):
+        text = (
+            "{{{\nouter\n{{{\ninner\n}}}\nstill inside\n}}}\n"
+            "auto_pm:#87 after"
+        )
+        blanked = self._blank(text)
+        self.assertNotIn("still inside", blanked)
+        self.assertIn("auto_pm:#87 after", blanked)
+
+    def test_unterminated_fence_blanks_to_end(self):
+        """An unclosed fence swallows the rest -- the same choice
+        `_strip_code_fences` makes. Recorded as intended, not accidental:
+        the alternative (treating an unclosed fence as prose) would put
+        this check back inside a block Trac renders verbatim."""
+        text = "{{{\nauto_pm:#87 never closed"
+        self.assertNotIn("auto_pm:#87", self._blank(text))
+
+
 class TestConversionResultMetadata(unittest.TestCase):
     """Test ConversionResult metadata and backward compatibility."""
 

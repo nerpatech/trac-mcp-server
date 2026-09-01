@@ -110,6 +110,33 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # `tracwiki_markup_in_markdown`, and row 48 documents a known, accepted
 # residual rather than an assertion that it now passes; see
 # `_check_unconfigured_intertrac_prefix`'s docstring.
+#
+# Suite 7 (rows 49-62, tickets #58 and #59): the two opposite-sign
+# defects the seeded-defect pass on #55 found in this module, landed
+# together because they touch `_PREFIX_TICKET_RE` from opposite
+# directions and a shared suite is the only way one run sees both signs.
+# Rows 49/50 plus the MOVE of row46 out of the silent half are #58's
+# false negative -- a backticked `prefix:#N` short link, the shape
+# `Rules/trac/HashNumberAutoLinks` names first, which the realm-anchored
+# `_CODE_SPAN_LINK_RE` could never match. Rows 51-53 are that widening's
+# calibration pins (a bare backticked number and a metavariable
+# placeholder both stay silent -- they fall out of `_PREFIX_TICKET_RE`
+# for free, and are asserted so a later tuning pass can't quietly widen
+# them; row 53 is the multiword-span guard rows 38/39 already pin for
+# the realm form). Rows 54/55 are the opt-out pragma the widening ships
+# with -- see their standalone tests. Rows 56-58 are #59's false
+# positive: `unconfigured_intertrac_prefix` scanned inside fenced
+# blocks, where Trac renders no anchor at all, so its "no anchor
+# therefore unconfigured" inference is unsound and it called a
+# CONFIGURED prefix unconfigured; row 58 is the must-keep-firing half.
+# Rows 59-62 are #59 comment 1: trailing text Trac captures INTO the
+# dispatcher target. Measured -- `.`, `,`, `)`, `;` are not captured
+# (rows 59/60, correct today and must stay silent), while `'s` and
+# `-ish` are (rows 61/62), producing a live-looking anchor onto a
+# ticket that does not exist. Those two warned already, but as
+# `unconfigured_intertrac_prefix` on a prefix that is configured -- a
+# right-signal/wrong-diagnosis case, which is why they get their own
+# code rather than a widened message.
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -135,7 +162,13 @@ SILENT_ROWS = [
     "row40_bracket_no_label_realm",
     "row41_bracket_no_label_ticket",
     "row42_realm_trailing_slash",
-    "row46_ticket_code_span",
+    "row51_code_span_bare_ticket_number",
+    "row52_code_span_placeholder_ticket",
+    "row53_code_span_multiword_ticket",
+    "row56_fence_short_link",
+    "row57_fence_realm_link",
+    "row59_ticket_trailing_period",
+    "row60_ticket_trailing_paren",
 ]
 
 WARNING_ROWS = [
@@ -200,6 +233,28 @@ WARNING_ROWS = [
     (
         "row45_typo_realm_parens",
         "unconfigured_intertrac_prefix",
+    ),
+    # Moved out of SILENT_ROWS by ticket #58 -- this row is the defect:
+    # a backticked, CONFIGURED short link is a reference meant to be a
+    # link, rendered inert. It was added by #57 as a code-span guard
+    # for the neighbouring check and marked silent because that check
+    # must stay silent on it; the question of whether the code-span
+    # check itself should fire was never asked. Same shape as #57's own
+    # move of row 10.
+    ("row46_ticket_code_span", "link_ref_in_code_span"),
+    ("row49_code_span_short_link_tms", "link_ref_in_code_span"),
+    ("row50_code_span_short_link_bcs", "link_ref_in_code_span"),
+    (
+        "row58_fence_plus_unconfigured_prose",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row61_ticket_possessive",
+        "intertrac_target_captured_punctuation",
+    ),
+    (
+        "row62_ticket_hyphen_suffix",
+        "intertrac_target_captured_punctuation",
     ),
 ]
 
@@ -342,6 +397,116 @@ def test_same_label_bracket_pair_is_a_known_accepted_residual():
     )
 
 
+def test_row46_short_link_code_span_warns_once_not_twice():
+    """The ticket-form counterpart to
+    `test_row11_code_span_does_not_also_warn_unconfigured_prefix`
+    (ticket #58). A backticked, CONFIGURED short link must trip
+    `link_ref_in_code_span` and nothing else -- in particular not
+    `unconfigured_intertrac_prefix`, whose code-span suppression is the
+    only thing keeping the two checks from double-reporting one span.
+    Widening the code-span check is exactly the change that could break
+    that suppression without any "must warn" row noticing."""
+    markdown_source, tracwiki, facts = _load("row46_ticket_code_span")
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert codes == ["link_ref_in_code_span"], codes
+
+
+def test_pragma_suppresses_the_named_code():
+    """Ticket #58's opt-out. A page whose SUBJECT is this syntax must
+    backtick it, and so must an anti-pattern section showing what not to
+    write -- measured, `auto_pm:wiki:Reference/trac/InterTrac` returns 8
+    of these errors on entirely correct content, and the widening takes
+    it to 13. The pragma is what makes that page's gate readable again.
+
+    Can't go in SILENT_ROWS: with `markdown_input: null` the harness
+    falls back to the stored TracWiki as the Markdown source, so the
+    `#!comment` block itself legitimately trips
+    `tracwiki_markup_in_markdown` -- the same reason row 47 is a
+    standalone test."""
+    markdown_source, tracwiki, facts = _load(
+        "row54_pragma_allows_code_span_ref"
+    )
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "link_ref_in_code_span" not in codes, codes
+
+
+def test_pragma_is_scoped_to_the_codes_it_names():
+    """The pragma is an opt-out for named codes, not a document-wide
+    mute. The same document carries a genuinely typo'd prefix in prose;
+    allowing `link_ref_in_code_span` must not silence that. Without this
+    row the feature could degenerate into "any page that opts out of one
+    warning stops being checked at all", which is how a gate stops being
+    a gate."""
+    markdown_source, tracwiki, facts = _load(
+        "row55_pragma_is_code_scoped"
+    )
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "link_ref_in_code_span" not in codes, codes
+    assert "unconfigured_intertrac_prefix" in codes, codes
+
+
+def test_fenced_document_warns_only_for_the_prose_token():
+    """Ticket #59's must-keep-firing half, and the reason the fence fix
+    can't just be "scan less".
+
+    The document holds a CONFIGURED realm link inside a fenced block
+    (silent after the fix -- Trac renders no anchor in a fence, so the
+    check's "no anchor therefore unconfigured" inference is unsound
+    there) and an UNCONFIGURED one in prose (must still warn). Asserting
+    the count, not just the code's presence, is the point: this row is
+    what catches a fix that blanks too much, which the `must warn` list
+    alone would pass."""
+    markdown_source, tracwiki, facts = _load(
+        "row58_fence_plus_unconfigured_prose"
+    )
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    prefix_warnings = [
+        w
+        for w in warnings
+        if w["code"] == "unconfigured_intertrac_prefix"
+    ]
+    assert len(prefix_warnings) == 1, warnings
+    assert (
+        prefix_warnings[0]["evidence"]["token"]
+        == "zzznotaprefix:wiki:SomePage"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["row61_ticket_possessive", "row62_ticket_hyphen_suffix"]
+)
+def test_captured_punctuation_is_not_reported_as_unconfigured(name):
+    """Ticket #59 comment 1: right signal, wrong diagnosis.
+
+    Trac's tokenizer swallows `'s` / `-ish` into the dispatcher target,
+    so the anchor resolves to ticket "87's" -- a dead link that reads as
+    live. The check was right that something was wrong and is the only
+    reason it gets caught, but it reported the prefix as unconfigured
+    when the prefix is configured and links correctly elsewhere. Acting
+    on that message sends the reader to the `[intertrac]` table, which
+    is fine, and then to conclude the check is broken, which it is not.
+    Both halves are asserted: the new code fires AND the misdiagnosis
+    does not."""
+    markdown_source, tracwiki, facts = _load(name)
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "intertrac_target_captured_punctuation" in codes, codes
+    assert "unconfigured_intertrac_prefix" not in codes, codes
+
+
 def test_suite_balance_is_roughly_even():
     """Per the ticket's coverage note: silent and warning rows must be
     roughly balanced, or a checker that warns about everything (or never
@@ -350,13 +515,15 @@ def test_suite_balance_is_roughly_even():
     silent_count = len(SILENT_ROWS)
     # Suite 3 also names row 15 (live-probe, covered by a separate live
     # test rather than this static list), bringing the full ticket table
-    # to 25 silent / 21 warning once it's counted (ticket #57 moved row
+    # to 31 silent / 27 warning once it's counted (ticket #57 moved row
     # 10 into the warning half and added rows 17-21, comment 4's reopen
-    # added rows 22-35, and comment 6/7/8's reopen added rows 36-45; rows
-    # 47/48 are standalone tests, not counted here -- see their comments).
+    # added rows 22-35, and comment 6/7/8's reopen added rows 36-45;
+    # tickets #58/#59 added rows 49-53 and 56-62 and moved row 46 into
+    # the warning half; rows 47/48/54/55 are standalone tests, not
+    # counted here -- see their comments).
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 25
-    assert warning_count == 21
+    assert silent_count == 31
+    assert warning_count == 27
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
