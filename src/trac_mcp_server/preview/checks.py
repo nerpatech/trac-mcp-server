@@ -40,6 +40,22 @@ _TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{")
 # isn't exposed over XML-RPC, so this is deliberately narrow.
 _PREFIX_TICKET_RE = re.compile(r"\b[A-Za-z][\w.+-]*:#\d+\b")
 
+# A `prefix:realm:target` token -- the realm-form counterpart to
+# `_PREFIX_TICKET_RE` (ticket #57). Keyed on TRACLINK_SCHEMES (the same
+# known-realm allowlist `is_link_target` uses) rather than any colon-
+# shaped token, so prose like `TODO:fix:Later` or `note:see:Below` -- whose
+# middle segment isn't a real Trac realm -- never matches. A configured
+# prefix in this shape rendered an anchor for every realm tried, measured
+# against the live daemon (`auto_pm:ticket:87`, `auto_pm:report:1`,
+# `auto_pm:changeset:1`, `auto_pm:attachment:foo` all resolved, per the
+# ticket), so "realm-shaped token, no anchor" is exactly as sound an
+# inference here as it is for the ticket form.
+_PREFIX_REALM_RE = re.compile(
+    r"\b[A-Za-z][\w.+-]*:(?:"
+    + "|".join(sorted(TRACLINK_SCHEMES))
+    + r"):\S+"
+)
+
 
 def _warning(
     code: str, severity: str, message: str, evidence: Any = None
@@ -166,32 +182,44 @@ def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
 def _check_unconfigured_intertrac_prefix(
     tracwiki: str, facts: PreviewFacts
 ) -> list[dict]:
-    """A `prefix:#N` token whose prefix is not in the `[intertrac]` table
-    renders as plain text, not a link (row 16) -- distinguished from an
-    ordinary colon-shaped token that must stay silent (row 10) only by
-    the `:#N` shape itself; see the module docstring on `_PREFIX_TICKET_RE`."""
+    """A `prefix:#N` or `prefix:realm:target` token whose prefix is not in
+    the `[intertrac]` table renders as plain text, not a link (rows 16 and
+    #57's realm-form fix) -- distinguished from an ordinary colon-shaped
+    token that must stay silent (row 10) only by the token's shape itself;
+    see the module docstrings on `_PREFIX_TICKET_RE` and `_PREFIX_REALM_RE`."""
     # Substring, not exact-equality: a resolved InterTrac anchor's text
     # content includes a leading icon glyph Trac injects ahead of the
     # visible link text (confirmed against the live daemon), so an exact
     # `token == anchor.text` match would spuriously fire on row 6.
     anchor_texts = [a.text for a in facts.anchors]
+    anchor_titles = [a.title for a in facts.anchors if a.title]
     code_span_texts = [s for s in facts.code_spans]
     warnings = []
-    for match in _PREFIX_TICKET_RE.finditer(tracwiki):
-        token = match.group(0)
-        if any(token in t for t in anchor_texts) or any(
-            token in t for t in code_span_texts
-        ):
-            continue
-        warnings.append(
-            _warning(
-                "unconfigured_intertrac_prefix",
-                "warning",
-                f"'{token}' does not match any configured InterTrac "
-                "prefix -- it will render as plain text, not a link.",
-                {"token": token},
+    for pattern in (_PREFIX_TICKET_RE, _PREFIX_REALM_RE):
+        for match in pattern.finditer(tracwiki):
+            token = match.group(0)
+            if any(token in t for t in anchor_texts) or any(
+                token in t for t in code_span_texts
+            ):
+                continue
+            # A bracketed link with a custom label (`[auto_pm:wiki:Page
+            # label]`, row 3) renders anchor text "label", not the token
+            # -- but Trac's title attribute always carries the resolved
+            # "<realm:target|#N> in <project>" form, so falling back to
+            # the token's suffix (past the prefix) against the title
+            # still recognizes a configured prefix in that shape.
+            suffix = token.split(":", 1)[1]
+            if any(suffix in t for t in anchor_titles):
+                continue
+            warnings.append(
+                _warning(
+                    "unconfigured_intertrac_prefix",
+                    "warning",
+                    f"'{token}' does not match any configured InterTrac "
+                    "prefix -- it will render as plain text, not a link.",
+                    {"token": token},
+                )
             )
-        )
     return warnings
 
 

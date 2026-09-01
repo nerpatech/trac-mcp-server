@@ -66,5 +66,25 @@
   "row16_unconfigured_prefix_ticket": {
     "markdown_input": "notaprefix:#7",
     "tracwiki": "notaprefix:#7"
+  },
+  "row17_unconfigured_prefix_ticket_realm": {
+    "markdown_input": "zzznotaprefix:ticket:87",
+    "tracwiki": "zzznotaprefix:ticket:87"
+  },
+  "row18_unconfigured_prefix_report_realm": {
+    "markdown_input": "zzznotaprefix:report:1",
+    "tracwiki": "zzznotaprefix:report:1"
+  },
+  "row19_prose_fix_colon": {
+    "markdown_input": "TODO:fix:Later",
+    "tracwiki": "TODO:fix:Later"
+  },
+  "row20_prose_see_colon": {
+    "markdown_input": "note:see:Below",
+    "tracwiki": "note:see:Below"
+  },
+  "row21_url_with_port": {
+    "markdown_input": "http://192.168.10.4:8000/some/path",
+    "tracwiki": "http://192.168.10.4:8000/some/path"
   }
 }
