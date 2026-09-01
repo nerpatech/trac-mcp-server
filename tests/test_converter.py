@@ -2185,6 +2185,115 @@ class TestConverterTicketRegressions(unittest.TestCase):
             "`http://host:8000/bcs/wiki/b-node/bench/BoardIdentity`",
         )
 
+    # -- ticket #44, reopened: the bare (unbracketed) InterTrac form --
+    #
+    # One test per row of the six-form table the ticket was reopened
+    # with. Rows A/A' are the defect; B and C are the two forms the
+    # first pass fixed, kept here so a later change can't trade one for
+    # the other; D, E and F are the over-correction pins -- F in
+    # particular must keep its "!", since a bare CamelCase prose word is
+    # exactly what the escape exists for (the ticket #37 lesson: this
+    # cannot be fixed by loosening the word-shape rule).
+
+    def test_ticket_44_row_a_bare_intertrac_target_not_escaped(self):
+        """Row A: a bare `prefix:realm:target` reference in prose, the
+        form `Rules/trac/PreferInterTracLinks` makes the preferred way
+        to write a cross-instance link. Trac auto-links it with no
+        brackets involved, so a "!" in its CamelCase final segment
+        becomes part of the page name and the link 302s to a page that
+        does not exist.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "See auto_pm:wiki:Rules/trac/RenderVerify for details."
+            ),
+            "See auto_pm:wiki:Rules/trac/RenderVerify for details.",
+        )
+        # Sentence-final and parenthesised placements: the surrounding
+        # punctuation must not end the skip span early.
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "(see auto_pm:wiki:Rules/trac/RenderVerify)"
+            ),
+            "(see auto_pm:wiki:Rules/trac/RenderVerify)",
+        )
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "See auto_pm:wiki:Rules/trac/RenderVerify."
+            ),
+            "See auto_pm:wiki:Rules/trac/RenderVerify.",
+        )
+
+    def test_ticket_44_row_a_bare_same_instance_traclink_not_escaped(
+        self,
+    ):
+        """Row A without the InterTrac prefix: a bare `realm:target`
+        TracLink (`wiki:SomePage`) auto-links the same way and breaks
+        the same way. The prefix segment is optional in the skip rule.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki(
+                "See wiki:Rules/trac/RenderVerify for details."
+            ),
+            "See wiki:Rules/trac/RenderVerify for details.",
+        )
+
+    def test_ticket_44_row_a_bare_intertrac_round_trips(self):
+        """The bare form survives markdown -> tracwiki -> markdown
+        byte-for-byte, so the read leg can't reintroduce the corruption
+        the write leg just stopped emitting.
+        """
+        markdown = (
+            "See auto_pm:wiki:Rules/trac/RenderVerify for details."
+        )
+        tracwiki = markdown_to_tracwiki(markdown)
+        self.assertEqual(tracwiki_to_markdown(tracwiki).text, markdown)
+
+    def test_ticket_44_row_d_non_camelcase_target_unaffected(self):
+        """Row D: a bare InterTrac reference whose final segment isn't
+        CamelCase-shaped was never escaped, and must stay untouched --
+        it pins the skip against changing anything it isn't there for.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki("See auto_pm:wiki:Index for details."),
+            "See auto_pm:wiki:Index for details.",
+        )
+
+    def test_ticket_44_row_e_bare_ticket_shortlink_unaffected(self):
+        """Row E: the InterTrac ticket short link `prefix:#N`. Never
+        escaped (no CamelCase in it), and must not be rewritten either.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki("See auto_pm:#87 for details."),
+            "See auto_pm:#87 for details.",
+        )
+
+    def test_ticket_44_row_f_bare_prose_word_still_escaped(self):
+        """Row F, the over-correction pin: a CamelCase word standing
+        alone in prose is NOT a link and still needs its "!" -- that is
+        the whole point of the escape pass (ticket #27). A and F are
+        textually identical apart from the `realm:` prefix, so the skip
+        has to key on the realm, never on the word shape.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki("The RenderVerify rule applies."),
+            "The !RenderVerify rule applies.",
+        )
+        # A colon that isn't a Trac realm buys nothing: still prose.
+        self.assertEqual(
+            markdown_to_tracwiki("Note: RenderVerify applies."),
+            "Note: !RenderVerify applies.",
+        )
+        self.assertEqual(
+            markdown_to_tracwiki("Also Foo:RenderVerify here."),
+            "Also Foo:!RenderVerify here.",
+        )
+        # Realm names are case-sensitive in Trac; "Wiki:" is prose.
+        self.assertEqual(
+            markdown_to_tracwiki("Wiki:RenderVerify is prose"),
+            "Wiki:!RenderVerify is prose",
+        )
+
     def test_ticket_45_table_cell_code_span_with_pipes_converts(self):
         """A Markdown table cell containing a code span whose body is
         itself pipe-shaped (documenting TracWiki table syntax, e.g.
