@@ -129,8 +129,9 @@ def _check_missing_local_target(facts: PreviewFacts) -> list[dict]:
                 _warning(
                     "missing_local_target",
                     "error",
-                    f"Link target '{anchor.text}' does not exist on "
-                    "this instance.",
+                    f"Link labeled '{anchor.text}' targets "
+                    f"{anchor.href or '(unknown href)'}, which does not "
+                    "exist on this instance.",
                     {"href": anchor.href, "text": anchor.text},
                 )
             )
@@ -227,12 +228,21 @@ def _check_target_probes(
             continue
         outcome = probes.get(anchor.href)
         if outcome == MISSING:
+            # Prefer the resolved title Trac attaches to an InterTrac
+            # anchor (e.g. "wiki:Page in Automated Project Manager") over
+            # the anchor's visible text: for a `[target label]`-style
+            # link, `anchor.text` is the LABEL, not the target, and using
+            # it here reads as "'label' targets a page that does not
+            # exist" -- correct but confusing, since "label" isn't a
+            # page name at all (found via live smoke test, ticket #56).
+            target_desc = anchor.title or anchor.href or anchor.text
             warnings.append(
                 _warning(
                     "missing_cross_instance_target",
                     "error",
-                    f"'{anchor.text}' targets a page that does not "
-                    "exist on the remote instance.",
+                    f"Link labeled '{anchor.text}' targets "
+                    f"{target_desc}, which does not exist on the "
+                    "remote instance.",
                     {"href": anchor.href, "text": anchor.text},
                 )
             )
