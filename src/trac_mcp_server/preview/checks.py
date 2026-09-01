@@ -40,21 +40,58 @@ _TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{")
 # isn't exposed over XML-RPC, so this is deliberately narrow.
 _PREFIX_TICKET_RE = re.compile(r"\b[A-Za-z][\w.+-]*:#\d+\b")
 
+# Realms recognized by `_PREFIX_REALM_RE` specifically -- narrower than
+# TRACLINK_SCHEMES (which `_CODE_SPAN_LINK_RE` and `is_link_target` keep
+# using unchanged; reusing it here was expedient, not deliberate). The
+# full scheme list includes ordinary English words -- `search`, `comment`,
+# `export`, `diff`, `timeline`, `browser` -- that false-positive on
+# plausible prose (`svn:diff:123`, `see:search:Results`, `ref:comment:3`,
+# `build:export:Artifacts`, all measured warning against the live daemon,
+# ticket #57 comment 4). This list keeps every realm actually measured
+# resolving through a configured InterTrac prefix (`wiki`, `ticket`,
+# `report`, `changeset`, `source`, `attachment`, `milestone`), plus `log`,
+# kept deliberately in spite of the `git:log:HEAD`-shaped-prose residual.
+_INTERTRAC_REALMS = frozenset(
+    {
+        "wiki",
+        "ticket",
+        "report",
+        "changeset",
+        "source",
+        "attachment",
+        "milestone",
+        "log",
+    }
+)
+
 # A `prefix:realm:target` token -- the realm-form counterpart to
-# `_PREFIX_TICKET_RE` (ticket #57). Keyed on TRACLINK_SCHEMES (the same
-# known-realm allowlist `is_link_target` uses) rather than any colon-
-# shaped token, so prose like `TODO:fix:Later` or `note:see:Below` -- whose
-# middle segment isn't a real Trac realm -- never matches. A configured
-# prefix in this shape rendered an anchor for every realm tried, measured
-# against the live daemon (`auto_pm:ticket:87`, `auto_pm:report:1`,
-# `auto_pm:changeset:1`, `auto_pm:attachment:foo` all resolved, per the
-# ticket), so "realm-shaped token, no anchor" is exactly as sound an
-# inference here as it is for the ticket form.
+# `_PREFIX_TICKET_RE` (ticket #57). Keyed on `_INTERTRAC_REALMS` rather
+# than any colon-shaped token, so prose like `TODO:fix:Later` or
+# `note:see:Below` -- whose middle segment isn't a real Trac realm --
+# never matches. A configured prefix in this shape rendered an anchor for
+# every realm tried, measured against the live daemon (`auto_pm:ticket:87`,
+# `auto_pm:report:1`, `auto_pm:changeset:1`, `auto_pm:attachment:foo` all
+# resolved, per the ticket), so "realm-shaped token, no anchor" is exactly
+# as sound an inference here as it is for the ticket form.
 _PREFIX_REALM_RE = re.compile(
     r"\b[A-Za-z][\w.+-]*:(?:"
-    + "|".join(sorted(TRACLINK_SCHEMES))
+    + "|".join(sorted(_INTERTRAC_REALMS))
     + r"):\S+"
 )
+
+# Trailing punctuation a realm-form match's trailing `\S+` swallows when
+# the token closes a sentence or sits inside other punctuation -- Trac's
+# own renderer stops the link target at the punctuation, so leaving it on
+# the token defeats every comparison below and false-positives a
+# correctly configured link as unconfigured (ticket #57 comment 4, the
+# false-positive counterpart to the title-fallback defects).
+_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?'\"\)\]}]+\Z")
+
+# The zero-width glyph Trac injects ahead of an InterTrac anchor's visible
+# text (`<span class="icon">​</span>`) -- stripped before any exact
+# text comparison so the comparison can BE exact instead of a substring
+# check (ticket #57 comment 4, change 4).
+_ZERO_WIDTH_ICON = "\u200b"
 
 
 def _warning(
@@ -179,6 +216,17 @@ def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
     return warnings
 
 
+def _bracket_label(tracwiki: str, token_end: int) -> str | None:
+    """The label text of a `[token label]` construct whose token ends at
+    `token_end`, or None if `token_end` isn't inside a bracket at all.
+    Used only to scope the title fallback below to the shape it exists
+    for (row 3) -- see ticket #57 comment 4, change 2."""
+    close = tracwiki.find("]", token_end)
+    if close == -1:
+        return None
+    return tracwiki[token_end:close].strip()
+
+
 def _check_unconfigured_intertrac_prefix(
     tracwiki: str, facts: PreviewFacts
 ) -> list[dict]:
@@ -186,31 +234,58 @@ def _check_unconfigured_intertrac_prefix(
     the `[intertrac]` table renders as plain text, not a link (rows 16 and
     #57's realm-form fix) -- distinguished from an ordinary colon-shaped
     token that must stay silent (row 10) only by the token's shape itself;
-    see the module docstrings on `_PREFIX_TICKET_RE` and `_PREFIX_REALM_RE`."""
-    # Substring, not exact-equality: a resolved InterTrac anchor's text
-    # content includes a leading icon glyph Trac injects ahead of the
-    # visible link text (confirmed against the live daemon), so an exact
-    # `token == anchor.text` match would spuriously fire on row 6.
-    anchor_texts = [a.text for a in facts.anchors]
-    anchor_titles = [a.title for a in facts.anchors if a.title]
-    code_span_texts = [s for s in facts.code_spans]
+    see the module docstrings on `_PREFIX_TICKET_RE` and `_PREFIX_REALM_RE`.
+
+    Every comparison here is exact and scoped to the one token being
+    checked, not a document-global substring scan -- the original
+    implementation's substring checks let a typo'd prefix hide behind an
+    unrelated anchor elsewhere in the same document (ticket #57 comment
+    4's reopen: a typo paired with a correct reference to the SAME
+    target, or even to a target whose number is a superstring of the
+    typo's, went silent). Reusing a resolved anchor's rendered text/title
+    to recognize a configured prefix is still correct -- it just has to
+    be the anchor that resolved THIS token, not any anchor at all.
+    """
+    code_span_texts = list(facts.code_spans)
     warnings = []
     for pattern in (_PREFIX_TICKET_RE, _PREFIX_REALM_RE):
         for match in pattern.finditer(tracwiki):
-            token = match.group(0)
-            if any(token in t for t in anchor_texts) or any(
-                token in t for t in code_span_texts
-            ):
+            # Trac's own renderer stops a realm-form target at trailing
+            # punctuation (`auto_pm:wiki:Index.` renders as `auto_pm:
+            # wiki:Index` plus a literal period) -- match that by
+            # trimming before any comparison, or a correctly configured
+            # link at the end of a sentence false-positives (row 31).
+            token = _TRAILING_PUNCT_RE.sub("", match.group(0))
+            if any(token in t for t in code_span_texts):
                 continue
+
             # A bracketed link with a custom label (`[auto_pm:wiki:Page
-            # label]`, row 3) renders anchor text "label", not the token
-            # -- but Trac's title attribute always carries the resolved
-            # "<realm:target|#N> in <project>" form, so falling back to
-            # the token's suffix (past the prefix) against the title
-            # still recognizes a configured prefix in that shape.
-            suffix = token.split(":", 1)[1]
-            if any(suffix in t for t in anchor_titles):
+            # label]`, row 3) renders anchor text "label", not the token,
+            # so the ordinary exact-text check below can never recognize
+            # it -- only a bracketed occurrence needs this fallback; a
+            # bare token in prose never does (row 27/28 relied on this
+            # being applied too broadly).
+            bracketed = (
+                match.start() > 0 and tracwiki[match.start() - 1] == "["
+            )
+            if bracketed:
+                label = _bracket_label(tracwiki, match.end())
+                suffix = token.split(":", 1)[1]
+                title_prefix = f"{suffix} in "
+                configured = label is not None and any(
+                    a.text.replace(_ZERO_WIDTH_ICON, "") == label
+                    and a.title is not None
+                    and a.title.startswith(title_prefix)
+                    for a in facts.anchors
+                )
+            else:
+                configured = any(
+                    a.text.replace(_ZERO_WIDTH_ICON, "") == token
+                    for a in facts.anchors
+                )
+            if configured:
                 continue
+
             warnings.append(
                 _warning(
                     "unconfigured_intertrac_prefix",
