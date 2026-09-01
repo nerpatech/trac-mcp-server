@@ -1557,4 +1557,120 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 
 ---
 
+## ticket_render_check
+
+**Description:** Fetch a ticket's LIVE rendered page (description, and each comment by default) and return structured facts + warnings, replacing the curl+grep workaround `Rules/trac/RenderVerify` otherwise forces after every ticket write. Every outbound link grouped by realm (ticket/wiki/external) with its resolved target, which wiki links carry Trac's `missing` class (dead target), code block counts, and the same defect checks `convert_preview` runs (escaped link targets, a cross-instance reference stuck in a code span, an unconfigured InterTrac prefix, and -- render-only -- markup that survived as literal text instead of converting). Use this right after any `ticket_update`/`ticket_create` write to verify what Trac actually rendered, not just what was stored.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number to render-check (minimum: 1) |
+| `include_comments` | boolean | No | `true` | Also render-check every comment on the ticket, not just the description |
+| `comment` | integer | No | - | Check only this one comment number instead of every comment (still includes the description); ignored when `include_comments` is false |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
+| `include_html` | boolean | No | `false` | Include each section's rendered HTML in the response (capped at 20KB per section, with `html_truncated` set if cut) -- off by default, since the structured links/warnings are the point of this tool |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "ticket/57: 0 error(s), 1 warning(s) across 2 section(s).\n\n[description] No warnings.\n[comment 1] [warning] unconfigured_intertrac_prefix: 'zzznotaprefix:wiki:SomePage' does not match any configured InterTrac prefix -- it will render as plain text, not a link.\n\nLinks: 1 ticket, 2 wiki, 1 external."
+}
+```
+```json
+{
+  "target": "ticket/57",
+  "sections": [
+    {
+      "kind": "description",
+      "ref": null,
+      "source_paired": true,
+      "links": {
+        "ticket": [],
+        "wiki": [{"href": "http://.../wiki/Index", "resolved_url": null, "text": "Index", "classes": ["wiki"], "title": null, "missing": false}],
+        "external": [{"href": "http://.../intertrac/wiki%3AReference/trac/InterTrac", "resolved_url": "http://.../wiki/Reference/trac/InterTrac", "text": "...", "classes": ["ext-link"], "title": "wiki:Reference/trac/InterTrac in Automated Project Manager", "missing": false}],
+        "other": []
+      },
+      "code_blocks": [{"highlighted": true, "lines": 3}],
+      "warnings": [],
+      "html": null,
+      "html_truncated": false
+    }
+  ],
+  "stats": {
+    "sections": 2,
+    "anchors": 4,
+    "warnings": 1,
+    "errors": 0,
+    "targets_checked": 1,
+    "targets_skipped": 0
+  }
+}
+```
+
+Each anchor's `resolved_url` is populated only for a probed InterTrac wiki-dispatcher href (from `check_targets`'s live probe) -- it's the real page the dispatcher redirects to, not the `/intertrac/wiki%3A...` href itself. `missing: true` marks a link Trac itself rendered with the `missing` class (a dead local wiki target). Realm grouping comes from Trac's own rendered `class` attribute, never from parsing the href.
+
+**Error Responses:**
+
+- **not_found:** Ticket does not exist, or the requested comment number wasn't found
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Ticket #999 not found.\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+- **validation_error:** `ticket_id` missing
+
+**Example Call:**
+```json
+{
+  "name": "ticket_render_check",
+  "arguments": {
+    "ticket_id": 57,
+    "check_targets": true
+  }
+}
+```
+
+---
+
+## wiki_render_check
+
+**Description:** Fetch a wiki page's LIVE rendered HTML and return structured facts + warnings, replacing the curl+grep workaround `Rules/trac/RenderVerify` otherwise forces after every wiki write. Same link inventory, code block counts, and defect checks as `ticket_render_check`. Use this right after any `wiki_update`/`wiki_create` write.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to render-check |
+| `version` | integer | No | - | Specific version to check (defaults to latest) |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render |
+| `include_html` | boolean | No | `false` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut) |
+
+**Success Response:** same shape as `ticket_render_check`, with a single `"kind": "page"` section and `"target": "wiki/<page_name>"`.
+
+**Error Responses:**
+
+- **not_found:** Page does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Wiki page \"DoesNotExist\" does not exist\n\nAction: Use wiki_search to find available pages."
+  }
+  ```
+- **validation_error:** `page_name` missing
+
+**Example Call:**
+```json
+{
+  "name": "wiki_render_check",
+  "arguments": {
+    "page_name": "Rules/trac/RenderVerify"
+  }
+}
+```
+
+---
+
 [Back to Reference Overview](overview.md)

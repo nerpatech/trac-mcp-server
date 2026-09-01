@@ -1,0 +1,76 @@
+{
+  "row01_clean": {
+    "must_warn": [],
+    "note": "Baseline: must produce zero warnings (check_targets=False).",
+    "requires_check_targets": false,
+    "tracwiki": "This is a clean paragraph with a real [wiki:ProjectMilestones link] and nothing wrong with it."
+  },
+  "row02_missing_local_target": {
+    "must_warn": [
+      "missing_local_target"
+    ],
+    "note": "Dead local wiki target -- class='missing wiki'.",
+    "requires_check_targets": false,
+    "tracwiki": "[wiki:ThisPageDoesNotExist123456 broken link]"
+  },
+  "row03_missing_cross_instance_target": {
+    "must_warn": [
+      "missing_cross_instance_target"
+    ],
+    "note": "InterTrac wiki dispatcher to a nonexistent page -- renders identically to a live one; only a live probe (check_targets=True) tells them apart.",
+    "requires_check_targets": true,
+    "tracwiki": "auto_pm:wiki:ThisDefinitelyDoesNotExist999888"
+  },
+  "row04_bare_ticket_ref": {
+    "must_warn": [
+      "bare_ticket_ref"
+    ],
+    "note": "Bare #N auto-links to this instance's own ticket.",
+    "requires_check_targets": false,
+    "tracwiki": "See #57 for details."
+  },
+  "row05_link_ref_in_code_span": {
+    "must_warn": [
+      "link_ref_in_code_span"
+    ],
+    "note": "TracLink-shaped reference backticked into a code span.",
+    "requires_check_targets": false,
+    "tracwiki": "see `auto_pm:wiki:Reference/trac/InterTrac` here"
+  },
+  "row06_unconfigured_intertrac_prefix": {
+    "must_warn": [
+      "unconfigured_intertrac_prefix"
+    ],
+    "note": "Prefix not in the [intertrac] table -- renders as plain text.",
+    "requires_check_targets": false,
+    "tracwiki": "zzznotaprefix:wiki:SomePage"
+  },
+  "row07_literal_markup_table": {
+    "must_warn": [
+      "literal_markup_in_render"
+    ],
+    "note": "TracWiki table syntax that isn't part of a real table -- survives as literal text in the render.",
+    "requires_check_targets": false,
+    "tracwiki": "some prose |=h=| more prose"
+  },
+  "row08_literal_markup_in_code_block_pin": {
+    "must_warn": [],
+    "note": "Over-correction pin (ticket #55): the SAME literal markup text, but inside a real code block documenting the syntax -- must stay silent, since prose_text excludes <pre> subtrees.",
+    "requires_check_targets": false,
+    "tracwiki": "{{{\nsome prose |=h=| more prose\n}}}"
+  },
+  "row09_code_blocks_mixed": {
+    "must_warn": [],
+    "note": "One highlighted block (2 lines), one plain block (2 lines) -- code_blocks extraction.",
+    "requires_check_targets": false,
+    "tracwiki": "{{{#!python\ndef f():\n    pass\n}}}\n\n{{{\nplain block\nline two\n}}}"
+  },
+  "row10_stray_block_delimiter": {
+    "must_warn": [
+      "literal_markup_in_render"
+    ],
+    "note": "Stray/unclosed {{{ delimiter survives as literal text.",
+    "requires_check_targets": false,
+    "tracwiki": "some text {{{ that never closes"
+  }
+}

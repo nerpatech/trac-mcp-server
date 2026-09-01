@@ -368,14 +368,16 @@ def _check_unconfigured_intertrac_prefix(
 
 
 def _check_target_probes(
-    facts: PreviewFacts, probes: dict[str, str], check_targets: bool
+    facts: PreviewFacts, probes: dict[str, dict], check_targets: bool
 ) -> list[dict]:
     """Live-probe results for cross-instance InterTrac wiki targets
     (row 15), plus an explicit note whenever a probeable target existed
     but wasn't actually checked -- capped, disabled, or network-failed
     must never look like a clean pass."""
-    probeable_hrefs = [
-        a.href for a in facts.anchors if is_probeable_wiki_href(a.href)
+    probeable_hrefs: list[str] = [
+        a.href
+        for a in facts.anchors
+        if a.href and is_probeable_wiki_href(a.href)
     ]
     if not probeable_hrefs:
         return []
@@ -394,12 +396,13 @@ def _check_target_probes(
         )
         return warnings
 
-    skipped_or_failed = []
+    skipped_or_failed: list[str] = []
     for anchor in facts.anchors:
-        if not is_probeable_wiki_href(anchor.href):
+        if not anchor.href or not is_probeable_wiki_href(anchor.href):
             continue
-        outcome = probes.get(anchor.href)
-        if outcome == MISSING:
+        outcome = probes.get(anchor.href, {})
+        status = outcome.get("status")
+        if status == MISSING:
             # Prefer the resolved title Trac attaches to an InterTrac
             # anchor (e.g. "wiki:Page in Automated Project Manager") over
             # the anchor's visible text: for a `[target label]`-style
@@ -418,7 +421,7 @@ def _check_target_probes(
                     {"href": anchor.href, "text": anchor.text},
                 )
             )
-        elif outcome in (SKIPPED, ERROR) or outcome is None:
+        elif status in (SKIPPED, ERROR) or status is None:
             skipped_or_failed.append(anchor.href)
 
     if skipped_or_failed:
@@ -437,16 +440,22 @@ def _check_target_probes(
 
 
 def build_warnings(
-    markdown_source: str,
+    markdown_source: str | None,
     tracwiki: str,
     facts: PreviewFacts,
-    probes: dict[str, str],
+    probes: dict[str, dict],
     check_targets: bool,
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
     Args:
-        markdown_source: The caller's original Markdown input.
+        markdown_source: The caller's original Markdown input, or None
+            when there is no Markdown source to check against -- the
+            verify path (ticket #55) checks a live render, which has no
+            corresponding Markdown candidate; ``_check_tracwiki_markup_
+            in_markdown`` is skipped in that case, since it is the only
+            rule keyed off Markdown source rather than ``facts``/
+            ``tracwiki``.
         tracwiki: The converted TracWiki text (what would be stored).
         facts: Extracted from the rendered HTML (what Trac would display).
         probes: Live-probe results for cross-instance targets, from
@@ -462,7 +471,10 @@ def build_warnings(
     warnings: list[dict] = []
     warnings.extend(_check_escaped_link_targets(facts))
     warnings.extend(_check_link_ref_in_code_span(facts))
-    warnings.extend(_check_tracwiki_markup_in_markdown(markdown_source))
+    if markdown_source is not None:
+        warnings.extend(
+            _check_tracwiki_markup_in_markdown(markdown_source)
+        )
     warnings.extend(_check_missing_local_target(facts))
     warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(

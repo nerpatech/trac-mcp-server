@@ -12,6 +12,7 @@ from .errors import build_error_response
 from .instances import INSTANCE_SPECS, INSTANCE_TOOLS
 from .milestone import MILESTONE_SPECS, MILESTONE_TOOLS
 from .registry import ToolRegistry, ToolSpec, load_permissions_file
+from .render_check import RENDER_CHECK_SPECS, RENDER_CHECK_TOOLS
 from .system import SYSTEM_SPECS, SYSTEM_TOOLS
 from .ticket_admin import TICKET_ADMIN_SPECS, TICKET_ADMIN_TOOLS
 from .ticket_attachment import (
@@ -60,6 +61,7 @@ ALL_SPECS: list[ToolSpec] = (
     + TICKET_ADMIN_SPECS
     + INSTANCE_SPECS
     + CONVERT_PREVIEW_SPECS
+    + RENDER_CHECK_SPECS
 )
 
 __all__ = [
@@ -85,6 +87,7 @@ __all__ = [
     "TICKET_ADMIN_SPECS",
     "INSTANCE_SPECS",
     "CONVERT_PREVIEW_SPECS",
+    "RENDER_CHECK_SPECS",
     # Tool lists (backward compat)
     "TICKET_TOOLS",
     "TICKET_READ_TOOLS",
@@ -101,4 +104,5 @@ __all__ = [
     "SYSTEM_TOOLS",
     "INSTANCE_TOOLS",
     "CONVERT_PREVIEW_TOOLS",
+    "RENDER_CHECK_TOOLS",
 ]

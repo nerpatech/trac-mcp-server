@@ -37,12 +37,16 @@ MISSING_HREF = (
 )
 
 
-def _mock_client(responses: dict[str, tuple[int, str]]) -> MagicMock:
+def _mock_client(
+    responses: dict[str, tuple[int, str]],
+    resolved: dict[str, str] | None = None,
+) -> MagicMock:
     def fake_get(url, timeout=None, allow_redirects=None):
         status, body = responses[url]
         resp = MagicMock()
         resp.status_code = status
         resp.text = body
+        resp.url = (resolved or {}).get(url, url)
         return resp
 
     client = MagicMock()
@@ -73,7 +77,7 @@ class TestProbeTargets(unittest.TestCase):
             {EXISTING_HREF: (200, EXISTING_PAGE_STUB)}
         )
         results = probe_targets(client, [EXISTING_HREF])
-        self.assertEqual(results[EXISTING_HREF], EXISTS)
+        self.assertEqual(results[EXISTING_HREF]["status"], EXISTS)
 
     def test_missing_page_classified_missing(self):
         """The calibration case the ticket calls out: HTTP 200 for a
@@ -81,18 +85,20 @@ class TestProbeTargets(unittest.TestCase):
         this page' stub in the body."""
         client = _mock_client({MISSING_HREF: (200, MISSING_PAGE_STUB)})
         results = probe_targets(client, [MISSING_HREF])
-        self.assertEqual(results[MISSING_HREF], MISSING)
+        self.assertEqual(results[MISSING_HREF]["status"], MISSING)
 
     def test_non_200_classified_error(self):
         client = _mock_client({EXISTING_HREF: (500, "boom")})
         results = probe_targets(client, [EXISTING_HREF])
-        self.assertEqual(results[EXISTING_HREF], ERROR)
+        self.assertEqual(results[EXISTING_HREF]["status"], ERROR)
+        self.assertIsNone(results[EXISTING_HREF]["resolved_url"])
 
     def test_request_exception_classified_error(self):
         client = MagicMock()
         client.session.get.side_effect = OSError("connection refused")
         results = probe_targets(client, [EXISTING_HREF])
-        self.assertEqual(results[EXISTING_HREF], ERROR)
+        self.assertEqual(results[EXISTING_HREF]["status"], ERROR)
+        self.assertIsNone(results[EXISTING_HREF]["resolved_url"])
 
     def test_duplicates_deduplicated(self):
         client = _mock_client(
@@ -102,7 +108,31 @@ class TestProbeTargets(unittest.TestCase):
             client, [EXISTING_HREF, EXISTING_HREF, EXISTING_HREF]
         )
         self.assertEqual(client.session.get.call_count, 1)
-        self.assertEqual(results, {EXISTING_HREF: EXISTS})
+        self.assertEqual(
+            results,
+            {
+                EXISTING_HREF: {
+                    "status": EXISTS,
+                    "resolved_url": EXISTING_HREF,
+                }
+            },
+        )
+
+    def test_resolved_url_reports_redirect_target(self):
+        """The `/intertrac/%23N`-shaped dispatcher trap: the caller must
+        be able to report the target it was actually redirected to, not
+        just the dispatcher href it started from."""
+        real_target = (
+            "http://192.168.10.4:8000/auto_pm/wiki/RenderVerify"
+        )
+        client = _mock_client(
+            {EXISTING_HREF: (200, EXISTING_PAGE_STUB)},
+            resolved={EXISTING_HREF: real_target},
+        )
+        results = probe_targets(client, [EXISTING_HREF])
+        self.assertEqual(
+            results[EXISTING_HREF]["resolved_url"], real_target
+        )
 
     def test_non_probeable_hrefs_are_dropped(self):
         client = _mock_client({})
@@ -119,9 +149,9 @@ class TestProbeTargets(unittest.TestCase):
         responses = {h: (200, EXISTING_PAGE_STUB) for h in hrefs}
         client = _mock_client(responses)
         results = probe_targets(client, hrefs, cap=2)
-        outcomes = list(results.values())
-        self.assertEqual(outcomes.count(EXISTS), 2)
-        self.assertEqual(outcomes.count(SKIPPED), 3)
+        statuses = [v["status"] for v in results.values()]
+        self.assertEqual(statuses.count(EXISTS), 2)
+        self.assertEqual(statuses.count(SKIPPED), 3)
         self.assertEqual(client.session.get.call_count, 2)
 
 

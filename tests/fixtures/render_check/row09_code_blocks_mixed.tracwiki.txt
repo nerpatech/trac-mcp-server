@@ -1,0 +1,9 @@
+{{{#!python
+def f():
+    pass
+}}}
+
+{{{
+plain block
+line two
+}}}
