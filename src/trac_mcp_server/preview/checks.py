@@ -79,14 +79,6 @@ _PREFIX_REALM_RE = re.compile(
     + r"):\S+"
 )
 
-# Trailing punctuation a realm-form match's trailing `\S+` swallows when
-# the token closes a sentence or sits inside other punctuation -- Trac's
-# own renderer stops the link target at the punctuation, so leaving it on
-# the token defeats every comparison below and false-positives a
-# correctly configured link as unconfigured (ticket #57 comment 4, the
-# false-positive counterpart to the title-fallback defects).
-_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?'\"\)\]}]+\Z")
-
 # The zero-width glyph Trac injects ahead of an InterTrac anchor's visible
 # text (`<span class="icon">​</span>`) -- stripped before any exact
 # text comparison so the comparison can BE exact instead of a substring
@@ -216,11 +208,68 @@ def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
     return warnings
 
 
-def _bracket_label(tracwiki: str, token_end: int) -> str | None:
+def _prefix_boundary_match(raw: str, candidate: str) -> bool:
+    """True if `candidate` is `raw` verbatim, or `raw` with trailing
+    punctuation the token regex's greedy `\\S+` glued on -- i.e.
+    `candidate` is a prefix of `raw` and whatever follows isn't a
+    continuation of the same identifier. `candidate` comes from Trac's
+    OWN render (an anchor's text, or the resolved-form prefix of its
+    title) -- using that as the true boundary, instead of guessing it
+    from a punctuation character class, is what makes this robust to
+    trailing backtick/hyphen/angle-bracket/etc without enumerating them
+    (ticket #57 comment 6: the class can never be complete; comment 7's
+    fix). Rejects a genuinely different, longer token (more digits, more
+    path) rather than just anything that happens to start the same way
+    -- comment 8's `tail` check is what makes this a boundary match
+    rather than a bare prefix check."""
+    if not raw.startswith(candidate):
+        return False
+    if len(raw) == len(candidate):
+        return True
+    tail = raw[len(candidate)]
+    return not (tail.isalnum() or tail == "_")
+
+
+def _code_span_contains(raw: str, code_span_text: str) -> bool:
+    """True if `code_span_text` contains `raw`, or contains `raw` with
+    trailing punctuation stripped one character at a time (the same
+    greedy-`\\S+`-glued-on garbage `_prefix_boundary_match` handles for
+    anchors). Containment, not a prefix check -- a code span legitimately
+    contains MORE than the token (surrounding prose, e.g. `` `see
+    auto_pm:wiki:Index here` ``), which a naive `_prefix_boundary_match`
+    call would have broken (comment 8 caught this: `_prefix_boundary_match`
+    asks whether `code_span_text` is a prefix of `raw`, backwards for
+    this case)."""
+    candidate = raw
+    while candidate:
+        if candidate in code_span_text:
+            return True
+        tail = candidate[-1]
+        if tail.isalnum() or tail == "_":
+            return False
+        candidate = candidate[:-1]
+    return False
+
+
+def _bracket_label(
+    tracwiki: str, raw: str, token_end: int
+) -> str | None:
     """The label text of a `[token label]` construct whose token ends at
     `token_end`, or None if `token_end` isn't inside a bracket at all.
-    Used only to scope the title fallback below to the shape it exists
-    for (row 3) -- see ticket #57 comment 4, change 2."""
+
+    Handles the no-label shape (`[token]`, nothing between the target and
+    the closing bracket) as its own case: the realm regex's greedy `\\S+`
+    swallows the `]` into `raw` itself when there's no space before it, so
+    `token_end` lands PAST the bracket and a forward search for `]` finds
+    the wrong one (or none) -- this warned a correctly configured,
+    label-less bracket as unconfigured until ticket #57 comment 8 caught
+    it live. Trac renders a label-less bracket's anchor text as the bare
+    resolved suffix (`wiki:Index`, not `auto_pm:wiki:Index`), which the
+    caller already computes separately -- signalled here by returning ""
+    rather than searching further, so the caller knows to compare against
+    the suffix instead of a real label."""
+    if raw.endswith("]"):
+        return ""
     close = tracwiki.find("]", token_end)
     if close == -1:
         return None
@@ -236,52 +285,72 @@ def _check_unconfigured_intertrac_prefix(
     token that must stay silent (row 10) only by the token's shape itself;
     see the module docstrings on `_PREFIX_TICKET_RE` and `_PREFIX_REALM_RE`.
 
-    Every comparison here is exact and scoped to the one token being
-    checked, not a document-global substring scan -- the original
-    implementation's substring checks let a typo'd prefix hide behind an
-    unrelated anchor elsewhere in the same document (ticket #57 comment
-    4's reopen: a typo paired with a correct reference to the SAME
-    target, or even to a target whose number is a superstring of the
-    typo's, went silent). Reusing a resolved anchor's rendered text/title
-    to recognize a configured prefix is still correct -- it just has to
-    be the anchor that resolved THIS token, not any anchor at all.
+    Every comparison here is scoped to the one token being checked, not a
+    document-global scan -- the original implementation's substring
+    checks let a typo'd prefix hide behind an unrelated anchor elsewhere
+    in the same document (comment 4's reopen). And every comparison uses
+    Trac's own rendered output (an anchor's text/title, a code span's
+    content) as the ground truth for where a token actually ends, rather
+    than guessing the boundary from a punctuation character class first
+    and then comparing guesses (comment 6's reopen: the class can never
+    enumerate every character Trac's tokenizer might stop at; comment 7/8
+    settled on `_prefix_boundary_match`/`_code_span_contains` instead).
+
+    Known accepted residual (comment 8): two bracketed occurrences with
+    the SAME label and the SAME resolved target -- e.g. `[auto-pm:#87
+    see]` and `[auto_pm:#87 see]` -- are textually indistinguishable from
+    each other, so a typo'd one there stays silent. Resolving that needs
+    actual source-position data this function doesn't have; deferred
+    rather than risk a heuristic that could misattribute the warning to
+    the GOOD occurrence instead (which order-based tie-breaking was
+    checked and found to do here, since the anchor is the second
+    occurrence's while the first is the dead one).
     """
     code_span_texts = list(facts.code_spans)
+    anchors = facts.anchors
     warnings = []
     for pattern in (_PREFIX_TICKET_RE, _PREFIX_REALM_RE):
         for match in pattern.finditer(tracwiki):
-            # Trac's own renderer stops a realm-form target at trailing
-            # punctuation (`auto_pm:wiki:Index.` renders as `auto_pm:
-            # wiki:Index` plus a literal period) -- match that by
-            # trimming before any comparison, or a correctly configured
-            # link at the end of a sentence false-positives (row 31).
-            token = _TRAILING_PUNCT_RE.sub("", match.group(0))
-            if any(token in t for t in code_span_texts):
+            raw = match.group(0)
+
+            if any(
+                _code_span_contains(raw, s) for s in code_span_texts
+            ):
                 continue
 
-            # A bracketed link with a custom label (`[auto_pm:wiki:Page
-            # label]`, row 3) renders anchor text "label", not the token,
-            # so the ordinary exact-text check below can never recognize
-            # it -- only a bracketed occurrence needs this fallback; a
-            # bare token in prose never does (row 27/28 relied on this
-            # being applied too broadly).
             bracketed = (
                 match.start() > 0 and tracwiki[match.start() - 1] == "["
             )
             if bracketed:
-                label = _bracket_label(tracwiki, match.end())
-                suffix = token.split(":", 1)[1]
-                title_prefix = f"{suffix} in "
-                configured = label is not None and any(
-                    a.text.replace(_ZERO_WIDTH_ICON, "") == label
+                label = _bracket_label(tracwiki, raw, match.end())
+                if label == "":
+                    # No custom label. For the realm form, `raw` includes
+                    # the closing `]` the greedy regex swallowed -- drop
+                    # it before deriving the suffix. The ticket form's
+                    # `\b` never swallows it (`_bracket_label` found ""
+                    # via the ordinary forward search instead), so only
+                    # strip when it's actually there.
+                    if raw.endswith("]"):
+                        raw = raw[:-1]
+                    expected_text = raw.split(":", 1)[1]
+                else:
+                    expected_text = label
+                suffix = raw.split(":", 1)[1]
+                configured = expected_text is not None and any(
+                    a.text.replace(_ZERO_WIDTH_ICON, "")
+                    == expected_text
                     and a.title is not None
-                    and a.title.startswith(title_prefix)
-                    for a in facts.anchors
+                    and _prefix_boundary_match(
+                        suffix, a.title.split(" in ", 1)[0]
+                    )
+                    for a in anchors
                 )
             else:
                 configured = any(
-                    a.text.replace(_ZERO_WIDTH_ICON, "") == token
-                    for a in facts.anchors
+                    _prefix_boundary_match(
+                        raw, a.text.replace(_ZERO_WIDTH_ICON, "")
+                    )
+                    for a in anchors
                 )
             if configured:
                 continue
@@ -290,9 +359,9 @@ def _check_unconfigured_intertrac_prefix(
                 _warning(
                     "unconfigured_intertrac_prefix",
                     "warning",
-                    f"'{token}' does not match any configured InterTrac "
+                    f"'{raw}' does not match any configured InterTrac "
                     "prefix -- it will render as plain text, not a link.",
-                    {"token": token},
+                    {"token": raw},
                 )
             )
     return warnings

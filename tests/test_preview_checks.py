@@ -79,6 +79,37 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # narrowed, check-local `_INTERTRAC_REALMS` excludes them. `log` stays
 # in the narrowed list per go-ahead, so `git:log:HEAD`-shaped prose is
 # accepted as a residual false positive rather than added as a row.
+#
+# Suite 6 (rows 36-48, ticket #57 comment 6/7/8): round 2's fix bounded a
+# token by trimming a punctuation character class off it -- comment 6
+# showed that class can never be complete (backtick, hyphen, `>` all
+# trail a CONFIGURED link's true boundary and aren't in it), and comment
+# 8 found the replacement mechanism (`_prefix_boundary_match`/
+# `_code_span_contains`, keyed on Trac's OWN rendered text/title/code-span
+# content instead of a guessed class) still had a direction bug for code
+# spans and missed the label-less bracket shape (`[token]`, no space
+# before `]`) for both forms. Rows 36/37 are the two reported trailing-
+# character defects (hyphen, `>`); row 42 is the must-stay-silent
+# regression they were checked against (`/`, which Trac itself includes
+# in the target). Rows 38/39 are comment 8's code-span direction-bug
+# regression guards -- a code span containing MORE than the token (prose
+# around it) must stay silent, which a naive prefix check on the whole
+# span would have broken. Row 46 is the ticket-form counterpart,
+# unaffected either way (its `\b` boundary never swallows trailing
+# characters) but covered here since nothing exercised a ticket ref
+# inside a code span before. Rows 40/41 are the no-label-bracket defect
+# comment 8 found live for both forms -- Trac renders the bare resolved
+# suffix as the anchor text when a bracket carries no custom label, which
+# neither round 1 nor round 2's bracket handling recognized. Rows 43-45
+# round out comment 6/7's punctuation-plus-typo regression coverage
+# specifically for realm-form (43, 45) and ticket-form (44), largely
+# redundant with rows 22-30 but exercising `)` and a realm-form `.`
+# together, which those rows didn't. Row 47 (bold-wrapped) and row 48
+# (a same-label bracketed pair) are handled as standalone tests below,
+# not table rows -- row 47 also legitimately trips
+# `tracwiki_markup_in_markdown`, and row 48 documents a known, accepted
+# residual rather than an assertion that it now passes; see
+# `_check_unconfigured_intertrac_prefix`'s docstring.
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -97,6 +128,14 @@ SILENT_ROWS = [
     "row33_prose_see_search",
     "row34_prose_ref_comment",
     "row35_prose_build_export",
+    "row36_realm_trailing_hyphen",
+    "row37_realm_trailing_angle_bracket",
+    "row38_code_span_multiword_prose",
+    "row39_code_span_multiword_command",
+    "row40_bracket_no_label_realm",
+    "row41_bracket_no_label_ticket",
+    "row42_realm_trailing_slash",
+    "row46_ticket_code_span",
 ]
 
 WARNING_ROWS = [
@@ -148,6 +187,18 @@ WARNING_ROWS = [
     ),
     (
         "row30_bracketed_typo_and_good_pair",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row43_typo_realm_trailing_period",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row44_typo_ticket_trailing_period",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row45_typo_realm_parens",
         "unconfigured_intertrac_prefix",
     ),
 ]
@@ -221,6 +272,76 @@ def test_row1_post_fix_does_not_warn_escaped_link_target():
     assert "escaped_link_target" not in codes
 
 
+def test_row11_code_span_does_not_also_warn_unconfigured_prefix():
+    """A backticked, CONFIGURED InterTrac reference must trip only
+    `link_ref_in_code_span`, never `unconfigured_intertrac_prefix` too --
+    the defect ticket #57 comment 6 found live: the realm regex's greedy
+    `\\S+` swallows the closing backtick, and the old trim class didn't
+    include it, so the code-span suppression's substring check missed and
+    a correctly-configured reference (`auto_pm`) got double-warned as if
+    its prefix were unconfigured. The existing warning-rows test only
+    ever checked `link_ref_in_code_span`'s presence, never this code's
+    absence -- which is exactly how the defect shipped unnoticed."""
+    markdown_source, tracwiki, facts = _load(
+        "row11_code_span_intertrac"
+    )
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "unconfigured_intertrac_prefix" not in codes, codes
+
+
+def test_bold_wrapped_realm_link_stays_silent_on_prefix_check():
+    """`'''auto_pm:wiki:Index'''` legitimately trips
+    `tracwiki_markup_in_markdown` (TracWiki bold syntax typed into a
+    Markdown candidate) -- that's an existing, correct warning, so this
+    row can't go in SILENT_ROWS (which requires full silence). What it
+    must NOT also do is warn `unconfigured_intertrac_prefix`: the link is
+    configured and Trac renders it correctly (wrapped in `<strong>`), and
+    the apostrophes trailing the token are exactly the kind of
+    non-word-character boundary `_prefix_boundary_match` is meant to
+    tolerate."""
+    markdown_source, tracwiki, facts = _load("row47_bold_realm")
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "tracwiki_markup_in_markdown" in codes
+    assert "unconfigured_intertrac_prefix" not in codes, codes
+
+
+def test_same_label_bracket_pair_is_a_known_accepted_residual():
+    """`[auto-pm:#87 see]` (typo'd prefix) and `[auto_pm:#87 see]`
+    (correct) share both their label text AND their resolved target, so
+    nothing in the rendered output distinguishes which occurrence
+    produced the one anchor Trac emits. This stays SILENT -- the typo
+    goes unreported -- and that is accepted, not fixed: ticket #57
+    comment 8 checked whether a source-order tie-break could resolve it
+    and found it would attribute the warning to the WRONG (good)
+    occurrence here, since the anchor is the second occurrence's while
+    the first is the dead one. Resolving this for real needs source-
+    position data `PreviewFacts` doesn't carry. This test exists so a
+    future change to this function has to notice it's touching the
+    known-open case, not silently start passing or failing it."""
+    markdown_source, tracwiki, facts = _load(
+        "row48_bracket_same_label_pair"
+    )
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [
+        w["code"]
+        for w in warnings
+        if w["code"] != "target_check_skipped"
+    ]
+    assert codes == [], (
+        f"expected the documented residual (silent); got {codes} -- "
+        "if this now warns, the residual may be fixed: update this "
+        "test and the docstring on _check_unconfigured_intertrac_prefix"
+    )
+
+
 def test_suite_balance_is_roughly_even():
     """Per the ticket's coverage note: silent and warning rows must be
     roughly balanced, or a checker that warns about everything (or never
@@ -229,12 +350,13 @@ def test_suite_balance_is_roughly_even():
     silent_count = len(SILENT_ROWS)
     # Suite 3 also names row 15 (live-probe, covered by a separate live
     # test rather than this static list), bringing the full ticket table
-    # to 17 silent / 18 warning once it's counted (ticket #57 moved row
-    # 10 into the warning half and added rows 17-21, then comment 4's
-    # reopen added rows 22-35).
+    # to 25 silent / 21 warning once it's counted (ticket #57 moved row
+    # 10 into the warning half and added rows 17-21, comment 4's reopen
+    # added rows 22-35, and comment 6/7/8's reopen added rows 36-45; rows
+    # 47/48 are standalone tests, not counted here -- see their comments).
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 17
-    assert warning_count == 18
+    assert silent_count == 25
+    assert warning_count == 21
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
