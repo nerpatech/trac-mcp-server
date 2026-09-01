@@ -980,6 +980,27 @@ class TracClient:
             )
         return result
 
+    def wiki_to_html(self, text: str) -> str:
+        """
+        Render arbitrary TracWiki markup to HTML server-side, with no write.
+
+        Wraps ``wiki.wikiToHtml``. Unlike ``get_wiki_page_html``, this does
+        not read (or require) an existing page -- it renders ``text`` in
+        isolation, which is what makes ``convert_preview`` possible without
+        a scratch-page round trip (ticket #56).
+
+        Args:
+            text: TracWiki markup to render.
+
+        Returns:
+            Rendered HTML as string.
+
+        Raises:
+            xmlrpc.client.Fault: If the server rejects the call (e.g.
+                permissions denied).
+        """
+        return self._rpc_request("wiki", "wikiToHtml", text)
+
     def delete_wiki_page(self, page_name: str) -> bool:
         """
         Delete a wiki page.

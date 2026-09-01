@@ -1,0 +1,70 @@
+{
+  "row01_intertrac_wiki": {
+    "markdown_input": "auto_pm:wiki:Rules/trac/RenderVerify",
+    "tracwiki": "auto_pm:wiki:Rules/trac/RenderVerify"
+  },
+  "row01_pre_fix": {
+    "markdown_input": null,
+    "tracwiki": "auto_pm:wiki:Rules/trac/!RenderVerify"
+  },
+  "row02_intertrac_wiki_bcs": {
+    "markdown_input": "bcs:wiki:b-node/bench/BoardIdentity",
+    "tracwiki": "bcs:wiki:b-node/bench/BoardIdentity"
+  },
+  "row03_bracket_intertrac": {
+    "markdown_input": "[auto_pm:wiki:Page label]",
+    "tracwiki": "[auto_pm:wiki:Page label]"
+  },
+  "row04_md_link_absolute": {
+    "markdown_input": "[label](http://192.168.10.4:8000/trac_mcp_server/wiki/Page)",
+    "tracwiki": "[http://192.168.10.4:8000/trac_mcp_server/wiki/Page label]"
+  },
+  "row05_intertrac_index": {
+    "markdown_input": "auto_pm:wiki:Index",
+    "tracwiki": "auto_pm:wiki:Index"
+  },
+  "row06_intertrac_ticket": {
+    "markdown_input": "auto_pm:#87",
+    "tracwiki": "auto_pm:#87"
+  },
+  "row07_prose_camelcase": {
+    "markdown_input": "RenderVerify",
+    "tracwiki": "!RenderVerify"
+  },
+  "row08_prose_after_colon": {
+    "markdown_input": "Note: SomeCamelWord follows a colon",
+    "tracwiki": "Note: !SomeCamelWord follows a colon"
+  },
+  "row09_prose_after_time": {
+    "markdown_input": "at 12:30 MeetingNotes were taken",
+    "tracwiki": "at 12:30 !MeetingNotes were taken"
+  },
+  "row10_unknown_prefix_wiki": {
+    "markdown_input": "zzznotaprefix:wiki:SomePageName",
+    "tracwiki": "zzznotaprefix:wiki:SomePageName"
+  },
+  "row11_code_span_intertrac": {
+    "markdown_input": "`auto_pm:wiki:Reference/trac/InterTrac` in prose",
+    "tracwiki": "`auto_pm:wiki:Reference/trac/InterTrac` in prose"
+  },
+  "row12_tracwiki_table_in_md": {
+    "markdown_input": "|=header=|= col=|",
+    "tracwiki": "|=header=|= col=|"
+  },
+  "row13_hand_relative_url": {
+    "markdown_input": "[Page](../wiki/Page)",
+    "tracwiki": "[wiki:../wiki/Page Page]"
+  },
+  "row14_bare_ticket_ref": {
+    "markdown_input": "#3",
+    "tracwiki": "#3"
+  },
+  "row15_missing_cross_instance": {
+    "markdown_input": "auto_pm:wiki:Rules/trac/DoesNotExist",
+    "tracwiki": "auto_pm:wiki:Rules/trac/DoesNotExist"
+  },
+  "row16_unconfigured_prefix_ticket": {
+    "markdown_input": "notaprefix:#7",
+    "tracwiki": "notaprefix:#7"
+  }
+}
