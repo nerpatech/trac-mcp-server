@@ -75,6 +75,42 @@ _CAMELCASE_ESCAPE_RE = re.compile(r"!(?=[A-Z][a-z]+(?:[A-Z][a-z]*)+\b)")
 # word Trac's WikiCamelCase grammar should ever see (ticket #44).
 _URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?)://\S+", re.IGNORECASE)
 
+# A bare, unbracketed TracLink sitting directly in prose -- the form
+# `Rules/trac/PreferInterTracLinks` on the auto_pm store makes the
+# *preferred* way to write a cross-instance reference, e.g.
+# `auto_pm:wiki:Rules/trac/RenderVerify` or plain `wiki:SomePage`. Trac
+# auto-links these without any bracket syntax, so a WikiPageNames-shaped
+# final segment escaped here becomes part of the address and resolves to
+# a page that does not exist -- the same destructive case as the bare-URL
+# and single-bracket forms above, reached through the one form neither of
+# them covers (ticket #44, reopened).
+#
+# Anchored on a *known* Trac realm (`TRACLINK_SCHEMES`) rather than on
+# "anything colon-shaped", with the InterTrac prefix as the optional
+# leading segment. That is what keeps the skip from swallowing ordinary
+# prose: a CamelCase word must still be escaped when it stands alone
+# (`RenderVerify`) or trails a non-realm colon, and only `realm:target` /
+# `prefix:realm:target` buys its way out. The two-segment InterTrac page
+# form (`prefix:PageName`, no realm) is deliberately NOT matched -- it is
+# textually indistinguishable from prose such as `Note:SomeThing`, and
+# the store's own rule requires the explicit `wiki:` realm for a wiki
+# page anyway.
+_BARE_TRACLINK_RE = re.compile(
+    r"\b(?:[A-Za-z][\w.+-]*:)?"
+    rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):"
+    r"[^\s\]]+"
+)
+
+# Every span `text()` must hand through unescaped, in one pass so the
+# scan stays single-shot and the two forms can't overlap-clobber each
+# other. The URL branch keeps its own scoped `(?i:...)` -- schemes are
+# case-insensitive, Trac's realm names are not, and a global IGNORECASE
+# here would quietly let `Wiki:SomePage` (prose, not a link) out of the
+# escape pass.
+_ESCAPE_SKIP_RE = re.compile(
+    f"(?i:{_URL_IN_TEXT_RE.pattern})|{_BARE_TRACLINK_RE.pattern}"
+)
+
 # An unresolved single-bracket TracWiki/InterTrac link typed directly in
 # Markdown source: `[scheme:target label]`, `[prefix:realm:target label]`,
 # `[url]`, `[url label]`. Not valid Markdown link syntax (no trailing
@@ -291,14 +327,21 @@ class TracWikiRenderer(mistune.BaseRenderer):
         that happens to be CamelCase-shaped is never escaped inside its
         brackets.
 
-        A bare URL DOES still reach this method as literal text -- it
-        can't be pre-stashed the way `[[...]]` is without risking a real
-        Markdown link's own `(url)` destination, so it's located and
-        skipped inline instead (ticket #44); see `_URL_IN_TEXT_RE`. The
-        single-bracket TracWiki/InterTrac link form is handled earlier,
-        by pre-stashing (`_SINGLE_BRACKET_LINK_RE`) rather than here --
-        mistune splits an unresolved "[...]" into separate text() calls
-        (the "[" on its own), so this method never sees that span whole.
+        Two link forms DO still reach this method as literal text, and
+        both are located and skipped inline via `_ESCAPE_SKIP_RE`
+        (ticket #44):
+
+        - a bare absolute URL, which can't be pre-stashed the way
+          `[[...]]` is without risking a real Markdown link's own
+          `(url)` destination (`_URL_IN_TEXT_RE`);
+        - a bare, unbracketed TracLink/InterTrac reference such as
+          `auto_pm:wiki:Rules/trac/RenderVerify`, which carries no
+          bracket syntax at all to pre-stash (`_BARE_TRACLINK_RE`).
+        The single-bracket TracWiki/InterTrac link form is handled
+        earlier, by pre-stashing (`_SINGLE_BRACKET_LINK_RE`) rather than
+        here -- mistune splits an unresolved "[...]" into separate
+        text() calls (the "[" on its own), so this method never sees
+        that span whole.
         """
 
         def escape(segment: str) -> str:
@@ -308,7 +351,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
         out: list[str] = []
         last = 0
-        for m in _URL_IN_TEXT_RE.finditer(text):
+        for m in _ESCAPE_SKIP_RE.finditer(text):
             out.append(escape(text[last : m.start()]))
             out.append(m.group(0))
             last = m.end()
