@@ -8,11 +8,26 @@ render.
 """
 
 from .checks import build_warnings
-from .facts import Anchor, PreviewFacts, extract_facts
+from .facts import Anchor, CodeBlock, PreviewFacts, extract_facts
+from .live import (
+    RenderCheckError,
+    RenderedSection,
+    TicketNotFoundError,
+    fetch_ticket_sections,
+    fetch_wiki_render,
+)
+from .verify import build_verify_warnings
 
 __all__ = [
     "Anchor",
+    "CodeBlock",
     "PreviewFacts",
     "extract_facts",
     "build_warnings",
+    "build_verify_warnings",
+    "RenderedSection",
+    "RenderCheckError",
+    "TicketNotFoundError",
+    "fetch_ticket_sections",
+    "fetch_wiki_render",
 ]

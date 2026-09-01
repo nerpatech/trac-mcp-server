@@ -54,7 +54,7 @@ def probe_targets(
     hrefs: list[str],
     cap: int = DEFAULT_TARGET_CAP,
     timeout: float = DEFAULT_TARGET_TIMEOUT_SECONDS,
-) -> dict[str, str]:
+) -> dict[str, dict]:
     """Fetch each unique, probeable href and classify it.
 
     Args:
@@ -69,9 +69,15 @@ def probe_targets(
         timeout: Per-request timeout in seconds.
 
     Returns:
-        ``{href: EXISTS | MISSING | SKIPPED | ERROR}`` for every unique
-        probeable href in ``hrefs`` (non-probeable hrefs are simply
-        omitted, since the caller has nothing to report for them).
+        ``{href: {"status": EXISTS | MISSING | SKIPPED | ERROR,
+        "resolved_url": str | None}}`` for every unique probeable href in
+        ``hrefs`` (non-probeable hrefs are simply omitted, since the
+        caller has nothing to report for them). ``resolved_url`` is the
+        URL the dispatcher actually redirected to (``response.url`` after
+        following redirects) when a fetch happened, else None -- this is
+        what lets a caller report the real target of an ``/intertrac/
+        %23N``-shaped dispatcher link instead of the dispatcher href
+        itself.
     """
     unique: list[str] = []
     seen: set[str] = set()
@@ -81,25 +87,26 @@ def probe_targets(
         seen.add(href)
         unique.append(href)
 
-    results: dict[str, str] = {}
+    results: dict[str, dict] = {}
     session = client.session
     for index, href in enumerate(unique):
         if index >= cap:
-            results[href] = SKIPPED
+            results[href] = {"status": SKIPPED, "resolved_url": None}
             continue
         try:
             response = session.get(
                 href, timeout=timeout, allow_redirects=True
             )
         except Exception:
-            results[href] = ERROR
+            results[href] = {"status": ERROR, "resolved_url": None}
             continue
         if response.status_code != 200:
-            results[href] = ERROR
+            results[href] = {"status": ERROR, "resolved_url": None}
             continue
-        results[href] = (
+        status = (
             MISSING
             if _MISSING_WIKI_PAGE_RE.search(response.text)
             else EXISTS
         )
+        results[href] = {"status": status, "resolved_url": response.url}
     return results
