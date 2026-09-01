@@ -1,0 +1,1 @@
+auto-pm:wiki:Rules/trac/RenderVerify

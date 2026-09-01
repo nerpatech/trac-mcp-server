@@ -53,6 +53,32 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # never fires. (`Note: SomeCamelWord` -- prose with a space after the
 # colon, so the realm regex can't match at all -- is already covered by
 # row08_prose_after_colon; no separate row needed for that shape.)
+#
+# Suite 5 (rows 22-35, ticket #57 comment 4 -- the reopen): the title
+# fallback added alongside the realm-form fix suppressed a token whenever
+# ITS SUFFIX APPEARED IN ANY ANCHOR TITLE ANYWHERE IN THE DOCUMENT, with
+# no association between the token and that anchor -- a document-global
+# substring match, not a scoped one. Rows 27/28/29 are the seeded
+# defects: each pairs a typo'd prefix with a correctly-configured
+# reference to the SAME (27/28) or a superstring (29) target elsewhere in
+# the document, which silenced the typo on the deployed build. Row 30 is
+# the same defect in the bracketed-label shape (the fallback's own
+# reason to exist, row 3). Rows 22/23/26 (single occurrence) and
+# rows 24/25 (paired with a DIFFERENT target, so the bug never had a
+# chance to fire) are regression guards -- confirmed already correct
+# pre-fix, must stay correct post-fix. Row 31 is the fourth defect found
+# while reproducing the reopen: a realm-form link closing a sentence
+# captures the trailing period in the token, so a *correctly configured*
+# link false-positives as unconfigured -- the false-positive counterpart
+# to rows 27/28/29's false negative. Rows 32-35 cover the second,
+# lower-severity finding: TRACLINK_SCHEMES (18 realms, shared with
+# is_link_target/code-span checks) is too wide for this check on its
+# own -- ordinary English words like `diff`, `search`, `comment`,
+# `export` false-positive on plausible prose (`svn:diff:123`,
+# `see:search:Results`, `ref:comment:3`, `build:export:Artifacts`); the
+# narrowed, check-local `_INTERTRAC_REALMS` excludes them. `log` stays
+# in the narrowed list per go-ahead, so `git:log:HEAD`-shaped prose is
+# accepted as a residual false positive rather than added as a row.
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -66,6 +92,11 @@ SILENT_ROWS = [
     "row19_prose_fix_colon",
     "row20_prose_see_colon",
     "row21_url_with_port",
+    "row31_realm_trailing_period",
+    "row32_prose_svn_diff",
+    "row33_prose_see_search",
+    "row34_prose_ref_comment",
+    "row35_prose_build_export",
 ]
 
 WARNING_ROWS = [
@@ -87,6 +118,36 @@ WARNING_ROWS = [
     ),
     (
         "row18_unconfigured_prefix_report_realm",
+        "unconfigured_intertrac_prefix",
+    ),
+    ("row22_typo_ticket_alone", "unconfigured_intertrac_prefix"),
+    ("row23_typo_realm_alone", "unconfigured_intertrac_prefix"),
+    (
+        "row24_typo_ticket_diff_target",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row25_typo_realm_diff_target",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row26_typo_ticket_short_alone",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row27_typo_ticket_same_target_twice",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row28_typo_realm_same_target_twice",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row29_typo_ticket_substring_target",
+        "unconfigured_intertrac_prefix",
+    ),
+    (
+        "row30_bracketed_typo_and_good_pair",
         "unconfigured_intertrac_prefix",
     ),
 ]
@@ -168,11 +229,12 @@ def test_suite_balance_is_roughly_even():
     silent_count = len(SILENT_ROWS)
     # Suite 3 also names row 15 (live-probe, covered by a separate live
     # test rather than this static list), bringing the full ticket table
-    # to 12 silent / 9 warning once it's counted (ticket #57 moved row 10
-    # into the warning half and added rows 17-21).
+    # to 17 silent / 18 warning once it's counted (ticket #57 moved row
+    # 10 into the warning half and added rows 17-21, then comment 4's
+    # reopen added rows 22-35).
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 12
-    assert warning_count == 9
+    assert silent_count == 17
+    assert warning_count == 18
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (

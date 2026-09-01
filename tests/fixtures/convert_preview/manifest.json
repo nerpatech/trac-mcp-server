@@ -86,5 +86,61 @@
   "row21_url_with_port": {
     "markdown_input": "http://192.168.10.4:8000/some/path",
     "tracwiki": "http://192.168.10.4:8000/some/path"
+  },
+  "row22_typo_ticket_alone": {
+    "markdown_input": "auto-pm:#87",
+    "tracwiki": "auto-pm:#87"
+  },
+  "row23_typo_realm_alone": {
+    "markdown_input": "auto-pm:wiki:Rules/trac/RenderVerify",
+    "tracwiki": "auto-pm:wiki:Rules/trac/RenderVerify"
+  },
+  "row24_typo_ticket_diff_target": {
+    "markdown_input": "See auto-pm:#87 and auto_pm:#84 for details.",
+    "tracwiki": "See auto-pm:#87 and auto_pm:#84 for details."
+  },
+  "row25_typo_realm_diff_target": {
+    "markdown_input": "See auto-pm:wiki:Rules/trac/RenderVerify and auto_pm:wiki:Index for details.",
+    "tracwiki": "See auto-pm:wiki:Rules/trac/RenderVerify and auto_pm:wiki:Index for details."
+  },
+  "row26_typo_ticket_short_alone": {
+    "markdown_input": "auto-pm:#8",
+    "tracwiki": "auto-pm:#8"
+  },
+  "row27_typo_ticket_same_target_twice": {
+    "markdown_input": "See auto-pm:#87 and also auto_pm:#87 for details.",
+    "tracwiki": "See auto-pm:#87 and also auto_pm:#87 for details."
+  },
+  "row28_typo_realm_same_target_twice": {
+    "markdown_input": "See auto-pm:wiki:Rules/trac/RenderVerify and auto_pm:wiki:Rules/trac/RenderVerify for details.",
+    "tracwiki": "See auto-pm:wiki:Rules/trac/RenderVerify and auto_pm:wiki:Rules/trac/RenderVerify for details."
+  },
+  "row29_typo_ticket_substring_target": {
+    "markdown_input": "See auto-pm:#8 and auto_pm:#87 for details.",
+    "tracwiki": "See auto-pm:#8 and auto_pm:#87 for details."
+  },
+  "row30_bracketed_typo_and_good_pair": {
+    "markdown_input": "[auto-pm:#87 typo label] and [auto_pm:#87 good label]",
+    "tracwiki": "[auto-pm:#87 typo label] and [auto_pm:#87 good label]"
+  },
+  "row31_realm_trailing_period": {
+    "markdown_input": "See the page at auto_pm:wiki:Index.",
+    "tracwiki": "See the page at auto_pm:wiki:Index."
+  },
+  "row32_prose_svn_diff": {
+    "markdown_input": "svn:diff:123",
+    "tracwiki": "svn:diff:123"
+  },
+  "row33_prose_see_search": {
+    "markdown_input": "see:search:Results",
+    "tracwiki": "see:search:Results"
+  },
+  "row34_prose_ref_comment": {
+    "markdown_input": "ref:comment:3",
+    "tracwiki": "ref:comment:3"
+  },
+  "row35_prose_build_export": {
+    "markdown_input": "build:export:Artifacts",
+    "tracwiki": "build:export:Artifacts"
   }
 }
