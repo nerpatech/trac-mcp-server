@@ -4,6 +4,10 @@ This package contains MCP tool implementations that wrap the core TracClient
 with async handlers, Markdown conversion, and structured error responses.
 """
 
+from .convert_preview import (
+    CONVERT_PREVIEW_SPECS,
+    CONVERT_PREVIEW_TOOLS,
+)
 from .errors import build_error_response
 from .instances import INSTANCE_SPECS, INSTANCE_TOOLS
 from .milestone import MILESTONE_SPECS, MILESTONE_TOOLS
@@ -55,6 +59,7 @@ ALL_SPECS: list[ToolSpec] = (
     + MILESTONE_SPECS
     + TICKET_ADMIN_SPECS
     + INSTANCE_SPECS
+    + CONVERT_PREVIEW_SPECS
 )
 
 __all__ = [
@@ -79,6 +84,7 @@ __all__ = [
     "MILESTONE_SPECS",
     "TICKET_ADMIN_SPECS",
     "INSTANCE_SPECS",
+    "CONVERT_PREVIEW_SPECS",
     # Tool lists (backward compat)
     "TICKET_TOOLS",
     "TICKET_READ_TOOLS",
@@ -94,4 +100,5 @@ __all__ = [
     "MILESTONE_TOOLS",
     "SYSTEM_TOOLS",
     "INSTANCE_TOOLS",
+    "CONVERT_PREVIEW_TOOLS",
 ]
