@@ -21,18 +21,15 @@ from .common import (
 _SLUG_DROP_RE = re.compile(r"[^\w\- ]+")
 _SLUG_WS_RE = re.compile(r"\s+")
 
-# `tracwiki_to_markdown`'s "bracket" mode placeholder for a macro it
-# couldn't resolve, e.g. `[MACRO: PageOutline]` or `[MACRO: TOC(depth=2)]`.
-# Restored back to `[[PageOutline]]` / `[[TOC(depth=2)]]` before parsing
-# even starts (see `_stash_bracket_syntax`) so a wiki_get -> edit ->
-# wiki_update round trip doesn't flatten the macro permanently (ticket #19).
-_MACRO_PLACEHOLDER_RE = re.compile(r"\[MACRO:\s*([^\]]+)\]")
-
 # Double-bracket syntax ([[Page]], [[Page|Label]], [[TOC]], ...) typed
-# directly in Markdown source. Stashed the same way `_MACRO_PLACEHOLDER_RE`
-# spans are, before parsing starts, so a macro/link name that happens to be
-# CamelCase-shaped (e.g. [[PageOutline]]) never has the CamelCase pass
-# below stuff a `!` inside the brackets.
+# directly in Markdown source, and -- since ticket #63 -- also the form a
+# macro arrives in from `tracwiki_to_markdown`, which now leaves it
+# literal rather than flattening it to `[MACRO: ...]` for this module to
+# rebuild. Stashed before parsing starts, so a macro/link name that
+# happens to be CamelCase-shaped (e.g. [[PageOutline]]) never has the
+# CamelCase pass below stuff a `!` inside the brackets. This one pass now
+# carries the whole wiki_get -> edit -> wiki_update round trip that
+# ticket #19 added `_MACRO_PLACEHOLDER_RE` for.
 _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
 
 # Sentinel used by `_stash_bracket_syntax`/`_restore_bracket_syntax`.
@@ -155,7 +152,7 @@ def _unescape_camelcase(text: str) -> str:
 
 
 def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
-    """Replace `[MACRO: ...]` / `[[...]]` spans with sentinel placeholders.
+    """Replace `[[...]]` spans with sentinel placeholders.
 
     Must run on the *raw* Markdown source, before mistune parses it.
     mistune's link-scanning splits a "[...]" span that doesn't resolve to
@@ -179,10 +176,6 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     """
     placeholders: list[str] = []
 
-    def stash_macro(m: re.Match[str]) -> str:
-        placeholders.append(f"[[{m.group(1)}]]")
-        return f"\x00WK{len(placeholders) - 1}\x00"
-
     def stash_literal(m: re.Match[str]) -> str:
         placeholders.append(m.group(0))
         return f"\x00WK{len(placeholders) - 1}\x00"
@@ -192,7 +185,6 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
         return f"`\x00WK{len(placeholders) - 1}\x00`"
 
     text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
-    text = _MACRO_PLACEHOLDER_RE.sub(stash_macro, text)
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
@@ -320,8 +312,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
         concept, so any such word reaching this method was never meant as
         a link (ticket #27).
 
-        `[MACRO: Name]` placeholders and literal `[[...]]` syntax typed in
-        the Markdown source never reach this method as such -- they're
+        Literal `[[...]]` syntax typed in the Markdown source (or arriving
+        from `tracwiki_to_markdown`) never reaches this method -- it is
         stashed as sentinel placeholders by `_stash_bracket_syntax` before
         mistune even starts parsing (ticket #19), so a macro/page name
         that happens to be CamelCase-shaped is never escaped inside its
@@ -882,7 +874,7 @@ def markdown_to_tracwiki(
     Returns:
         TracWiki formatted text
     """
-    # Stash code spans / [MACRO: ...] / [[...]] / single-bracket link
+    # Stash code spans / [[...]] / single-bracket link
     # spans before mistune ever sees a "`" or a "[" (see
     # _stash_bracket_syntax for why this can't happen inside text()).
     # Must run before the renderer is constructed -- heading() needs the

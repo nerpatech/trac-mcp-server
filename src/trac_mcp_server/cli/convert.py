@@ -532,13 +532,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--unknown-macros",
         dest="unknown_macros",
-        choices=("bracket", "preserve", "drop"),
-        default="bracket",
+        choices=("preserve", "drop"),
+        default="preserve",
         help=(
             "How to render unknown TracWiki macros"
-            " (tracwiki → md only). bracket = [MACRO: Name],"
-            " preserve = leave [[Name]] literal, drop = omit."
-            " Default: bracket."
+            " (tracwiki → md only). preserve = leave [[Name]] literal,"
+            " drop = omit. Default: preserve."
+            " (The 'bracket' mode, which emitted [MACRO: Name], was"
+            " removed in ticket #63 -- 'preserve' round-trips back to"
+            " TracWiki unchanged, which 'bracket' only simulated.)"
         ),
     )
     parser.add_argument(
@@ -649,7 +651,7 @@ def convert_text(
     target_format: str,
     *,
     heading_anchors: bool = False,
-    unknown_macros: str = "bracket",
+    unknown_macros: str = "preserve",
 ) -> ConversionResult:
     """Convert text between Markdown and TracWiki.
 

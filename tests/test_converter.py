@@ -715,9 +715,9 @@ AGENT: do the thing
         self.assertEqual(result.text, "![](screenshot.png)")
 
     def test_unknown_macro_passthrough(self):
-        """Test unknown macros are preserved with [MACRO: ...] notation."""
+        """Macros are left literal, so they survive the trip back (#63)."""
         result = tracwiki_to_markdown("[[TOC]]")
-        self.assertEqual(result.text, "[MACRO: TOC]")
+        self.assertEqual(result.text, "[[TOC]]")
 
     def test_blockquote(self):
         """Test blockquote conversion."""
@@ -807,21 +807,25 @@ See screenshot: [[Image(error.png)]]"""
 class TestUnknownMacrosOption(unittest.TestCase):
     """Tests for the unknown_macros kwarg added in Phase 16.
 
-    Verifies that the default "bracket" preserves existing behavior and that
-    "preserve" / "drop" produce the expected output without disturbing known
-    macros (Image, BR) or the lossy-elements warning.
+    Verifies that the default "preserve" leaves the macro literal -- so a
+    tw->md->tw round trip restores it unchanged -- and that "drop" omits it,
+    without either disturbing known macros (Image, BR) or the lossy-elements
+    warning. The former default, "bracket", emitted a [MACRO: ...] placeholder
+    that existed only for markdown_to_tracwiki to rebuild; it was removed in
+    ticket #63 because "preserve" reaches the same round trip directly.
     """
 
-    def test_default_bracket(self):
-        """unknown_macros="bracket" (default) emits [MACRO: Name]."""
+    def test_default_preserve(self):
+        """unknown_macros defaults to "preserve": [[Name]] stays literal."""
         result = tracwiki_to_markdown("[[PageOutline]]")
-        self.assertIn("[MACRO: PageOutline]", result.text)
+        self.assertIn("[[PageOutline]]", result.text)
+        self.assertNotIn("[MACRO:", result.text)
 
-    def test_bracket_explicit(self):
-        """Explicit unknown_macros="bracket" matches the default."""
+    def test_preserve_explicit(self):
+        """Explicit unknown_macros="preserve" matches the default."""
         default = tracwiki_to_markdown("[[PageOutline]]")
         explicit = tracwiki_to_markdown(
-            "[[PageOutline]]", unknown_macros="bracket"
+            "[[PageOutline]]", unknown_macros="preserve"
         )
         self.assertEqual(default.text, explicit.text)
 
@@ -872,15 +876,18 @@ class TestUnknownMacrosOption(unittest.TestCase):
 
     def test_warning_fires_under_all_modes(self):
         """_detect_lossy_elements warning fires regardless of rendering mode."""
-        for mode in ("bracket", "preserve", "drop"):
+        for mode in ("preserve", "drop"):
             with self.subTest(mode=mode):
                 result = tracwiki_to_markdown(
                     "[[PageOutline]]",
                     unknown_macros=mode,  # type: ignore[arg-type]
                 )
                 self.assertTrue(
-                    any("Unknown macros" in w for w in result.warnings),
-                    f"Expected 'Unknown macros' warning in mode={mode!r}",
+                    any(
+                        "Trac macros detected" in w
+                        for w in result.warnings
+                    ),
+                    f"Expected macro warning in mode={mode!r}",
                 )
 
 
@@ -888,9 +895,9 @@ class TestTracWikiEnhancements(unittest.TestCase):
     """Test TracWiki to Markdown enhancements (macros, TracLinks, tables, etc)."""
 
     def test_tracwiki_unknown_macros(self):
-        """Test unknown macros are preserved with [MACRO: ...] notation."""
+        """Macros stay literal and still raise the lossy-elements warning."""
         result = tracwiki_to_markdown("[[PageOutline]]")
-        self.assertIn("[MACRO: PageOutline]", result.text)
+        self.assertIn("[[PageOutline]]", result.text)
         self.assertTrue(
             any("macro" in w.lower() for w in result.warnings)
         )
@@ -1315,12 +1322,19 @@ class TestTableConversion(unittest.TestCase):
 class TestRoundTripConversion(unittest.TestCase):
     """Test round-trip conversion behavior (lossy and compatible elements)."""
 
-    def test_roundtrip_lossy_macros(self):
-        """Test macros survive round-trip but become [MACRO: ...] notation."""
+    def test_roundtrip_macros_are_lossless(self):
+        """Macros now survive the round trip byte-for-byte (#63).
+
+        Formerly lossy: the macro travelled as a [MACRO: ...] placeholder
+        and was only approximately rebuilt. Leaving it literal makes the
+        round trip exact. The warning still fires -- the macro is inert in
+        a Markdown renderer even though nothing is lost converting back.
+        """
         original = "Text [[PageOutline]] more"
         to_md = tracwiki_to_markdown(original)
-        # Macro becomes [MACRO: ...] - not identical but preserved
-        self.assertIn("[MACRO: PageOutline]", to_md.text)
+        self.assertIn("[[PageOutline]]", to_md.text)
+        self.assertNotIn("[MACRO:", to_md.text)
+        self.assertEqual(markdown_to_tracwiki(to_md.text), original)
         self.assertGreater(len(to_md.warnings), 0)
 
     def test_roundtrip_compatible_elements(self):
@@ -2097,22 +2111,21 @@ class TestConverterTicketRegressions(unittest.TestCase):
     found and fixed in the same sweep.
     """
 
-    def test_ticket_19_macro_placeholder_restored(self):
-        """[MACRO: Name(args)] round-trips back to [[Name(args)]].
+    def test_ticket_19_macro_survives_read_edit_write(self):
+        """A macro is not flattened by a tw -> md -> tw cycle.
 
-        `tracwiki_to_markdown`'s "bracket" mode placeholder for an
-        unresolved macro used to pass through markdown_to_tracwiki as
-        literal text, permanently flattening the macro the first time a
-        page carrying one was edited via the Markdown path.
+        This is ticket #19's actual guarantee, restated against the
+        mechanism that carries it since ticket #63. It used to be reached
+        by emitting a [MACRO: Name] placeholder and re-absorbing it here;
+        the macro is now simply left literal on the way out, and the
+        bracket-stashing pass carries it back. The guarantee is what the
+        test pins -- asserting the placeholder spelling would only have
+        restated the implementation.
         """
-        self.assertEqual(
-            markdown_to_tracwiki("[MACRO: PageOutline]"),
-            "[[PageOutline]]",
-        )
-        self.assertEqual(
-            markdown_to_tracwiki("[MACRO: TOC(depth=2)]"),
-            "[[TOC(depth=2)]]",
-        )
+        for macro in ("[[PageOutline]]", "[[TOC(depth=2)]]"):
+            with self.subTest(macro):
+                md = tracwiki_to_markdown(macro).text
+                self.assertEqual(markdown_to_tracwiki(md), macro)
 
     def test_ticket_19_literal_bracket_syntax_survives(self):
         """[[Page]] typed directly in Markdown source passes through
