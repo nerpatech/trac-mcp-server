@@ -596,13 +596,18 @@ def test_heading_anchors_ignored_on_tw_to_md(monkeypatch):
     assert exit_code == 0
 
 
-def test_unknown_macros_bracket_default(monkeypatch, capsys):
-    """--unknown-macros defaults to bracket; stdout contains [MACRO: PageOutline]."""
+def test_unknown_macros_preserve_default(monkeypatch, capsys):
+    """--unknown-macros defaults to preserve; [[PageOutline]] stays literal.
+
+    The former default, "bracket", emitted [MACRO: PageOutline]; it was
+    removed in ticket #63 along with the re-absorption on the other side.
+    """
     monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
     exit_code = main(["--from", "tracwiki", "--to", "md"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "[MACRO: PageOutline]" in out
+    assert "[[PageOutline]]" in out
+    assert "[MACRO:" not in out
 
 
 def test_unknown_macros_preserve(monkeypatch, capsys):
@@ -1285,10 +1290,10 @@ def test_roundtrip_tw_full_document_preserves_all_construct_markers(
 # ---------------------------------------------------------------------------
 
 
-def test_roundtrip_tw_unknown_macro_becomes_bracket_text(
+def test_roundtrip_tw_unknown_macro_survives_both_hops(
     monkeypatch, capsys
 ):
-    """[[SomeMacro(arg)]] becomes [MACRO: SomeMacro(arg)] on tw→md, and back on md→tw.
+    """[[SomeMacro(arg)]] survives tw→md→tw unchanged.
 
     Only names carrying explicit "(args)" -- which a plain WikiLink never
     does -- or names on the known-macro allowlist are treated as macros
@@ -1296,19 +1301,20 @@ def test_roundtrip_tw_unknown_macro_becomes_bracket_text(
     see test_roundtrip_tw_bare_bracket_link_becomes_wikilink below).
 
     Regression test for ticket #19: the tw→md→tw path used to be lossy
-    here -- "[MACRO: SomeMacro(arg)]" passed through the second hop as
-    literal text instead of being restored to "[[SomeMacro(arg)]]",
-    silently and permanently flattening the macro the first time a page
-    carrying one was edited via the Markdown path. It now round-trips
-    losslessly in default "bracket" mode, with no workaround needed.
+    here, silently and permanently flattening the macro the first time a
+    page carrying one was edited via the Markdown path. Ticket #19 fixed
+    that by emitting "[MACRO: SomeMacro(arg)]" and re-absorbing it on the
+    way back; ticket #63 removed that detour, and the macro is now simply
+    left literal across both hops. The guarantee under test is unchanged.
     """
     tw_input = "[[SomeMacro(arg)]]\n"
     monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
     rc1 = main(["--from", "tracwiki", "--to", "md"])
     assert rc1 == EXIT_OK
     intermediate = capsys.readouterr().out
-    # First hop: [[SomeMacro(arg)]] → [MACRO: SomeMacro(arg)]
-    assert "[MACRO: SomeMacro(arg)]" in intermediate
+    # First hop leaves the macro literal rather than flattening it.
+    assert "[[SomeMacro(arg)]]" in intermediate
+    assert "[MACRO:" not in intermediate
 
     monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
     rc2 = main(
@@ -1316,9 +1322,9 @@ def test_roundtrip_tw_unknown_macro_becomes_bracket_text(
     )
     assert rc2 == EXIT_OK
     result = capsys.readouterr().out
-    # Second hop: [MACRO: SomeMacro(arg)] → [[SomeMacro(arg)]] (restored)
+    # Second hop carries it through unchanged.
     assert "[[SomeMacro(arg)]]" in result
-    assert "[MACRO: SomeMacro(arg)]" not in result
+    assert "[MACRO:" not in result
 
 
 def test_roundtrip_tw_unknown_macro_preserve_mode_roundtrips(
