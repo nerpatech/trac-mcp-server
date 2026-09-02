@@ -1084,6 +1084,64 @@ class TestBlankCodeFences(unittest.TestCase):
         self.assertNotIn("auto_pm:#87", self._blank(text))
 
 
+class TestBlankInlineCodeSpans(unittest.TestCase):
+    """`blank_inline_code_spans` (ticket #65) -- the companion to
+    `blank_code_fences` for the other way of marking content literal.
+
+    Same length-preserving contract, and the same reason: markup inside
+    backticks is quoted ON PURPOSE and Trac renders it as literal text,
+    which is precisely the outcome `tracwiki_markup_in_markdown` exists
+    to warn about -- so warning about it is self-defeating.
+    """
+
+    def _blank(self, text):
+        from trac_mcp_server.converters.common import (
+            blank_inline_code_spans,
+        )
+
+        return blank_inline_code_spans(text)
+
+    def test_length_is_preserved(self):
+        text = "See `{{{#!python}}}` for the processor form."
+        self.assertEqual(len(self._blank(text)), len(text))
+
+    def test_span_content_is_blanked_and_prose_survives(self):
+        text = "Quoted `'''alpha'''` and a genuine '''beta''' one."
+        blanked = self._blank(text)
+        self.assertNotIn("alpha", blanked)
+        self.assertIn("beta", blanked)
+        self.assertIn("Quoted", blanked)
+
+    def test_multi_backtick_span_needs_a_matching_run(self):
+        """A double-backtick span closes on a double run, not on the
+        single tick it legitimately contains."""
+        text = "a ``x ` y`` b"
+        blanked = self._blank(text)
+        self.assertNotIn("x", blanked)
+        self.assertIn("b", blanked)
+
+    def test_stray_backtick_blanks_nothing(self):
+        """An unmatched backtick is ordinary in prose. Treating it as an
+        opener would blank an arbitrary stretch of the document, and
+        over-blanking silences real defects while every test stays
+        green -- the dangerous direction, so it is pinned."""
+        text = "a ` stray tick and '''bold''' after it"
+        self.assertEqual(self._blank(text), text)
+
+    def test_a_span_does_not_run_across_lines(self):
+        """Same reason as the stray tick: a backtick on one line and
+        another paragraphs later must not blank everything between."""
+        text = "open ` here\n\nand '''bold''' ` much later"
+        blanked = self._blank(text)
+        self.assertIn("'''bold'''", blanked)
+
+    def test_newlines_are_preserved_not_just_length(self):
+        text = "a `x` b\nc `y` d\n"
+        blanked = self._blank(text)
+        self.assertEqual(len(blanked), len(text))
+        self.assertEqual(blanked.count("\n"), text.count("\n"))
+
+
 class TestConversionResultMetadata(unittest.TestCase):
     """Test ConversionResult metadata and backward compatibility."""
 

@@ -262,5 +262,30 @@
   "row65_table_cell_unconfigured_realm": {
     "markdown_input": "| source | result |\n|---|---|\n| notaprefix:wiki:Some/Page | dead |\n",
     "tracwiki": "||=source=||=result=||\n||notaprefix:wiki:Some/Page||dead||\n"
+  },
+  "row66_code_span_tracwiki_block": {
+    "markdown_input": "See `{{{#!python}}}` for the processor form.",
+    "tracwiki": "See `{{{#!python}}}` for the processor form."
+  },
+  "row67_code_span_tracwiki_table": {
+    "markdown_input": "It stores as `||=a=||=b=||` today.",
+    "tracwiki": "It stores as `||=a=||=b=||` today."
+  },
+  "row68_declared_tracwiki_bold": {
+    "markdown_input": "This is '''bold''' text.",
+    "tracwiki": "This is '''bold''' text.",
+    "source_format": "tracwiki"
+  },
+  "row69_declared_markdown_bold": {
+    "markdown_input": "This is '''bold''' text.",
+    "tracwiki": "This is '''bold''' text."
+  },
+  "row70_same_line_fence_then_bold": {
+    "markdown_input": "{{{ inline }}}\n\nThen '''bold''' pasted in.",
+    "tracwiki": "{{{ inline }}}\n\nThen '''bold''' pasted in."
+  },
+  "row71_code_span_and_bare_bold": {
+    "markdown_input": "Quoted `'''alpha'''` and a genuine '''beta''' one.",
+    "tracwiki": "Quoted `'''alpha'''` and a genuine '''beta''' one."
   }
 }

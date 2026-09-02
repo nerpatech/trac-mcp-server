@@ -149,6 +149,9 @@ async def _handle_convert_preview(
         facts=facts,
         probes=probes,
         check_targets=check_targets,
+        # The caller already told us what it wrote; pass it on rather
+        # than letting the checks assume Markdown (ticket #65).
+        source_format=fmt,
     )
     for message in conversion_warnings:
         warnings.append(
