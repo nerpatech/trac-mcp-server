@@ -1,0 +1,43 @@
+**Scope:** global   
+**Type:** hard-rule   
+**Status:** active   
+**Related:** [WikiStart](wiki:WikiStart), [[Meta/WhenToWriteARule]]   
+**Source:** ticket #1 comment 3 (operator-approved proposal); header hard-break fix from ticket #10
+
+## Namespace grammar
+```
+Rules/<domain>/<Leaf>
+Reference/<domain>/<Leaf>
+Projects/<name>
+Meta/<Leaf>
+```
+ - The `<domain>` segment is **exactly** the component name (e.g. `trac`, `version_control`, `agent_conduct`) — this is what makes `wiki_search prefix=Rules/trac` work as a domain filter.
+ - `<Leaf>` is !CamelCase, no spaces, no domain repetition (`Rules/trac/RenderVerify`, not `Rules/trac/TracRenderVerify`).
+ - `Projects/<name>` uses the project's directory name under `~/work/projects` (e.g. `Projects/b-node`).
+ - Hierarchical `/` names are preferred over flat !CamelCase: they sort, they prefix-search, and the domain is visible in the page name itself.
+## Mandatory page header
+Every `Rules/`, `Reference/`, and `Projects/` page opens with these bold key-value lines, in this order, before any prose: the five mandatory ones, plus `Domains:` on the `Projects/` cards that carry it. Bold-line format is chosen because it is both greppable in raw Markdown and renders cleanly (no table overhead at this size):
+
+```
+**Scope:** `global` | `toolchain:<name>` | `substrate:<name>` | `project:<name>`  
+**Type:** hard-rule | default | reference  
+**Status:** active | draft | superseded-by <page>  
+**Domains:** <comma-separated domain names>   (optional, `Projects/` only)  
+**Related:** <other page names, comma-separated>  
+**Source:** <memory file, ticket # or other origin>
+```
+ - **Every line but the last must end with two trailing spaces** (!CommonMark hard break) so the Markdown→!TracWiki converter emits `[[BR]]` and the header actually renders as five separate visual lines. A plain single newline (soft break) renders as one run-on paragraph in the live wiki — this was broken on every page in the store until ticket #10 caught it, and has since been retrofitted across all 24 affected pages.
+ - **Scope** — who this applies to. `global` (all projects), `toolchain:X` (e.g. `toolchain:esp-idf`), `substrate:X` (e.g. `substrate:trac`), or `project:X` for something that genuinely doesn't generalize yet. **Always backtick-wrap a colon-valued Scope** — the value goes inside a code span, and a bare colon-valued token with no backticks breaks the hard break that follows it: `trac_mcp_server:ticket:29` (open) tracks a Trac-side quirk where `[[BR]]` immediately after a bare colon-valued token silently fails to render — Trac's wiki-link grammar greedily swallows the macro into a failed `wikiname:target` link parse. Verified live: the hard break's own trailing spaces do **not** help (they're consumed as break syntax, not preserved as a separating space) — wrapping the value in backticks is the only workaround confirmed to work, since the closing backtick breaks the colon-token adjacency. `global` (no colon) is unaffected either way.
+ - **Type** — see [[Meta/WhenToWriteARule]] for the full test; `hard-rule` = never violate, `default` = the usual choice unless there's a stated reason not to, `reference` = a discovered fact, not a directive.
+ - **Status** — `draft` while still being refined, `active` once settled, `superseded-by <page>` when replaced (the old page stays, pointing forward — see below).
+ - **Related** — cross-links to other pages that share context, overlap in scope, or are commonly read together.
+ - **Source** — where this came from: a memory file name, a ticket number, or "derived from survey" — enough for a future reader to trace provenance.
+ - **Domains** — *optional, and only on a `Projects/<name>` card.* The domains from this store that apply to that project, comma-separated, backticked, in the same order the card's "Applicable domains" prose introduces them. It sits with the identity fields, between **Status** and **Related**.
+This one field is duplicated content, deliberately. The prose section explains *why* each domain applies, which is what a reader needs and exactly what a checker cannot parse: a regex over backticked tokens in that section works right up until someone backticks a domain name in the surrounding rationale. So the card states the list twice — prose for the reader, header field for the machine — and the field is what a project's `.claude/rule-domains.conf` is checked against. auto-pm's `scripts/housekeeping/check_rules_digest.py` reports a domain named on one side and not the other, in either direction, and the two directions are not the same failure: a domain on the card and missing from the conf means the project has silently lost those rules, while a domain in the conf and missing from the card means the conf has quietly become the source and the card is now wrong about the project. Ticket #42, which was opened because b-node had spent months in the first state without anything noticing.
+
+Keep the two in step. If the field and the prose disagree, the prose is what a human will believe and the field is what the machinery will act on — so a card that carries only one of them is worse than one that carries neither.
+
+`Meta/` pages themselves don't require this header (they're rules about the store, not domain rules), but should still open with a one-line purpose statement.
+
+## Superseding, not editing in place
+When a rule changes in a way that would surprise someone who read the old version, create a new page and mark the old one `**Status:** superseded-by <new-page>`. Do not silently rewrite the old page's content — the history would then hide that a decision was reversed. Small clarifications and typo fixes are fine to edit in place; substantive changes in meaning are not.
