@@ -109,10 +109,20 @@ _INTERTRAC_REALMS = frozenset(
 # `auto_pm:report:1`, `auto_pm:changeset:1`, `auto_pm:attachment:foo` all
 # resolved, per the ticket), so "realm-shaped token, no anchor" is exactly
 # as sound an inference here as it is for the ticket form.
+# The trailing class excludes a backtick (ticket #61). `\S+` did not
+# stop at one, so a token whose inline code span was followed
+# immediately by non-whitespace -- a table cell delimiter is the common
+# case, since `||` never has a space before it -- ran past the closing
+# backtick and swallowed the next cell. `_code_span_contains` then
+# compared a token longer than any rendered span, found no containment,
+# and the check called a CONFIGURED prefix unconfigured. Trac ends an
+# inline code span at the backtick, so ending the token there too makes
+# the two agree by construction rather than by recovery. This is the
+# same class as #59's fenced-block gap, at the other delimiter.
 _PREFIX_REALM_RE = re.compile(
     r"\b[A-Za-z][\w.+-]*:(?:"
     + "|".join(sorted(_INTERTRAC_REALMS))
-    + r"):\S+"
+    + r"):[^\s`]+"
 )
 
 # The zero-width glyph Trac injects ahead of an InterTrac anchor's visible
@@ -291,7 +301,16 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
     auto_pm:wiki:Index here` ``), which a naive `_prefix_boundary_match`
     call would have broken (comment 8 caught this: `_prefix_boundary_match`
     asks whether `code_span_text` is a prefix of `raw`, backwards for
-    this case)."""
+    this case).
+
+    Note the limit of that stripping, and why it is acceptable: it gives
+    up at the first alphanumeric or underscore, so it cannot walk back
+    across a whole word. It therefore cannot recover from a token that
+    over-ran a code span's closing delimiter and swallowed the following
+    text -- which is precisely what ticket #61 measured. That is fixed at
+    the boundary instead: `_PREFIX_REALM_RE` no longer crosses a
+    backtick, so a token that starts inside a code span now ends inside
+    it, and this helper is never asked to recover from that case."""
     candidate = raw
     while candidate:
         if candidate in code_span_text:

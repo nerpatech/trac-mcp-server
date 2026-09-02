@@ -1,0 +1,2 @@
+||=source=||=result=||
+||`auto_pm:wiki:Rules/testing/SeededDefectFirst`||correct||

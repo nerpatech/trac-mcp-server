@@ -250,5 +250,17 @@
   "row62_ticket_hyphen_suffix": {
     "markdown_input": "Hyphen suffix alone: auto_pm:#87-ish here.",
     "tracwiki": "Hyphen suffix alone: auto_pm:#87-ish here."
+  },
+  "row63_code_span_table_cell": {
+    "markdown_input": "| source | result |\n|---|---|\n| `auto_pm:wiki:Rules/testing/SeededDefectFirst` | correct |\n",
+    "tracwiki": "||=source=||=result=||\n||`auto_pm:wiki:Rules/testing/SeededDefectFirst`||correct||\n"
+  },
+  "row64_code_span_adjacent_word": {
+    "markdown_input": "`auto_pm:wiki:Rules/testing/SeededDefectFirst`correct\n",
+    "tracwiki": "`auto_pm:wiki:Rules/testing/SeededDefectFirst`correct\n"
+  },
+  "row65_table_cell_unconfigured_realm": {
+    "markdown_input": "| source | result |\n|---|---|\n| notaprefix:wiki:Some/Page | dead |\n",
+    "tracwiki": "||=source=||=result=||\n||notaprefix:wiki:Some/Page||dead||\n"
   }
 }
