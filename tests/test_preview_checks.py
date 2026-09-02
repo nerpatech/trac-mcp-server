@@ -157,6 +157,34 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # prefix in a cell, not backticked, must still warn -- the fix corrects
 # a token boundary, it does not widen suppression to un-backticked
 # prose.
+#
+# Suite 9 (rows 66-71, ticket #65): `tracwiki_markup_in_markdown`'s own
+# scoping, the last check in this module still using the ORIGINAL
+# `_strip_code_fences`. Measured before planning, two of the ticket's
+# three claims did not survive: a `{{{` inside a FENCED block was
+# already silent (rows 56/57 are standing evidence), so the ticket's
+# proposed seed could not fail. The two real defects are elsewhere.
+# Rows 66/67 are the false positive that actually fires -- TracWiki
+# markup inside an INLINE CODE SPAN, i.e. deliberate quoting that
+# renders as literal text ON PURPOSE, which is the very outcome this
+# check warns *will* happen; warning about it is self-defeating, and it
+# is the shape that fired repeatedly while #62 was being written.
+# Row 68 is symptom A: markup correct for its DECLARED format, which the
+# check ignored entirely -- paired with row 69, byte-identical content
+# and an identical render, differing only in the declared format, so the
+# pair asserts that the declaration is what decides and nothing else.
+# Row 70 is the opposite sign and the more dangerous one: a fence opened
+# and closed on ONE line made `_strip_code_fences` read the whole rest of
+# the document as fence interior, so genuine TracWiki bold after it was
+# never seen at all. That is a false NEGATIVE, and it is the reason the
+# swap to `blank_code_fences` is the right change even though the
+# ticket's stated reason for it (a fenced-block false positive) does not
+# reproduce -- see that function's docstring, which documents this exact
+# divergence as its reason to exist. Row 71 is the over-blanking catcher:
+# a quoted occurrence and a genuine one in the same document must warn
+# EXACTLY once and name the genuine one, asserted on the evidence rather
+# than the code, since blanking too much silences the real defect while
+# leaving the row superficially green.
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -189,6 +217,9 @@ SILENT_ROWS = [
     "row57_fence_realm_link",
     "row59_ticket_trailing_period",
     "row60_ticket_trailing_paren",
+    "row66_code_span_tracwiki_block",
+    "row67_code_span_tracwiki_table",
+    "row68_declared_tracwiki_bold",
 ]
 
 WARNING_ROWS = [
@@ -282,6 +313,12 @@ WARNING_ROWS = [
         "row65_table_cell_unconfigured_realm",
         "unconfigured_intertrac_prefix",
     ),
+    ("row69_declared_markdown_bold", "tracwiki_markup_in_markdown"),
+    (
+        "row70_same_line_fence_then_bold",
+        "tracwiki_markup_in_markdown",
+    ),
+    ("row71_code_span_and_bare_bold", "tracwiki_markup_in_markdown"),
 ]
 
 # Seeded defect: row 1 rendered from ITS PRE-FIX TracWiki
@@ -293,18 +330,31 @@ SEEDED_DEFECT_ROW = ("row01_pre_fix", "escaped_link_target")
 
 
 def _load(name: str):
+    """Return (markdown_source, tracwiki, facts, source_format).
+
+    ``source_format`` defaults to ``markdown`` -- the value every row
+    predating ticket #65 was captured under, so adding the parameter
+    left all of them byte-identical in behaviour. Only a row that
+    deliberately declares TracWiki (row 68) sets it.
+    """
     html = (FIXTURES_DIR / f"{name}.html").read_text()
     data = MANIFEST[name]
     tracwiki = data["tracwiki"]
     markdown_source = data["markdown_input"] or tracwiki
-    return markdown_source, tracwiki, extract_facts(html)
+    source_format = data.get("source_format", "markdown")
+    return markdown_source, tracwiki, extract_facts(html), source_format
 
 
 @pytest.mark.parametrize("name", SILENT_ROWS)
 def test_silent_rows_produce_no_warning(name):
-    markdown_source, tracwiki, facts = _load(name)
+    markdown_source, tracwiki, facts, source_format = _load(name)
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [
         w["code"]
@@ -316,9 +366,14 @@ def test_silent_rows_produce_no_warning(name):
 
 @pytest.mark.parametrize("name,expected_code", WARNING_ROWS)
 def test_warning_rows_produce_expected_code(name, expected_code):
-    markdown_source, tracwiki, facts = _load(name)
+    markdown_source, tracwiki, facts, source_format = _load(name)
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert expected_code in codes, (
@@ -333,9 +388,14 @@ def test_seeded_defect_row1_pre_fix_warns_escaped_link_target():
     `1ef59b3`/HEAD (post-fix) -- `Rules/testing/SeededDefectFirst`.
     """
     name, expected_code = SEEDED_DEFECT_ROW
-    markdown_source, tracwiki, facts = _load(name)
+    markdown_source, tracwiki, facts, source_format = _load(name)
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert expected_code in codes
@@ -345,9 +405,16 @@ def test_row1_post_fix_does_not_warn_escaped_link_target():
     """The counterpart to the seeded-defect test: the CURRENT converter's
     row 1 output must NOT trip the same check the pre-fix fixture does --
     otherwise the check can't tell fixed from broken."""
-    markdown_source, tracwiki, facts = _load("row01_intertrac_wiki")
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row01_intertrac_wiki"
+    )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "escaped_link_target" not in codes
@@ -363,11 +430,16 @@ def test_row11_code_span_does_not_also_warn_unconfigured_prefix():
     its prefix were unconfigured. The existing warning-rows test only
     ever checked `link_ref_in_code_span`'s presence, never this code's
     absence -- which is exactly how the defect shipped unnoticed."""
-    markdown_source, tracwiki, facts = _load(
+    markdown_source, tracwiki, facts, source_format = _load(
         "row11_code_span_intertrac"
     )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "unconfigured_intertrac_prefix" not in codes, codes
@@ -383,9 +455,16 @@ def test_bold_wrapped_realm_link_stays_silent_on_prefix_check():
     the apostrophes trailing the token are exactly the kind of
     non-word-character boundary `_prefix_boundary_match` is meant to
     tolerate."""
-    markdown_source, tracwiki, facts = _load("row47_bold_realm")
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row47_bold_realm"
+    )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "tracwiki_markup_in_markdown" in codes
@@ -405,11 +484,16 @@ def test_same_label_bracket_pair_is_a_known_accepted_residual():
     position data `PreviewFacts` doesn't carry. This test exists so a
     future change to this function has to notice it's touching the
     known-open case, not silently start passing or failing it."""
-    markdown_source, tracwiki, facts = _load(
+    markdown_source, tracwiki, facts, source_format = _load(
         "row48_bracket_same_label_pair"
     )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [
         w["code"]
@@ -432,9 +516,16 @@ def test_row46_short_link_code_span_warns_once_not_twice():
     only thing keeping the two checks from double-reporting one span.
     Widening the code-span check is exactly the change that could break
     that suppression without any "must warn" row noticing."""
-    markdown_source, tracwiki, facts = _load("row46_ticket_code_span")
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row46_ticket_code_span"
+    )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert codes == ["link_ref_in_code_span"], codes
@@ -452,11 +543,16 @@ def test_pragma_suppresses_the_named_code():
     `#!comment` block itself legitimately trips
     `tracwiki_markup_in_markdown` -- the same reason row 47 is a
     standalone test."""
-    markdown_source, tracwiki, facts = _load(
+    markdown_source, tracwiki, facts, source_format = _load(
         "row54_pragma_allows_code_span_ref"
     )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "link_ref_in_code_span" not in codes, codes
@@ -469,11 +565,16 @@ def test_pragma_is_scoped_to_the_codes_it_names():
     row the feature could degenerate into "any page that opts out of one
     warning stops being checked at all", which is how a gate stops being
     a gate."""
-    markdown_source, tracwiki, facts = _load(
+    markdown_source, tracwiki, facts, source_format = _load(
         "row55_pragma_is_code_scoped"
     )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "link_ref_in_code_span" not in codes, codes
@@ -491,11 +592,16 @@ def test_fenced_document_warns_only_for_the_prose_token():
     the count, not just the code's presence, is the point: this row is
     what catches a fix that blanks too much, which the `must warn` list
     alone would pass."""
-    markdown_source, tracwiki, facts = _load(
+    markdown_source, tracwiki, facts, source_format = _load(
         "row58_fence_plus_unconfigured_prose"
     )
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     prefix_warnings = [
         w
@@ -524,9 +630,14 @@ def test_captured_punctuation_is_not_reported_as_unconfigured(name):
     is fine, and then to conclude the check is broken, which it is not.
     Both halves are asserted: the new code fires AND the misdiagnosis
     does not."""
-    markdown_source, tracwiki, facts = _load(name)
+    markdown_source, tracwiki, facts, source_format = _load(name)
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "intertrac_target_captured_punctuation" in codes, codes
@@ -547,9 +658,14 @@ def test_code_span_boundary_is_not_reported_as_unconfigured(name):
     unconfigured. `link_ref_in_code_span` firing here is correct and
     asserted as a warning row; what must not appear is the second code.
     """
-    markdown_source, tracwiki, facts = _load(name)
+    markdown_source, tracwiki, facts, source_format = _load(name)
     warnings = build_warnings(
-        markdown_source, tracwiki, facts, probes={}, check_targets=False
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
     )
     codes = [w["code"] for w in warnings]
     assert "link_ref_in_code_span" in codes, codes
@@ -569,10 +685,14 @@ def test_suite_balance_is_roughly_even():
     # added rows 22-35, and comment 6/7/8's reopen added rows 36-45;
     # tickets #58/#59 added rows 49-53 and 56-62 and moved row 46 into
     # the warning half; rows 47/48/54/55 are standalone tests, not
-    # counted here -- see their comments; ticket #61 added rows 63-65).
+    # counted here -- see their comments; ticket #61 added rows 63-65;
+    # ticket #65 added rows 66-71, three to each half -- deliberately
+    # balanced, because that ticket both NARROWS the check (rows 66-68)
+    # and WIDENS it (row 70), and a one-sided addition would have hidden
+    # whichever direction went wrong).
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 31
-    assert warning_count == 30
+    assert silent_count == 34
+    assert warning_count == 33
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
@@ -580,3 +700,103 @@ def test_suite_balance_is_roughly_even():
         / min(silent_count, warning_count)
         <= 2.0
     )
+
+
+def test_declared_format_decides_identical_content():
+    """Rows 68/69, ticket #65 symptom A.
+
+    Byte-identical content, byte-identical render, opposite verdicts --
+    the ONLY difference is the declared source format. TracWiki bold in
+    TracWiki input is correct content; in Markdown input it is a defect.
+    Asserted as a pair rather than as two independent rows because the
+    point is the contrast: a check that ignored the declaration would
+    pass one half and fail the other, and so would a check that
+    suppressed everything -- only the pair pins both directions.
+    """
+    tw_src, tw_wiki, tw_facts, tw_fmt = _load(
+        "row68_declared_tracwiki_bold"
+    )
+    md_src, md_wiki, md_facts, md_fmt = _load(
+        "row69_declared_markdown_bold"
+    )
+
+    assert tw_src == md_src, "the pair must share identical content"
+    assert tw_wiki == md_wiki, "the pair must share identical output"
+    assert (tw_fmt, md_fmt) == ("tracwiki", "markdown")
+
+    def codes_for(src, wiki, facts, fmt):
+        return [
+            w["code"]
+            for w in build_warnings(
+                src,
+                wiki,
+                facts,
+                probes={},
+                check_targets=False,
+                source_format=fmt,
+            )
+        ]
+
+    assert "tracwiki_markup_in_markdown" not in codes_for(
+        tw_src, tw_wiki, tw_facts, tw_fmt
+    )
+    assert "tracwiki_markup_in_markdown" in codes_for(
+        md_src, md_wiki, md_facts, md_fmt
+    )
+
+
+def _markup_warnings(name):
+    src, wiki, facts, fmt = _load(name)
+    warnings = build_warnings(
+        src,
+        wiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=fmt,
+    )
+    return src, [
+        w
+        for w in warnings
+        if w["code"] == "tracwiki_markup_in_markdown"
+    ]
+
+
+def test_code_span_blanking_does_not_silence_the_genuine_occurrence():
+    """Row 71, ticket #65 -- the over-blanking catcher.
+
+    A quoted occurrence and a genuine one in the same document. Both
+    failure modes here produce a plausible-looking result: blanking
+    nothing reports the QUOTED one (right code, wrong defect -- what
+    happens pre-fix), and blanking too much silences the genuine one
+    while leaving the table row green. So this asserts on WHICH
+    occurrence was found, not merely that something was.
+
+    The two carry different words on purpose. An earlier draft used the
+    same word for both and could not tell them apart at all -- the
+    evidence dict carries the matched text, not its offset, so a lookup
+    always found the first occurrence and the test passed or failed for
+    the wrong reason.
+    """
+    src, matches = _markup_warnings("row71_code_span_and_bare_bold")
+    assert len(matches) == 1, matches
+    assert matches[0]["evidence"]["matched"] == "'''beta'''", (
+        "expected the genuine occurrence; "
+        f"got {matches[0]['evidence']['matched']!r}"
+    )
+    assert "alpha" in src, "fixture must still contain the quoted one"
+
+
+def test_same_line_fence_does_not_blind_the_rest_of_the_document():
+    """Row 70, ticket #65 -- the false negative, and the sharper half.
+
+    `_strip_code_fences` never closes a fence opened and closed on one
+    line, so everything after such a line read as fence interior and
+    genuine TracWiki markup following it was never seen at all. Silent
+    pre-fix. This is the direction a fence-scoping change is most likely
+    to get backwards, so it is asserted on its own rather than only
+    through the table row.
+    """
+    _, matches = _markup_warnings("row70_same_line_fence_then_bold")
+    assert len(matches) == 1, matches
+    assert matches[0]["evidence"]["matched"] == "'''bold'''"

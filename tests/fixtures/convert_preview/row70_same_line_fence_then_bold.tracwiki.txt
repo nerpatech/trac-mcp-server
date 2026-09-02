@@ -1,0 +1,3 @@
+{{{ inline }}}
+
+Then '''bold''' pasted in.

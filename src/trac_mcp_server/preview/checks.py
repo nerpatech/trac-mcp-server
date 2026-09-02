@@ -11,8 +11,8 @@ from typing import Any
 
 from ..converters.common import (
     TRACLINK_SCHEMES,
-    _strip_code_fences,
     blank_code_fences,
+    blank_inline_code_spans,
 )
 from .facts import PreviewFacts
 from .targets import ERROR, MISSING, SKIPPED, is_probeable_wiki_href
@@ -202,8 +202,30 @@ def _check_tracwiki_markup_in_markdown(
 ) -> list[dict]:
     """TracWiki markup (`|=header=|`, `'''bold'''`, `{{{ }}}`) pasted into
     a Markdown candidate, where it is not valid Markdown and so would
-    round-trip into visibly broken markup (row 12)."""
-    scan_text = _strip_code_fences(markdown_source)
+    round-trip into visibly broken markup (row 12).
+
+    Only called for Markdown-declared input -- see ``build_warnings``.
+    On TracWiki-declared input this markup is correct content, and
+    warning about it fires on essentially every write (ticket #65).
+
+    Two scoping steps, both ticket #65, both blanking rather than
+    stripping so the reported ``match.group(0)`` comes from a document
+    the same shape as the caller's:
+
+    - ``blank_code_fences`` rather than ``_strip_code_fences``. The old
+      function never closes a fence opened and closed on ONE line, so
+      everything after such a line read as fence interior and genuine
+      markup following it was never seen -- a false NEGATIVE, and the
+      more dangerous sign. (The fenced-block false POSITIVE that ticket
+      originally reported never existed: fences were always scoped out.)
+    - ``blank_inline_code_spans``, second, once the fences' own
+      backticks are gone. Markup inside backticks is quoted on purpose
+      and renders as literal text by intent, which is the very outcome
+      this check warns about.
+    """
+    scan_text = blank_inline_code_spans(
+        blank_code_fences(markdown_source)
+    )
     warnings = []
     for pattern, label in (
         (_TRACWIKI_TABLE_RE, "table"),
@@ -599,6 +621,7 @@ def build_warnings(
     facts: PreviewFacts,
     probes: dict[str, dict],
     check_targets: bool,
+    source_format: str = "markdown",
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
@@ -616,6 +639,16 @@ def build_warnings(
             :func:`trac_mcp_server.preview.targets.probe_targets`. Ignored
             when ``check_targets`` is False.
         check_targets: Whether the live probe actually ran.
+        source_format: The format the caller DECLARED its input to be,
+            'markdown' (the default, and what every caller predating
+            ticket #65 meant) or 'tracwiki'. Only
+            ``_check_tracwiki_markup_in_markdown`` consults it, and only
+            to skip itself: TracWiki markup in TracWiki-declared input
+            is correct content, not a defect, and warning about it fires
+            on nearly every write once TracWiki authoring is possible
+            (#62). Never used to GUESS the format -- the declaration is
+            the caller's, and #47 is this project's evidence that
+            sniffing content instead is unreliable.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -630,7 +663,7 @@ def build_warnings(
     warnings: list[dict] = []
     warnings.extend(_check_escaped_link_targets(facts))
     warnings.extend(_check_link_ref_in_code_span(facts))
-    if markdown_source is not None:
+    if markdown_source is not None and source_format != "tracwiki":
         warnings.extend(
             _check_tracwiki_markup_in_markdown(markdown_source)
         )

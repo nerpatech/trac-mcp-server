@@ -355,6 +355,46 @@ def blank_code_fences(text: str) -> str:
     return "".join(out)
 
 
+#: An inline code span: a run of backticks, a body, and a matching run.
+#: Deliberately NOT DOTALL -- a span is confined to one line here. A
+#: stray unmatched backtick is common in prose, and letting a span run
+#: across paragraphs would blank an arbitrary stretch of the document,
+#: which is the dangerous direction: over-blanking silences real defects
+#: while leaving every test superficially green (ticket #65, row 71).
+_INLINE_CODE_SPAN_RE = re.compile(
+    r"(?P<ticks>`+)(?:(?!(?P=ticks)).)+(?P=ticks)"
+)
+
+
+def blank_inline_code_spans(text: str) -> str:
+    """Return ``text`` with inline code spans replaced by spaces,
+    character for character, so the result has the SAME LENGTH as the
+    input -- the companion to :func:`blank_code_fences` for the other
+    way of marking content as literal.
+
+    Markup inside backticks is quoted ON PURPOSE and Trac renders it as
+    literal text, which is exactly the outcome
+    ``tracwiki_markup_in_markdown`` exists to warn about -- so warning
+    about it is self-defeating, and that false positive is what ticket
+    #65 measured firing constantly once TracWiki authoring landed
+    (#62).
+
+    Run this AFTER ``blank_code_fences``: a fenced block's own
+    delimiters are backticks, and blanking the fences first stops them
+    being read as span delimiters.
+
+    Newlines are preserved along with length, so any line-oriented
+    logic downstream still sees the same shape.
+    """
+
+    def _blank(match: re.Match[str]) -> str:
+        return "".join(
+            "\n" if ch == "\n" else " " for ch in match.group(0)
+        )
+
+    return _INLINE_CODE_SPAN_RE.sub(_blank, text)
+
+
 def detect_format_heuristic(text: str) -> str:
     """Heuristic format detection (fallback when capabilities unavailable).
 
