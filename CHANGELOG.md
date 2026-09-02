@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- `ticket_get` now returns the ticket's comments by default (Trac #60): number, author, timestamp and body, converted to Markdown like the description, so one call is the whole ticket. Previously comments were reachable only through `ticket_changelog`, with nothing in a `ticket_get` response indicating any existed — the compliant triage path cost two calls and the one-call path *looked* complete, which silently cost correctness (an operator's answer, already recorded in a comment, re-asked)
+  - New `include_comments` (default `true`) — the documented opt-out for fetching `_ts` before a write; `max_comments` (default 50) caps long threads
+  - Comments are filtered out of the changelog inside the tool, so field-only changes never reach the response: a ticket whose description was edited no longer drags two full copies of that description along to deliver a few bytes of comment text (the cost that ruled out proxying `ticket_changelog` wholesale)
+  - Each comment carries the number Trac assigns it — the same number `ticket_render_check`'s `comment` parameter is keyed on, closing a discoverability gap where that number could only be found by guessing
+  - `raw=true` now governs comment bodies as well as the description
+  - Truncation is loud by construction: over the cap, the head and tail are kept and the middle dropped (a long thread has its scope set early and corrected late), and the response names how many exist, how many are shown, and which comment numbers were omitted — `comment_count` is always the exact total. A failed changelog fetch still returns the ticket, and says the comments are missing
+
 ### Fixed
 - `install.sh` now installs both `dist/` binaries, not just `trac-mcp-server` (Trac #54): it previously hard-coded a single binary name, so `trac-convert` on `PATH` was never refreshed by the normal build-and-install cycle — a copy placed there by hand once could silently drift 15+ days and a behavior change (the #37 fix) behind `dist/trac-convert`, with `--version` reporting the same string for both and unable to tell them apart
 - `markdown_to_tracwiki` converter sweep (Trac #19, #20, #27, #29): four defects found and fixed together since they're all in the same `TracWikiRenderer`

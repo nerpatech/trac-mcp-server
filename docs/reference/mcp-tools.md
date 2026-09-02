@@ -150,14 +150,31 @@ instead of the default one -- see
 
 ## ticket_get
 
-**Description:** Get full ticket details including summary, description, status, and owner. Use ticket_changelog for history.
+**Description:** Get full ticket details: summary, description, field values and — by default — every comment with its number, author and timestamp, so one call covers the whole ticket. Use ticket_changelog for full field-change history.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to retrieve (minimum: 1) |
-| `raw` | boolean | No | `false` | If true, return description in original TracWiki format without converting to Markdown |
+| `raw` | boolean | No | `false` | If true, return description **and comment bodies** in original TracWiki format without converting to Markdown |
+| `include_comments` | boolean | No | `true` | Return the ticket's comments alongside its fields. Set `false` when you only need field values or the `_ts` change token before a write |
+| `max_comments` | integer | No | `50` | Maximum comment bodies to return (minimum: 1). Ignored when `include_comments` is false |
+
+**Comments.** Comments are read from the ticket's changelog and filtered there: field-only
+changes never reach the response, so a ticket whose description was edited does not drag
+two full copies of that description along with its comments. Each comment carries the
+number Trac itself assigns — the same number `ticket_render_check`'s `comment` parameter
+takes, so it can be used directly instead of guessed. Comment numbering skips field-only
+changelog entries, so it is *not* a comment's ordinal position in the thread.
+
+**Truncation is loud.** A thread longer than `max_comments` keeps its head and its tail and
+drops the middle — a long thread usually has its scope set in the earliest comments and
+corrected in the latest. The response then states how many comments exist, how many are
+shown, and which comment numbers were omitted; `comment_count` is always the exact total,
+never the number shown. If the changelog fetch fails, the ticket still comes back and the
+response says plainly that the comments are missing rather than returning silently
+without them.
 
 **Success Response:**
 ```json
@@ -184,9 +201,25 @@ instead of the default one -- see
   "resolution": "",
   "created": "2025-01-15T10:30:00",
   "modified": "2025-01-20T14:22:00",
-  "description": "Users are experiencing timeout errors..."
+  "description": "Users are experiencing timeout errors...",
+  "comments_included": true,
+  "comments": [
+    {
+      "number": "1",
+      "author": "carol",
+      "timestamp": "2025-01-16 08:12",
+      "body": "Reproduced on staging."
+    }
+  ],
+  "comment_count": 1,
+  "comments_shown": 1,
+  "comments_truncated": false
 }
 ```
+
+When a thread is truncated, `comments_truncated` is `true` and
+`omitted_comment_numbers` lists the dropped comments. When the changelog fetch
+fails, `comments_included` is `false` and `comments_error` carries the reason.
 
 **Error Responses:**
 
