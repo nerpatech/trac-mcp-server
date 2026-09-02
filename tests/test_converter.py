@@ -1998,6 +1998,85 @@ class TestHeadingAnchorsOption(unittest.TestCase):
         self.assertEqual(default, explicit)
 
 
+class TestMarkerPoorMarkdownNeedsAnExplicitDeclaration(
+    unittest.TestCase
+):
+    """Ticket #47's pin, re-anchored by ticket #69.
+
+    #47's defect was that a marker-poor Markdown document -- a bare table
+    with no heading, bold, fence or link -- scores as TracWiki and is
+    stored unconverted. It was pinned on wiki_create/wiki_update, which
+    fixed it by passing ``source_format="markdown"`` explicitly instead
+    of letting ``auto_convert`` re-detect.
+
+    Ticket #69 removed the Markdown path from those tools, so there is no
+    write handler left to assert it on. The heuristic itself did not go
+    anywhere: ``auto_convert`` still calls it whenever ``source_format``
+    is None, and ``wiki_file_push`` and the ``trac-convert`` binary still
+    reach it. So the row moves here rather than being deleted -- it is
+    re-anchored, not relaxed, and the misclassification below is still
+    the live behaviour that makes declaring necessary.
+    """
+
+    # The exact shape ticket #47 measured.
+    MARKER_POOR = "| a | b |\n|---|---|\n| 1 | 2 |"
+
+    def test_marker_poor_markdown_is_still_misclassified(self):
+        """The defect, unfixed and unfixable by heuristic. Asserted so
+        that a future change to the scoring is a deliberate one.
+        """
+        from trac_mcp_server.converters.common import (
+            detect_format_heuristic,
+        )
+
+        self.assertEqual(
+            detect_format_heuristic(self.MARKER_POOR), "tracwiki"
+        )
+
+    def test_auto_convert_left_to_detect_stores_it_unconverted(self):
+        """No declaration, so the heuristic decides -- and getting it
+        wrong means source == target, which auto_convert passes through
+        untouched. This is #47's symptom end to end.
+        """
+        import asyncio
+
+        from trac_mcp_server.config import Config
+        from trac_mcp_server.converters.common import auto_convert
+
+        config = Config(
+            trac_url="http://test", username="u", password="p"
+        )
+        result = asyncio.run(
+            auto_convert(
+                self.MARKER_POOR, config, target_format="tracwiki"
+            )
+        )
+        self.assertFalse(result.converted)
+        self.assertEqual(result.text, self.MARKER_POOR)
+
+    def test_declaring_markdown_converts_it(self):
+        """The fix #47 landed, on the API that still offers the choice."""
+        import asyncio
+
+        from trac_mcp_server.config import Config
+        from trac_mcp_server.converters.common import auto_convert
+
+        config = Config(
+            trac_url="http://test", username="u", password="p"
+        )
+        result = asyncio.run(
+            auto_convert(
+                self.MARKER_POOR,
+                config,
+                target_format="tracwiki",
+                source_format="markdown",
+            )
+        )
+        self.assertTrue(result.converted)
+        self.assertNotEqual(result.text, self.MARKER_POOR)
+        self.assertIn("||", result.text)
+
+
 class TestDetectFormatHeuristicFenceAware(unittest.TestCase):
     """Tests for detect_format_heuristic() — fence redaction + line-anchored heading match.
 

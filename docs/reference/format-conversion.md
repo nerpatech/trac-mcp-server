@@ -2,32 +2,61 @@
 
 ## Overview
 
-The Trac MCP Server automatically converts between Markdown and TracWiki formats:
+**The inline ticket and wiki tools do not convert.** They store and return
+TracWiki bytes exactly as given, so a read-edit-write round trip is
+byte-exact. Ticket #69 removed the Markdown path from those tools --
+along with the `format` parameter on the write tools and the `raw`
+parameter on the read tools -- because the default aimed the *destructive*
+failure at hand-authored TracWiki: indentation inside a `{{{ }}}`
+processor block was silently stripped, with an empty warning list and a
+plausible-looking render.
 
-- **Markdown -> TracWiki:** When creating/updating wiki pages and ticket descriptions
-- **TracWiki -> Markdown:** When reading wiki pages and ticket content
+Passing `format="markdown"` or `raw=false` to those tools is now a
+`validation_error` rather than a silently ignored argument. Passing
+`format="tracwiki"` or `raw=true` is accepted as a no-op.
+
+The converters described in the rest of this document are still shipped
+and still maintained. They are reached from three places:
+
+| Consumer | What it converts |
+|----------|------------------|
+| `trac-convert` (standalone binary) | Either direction, on files or stdin |
+| `convert_preview` (MCP tool) | Markdown -> TracWiki, without writing |
+| `wiki_file_push` / `wiki_file_pull` | Markdown <-> TracWiki, driven by the file's extension |
+
+The file tools keep converting deliberately: they have a *filename* to go
+on, which the inline tools do not.
 
 ## Conversion Direction by Operation
 
 | Operation | Input Format | Output Format | Conversion |
 |-----------|--------------|---------------|------------|
-| `wiki_create` | Markdown | TracWiki | Auto-converts content |
-| `wiki_update` | Markdown | TracWiki | Auto-converts content |
-| `wiki_get` | TracWiki | Markdown | Auto-converts (unless `raw=true`) |
-| `ticket_create` | Markdown | TracWiki | Auto-converts description |
-| `ticket_get` | TracWiki | Markdown | Auto-converts (unless `raw=true`) |
-| `ticket_update` | Markdown | TracWiki | Auto-converts comment |
+| `wiki_create` / `wiki_update` | TracWiki | TracWiki | **None** -- stored byte-for-byte |
+| `wiki_get` / `wiki_search` | TracWiki | TracWiki | **None** -- returned byte-for-byte |
+| `ticket_create` / `ticket_update` | TracWiki | TracWiki | **None** -- stored byte-for-byte |
+| `ticket_get` / `ticket_changelog` | TracWiki | TracWiki | **None** -- returned byte-for-byte |
+| `milestone_*` | TracWiki | TracWiki | **None** -- byte-for-byte both ways |
+| `wiki_file_push` | Markdown or TracWiki | TracWiki | Converts when the source is Markdown |
+| `wiki_file_pull` | TracWiki | Markdown or TracWiki | Converts when the target is Markdown |
+| `convert_preview` | Markdown | TracWiki | Converts, without writing anything |
 
-## The `raw` Parameter
+## Holding Markdown?
 
-Use `raw=true` to skip format conversion and get/send content in original TracWiki format:
+Convert it yourself before writing, with the `trac-convert` binary:
+
+```bash
+trac-convert --to tracwiki notes.md > notes.tracwiki
+```
+
+Or push the file directly and let `wiki_file_push` convert from the
+extension:
 
 ```json
 {
-  "name": "wiki_get",
+  "name": "wiki_file_push",
   "arguments": {
-    "page_name": "WikiStart",
-    "raw": true
+    "file_path": "/abs/path/notes.md",
+    "page_name": "Notes"
   }
 }
 ```

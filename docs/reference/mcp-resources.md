@@ -6,8 +6,7 @@ The Trac MCP Server exposes wiki pages as resources via URI templates, enabling 
 
 | URI Pattern | Description |
 |-------------|-------------|
-| `trac://wiki/{page_name}` | Read specific wiki page (Markdown by default) |
-| `trac://wiki/{page_name}?format=tracwiki` | Read page in raw TracWiki format |
+| `trac://wiki/{page_name}` | Read specific wiki page as stored (TracWiki, byte-for-byte) |
 | `trac://wiki/{page_name}?version=N` | Read specific historical version |
 | `trac://wiki/{page_name}?instance=/project` | Read from another Trac instance |
 | `trac://wiki/_index` | List all wiki pages in hierarchical tree structure |
@@ -16,21 +15,21 @@ The Trac MCP Server exposes wiki pages as resources via URI templates, enabling 
 
 | Parameter | Values | Description |
 |-----------|--------|-------------|
-| `format` | `markdown` (default), `tracwiki` | Output format for page content |
 | `version` | Integer (1+) | Retrieve specific version instead of latest |
 | `instance` | Configured name, or a path/URL on the same host | Route to another Trac instance instead of the default -- see [Multiple Instances](configuration.md#multiple-instances) |
 
 ## Examples
 
-**Read WikiStart in Markdown:**
+**Read WikiStart:**
 ```
 trac://wiki/WikiStart
 ```
 
-**Read raw TracWiki:**
-```
-trac://wiki/WikiStart?format=tracwiki
-```
+Content comes back as stored -- TracWiki, byte-for-byte. `?format=` was
+removed with the rest of the Markdown read path (ticket #69) and is
+reported as an error rather than ignored, so a stale caller is told
+instead of quietly handed something else. To convert the result, use the
+`trac-convert` binary.
 
 **Read specific version:**
 ```

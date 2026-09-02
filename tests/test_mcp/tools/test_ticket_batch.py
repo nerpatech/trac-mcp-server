@@ -81,16 +81,10 @@ class TestHandleBatchCreate(unittest.TestCase):
 
     def test_batch_create_success(self):
         """Batch create with 3 tickets returns all succeeded."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.side_effect = [1, 2, 3]
-            mock_convert.side_effect = lambda x: f"converted:{x}"
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -127,19 +121,13 @@ class TestHandleBatchCreate(unittest.TestCase):
 
     def test_batch_create_partial_failure(self):
         """Batch create with one xmlrpc fault reports partial failure."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.side_effect = [
                 1,
                 xmlrpc.client.Fault(500, "Server error"),
             ]
-            mock_convert.side_effect = lambda x: f"converted:{x}"
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -209,16 +197,10 @@ class TestHandleBatchCreate(unittest.TestCase):
 
     def test_batch_create_missing_summary(self):
         """Ticket missing summary appears in failed list."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.return_value = 1
-            mock_convert.side_effect = lambda x: x
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -244,16 +226,10 @@ class TestHandleBatchCreate(unittest.TestCase):
 
     def test_batch_create_missing_description(self):
         """Ticket missing description appears in failed list."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.return_value = 1
-            mock_convert.side_effect = lambda x: x
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -277,40 +253,40 @@ class TestHandleBatchCreate(unittest.TestCase):
                 sc["failed"][0]["error"], "description is required"
             )
 
-    def test_batch_create_calls_markdown_to_tracwiki(self):
-        """Each ticket description is converted via markdown_to_tracwiki."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+    def test_batch_create_stores_each_description_as_written(self):
+        """Every item in the batch is stored byte-for-byte, not just the
+        first -- the loop body is where a per-item conversion would come
+        back (ticket #69)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.side_effect = [10, 11]
-            mock_convert.side_effect = lambda x: f"wiki:{x}"
 
             asyncio.run(
                 _handle_batch_create(
                     self.mock_client,
                     {
                         "tickets": [
-                            {"summary": "A", "description": "**bold**"},
+                            {
+                                "summary": "A",
+                                "description": "'''bold'''",
+                            },
                             {
                                 "summary": "B",
-                                "description": "# heading",
+                                "description": "= heading =",
                             },
                         ]
                     },
                 )
             )
 
-            self.assertEqual(mock_convert.call_count, 2)
-            mock_convert.assert_any_call("**bold**")
-            mock_convert.assert_any_call("# heading")
-            # Verify converted description passed to create_ticket
-            first_call = mock_rsl.call_args_list[0]
-            self.assertEqual(first_call[0][2], "wiki:**bold**")
+            self.assertEqual(mock_rsl.call_count, 2)
+            self.assertEqual(
+                mock_rsl.call_args_list[0][0][2], "'''bold'''"
+            )
+            self.assertEqual(
+                mock_rsl.call_args_list[1][0][2], "= heading ="
+            )
 
 
 class TestHandleBatchDelete(unittest.TestCase):
@@ -499,18 +475,12 @@ class TestHandleBatchUpdate(unittest.TestCase):
                 "ticket_id is required", sc["failed"][0]["error"]
             )
 
-    def test_batch_update_with_comment_converts_markdown(self):
-        """Comments in updates are converted via markdown_to_tracwiki."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
-            ) as mock_rsl,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+    def test_batch_update_stores_comment_as_written(self):
+        """Comments in updates are stored byte-for-byte (ticket #69)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
             mock_rsl.return_value = True
-            mock_convert.side_effect = lambda x: f"wiki:{x}"
 
             asyncio.run(
                 _handle_batch_update(
@@ -519,17 +489,15 @@ class TestHandleBatchUpdate(unittest.TestCase):
                         "updates": [
                             {
                                 "ticket_id": 1,
-                                "comment": "**bold comment**",
+                                "comment": "'''bold comment'''",
                             },
                         ]
                     },
                 )
             )
 
-            mock_convert.assert_called_once_with("**bold comment**")
-            # Verify converted comment passed to update_ticket
             call_args = mock_rsl.call_args[0]
-            self.assertEqual(call_args[2], "wiki:**bold comment**")
+            self.assertEqual(call_args[2], "'''bold comment'''")
 
     def test_batch_update_exceeds_max_batch_size(self):
         """Batch exceeding max size returns validation error."""

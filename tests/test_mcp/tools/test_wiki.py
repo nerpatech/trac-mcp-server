@@ -14,7 +14,6 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.converters import ConversionResult
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
 from trac_mcp_server.mcp.tools.errors import format_timestamp
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -731,15 +730,10 @@ class TestHandleCreate(unittest.TestCase):
         self.mock_client.config = self.mock_config
 
     def test_handle_create_success(self):
-        """Test _handle_create creates page and reports warnings."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        """Test _handle_create creates the page."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up side effect - first call raises not found, second returns success
             call_count = [0]
 
@@ -758,20 +752,6 @@ class TestHandleCreate(unittest.TestCase):
 
             mock_run_sync.side_effect = side_effect_func
 
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= New Page =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[
-                        "Tables detected - TracWiki uses different table syntax. Manual conversion may be needed."
-                    ],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
-
             # Call handler
             result = asyncio.run(
                 _handle_create(
@@ -789,35 +769,17 @@ class TestHandleCreate(unittest.TestCase):
 
             self.assertIn("Created wiki page 'NewPage'", text)
             self.assertIn("version 1", text)
-            self.assertIn("Conversion warnings:", text)
-            self.assertIn("Tables detected", text)
 
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Return page info (page exists)
             mock_run_sync.return_value = {
                 "name": "ExistingPage",
                 "version": 3,
             }
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Existing =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(
@@ -836,52 +798,6 @@ class TestHandleCreate(unittest.TestCase):
             self.assertIn("already exists", text)
             self.assertIn("wiki_update", text)
 
-    def test_handle_create_passes_source_format_markdown(self):
-        """ticket #47: _handle_create must tell auto_convert its content
-        is Markdown rather than leaving it to re-detect. Left to
-        heuristics, a marker-poor Markdown document (e.g. a bare table
-        with no heading/bold/fence/link) scores as TracWiki and is
-        stored verbatim, unconverted.
-        """
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
-            call_count = [0]
-
-            def side_effect_func(*args, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    raise xmlrpc.client.Fault(404, "Page not found")
-                return {"name": "NewPage", "version": 1}
-
-            mock_run_sync.side_effect = side_effect_func
-
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="||a||b||",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                )
-
-            mock_convert.side_effect = mock_auto_convert
-
-            asyncio.run(
-                _handle_create(
-                    self.mock_client,
-                    {"page_name": "NewPage", "content": "| a | b |"},
-                )
-            )
-
-            mock_convert.assert_called_once()
-            _, kwargs = mock_convert.call_args
-            self.assertEqual(kwargs.get("source_format"), "markdown")
-
 
 class TestHandleUpdate(unittest.TestCase):
     """Test _handle_update handler."""
@@ -896,32 +812,15 @@ class TestHandleUpdate(unittest.TestCase):
 
     def test_handle_update_success(self):
         """Test _handle_update updates page successfully."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up mocks
             mock_run_sync.return_value = {
                 "name": "TestPage",
                 "version": 6,
                 "author": "alice",
             }
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Updated Page =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(
@@ -947,14 +846,9 @@ class TestHandleUpdate(unittest.TestCase):
 
     def test_handle_update_version_conflict(self):
         """Test _handle_update handles version conflict."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up side effect - first call raises conflict, second returns current version
             call_count = [0]
 
@@ -970,18 +864,6 @@ class TestHandleUpdate(unittest.TestCase):
                     return {"name": "TestPage", "version": 7}
 
             mock_run_sync.side_effect = side_effect_func
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Updated =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(
@@ -1004,46 +886,6 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("Current version is 7", text)
             self.assertIn("you tried to update version 5", text)
             self.assertIn("version=7", text)
-
-    def test_handle_update_passes_source_format_markdown(self):
-        """ticket #47: same explicit-hint requirement as _handle_create."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
-            mock_run_sync.return_value = {
-                "name": "TestPage",
-                "version": 6,
-            }
-
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="||a||b||",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                )
-
-            mock_convert.side_effect = mock_auto_convert
-
-            asyncio.run(
-                _handle_update(
-                    self.mock_client,
-                    {
-                        "page_name": "TestPage",
-                        "content": "| a | b |",
-                        "version": 5,
-                    },
-                )
-            )
-
-            mock_convert.assert_called_once()
-            _, kwargs = mock_convert.call_args
-            self.assertEqual(kwargs.get("source_format"), "markdown")
 
 
 class TestHandleDelete(unittest.TestCase):
