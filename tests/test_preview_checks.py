@@ -137,6 +137,26 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # `unconfigured_intertrac_prefix` on a prefix that is configured -- a
 # right-signal/wrong-diagnosis case, which is why they get their own
 # code rather than a widened message.
+#
+# Suite 8 (rows 63-65, ticket #61): the third scoping gap in the same
+# check, at the delimiter #59 did not reach. `_PREFIX_REALM_RE`'s
+# trailing `\S+` did not stop at a backtick, so a token whose code span
+# is followed immediately by non-whitespace ran PAST the closing
+# backtick -- and `_code_span_contains` then compared a token longer
+# than any span, found no containment, and called a CONFIGURED prefix
+# unconfigured. Row 63 is the shape it was found in (a table cell, where
+# the delimiter follows the backtick with no space); row 64 is the same
+# defect with no table at all, pinning that the trigger is the adjacency
+# and not the table. Both are warning rows rather than silent ones,
+# because a backticked link reference legitimately trips
+# `link_ref_in_code_span` (row 11's shape, widened by #58) -- the defect
+# here is the SECOND code they carried, pinned by
+# `test_code_span_boundary_is_not_reported_as_unconfigured` below, the
+# same present-code/absent-code shape #59 comment 1's rows use. Row 65
+# is the must-keep-firing half in the same position: an UNCONFIGURED
+# prefix in a cell, not backticked, must still warn -- the fix corrects
+# a token boundary, it does not widen suppression to un-backticked
+# prose.
 SILENT_ROWS = [
     "row01_intertrac_wiki",
     "row02_intertrac_wiki_bcs",
@@ -255,6 +275,12 @@ WARNING_ROWS = [
     (
         "row62_ticket_hyphen_suffix",
         "intertrac_target_captured_punctuation",
+    ),
+    ("row63_code_span_table_cell", "link_ref_in_code_span"),
+    ("row64_code_span_adjacent_word", "link_ref_in_code_span"),
+    (
+        "row65_table_cell_unconfigured_realm",
+        "unconfigured_intertrac_prefix",
     ),
 ]
 
@@ -507,6 +533,29 @@ def test_captured_punctuation_is_not_reported_as_unconfigured(name):
     assert "unconfigured_intertrac_prefix" not in codes, codes
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["row63_code_span_table_cell", "row64_code_span_adjacent_word"],
+)
+def test_code_span_boundary_is_not_reported_as_unconfigured(name):
+    """Ticket #61: a configured prefix inside a code span whose closing
+    backtick is followed immediately by non-whitespace.
+
+    Before the fix the realm pattern's `\\S+` ran past that backtick, so
+    `_code_span_contains` compared a token longer than any rendered span,
+    found no containment, and reported a CONFIGURED prefix as
+    unconfigured. `link_ref_in_code_span` firing here is correct and
+    asserted as a warning row; what must not appear is the second code.
+    """
+    markdown_source, tracwiki, facts = _load(name)
+    warnings = build_warnings(
+        markdown_source, tracwiki, facts, probes={}, check_targets=False
+    )
+    codes = [w["code"] for w in warnings]
+    assert "link_ref_in_code_span" in codes, codes
+    assert "unconfigured_intertrac_prefix" not in codes, codes
+
+
 def test_suite_balance_is_roughly_even():
     """Per the ticket's coverage note: silent and warning rows must be
     roughly balanced, or a checker that warns about everything (or never
@@ -520,10 +569,10 @@ def test_suite_balance_is_roughly_even():
     # added rows 22-35, and comment 6/7/8's reopen added rows 36-45;
     # tickets #58/#59 added rows 49-53 and 56-62 and moved row 46 into
     # the warning half; rows 47/48/54/55 are standalone tests, not
-    # counted here -- see their comments).
+    # counted here -- see their comments; ticket #61 added rows 63-65).
     warning_count = len(WARNING_ROWS) + 1
     assert silent_count == 31
-    assert warning_count == 27
+    assert warning_count == 30
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
