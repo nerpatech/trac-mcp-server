@@ -375,17 +375,31 @@ class TestUndeclaredWriteIsVerbatim(unittest.TestCase):
             self.assertEqual(mock_run_sync.call_args[0][2], marker_poor)
 
 
-class TestCarriageReturnsSurvive(unittest.TestCase):
+class TestCarriageReturnsReachTheClientUnchanged(unittest.TestCase):
     """The CRLF row inherited from auto_pm:#90, via #69 comment 6.
 
     ``wiki_file_push`` normalises CRLF to LF because it reads a file.
     The inline tools take a string and have no such step, and their
-    behaviour was unmeasured. Under #69 they store bytes verbatim, so
-    the answer is: a CR that reaches them is preserved, not stripped.
+    behaviour was unmeasured. The worry was that #69, by storing bytes
+    verbatim, would let a pasted CRLF body persist CRLF into an all-LF
+    store -- invisibly, since Trac renders the two identically and
+    auto_pm:#90 measured that byte size, not the diff, was the only
+    signal that surfaced it.
 
-    Pinned in both directions rather than left to inspection, because
-    Trac renders CRLF and LF identically -- auto_pm:#90 measured that
-    the byte size, not the diff, was the only signal that surfaced it.
+    **Measured end to end on /trac_test after deploying #69: it does
+    not.** A CR cannot reach the store through any of these tools,
+    because ``xmlrpc.client.dumps`` emits a raw CR rather than escaping
+    it as ``&#13;``, and XML 1.0 line-end normalisation collapses it to
+    LF on the parser side -- before Trac ever sees the value. Pushing
+    ``"line one\r\nline two\r\n"`` through ``wiki_update`` stored it
+    with **zero** CRs.
+
+    So these tests pin the handler boundary only: the inline tools add
+    no normalisation of their own, which is what makes them verbatim.
+    The store stays LF-only for a reason one layer down, and that reason
+    is recorded here so a future reader does not re-derive it -- or,
+    worse, "fix" a normalisation step into these handlers to solve a
+    problem that the transport already rules out.
     """
 
     def setUp(self):
