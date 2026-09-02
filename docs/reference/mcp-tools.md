@@ -254,14 +254,14 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 
 ## ticket_create
 
-**Description:** Create a new ticket. Accepts Markdown for description (auto-converted to TracWiki).
+**Description:** Create a new ticket. The description is Markdown by default (converted to TracWiki); pass `format="tracwiki"` to store hand-authored TracWiki verbatim.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `summary` | string | **Yes** | - | Ticket title |
-| `description` | string | **Yes** | - | Ticket body in Markdown (will be converted to TracWiki) |
+| `description` | string | **Yes** | - | Ticket body. Markdown by default; see `format` |
 | `ticket_type` | string | No | `"defect"` | Ticket type: `defect`, `enhancement`, or `task` |
 | `priority` | string | No | - | Priority level (e.g., `blocker`, `critical`, `major`, `minor`, `trivial`) |
 | `severity` | string | No | - | Severity level (e.g., `critical`, `major`, `minor`) |
@@ -270,6 +270,7 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `owner` | string | No | - | Assignee username |
 | `cc` | string | No | - | CC email addresses |
 | `keywords` | string | No | - | Keywords/tags |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 **Success Response:**
 ```json
@@ -316,14 +317,14 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 
 ## ticket_update
 
-**Description:** Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments.
+**Description:** Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. The comment and the description rewrite are Markdown by default (converted to TracWiki); pass `format="tracwiki"` to store hand-authored TracWiki verbatim — one declaration governs both fields.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
-| `comment` | string | No | - | Comment in Markdown (optional, max 10000 chars) |
+| `comment` | string | No | - | Comment body (optional, max 10000 chars). Markdown by default; see `format` |
 | `status` | string | No | - | New status |
 | `priority` | string | No | - | New priority |
 | `severity` | string | No | - | New severity |
@@ -333,6 +334,7 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `resolution` | string | No | - | Resolution (when closing, e.g., `fixed`, `invalid`, `wontfix`) |
 | `cc` | string | No | - | CC email addresses |
 | `keywords` | string | No | - | Keywords/tags |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 **Success Response:**
 ```json
@@ -563,20 +565,21 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 
 ## ticket_batch_create
 
-**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore.
+**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are Markdown by default; `format` sits at the call level and governs every item in the batch.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `tickets` | array | **Yes** | - | List of ticket objects to create |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 Each ticket object:
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `summary` | string | **Yes** | - | Ticket title |
-| `description` | string | **Yes** | - | Ticket body in Markdown (will be converted to TracWiki) |
+| `description` | string | **Yes** | - | Ticket body. Markdown by default; see the call-level `format` |
 | `ticket_type` | string | No | `"defect"` | Ticket type |
 | `priority` | string | No | - | Priority level |
 | `component` | string | No | - | Component name |
@@ -721,20 +724,21 @@ Each ticket object:
 
 ## ticket_batch_update
 
-**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported.
+**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are Markdown by default; `format` sits at the call level and governs every item in the batch. (This tool takes no per-item `description`, so `format` governs comments only here.)
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `updates` | array | **Yes** | - | List of update objects with ticket_id and fields to change |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 Each update object:
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
-| `comment` | string | No | - | Comment in Markdown (will be converted to TracWiki) |
+| `comment` | string | No | - | Comment body. Markdown by default; see the call-level `format` |
 | `status` | string | No | - | New status |
 | `resolution` | string | No | - | Resolution (when closing) |
 | `priority` | string | No | - | New priority |
@@ -890,15 +894,16 @@ Each update object:
 
 ## wiki_create
 
-**Description:** Create new wiki page from Markdown input. Fails if page exists (use wiki_update instead).
+**Description:** Create a new wiki page. Content is Markdown by default (converted to TracWiki); pass `format="tracwiki"` to store hand-authored TracWiki verbatim. Fails if the page exists (use wiki_update instead).
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to create |
-| `content` | string | **Yes** | - | Page content in Markdown format |
+| `content` | string | **Yes** | - | Page content. Markdown by default; see `format` |
 | `comment` | string | No | - | Change comment |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 **Success Response:**
 ```json
@@ -950,16 +955,17 @@ Each update object:
 
 ## wiki_update
 
-**Description:** Update existing wiki page with optimistic locking. Requires version for conflict detection.
+**Description:** Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is Markdown by default (converted to TracWiki); pass `format="tracwiki"` to store hand-authored TracWiki verbatim.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to update |
-| `content` | string | **Yes** | - | Page content in Markdown format |
+| `content` | string | **Yes** | - | Page content. Markdown by default; see `format` |
 | `version` | integer | **Yes** | - | Current page version for optimistic locking (minimum: 1) |
 | `comment` | string | No | - | Change comment |
+| `format` | string | No | `"markdown"` | Format of the content you supply: `markdown` (converted to TracWiki) or `tracwiki` (stored byte-for-byte, converter skipped). There is no `auto` — the format is declared, never guessed from content |
 
 **Success Response:**
 ```json

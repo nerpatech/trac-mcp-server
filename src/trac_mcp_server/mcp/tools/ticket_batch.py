@@ -18,6 +18,7 @@ from ...core.client import TracClient
 from .constants import DEFAULT_TICKET_TYPE
 from .errors import build_error_response
 from .registry import ToolSpec
+from .source_format import FORMAT_PROPERTY, resolve_source_format
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_create",
-        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore.",
+        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are Markdown by default; format applies to the whole batch.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -54,7 +55,8 @@ TICKET_BATCH_TOOLS = [
                         "required": ["summary", "description"],
                     },
                     "description": "List of ticket objects to create",
-                }
+                },
+                "format": FORMAT_PROPERTY,
             },
             "required": ["tickets"],
         },
@@ -82,7 +84,7 @@ TICKET_BATCH_TOOLS = [
     ),
     types.Tool(
         name="ticket_batch_update",
-        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported.",
+        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are Markdown by default; format applies to the whole batch.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -114,7 +116,8 @@ TICKET_BATCH_TOOLS = [
                         "required": ["ticket_id"],
                     },
                     "description": "List of update objects with ticket_id and fields to change",
-                }
+                },
+                "format": FORMAT_PROPERTY,
             },
             "required": ["updates"],
         },
@@ -142,6 +145,13 @@ async def _handle_batch_create(
             "Reduce the number of tickets per request.",
         )
 
+    # One declaration for the whole call, not per item (#62): a batch
+    # mixing source formats is hypothetical rather than observed, and
+    # call level keeps the item schema simple.
+    source_format, format_error = resolve_source_format(args)
+    if format_error is not None:
+        return format_error
+
     async def _create_one(
         index: int, ticket_data: dict
     ) -> dict[str, Any]:
@@ -162,7 +172,10 @@ async def _handle_batch_create(
             }
 
         try:
-            description_tracwiki = markdown_to_tracwiki(description)
+            if source_format == "markdown":
+                description_tracwiki = markdown_to_tracwiki(description)
+            else:
+                description_tracwiki = description
             ticket_type = ticket_data.get(
                 "ticket_type", DEFAULT_TICKET_TYPE
             )
@@ -313,6 +326,13 @@ async def _handle_batch_update(
             "Reduce the number of updates per request.",
         )
 
+    # Call-level declaration, as in batch create (#62). Note this tool
+    # accepts no per-item `description`, so the format governs comments
+    # only here.
+    source_format, format_error = resolve_source_format(args)
+    if format_error is not None:
+        return format_error
+
     async def _update_one(update_data: dict) -> dict[str, Any]:
         ticket_id = update_data.get("ticket_id")
         if not ticket_id:
@@ -323,7 +343,7 @@ async def _handle_batch_update(
 
         try:
             comment = update_data.get("comment", "")
-            if comment:
+            if comment and source_format == "markdown":
                 comment = markdown_to_tracwiki(comment)
 
             attributes: dict[str, Any] = {}
