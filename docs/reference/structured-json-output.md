@@ -38,7 +38,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 |------|----------------------|
 | `get_server_time` | `server_time`, `unix_timestamp`, `timezone` |
 | `ticket_search` | `tickets[]`, `total`, `showing` |
-| `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified` |
+| `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified`, `_ts`, `comments_included`, and (unless `include_comments=false`) `comments[]` (each: `number`, `author`, `timestamp`, `body`), `comment_count`, `comments_shown`, `comments_truncated`, optional `omitted_comment_numbers`, optional `comments_error` |
 | `ticket_fields` | `fields[]` (each: `name`, `type`, `label`, `custom`, optional `options`) |
 | `ticket_actions` | `actions[]` (each: `name`, `label`, optional `hints`, `input_fields`) |
 | `ticket_batch_create` | `created[]`, `failed[]`, `total`, `succeeded`, `failed_count` |
