@@ -172,10 +172,10 @@ Every tool below also accepts an optional `instance` argument to route the call 
 ### Wiki (7)
 | Tool | Description |
 |------|-------------|
-| `wiki_get` | Get wiki page content (with Markdown conversion) |
+| `wiki_get` | Get wiki page content as stored (TracWiki, byte-for-byte) |
 | `wiki_search` | Search wiki pages |
-| `wiki_create` | Create new wiki pages |
-| `wiki_update` | Update existing wiki pages |
+| `wiki_create` | Create new wiki pages (content stored byte-for-byte) |
+| `wiki_update` | Update existing wiki pages (content stored byte-for-byte) |
 | `wiki_delete` | Delete wiki pages |
 | `wiki_recent_changes` | List recent wiki changes |
 | `wiki_get_history` | Get version history for a wiki page |

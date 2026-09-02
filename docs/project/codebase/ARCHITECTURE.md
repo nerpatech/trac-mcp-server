@@ -134,10 +134,9 @@
 5. Domain handler validates arguments, calls `TracClient` methods via `await run_sync(client.method, args)`
 6. `run_sync()` offloads synchronous XML-RPC call to thread pool via `asyncio.to_thread()`
 7. `TracClient._rpc_request()` serializes XML-RPC payload, sends HTTP POST, parses XML response
-8. For read operations: TracWiki content converted to Markdown via `tracwiki_to_markdown()`
-9. For write operations: Markdown content converted to TracWiki via `markdown_to_tracwiki()`
-10. Handler builds `list[TextContent]` or `CallToolResult` with text + structured JSON
-11. Response sent back to MCP client via stdio transport
+8. No conversion step: the inline ticket and wiki tools move TracWiki bytes unchanged in both directions (ticket #69)
+9. Handler builds `list[TextContent]` or `CallToolResult` with text + structured JSON
+10. Response sent back to MCP client via stdio transport
 
 **MCP Resource Read Lifecycle:**
 
@@ -253,10 +252,9 @@
 - Thread-local `requests.Session` instances in TracClient
 
 **Format Conversion:**
-- Transparent Markdown <-> TracWiki conversion at tool handler boundaries
-- Read operations: TracWiki -> Markdown (default) with `raw=true` bypass option
-- Write operations: Markdown -> TracWiki conversion before pushing to Trac
-- Auto-detection of source format via heuristics when format unknown
+- **Not at the inline tool boundaries.** `ticket_*`, `wiki_get`/`wiki_search`, `wiki_create`/`wiki_update` and `milestone_*` store and return TracWiki bytes unchanged; there is no `format` or `raw` parameter to select otherwise (ticket #69)
+- The converters remain, reached from three places: the standalone `trac-convert` binary, the `convert_preview` tool, and `wiki_file_push`/`wiki_file_pull`
+- The file tools still convert because they have a *filename* to go on; source-format auto-detection by content heuristic lives there and in `auto_convert`, not in an inline write path
 
 ---
 

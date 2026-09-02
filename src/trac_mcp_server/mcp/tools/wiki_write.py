@@ -2,7 +2,8 @@
 
 This module implements wiki write operations: create, update, and delete.
 All tools use async handlers with run_sync() to bridge synchronous TracClient calls,
-automatic Markdown conversion, and structured error responses.
+and structured error responses. Content is TracWiki and is stored
+byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
 import logging
@@ -10,12 +11,11 @@ import xmlrpc.client
 
 import mcp.types as types
 
-from ...converters.common import auto_convert
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
-from .source_format import FORMAT_PROPERTY, resolve_source_format
+from .source_format import reject_removed_conversion_args
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_create",
-        description="Create a new wiki page. Content is Markdown by default (converted to TracWiki); pass format='tracwiki' to store hand-authored TracWiki verbatim. Fails if the page exists (use wiki_update instead).",
+        description="Create a new wiki page. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Fails if the page exists (use wiki_update instead).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -40,20 +40,19 @@ WIKI_WRITE_TOOLS = [
                 },
                 "content": {
                     "type": "string",
-                    "description": "Page content (required). Markdown by default (converted to TracWiki); set format='tracwiki' to supply TracWiki that is stored unchanged.",
+                    "description": "Page content (required). TracWiki, stored verbatim.",
                 },
                 "comment": {
                     "type": "string",
                     "description": "Change comment (optional)",
                 },
-                "format": FORMAT_PROPERTY,
             },
             "required": ["page_name", "content"],
         },
     ),
     types.Tool(
         name="wiki_update",
-        description="Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is Markdown by default (converted to TracWiki); pass format='tracwiki' to store hand-authored TracWiki verbatim.",
+        description="Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -69,7 +68,7 @@ WIKI_WRITE_TOOLS = [
                 },
                 "content": {
                     "type": "string",
-                    "description": "Page content (required). Markdown by default (converted to TracWiki); set format='tracwiki' to supply TracWiki that is stored unchanged.",
+                    "description": "Page content (required). TracWiki, stored verbatim.",
                 },
                 "version": {
                     "type": "integer",
@@ -80,7 +79,6 @@ WIKI_WRITE_TOOLS = [
                     "type": "string",
                     "description": "Change comment (optional)",
                 },
-                "format": FORMAT_PROPERTY,
             },
             "required": ["page_name", "content", "version"],
         },
@@ -130,34 +128,14 @@ async def _handle_create(
 
     comment = args.get("comment", "")
 
-    source_format, format_error = resolve_source_format(args)
+    format_error = reject_removed_conversion_args(args)
     if format_error is not None:
         return format_error
 
-    # Convert content using auto_convert with server capability detection.
-    # source_format is passed explicitly rather than left to re-detect: a
-    # marker-poor Markdown document (e.g. a bare table with no
-    # heading/bold/fence/link) scores as TracWiki and passes through
-    # unconverted (ticket #47). When the caller declares TracWiki the
-    # converter is skipped outright rather than configured to pass
-    # through (ticket #62) -- same shape as wiki_file_push.
-    warnings: list[str] = []
-    if source_format == "markdown":
-        conversion = await auto_convert(
-            content,
-            client.config,
-            target_format="tracwiki",
-            source_format="markdown",
-        )
-        wiki_content = conversion.text
-        warnings = conversion.warnings
-    else:
-        # Already TracWiki -- store the author's bytes unchanged
-        wiki_content = content
-
-    # Log warnings for agent visibility
-    if warnings:
-        logger.warning(f"Conversion warnings: {', '.join(warnings)}")
+    # The author's bytes are the bytes that land. No converter, so no
+    # detection either -- ticket #47's misclassification of marker-poor
+    # Markdown cannot arise on this path any more (ticket #69).
+    wiki_content = content
 
     # Check if page already exists
     # Note: get_wiki_page raises exceptions for non-existent pages,
@@ -192,13 +170,6 @@ async def _handle_create(
     response_lines = [
         f"Created wiki page '{page_name}' (version {new_version})"
     ]
-
-    # Add warnings if any
-    if warnings:
-        response_lines.append("")
-        response_lines.append("Conversion warnings:")
-        for warning in warnings:
-            response_lines.append(f"- {warning}")
 
     return types.CallToolResult(
         content=[
@@ -238,30 +209,12 @@ async def _handle_update(
 
     comment = args.get("comment", "")
 
-    source_format, format_error = resolve_source_format(args)
+    format_error = reject_removed_conversion_args(args)
     if format_error is not None:
         return format_error
 
-    # Convert content, or skip the converter entirely when the caller
-    # declares TracWiki -- see the matching comment in _handle_create
-    # (tickets #47 and #62).
-    warnings: list[str] = []
-    if source_format == "markdown":
-        conversion = await auto_convert(
-            content,
-            client.config,
-            target_format="tracwiki",
-            source_format="markdown",
-        )
-        wiki_content = conversion.text
-        warnings = conversion.warnings
-    else:
-        # Already TracWiki -- store the author's bytes unchanged
-        wiki_content = content
-
-    # Log warnings for agent visibility
-    if warnings:
-        logger.warning(f"Conversion warnings: {', '.join(warnings)}")
+    # Stored as written -- see the matching comment in _handle_create.
+    wiki_content = content
 
     # Update the page with version check
     try:
@@ -307,13 +260,6 @@ async def _handle_update(
     response_lines = [
         f"Updated wiki page '{page_name}' to version {new_version}"
     ]
-
-    # Add warnings if any
-    if warnings:
-        response_lines.append("")
-        response_lines.append("Conversion warnings:")
-        for warning in warnings:
-            response_lines.append(f"- {warning}")
 
     return types.CallToolResult(
         content=[

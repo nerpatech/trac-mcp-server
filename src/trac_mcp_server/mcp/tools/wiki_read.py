@@ -14,17 +14,17 @@ from datetime import datetime, timedelta
 
 import mcp.types as types
 
-from ...converters import tracwiki_to_markdown
 from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
 from .errors import build_error_response, format_timestamp
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
 
 # Tool definitions for list_tools()
 WIKI_READ_TOOLS = [
     types.Tool(
         name="wiki_get",
-        description="Get wiki page content with Markdown output. Returns full content with metadata (version, author, modified date). Set raw=true to get original TracWiki format without conversion.",
+        description="Get wiki page content as stored: TracWiki, byte-for-byte. Returns full content with metadata (version, author, modified date).",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -43,18 +43,13 @@ WIKI_READ_TOOLS = [
                     "description": "Specific version to retrieve (optional, defaults to latest)",
                     "minimum": 1,
                 },
-                "raw": {
-                    "type": "boolean",
-                    "description": "If true, return original TracWiki format without converting to Markdown (default: false)",
-                    "default": False,
-                },
             },
             "required": ["page_name"],
         },
     ),
     types.Tool(
         name="wiki_search",
-        description="Search wiki pages by content with relevance ranking. Returns snippets showing matched text. Set raw=true to get snippets in original TracWiki format without conversion.",
+        description="Search wiki pages by content with relevance ranking. Returns snippets showing matched text, as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -82,11 +77,6 @@ WIKI_READ_TOOLS = [
                 "cursor": {
                     "type": "string",
                     "description": "Pagination cursor from previous response (optional)",
-                },
-                "raw": {
-                    "type": "boolean",
-                    "description": "If true, return snippets in original TracWiki format without converting to Markdown (default: false)",
-                    "default": False,
                 },
             },
             "required": ["query"],
@@ -198,8 +188,11 @@ async def _handle_get(
             "Provide page_name parameter.",
         )
 
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
     version = args.get("version")
-    raw = args.get("raw", False)
 
     # Get page content and info in parallel (bounded by semaphore)
     content, info = await asyncio.gather(
@@ -207,12 +200,9 @@ async def _handle_get(
         run_sync_limited(client.get_wiki_page_info, page_name, version),
     )
 
-    # Convert content to Markdown unless raw mode is requested
-    if raw:
-        content_output = content
-    else:
-        conversion_result = tracwiki_to_markdown(content)
-        content_output = conversion_result.text
+    # Returned as stored, so a read-edit-write round trip is byte-exact
+    # (ticket #69).
+    content_output = content
 
     # Extract metadata
     page_version = info.get("version", 1)
@@ -221,9 +211,8 @@ async def _handle_get(
     modified_str = format_timestamp(modified)
 
     # Format response with metadata header
-    format_note = " (TracWiki)" if raw else ""
     response_lines = [
-        f"# {page_name}{format_note}",
+        f"# {page_name}",
         f"Version: {page_version} | Author: {author} | Modified: {modified_str}",
         "----",
         "",
@@ -264,7 +253,10 @@ async def _handle_search(
     prefix = args.get("prefix")
     limit = args.get("limit", 10)
     cursor = args.get("cursor")
-    raw = args.get("raw", False)
+
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
 
     # Ensure limit is within bounds
     limit = min(max(1, limit), 50)
@@ -330,21 +322,17 @@ async def _handle_search(
     for result in results_page:
         name = result.get("name", "")
         snippet = result.get("snippet", "")
-        # Convert snippet to Markdown unless raw mode is requested
-        if not raw and snippet:
-            conversion_result = tracwiki_to_markdown(snippet)
-            snippet = conversion_result.text
         formatted.append(f"**{name}**\n  ...{snippet}...")
 
     # Build response
-    format_note = " (TracWiki format)" if raw else ""
-    response_lines = [f"Found {total} wiki pages{format_note}"]
+    response_lines = [f"Found {total} wiki pages"]
 
     if total > limit:
         showing_start = offset + 1
         showing_end = offset + len(results_page)
         response_lines[0] = (
-            f"Found {total} wiki pages (showing {showing_start}-{showing_end}){format_note}"
+            f"Found {total} wiki pages "
+            f"(showing {showing_start}-{showing_end})"
         )
 
     response_lines[0] += ":"

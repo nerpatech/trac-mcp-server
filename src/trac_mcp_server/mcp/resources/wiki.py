@@ -2,7 +2,8 @@
 
 This module implements MCP resource handlers for exposing Trac wiki pages
 as read-only resources via URI templates. Agents can discover pages via
-the index resource and read individual pages with format/version options.
+the index resource and read individual pages by version. Content is
+returned as stored -- TracWiki, byte-for-byte (ticket #69).
 """
 
 import asyncio
@@ -14,7 +15,6 @@ from urllib.parse import unquote
 import mcp.types as types
 from pydantic_core import Url
 
-from ...converters import tracwiki_to_markdown
 from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
 from ..tools.errors import format_timestamp
@@ -25,9 +25,10 @@ WIKI_RESOURCES = [
         uri="trac://wiki/{page_name}",  # type: ignore[arg-type]  # MCP AnyUrl/Url type mismatch
         name="Wiki Page",
         description=(
-            "Read a wiki page by name. "
-            "Query params: format=tracwiki (raw) or markdown (default), version=N (specific version). "
-            "Example: trac://wiki/WikiStart?format=markdown"
+            "Read a wiki page by name, as stored: TracWiki, "
+            "byte-for-byte. "
+            "Query param: version=N (specific version). "
+            "Example: trac://wiki/WikiStart?version=5"
         ),
         mimeType="text/plain",
     ),
@@ -67,8 +68,12 @@ async def handle_read_wiki_resource(
     URI Formats:
         - trac://wiki/_index - List all pages as hierarchical tree
         - trac://wiki/{page_name} - Read specific page
-        - trac://wiki/{page_name}?format=tracwiki - Raw TracWiki format
         - trac://wiki/{page_name}?version=5 - Specific version
+
+    Content is returned as stored. ``?format=markdown`` was removed
+    with the rest of the Markdown read path (ticket #69) and is
+    reported as an error rather than ignored, so a stale caller is
+    told instead of quietly handed something else.
     """
     # Parse URI path - remove trac://wiki/ prefix
     path = str(uri)
@@ -86,7 +91,15 @@ async def handle_read_wiki_resource(
 
     # Parse query parameters
     params = _parse_query_params(query_string)
-    output_format = params.get("format", "markdown")
+    output_format = params.get("format")
+    if output_format is not None and output_format != "tracwiki":
+        return (
+            f"Error (validation_error): format={output_format!r} is no "
+            "longer supported -- wiki resources return the stored "
+            "TracWiki byte-for-byte.\n\nHint: drop the format query "
+            "parameter. To convert the result to Markdown, use the "
+            "trac-convert binary."
+        )
     version_str = params.get("version")
     version = int(version_str) if version_str else None
 
@@ -103,10 +116,6 @@ async def handle_read_wiki_resource(
                 client.get_wiki_page_info, page_name, version
             ),
         )
-
-        # Convert to Markdown unless raw format requested
-        if output_format != "tracwiki":
-            content = tracwiki_to_markdown(content).text
 
         # Format response with metadata
         return _format_page_response(page_name, content, info)

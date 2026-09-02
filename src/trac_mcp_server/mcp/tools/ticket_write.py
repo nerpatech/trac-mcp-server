@@ -2,7 +2,8 @@
 
 This module implements ticket write operations: create, update, and delete.
 All tools use async handlers with run_sync() to bridge synchronous TracClient calls,
-automatic Markdown conversion, and structured error responses.
+and structured error responses. Content is TracWiki and is stored
+byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
 import xmlrpc.client
@@ -10,7 +11,6 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters import markdown_to_tracwiki
 from ...core.async_utils import run_sync
 from ...core.client import (
     TicketCreateTimeout,
@@ -20,7 +20,7 @@ from ...core.client import (
 from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
 from .errors import build_error_response
 from .registry import ToolSpec
-from .source_format import FORMAT_PROPERTY, resolve_source_format
+from .source_format import reject_removed_conversion_args
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -29,7 +29,7 @@ def _build_ticket_create_tool() -> types.Tool:
     type_list = TICKET_TYPE_LIST
     return types.Tool(
         name="ticket_create",
-        description="Create a new ticket. Description is Markdown by default (converted to TracWiki); pass format='tracwiki' to store hand-authored TracWiki verbatim.",
+        description="Create a new ticket. The description is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -45,7 +45,7 @@ def _build_ticket_create_tool() -> types.Tool:
                 },
                 "description": {
                     "type": "string",
-                    "description": "Ticket body. Markdown by default (converted to TracWiki); set format='tracwiki' to supply TracWiki that is stored unchanged.",
+                    "description": "Ticket body (required). TracWiki, stored verbatim.",
                 },
                 "ticket_type": {
                     "type": "string",
@@ -80,7 +80,6 @@ def _build_ticket_create_tool() -> types.Tool:
                     "type": "string",
                     "description": "Keywords/tags",
                 },
-                "format": FORMAT_PROPERTY,
             },
             "required": ["summary", "description"],
         },
@@ -92,7 +91,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Comment and description are Markdown by default (converted to TracWiki); pass format='tracwiki' to store hand-authored TracWiki verbatim -- it governs both fields. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -109,7 +108,7 @@ TICKET_WRITE_TOOLS = [
                 },
                 "comment": {
                     "type": "string",
-                    "description": "Comment body (optional, max 10000 chars). Markdown by default; see format.",
+                    "description": "Comment body (optional, max 10000 chars). TracWiki, stored verbatim.",
                 },
                 "summary": {
                     "type": "string",
@@ -117,7 +116,7 @@ TICKET_WRITE_TOOLS = [
                 },
                 "description": {
                     "type": "string",
-                    "description": "New description, replacing the ticket body. Markdown by default; see format.",
+                    "description": "New description, replacing the ticket body. TracWiki, stored verbatim.",
                 },
                 "type": {
                     "type": "string",
@@ -169,7 +168,6 @@ TICKET_WRITE_TOOLS = [
                     "type": "string",
                     "description": "Change token from a prior ticket_get() call's _ts field (a numeric string -- pass it through as-is, don't parse it as a number). When provided, the update is rejected with a version_conflict error (naming what changed) if the ticket was modified since that token was read. Strongly recommended -- without it, this write silently overwrites any concurrent change.",
                 },
-                "format": FORMAT_PROPERTY,
             },
             "required": ["ticket_id"],
         },
@@ -218,17 +216,13 @@ async def _handle_create(
             "Provide description parameter.",
         )
 
-    source_format, format_error = resolve_source_format(args)
+    format_error = reject_removed_conversion_args(args)
     if format_error is not None:
         return format_error
 
-    # Convert description from Markdown to TracWiki, unless the caller
-    # declared it is already TracWiki -- in which case skip the
-    # converter entirely rather than round-tripping through it (#62).
-    if source_format == "markdown":
-        description_tracwiki = markdown_to_tracwiki(description)
-    else:
-        description_tracwiki = description
+    # Stored as written. There is no conversion step here any more
+    # (#69) -- the author's bytes are the bytes that land.
+    description_tracwiki = description
 
     # Build attributes (hardcoded default for standalone server)
     ticket_type = args.get("ticket_type", DEFAULT_TICKET_TYPE)
@@ -301,17 +295,14 @@ async def _handle_update(
             "Provide ticket_id parameter.",
         )
 
-    source_format, format_error = resolve_source_format(args)
+    format_error = reject_removed_conversion_args(args)
     if format_error is not None:
         return format_error
 
-    # Convert comment from Markdown to TracWiki if provided. The one
-    # declaration governs the comment and the description rewrite below
-    # alike -- they convert at separate call sites, but they are one
-    # caller's content (#62).
+    # The comment and the description rewrite below are both stored as
+    # written (#69). They used to convert at two separate call sites,
+    # which is why they are still worth testing separately.
     comment = args.get("comment", "")
-    if comment and source_format == "markdown":
-        comment = markdown_to_tracwiki(comment)
 
     # Reply-to: prepend Trac's standard "Replying to [comment:N author]:"
     # quote block before the new comment. Trac's XML-RPC API on this host
@@ -374,16 +365,10 @@ async def _handle_update(
         attributes["summary"] = args["summary"]
     if "type" in args:
         attributes["type"] = args["type"]
-    # Description rewrite: convert from Markdown to TracWiki, mirroring
-    # the comment + create-ticket-description handling -- including the
-    # declared-format branch (#62).
+    # Description rewrite: stored as written, mirroring the comment and
+    # the create-ticket description (#69).
     if "description" in args:
-        if source_format == "markdown":
-            attributes["description"] = markdown_to_tracwiki(
-                args["description"]
-            )
-        else:
-            attributes["description"] = args["description"]
+        attributes["description"] = args["description"]
     # Workflow action: trigger a Trac workflow transition (e.g. accept,
     # resolve, reopen). Action-specific input fields follow Trac's
     # ``action_<action>_<action>_<field>`` convention (e.g.
