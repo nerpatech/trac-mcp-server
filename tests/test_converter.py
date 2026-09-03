@@ -917,13 +917,33 @@ class TestTracWikiEnhancements(unittest.TestCase):
         )
 
     def test_tracwiki_definition_lists(self):
-        """Test definition lists conversion with warnings."""
-        result = tracwiki_to_markdown("term:: definition")
+        """Test definition lists conversion with warnings.
+
+        The input gained its leading space for ticket #71.  It previously read
+        ``"term:: definition"`` at column zero, which Trac renders as an
+        ordinary paragraph -- so the old form asserted the very false positive
+        that ticket fixed.  The guarantee being tested is unchanged: a real
+        definition list converts to a bold term and warns.
+        """
+        result = tracwiki_to_markdown(" term:: definition")
         # Should convert to bold with colon
         self.assertIn("**term**:", result.text)
         # Should warn about lossy conversion
         self.assertTrue(
             any("definition" in w.lower() for w in result.warnings)
+        )
+
+    def test_tracwiki_definition_list_needs_indentation(self):
+        """The column-zero form the previous test used to pass is prose.
+
+        Measured against Trac's own renderer (ticket #71): ``term:: definition``
+        at column zero is a ``<p>``, not a ``<dl>``.  Pinned here so the
+        rewrite above cannot be quietly undone by restoring the old input.
+        """
+        result = tracwiki_to_markdown("term:: definition")
+        self.assertEqual(result.text, "term:: definition")
+        self.assertFalse(
+            any("definition list" in w.lower() for w in result.warnings)
         )
 
     def test_tracwiki_tables(self):
