@@ -416,6 +416,117 @@ class TestPush:
         assert result.isError is True
         assert "page_name is required" in result.content[0].text
 
+    # --- ticket #68: silent code-block indentation loss -----------------
+    #
+    # These deliberately do NOT patch auto_convert. The defect IS the
+    # conversion, so a mocked converter could only assert that the plumbing
+    # calls something -- the real one is what makes the seed a seed. No
+    # network is reached: target_format is passed explicitly, so the
+    # capability lookup that would need a server never runs.
+
+    async def test_push_refuses_a_block_that_would_lose_indentation(
+        self, tmp_path
+    ):
+        """Ticket #68, operator decision: refuse, do not warn.
+
+        A `{{{ }}}` block in a Markdown-detected file has its body
+        indentation eaten by paragraph handling, and every signal an
+        author checks stays clean -- the call succeeds, the render looks
+        plausible, `warnings` comes back empty. Warning on a path that
+        then stores the damaged bytes anyway would leave the corruption
+        in the page.
+
+        Asserted on what reached the server, per the ticket's acceptance
+        section: `put_wiki_page` must not be called at all. Asserting on
+        the response alone would pass against a handler that reported the
+        problem and stored the content regardless.
+        """
+        md_file = tmp_path / "page.md"
+        md_file.write_text(
+            "{{{#!python\ndef f(x):\n    return 1\n}}}\n"
+        )
+
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "not found"
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert isinstance(result, types.CallToolResult)
+        assert result.isError is True
+        assert "validation_error" in result.content[0].text
+        assert "indentation" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
+    async def test_push_stores_the_same_block_verbatim_as_tracwiki(
+        self, tmp_path
+    ):
+        """The escape hatch the refusal's hint names, exercised.
+
+        Same bytes, same tool, `format="tracwiki"` -- stored verbatim
+        with its indentation intact. Paired with the refusal above
+        because the point is the contrast: the check must gate on the
+        declared format, not on the content, or it would make a
+        legitimate TracWiki push impossible.
+        """
+        md_file = tmp_path / "page.md"
+        content = "{{{#!python\ndef f(x):\n    return 1\n}}}\n"
+        md_file.write_text(content)
+
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "not found"
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {
+                "file_path": str(md_file),
+                "page_name": "TestPage",
+                "format": "tracwiki",
+            },
+            client,
+        )
+
+        assert isinstance(result, types.CallToolResult)
+        assert result.isError is not True
+        assert client.put_wiki_page.call_args[0][1] == content
+
+    async def test_push_allows_a_markdown_fence_with_indentation(
+        self, tmp_path
+    ):
+        """The recall gate at the write surface.
+
+        The safe shape from the ticket's section 2 control rows. A check
+        that refused this would make the tool useless for any file
+        containing indented code, which is most of them -- and an
+        over-firing check is what #57 and #59 record getting muted here.
+        """
+        md_file = tmp_path / "page.md"
+        md_file.write_text("```python\ndef f(x):\n    return 1\n```\n")
+
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "not found"
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert isinstance(result, types.CallToolResult)
+        assert result.isError is not True
+        assert "    return 1" in client.put_wiki_page.call_args[0][1]
+
 
 # =============================================================================
 # _handle_pull (via ToolRegistry.call_tool)

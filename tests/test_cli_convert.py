@@ -1765,3 +1765,64 @@ def test_empty_input_returns_exit_ok_from_clipboard(
     exit_code = main(["--from-clipboard", "--to", "md"])
     assert exit_code == EXIT_OK
     assert capsys.readouterr().out == ""
+
+
+# ---------- code-block indentation loss (ticket #68) ----------
+
+
+def test_convert_text_warns_on_code_block_indentation_loss():
+    """A `{{{ }}}` block in Markdown input loses its body indentation,
+    and nothing else in this pipeline says so -- the conversion
+    succeeds and the output looks plausible.
+
+    Reported rather than raised: unlike the MCP write tools, this binary
+    stores nothing, so the caller still holds the input and a stderr
+    line is enough to act on. Ticket #68 comment 1 is where the binary
+    was established to carry the same loss as the server.
+    """
+    result = convert_text(
+        "{{{#!python\ndef f(x):\n    return 1\n}}}\n", "md", "tracwiki"
+    )
+    assert "    return 1" not in result.text, (
+        "the loss this warning describes must actually be happening"
+    )
+    assert any("lost leading whitespace" in w for w in result.warnings)
+
+
+def test_convert_text_stays_silent_on_a_markdown_fence():
+    """The control row, at the CLI surface -- an indented body inside a
+    Markdown fence survives conversion intact and must draw nothing."""
+    result = convert_text(
+        "```python\ndef f(x):\n    return 1\n```\n", "md", "tracwiki"
+    )
+    assert "    return 1" in result.text
+    assert result.warnings == []
+
+
+def test_convert_text_stays_silent_converting_tracwiki_to_markdown():
+    """Nothing to lose in the other direction, and the check must not
+    be reached at all -- it compares Markdown source against converted
+    TracWiki, and running it on a TracWiki source would compare a
+    document against its own translation."""
+    result = convert_text(
+        "{{{#!python\ndef f(x):\n    return 1\n}}}\n", "tracwiki", "md"
+    )
+    assert not any(
+        "lost leading whitespace" in w for w in result.warnings
+    )
+
+
+def test_main_reports_indentation_loss_on_stderr(monkeypatch, capsys):
+    """End to end through main(): stdout carries the converted text,
+    stderr carries the warning, exit code stays 0 (a warning, not a
+    refusal)."""
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO("{{{#!python\ndef f(x):\n    return 1\n}}}\n"),
+    )
+    exit_code = main(["--from", "md", "--to", "tracwiki"])
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_OK
+    assert "lost leading whitespace" in captured.err
+    assert "lost leading whitespace" not in captured.out
