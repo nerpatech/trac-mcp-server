@@ -40,6 +40,27 @@ _TRACWIKI_TABLE_RE = re.compile(r"\|=[^|\n]*=\|")
 _TRACWIKI_BOLD_RE = re.compile(r"'''[^'\n]+'''")
 _TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{")
 
+# The RENDER-scanning counterparts of the two patterns above, moved here
+# from `verify.py` by ticket #77 so the check they feed runs on every
+# caller of `build_warnings` rather than only the verify path. The names
+# carry the `_RENDER_` prefix because the source-scanning pair above
+# already owns the plain names, and the two pairs answer opposite
+# questions: those scan Markdown SOURCE for TracWiki syntax that won't
+# convert, these scan a RENDER for markup that survived unconverted.
+# Deliberately not merged with the source pair even where the regex is
+# currently identical -- they must be free to diverge.
+_RENDER_TRACWIKI_TABLE_RE = re.compile(r"\|=[^|\n]*=\|")
+_RENDER_TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{|\}\}\}")
+
+# Markdown residue that should have been converted to TracWiki (bold,
+# fenced code, inline link) but survived as literal text in the render --
+# the inverse of `_TRACWIKI_BOLD_RE`/`_TRACWIKI_BLOCK_RE` above (e.g.
+# hand-edited via `raw=true`, TracWiki-declared input carrying Markdown
+# link syntax, or a converter defect that let Markdown straight through).
+_MARKDOWN_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
+_MARKDOWN_FENCE_RE = re.compile(r"```")
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
+
 # A `prefix:#N` token -- the only shape that distinguishes an unconfigured
 # InterTrac ticket prefix (row 16, must warn) from an ordinary colon-shaped
 # token that happens to produce no anchor (row 10, must stay silent). See
@@ -663,6 +684,46 @@ def _check_unconfigured_intertrac_prefix(
     return warnings
 
 
+def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
+    """Markup that should have been converted but survived as literal
+    text in the rendered page -- scoped to ``facts.prose_text`` (NOT
+    ``facts.plain_text``), which excludes ``<pre>``/``<code>`` subtrees.
+    A page that legitimately documents this syntax inside a code block
+    must stay silent; scanning ``plain_text`` instead would warn on every
+    such block (the over-correction pin ticket #55 calls out).
+
+    Added by ticket #55 and reachable only through the verify path until
+    ticket #77 moved it here: it is the one check that looks at what came
+    OUT of the render rather than what went in, and `convert_preview` --
+    the only PRE-write gate -- was therefore blind to it. It takes only
+    ``facts``, which every caller of `build_warnings` already has, so it
+    lives in the shared assembly with a single call site. Two call sites
+    is precisely how the blind spot arose.
+    """
+    warnings = []
+    for pattern, label in (
+        (_RENDER_TRACWIKI_TABLE_RE, "TracWiki table"),
+        (_RENDER_TRACWIKI_BLOCK_RE, "TracWiki code-block delimiter"),
+        (_MARKDOWN_BOLD_RE, "Markdown bold"),
+        (_MARKDOWN_FENCE_RE, "Markdown code fence"),
+        (_MARKDOWN_LINK_RE, "Markdown link"),
+    ):
+        match = pattern.search(facts.prose_text)
+        if match:
+            warnings.append(
+                _warning(
+                    "literal_markup_in_render",
+                    "warning",
+                    f"{label} syntax ('{match.group(0)}') appears "
+                    "as literal text in the rendered page instead "
+                    "of being rendered -- it did not convert "
+                    "cleanly.",
+                    {"matched": match.group(0)},
+                )
+            )
+    return warnings
+
+
 def _check_target_probes(
     facts: PreviewFacts, probes: dict[str, dict], check_targets: bool
 ) -> list[dict]:
@@ -778,6 +839,10 @@ def build_warnings(
         evidence}``. Empty list means clean input, not "not checked" --
         pair with ``target_check_skipped`` for the latter.
 
+        Includes ``literal_markup_in_render``, which reads ``facts``
+        only and so applies to every caller, pre-write and post-write
+        alike (ticket #77).
+
         Codes named by a ``preview-checks: allow ...`` pragma in either
         source are dropped last, after every rule has run (ticket #58) --
         see ``_PRAGMA_RE``. Scoped to the codes it names, so a page that
@@ -802,6 +867,10 @@ def build_warnings(
         _check_unconfigured_intertrac_prefix(tracwiki, facts)
     )
     warnings.extend(_check_target_probes(facts, probes, check_targets))
+    # Last (ticket #77), so the verify path's warning ordering stays
+    # byte-identical to what `build_verify_warnings` produced when it
+    # appended this itself.
+    warnings.extend(_check_literal_markup_in_render(facts))
 
     allowed = _allowed_codes(markdown_source, tracwiki)
     if allowed:

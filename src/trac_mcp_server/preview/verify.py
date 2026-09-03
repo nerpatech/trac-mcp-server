@@ -3,66 +3,20 @@
 Companion to ``checks.build_warnings`` (ticket #56): that path checks a
 dry-run render against its Markdown source; this path checks a page Trac
 has already rendered, where there is no Markdown candidate to check
-against, but there IS a live document whose surviving-markup defects
-``build_warnings`` alone can't see (it only ever looked at Markdown
-*input*, never at what came out the other end).
-"""
+against.
 
-import re
+Ticket #55 also gave this module the one check that looks at what came
+OUT of a render rather than what went in,
+``_check_literal_markup_in_render``. Ticket #77 moved that check into
+``checks.build_warnings``: it takes only ``facts``, which every caller
+already has, and keeping it here made ``convert_preview`` -- the only
+PRE-write gate -- blind to markup that survived unconverted. What remains
+here is the render-path wrapper: no Markdown source, so the two
+Markdown-source rules are skipped.
+"""
 
 from .checks import build_warnings
 from .facts import PreviewFacts
-
-# TracWiki table-row syntax (`|=Header=|`) that failed to render as a
-# table and survived as literal text in the page body.
-_TRACWIKI_TABLE_RE = re.compile(r"\|=[^|\n]*=\|")
-
-# An unclosed or otherwise-literal `{{{`/`}}}` code-block delimiter.
-_TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{|\}\}\}")
-
-# Markdown residue that should have been converted to TracWiki (bold,
-# fenced code, inline link) but survived as literal text in the render --
-# the inverse of `checks._TRACWIKI_BOLD_RE`/`_TRACWIKI_BLOCK_RE`: those
-# scan Markdown SOURCE for TracWiki syntax that won't convert; this scans
-# a RENDER for Markdown syntax that never got converted to TracWiki in
-# the first place (e.g. hand-edited via `raw=true`, or a converter defect
-# that let Markdown straight through).
-_MARKDOWN_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
-_MARKDOWN_FENCE_RE = re.compile(r"```")
-_MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
-
-
-def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
-    """Markup that should have been converted but survived as literal
-    text in the rendered page -- scoped to ``facts.prose_text`` (NOT
-    ``facts.plain_text``), which excludes ``<pre>``/``<code>`` subtrees.
-    A page that legitimately documents this syntax inside a code block
-    must stay silent; scanning ``plain_text`` instead would warn on every
-    such block (the over-correction pin ticket #55 calls out)."""
-    warnings = []
-    for pattern, label in (
-        (_TRACWIKI_TABLE_RE, "TracWiki table"),
-        (_TRACWIKI_BLOCK_RE, "TracWiki code-block delimiter"),
-        (_MARKDOWN_BOLD_RE, "Markdown bold"),
-        (_MARKDOWN_FENCE_RE, "Markdown code fence"),
-        (_MARKDOWN_LINK_RE, "Markdown link"),
-    ):
-        match = pattern.search(facts.prose_text)
-        if match:
-            warnings.append(
-                {
-                    "code": "literal_markup_in_render",
-                    "severity": "warning",
-                    "message": (
-                        f"{label} syntax ('{match.group(0)}') appears "
-                        "as literal text in the rendered page instead "
-                        "of being rendered -- it did not convert "
-                        "cleanly."
-                    ),
-                    "evidence": {"matched": match.group(0)},
-                }
-            )
-    return warnings
 
 
 def build_verify_warnings(
@@ -87,15 +41,13 @@ def build_verify_warnings(
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
-        evidence}`` -- the shared ``build_warnings`` rules (Markdown-
-        source rule skipped) plus the render-only literal-markup check.
+        evidence}`` -- the shared ``build_warnings`` rules with the
+        Markdown-source rules skipped.
     """
-    warnings = build_warnings(
+    return build_warnings(
         markdown_source=None,
         tracwiki=tracwiki,
         facts=facts,
         probes=probes,
         check_targets=check_targets,
     )
-    warnings.extend(_check_literal_markup_in_render(facts))
-    return warnings

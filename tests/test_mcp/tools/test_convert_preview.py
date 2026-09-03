@@ -228,6 +228,65 @@ class TestConvertPreviewHandler(unittest.TestCase):
             result.structuredContent["stats"]["targets_checked"], 0
         )
 
+    def test_literal_markup_in_render_reaches_the_tool(self):
+        """Ticket #77's seed, at the tool boundary.
+
+        The defect was observable HERE -- `convert_preview` returned
+        `warnings: []` on content both render-check tools flagged -- so a
+        check-level test alone would not have caught it: the check
+        existed and passed its own tests throughout. Fixture comes from
+        the render_check corpus, since that is where the seed was
+        captured from the live renderer.
+        """
+        render_dir = (
+            Path(__file__).parent.parent.parent
+            / "fixtures"
+            / "render_check"
+        )
+        name = "row12_markdown_link_unconverted"
+        client = _mock_client((render_dir / f"{name}.html").read_text())
+        result = self._run(
+            client,
+            {
+                "content": (
+                    render_dir / f"{name}.tracwiki.txt"
+                ).read_text(),
+                "format": "tracwiki",
+                "check_targets": False,
+            },
+        )
+        self.assertFalse(result.isError)
+        codes = [
+            w["code"] for w in result.structuredContent["warnings"]
+        ]
+        self.assertIn("literal_markup_in_render", codes)
+
+    def test_the_same_markup_in_a_code_block_stays_silent_at_the_tool(
+        self,
+    ):
+        """The over-correction pin at the same boundary: identical
+        bytes inside a `{{{ }}}` block, no warning. Without this, the
+        test above passes just as well for a check that fires on
+        everything."""
+        render_dir = (
+            Path(__file__).parent.parent.parent
+            / "fixtures"
+            / "render_check"
+        )
+        name = "row13_markdown_link_in_code_block_pin"
+        client = _mock_client((render_dir / f"{name}.html").read_text())
+        result = self._run(
+            client,
+            {
+                "content": (
+                    render_dir / f"{name}.tracwiki.txt"
+                ).read_text(),
+                "format": "tracwiki",
+                "check_targets": False,
+            },
+        )
+        self.assertEqual(result.structuredContent["warnings"], [])
+
 
 @pytest.mark.live
 class TestConvertPreviewLive:

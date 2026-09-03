@@ -1,0 +1,4 @@
+{{{#!comment
+preview-checks: allow literal_markup_in_render
+}}}
+some prose |=h=| more prose
