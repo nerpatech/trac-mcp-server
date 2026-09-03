@@ -8,6 +8,7 @@ without a server. Warning codes map one-to-one onto ticket #56 comment 1's
 
 import re
 from typing import Any
+from urllib.parse import unquote
 
 from ..converters.common import (
     TRACLINK_SCHEMES,
@@ -387,9 +388,100 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
     return False
 
 
+# The target segment of an InterTrac dispatcher href, percent-encoded --
+# e.g. ".../intertrac/%2387" (`#87`) or ".../intertrac/%2387%27s"
+# (`#87's`). This segment is Trac's OWN resolved dispatch target: it is
+# literally what the link dispatches on, which is why ticket #70's fix
+# reads it instead of comparing a source token against anchor text.
+_INTERTRAC_HREF_TARGET_RE = re.compile(r"/intertrac/([^/?#]+)\Z")
+
+# A clean short-link target: `#` and digits, nothing else.
+_CLEAN_TICKET_TARGET_RE = re.compile(r"\A#\d+\Z")
+
+# The leading short-link part of a target; whatever follows it is text
+# Trac swallowed in.
+_TICKET_TARGET_PREFIX_RE = re.compile(r"\A#\d+")
+
+
+def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
+    """A short link whose dispatcher target swallowed trailing text, so
+    it renders as a live link onto a ticket that does not exist (ticket
+    #59 comment 1, rebuilt on ticket #70).
+
+    '''Judged from the anchor's href, not by pairing it with a source
+    token.''' The href's `/intertrac/` segment is Trac's own dispatch
+    target, so `#87's` is a dead reference no matter what else the
+    document contains. That removes the document-global comparison this
+    check used to depend on, and with it two measured defects:
+
+    * ticket #70 -- the previous implementation asked whether ANY anchor
+      in the document matched the token, so a CORRECT reference to the
+      same ticket elsewhere satisfied the match and silenced the broken
+      one, reporting zero errors on a document carrying a dead link;
+    * ticket #78 -- and in the other direction, a token in the LABEL of
+      an ordinary external link was compared against that link's own
+      anchor text, reporting a dead InterTrac dispatch for a link that
+      never dispatched at all. An external href simply is not an
+      InterTrac dispatcher href, so that shape is now unreachable.
+
+    Scoped to the ticket form deliberately. The realm form's greedy
+    token match pulls the captured text into the token itself, so this
+    check was always silent on it; what catches that shape is
+    `_check_target_probes`, which live-probes each anchor and is
+    per-anchor already. Measured on the deployed daemon 2026-09-03:
+    `auto_pm:wiki:Index's` reports `missing_cross_instance_target`.
+
+    The `\\d+`-then-remainder split is what keeps a genuinely different,
+    longer ticket out: `#871` is a clean target, not `#87` plus a `1`.
+    """
+    warnings = []
+    for anchor in facts.anchors:
+        match = _INTERTRAC_HREF_TARGET_RE.search(anchor.href or "")
+        if not match:
+            continue
+        target = unquote(match.group(1))
+        if _CLEAN_TICKET_TARGET_RE.match(target):
+            continue
+        prefix = _TICKET_TARGET_PREFIX_RE.match(target)
+        if not prefix:
+            continue
+        tail = target[prefix.end() :]
+        text = anchor.text.replace(_ZERO_WIDTH_ICON, "")
+        # The reference the author meant is the rendered text without
+        # the swallowed tail -- the same `token` value the pre-#70
+        # implementation reported, so nothing downstream changes shape.
+        token = text[: -len(tail)] if text.endswith(tail) else text
+        warnings.append(
+            _warning(
+                "intertrac_target_captured_punctuation",
+                "error",
+                f"'{token}' rendered as a link, but Trac captured "
+                f"trailing text into the target: it dispatches on "
+                f"'{text}', not the reference you wrote. The prefix is "
+                "fine; the link is dead.",
+                {
+                    "token": token,
+                    "resolved_as": text,
+                    "href": anchor.href,
+                },
+            )
+        )
+    return warnings
+
+
 def _captured_punctuation_anchor(raw: str, anchors) -> Any | None:
     """The anchor whose resolved target is `raw` with trailing text Trac
     swallowed into it, or None (ticket #59 comment 1).
+
+    '''Suppression only since ticket #70.''' The error itself is now
+    reported by `_check_captured_punctuation` from the anchor's href.
+    This is kept because the unconfigured-prefix check still needs to
+    know not to misdiagnose such a token: the anchor's text is the token
+    PLUS the swallowed tail, so `_prefix_boundary_match` cannot match it
+    and the token would otherwise be reported as an unconfigured prefix
+    -- the right-signal/wrong-diagnosis case ticket #59 removed. A false
+    suppression here costs at most a missed `unconfigured_intertrac_
+    prefix` warning, never a wrong error.
 
     The exact mirror of `_prefix_boundary_match`: there the ANCHOR's text
     is a prefix of the token; here the TOKEN is a prefix of the anchor's
@@ -549,27 +641,12 @@ def _check_unconfigured_intertrac_prefix(
                     for a in anchors
                 )
                 if not configured:
-                    overrun = _captured_punctuation_anchor(raw, anchors)
-                    if overrun is not None:
-                        warnings.append(
-                            _warning(
-                                "intertrac_target_captured_punctuation",
-                                "error",
-                                f"'{raw}' rendered as a link, but Trac "
-                                f"captured trailing text into the "
-                                f"target: it dispatches on "
-                                f"'{overrun.text.replace(_ZERO_WIDTH_ICON, '')}'"
-                                ", not the reference you wrote. The "
-                                "prefix is fine; the link is dead.",
-                                {
-                                    "token": raw,
-                                    "resolved_as": overrun.text.replace(
-                                        _ZERO_WIDTH_ICON, ""
-                                    ),
-                                    "href": overrun.href,
-                                },
-                            )
-                        )
+                    # Suppression only (ticket #70): the error is raised
+                    # by `_check_captured_punctuation` from the href.
+                    # All this decides is that the prefix is NOT
+                    # unconfigured, so the token does not fall through
+                    # to the wrong diagnosis below.
+                    if _captured_punctuation_anchor(raw, anchors):
                         continue
             if configured:
                 continue
@@ -720,6 +797,7 @@ def build_warnings(
         )
     warnings.extend(_check_missing_local_target(facts))
     warnings.extend(_check_bare_ticket_ref(facts))
+    warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(
         _check_unconfigured_intertrac_prefix(tracwiki, facts)
     )

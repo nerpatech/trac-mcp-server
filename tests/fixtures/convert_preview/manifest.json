@@ -287,5 +287,30 @@
   "row71_code_span_and_bare_bold": {
     "markdown_input": "Quoted `'''alpha'''` and a genuine '''beta''' one.",
     "tracwiki": "Quoted `'''alpha'''` and a genuine '''beta''' one."
+  },
+  "row72_ticket_possessive_and_correct_pair": {
+    "markdown_input": null,
+    "tracwiki": "Broken: see auto_pm:#87's summary. Correct, same ticket, later: auto_pm:#87 covers it.",
+    "source_format": "tracwiki"
+  },
+  "row73_fence_plus_real_ticket_ref": {
+    "markdown_input": null,
+    "tracwiki": "A fenced example beside a real reference:\n\n{{{\nauto_pm:#87's summary\n}}}\n\nand a real one in prose: auto_pm:#87 covers it.",
+    "source_format": "tracwiki"
+  },
+  "row74_external_label_possessive": {
+    "markdown_input": null,
+    "tracwiki": "An external link labelled with a possessive: [http://example.com/x auto_pm:#87's summary] here.",
+    "source_format": "tracwiki"
+  },
+  "row75_external_label_multiword": {
+    "markdown_input": null,
+    "tracwiki": "An external link labelled with a multi-word label: [http://example.com/x auto_pm:#87 summary] here.",
+    "source_format": "tracwiki"
+  },
+  "row76_external_label_plain": {
+    "markdown_input": null,
+    "tracwiki": "An external link with an ordinary label: [http://example.com/x the summary page] here.",
+    "source_format": "tracwiki"
   }
 }
