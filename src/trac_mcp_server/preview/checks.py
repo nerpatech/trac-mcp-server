@@ -312,23 +312,212 @@ def _check_code_block_indentation_loss(
     ]
 
 
-def _check_missing_local_target(facts: PreviewFacts) -> list[dict]:
+# -- Ticket #79: telling an authored dead link apart from a CamelCase
+# word Trac auto-linked out of ordinary prose. Both render as
+# `<a class="missing wiki" href=".../wiki/<Name>">`, so `facts` alone
+# cannot separate them; the discriminating information is in the SOURCE.
+
+# A page name Trac's WikiFormatting engine will auto-link when it
+# appears bare in prose: two or more humps of `[A-Z][a-z]+`, optionally
+# joined by `/`.
+#
+# DERIVED FROM THE DEPLOYED DAEMON, not from Trac's source and not from
+# reasoning about CamelCase -- see `MEASURED_AUTOLINK_SHAPES` in
+# `tests/test_preview_checks.py`, which is the authority this pattern is
+# checked against. Ticket #37 is why: that ticket's escape regex
+# false-positived on `PyVISA`, and an acronym tail is exactly the shape
+# a hand-reasoned rule gets wrong. Measured here, `PyVISA`, `XMLParser`,
+# `ABCDef`, `iPhone`, `Abc`, `AbcDef2`, `Abc2Def` and `A1B2` are all left
+# alone by Trac, while `WiFi`, `LoRa`, `McDonald` and `Rules/RenderVerify`
+# are linked.
+#
+# The safety direction is asymmetric. Too NARROW leaves an anchor
+# reported as `missing_local_target` at `error` -- today's behaviour, and
+# a false positive that already exists. Too WIDE downgrades a genuinely
+# broken link to advisory, which is the failure #70 and #77 were
+# prerequisites about. So where the measurement is ambiguous this stays
+# narrow.
+_AUTOLINK_PAGE_NAME_RE = re.compile(r"[A-Z][a-z]+(?:/?[A-Z][a-z]+)+")
+
+# The same shape as a scanner over source text, with the boundaries the
+# `fullmatch` above gets for free. `!` in the lookbehind is the escape
+# pin: `!TracClient` renders no anchor at all, so an escaped word must
+# not be counted as a bare occurrence -- counting it would let an escaped
+# mention mask a genuinely authored dead link to the same page. `/` in
+# both lookarounds keeps `RenderVerify` from matching inside
+# `Rules/trac/RenderVerify`, which Trac does NOT auto-link (a lowercase
+# path segment breaks the rule, measured).
+_BARE_AUTOLINK_RE = re.compile(
+    r"(?<![\w/!])[A-Z][a-z]+(?:/?[A-Z][a-z]+)+(?![\w/])"
+)
+
+# The page name segment of a local wiki href, e.g.
+# `.../auto_pm/wiki/TracClient` -> `TracClient`. Deliberately the FIRST
+# `/wiki/`, not the last: `row13_hand_relative_url`'s hand-built relative
+# URL resolves to `.../wiki/wiki/Page`, and taking the first yields
+# `wiki/Page`, which does not equal the anchor's text and so keeps that
+# row an error.
+_WIKI_HREF_PAGE_RE = re.compile(r"/wiki/(.+)\Z")
+
+# Link constructs blanked out of the source before the bare-occurrence
+# scan, because a name inside one of these was TYPED as a link rather
+# than linkified by Trac. `[[...]]` first: blanking single brackets first
+# would eat `[[X]` and leave a stray `]`.
+#
+# Over-blanking here is the SAFE direction -- it can only lower the bare
+# count, which turns an advisory back into an error and so returns the
+# anchor to today's behaviour. Under-blanking is what would hide a real
+# dead link.
+_MACRO_LINK_RE = re.compile(r"\[\[.*?\]\]", re.DOTALL)
+_BRACKET_LINK_RE = re.compile(r"\[[^\]\n]*\]")
+_REALM_REF_RE = re.compile(
+    r"\b(?:[A-Za-z][\w.+-]*:)?"
+    rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):\S+"
+)
+
+
+def _is_autolink_page_name(name: str) -> bool:
+    """Whether Trac would auto-link ``name`` appearing bare in prose."""
+    return _AUTOLINK_PAGE_NAME_RE.fullmatch(name) is not None
+
+
+def _blank_preserving_layout(match: re.Match[str]) -> str:
+    """Spaces for every character but newlines -- same length, same line
+    structure, so nothing downstream sees a document of a different
+    shape (the convention ``blank_code_fences`` established)."""
+    return "".join("\n" if ch == "\n" else " " for ch in match.group(0))
+
+
+def _bare_autolink_counts(tracwiki: str) -> dict[str, int]:
+    """How many times each auto-linkable page name occurs BARE in the
+    source -- outside code, outside link syntax, and unescaped.
+
+    Trac does not linkify inside a code span or a fenced block, and a
+    name inside ``[[...]]``, ``[target label]`` or a ``wiki:`` realm
+    reference was typed as a link by a person. What survives all of that
+    and still matches the auto-link shape is a word Trac linkified on
+    its own.
+    """
+    scan = blank_inline_code_spans(blank_code_fences(tracwiki))
+    for pattern in (_MACRO_LINK_RE, _BRACKET_LINK_RE, _REALM_REF_RE):
+        scan = pattern.sub(_blank_preserving_layout, scan)
+
+    counts: dict[str, int] = {}
+    for match in _BARE_AUTOLINK_RE.finditer(scan):
+        counts[match.group(0)] = counts.get(match.group(0), 0) + 1
+    return counts
+
+
+def _autolinked_page_name(anchor: Any) -> str | None:
+    """The page name this anchor would have if Trac auto-linked it out
+    of prose, or None if its shape rules that out.
+
+    Two of the three gates live here. The anchor's text must EQUAL the
+    page name in its href -- an auto-link's text is its target, so a
+    label (``[wiki:DeadPage some words]``) can never be incidental --
+    and the name must be one Trac would auto-link at all. The third
+    gate, whether it actually occurs bare in the source, is the
+    caller's.
+    """
+    if not anchor.href or "wiki" not in anchor.classes:
+        return None
+    match = _WIKI_HREF_PAGE_RE.search(unquote(anchor.href))
+    if not match:
+        return None
+    page = match.group(1)
+    if anchor.text.replace(_ZERO_WIDTH_ICON, "") != page:
+        return None
+    if not _is_autolink_page_name(page):
+        return None
+    return page
+
+
+def _check_missing_local_target(
+    facts: PreviewFacts, tracwiki: str
+) -> list[dict]:
     """A dead local wiki-page target (`class="missing wiki"`), including
     a hand-built relative URL that resolved to a nonexistent page
-    (row 13)."""
+    (row 13) -- split by ticket #79 into the population somebody
+    authored and the population Trac auto-linked out of prose.
+
+    Two entirely different things produce a `missing wiki` anchor, and
+    THE RENDER CANNOT TELL THEM APART: an authored link to a page that
+    does not exist, and an ordinary CamelCase word Trac linkified
+    whether or not anybody meant it as a reference. Ticket #79 measured
+    291 findings across two stores, of which 122 were the second kind
+    -- 48 correct documents that #64's blocking error column would have
+    refused, including one comment whose offending text was
+    `"WiFi"/"LoRa"` inside a sentence quoting this exact defect.
+
+    So the incidental population keeps its signal at `warning` and
+    stops refusing writes, while `missing_local_target` keeps its name,
+    its `error` severity and the 169 authored findings.
+
+    THREE GATES, not one. Ticket #79 section 5 proposed a single test
+    -- does the anchor's text still occur bare once link syntax is
+    blanked -- and that test alone introduces a false negative, which
+    is the one direction this ticket must not move in. `See [[Page]].
+    The Page is missing.` renders exactly ONE anchor, from the authored
+    `[[Page]]`, because `Page` is a single hump Trac does not
+    auto-link; but `Page` does occur bare in the remainder, so the
+    one-test form downgrades a genuinely dead link. The shape gate in
+    `_autolinked_page_name` is what keeps that row an error.
+
+    COUNTING, not a boolean, so a mixed document reports both. A
+    document carrying `[[TracClient]]` AND the prose word `TracClient`
+    renders two identical anchors; a boolean answers "yes, it occurs
+    bare" for the whole document and downgrades both, losing the dead
+    link while reporting zero errors. That is ticket #70's residual
+    arriving through a new door. Counting bare occurrences per target
+    and spending them one anchor at a time reports one of each.
+
+    Which anchor of a matched pair carries which code is arbitrary --
+    they are byte-identical in `facts`, so the evidence dicts are
+    indistinguishable and only the counts carry meaning. Accepted the
+    way #59 comment 8's same-label residual was, and for the same
+    reason: separating them needs source positions the render does not
+    have.
+
+    NO SOURCE MEANS NO DOWNGRADE. `build_verify_warnings` passes
+    `tracwiki=""` when `render_check` could not pair a source with the
+    render. With no source there is no discriminator, so every anchor
+    stays an error -- unchanged behaviour -- rather than being
+    downgraded for lack of evidence, which would fail silent.
+    """
+    budget = _bare_autolink_counts(tracwiki) if tracwiki else {}
     warnings = []
     for anchor in facts.anchors:
-        if "missing" in anchor.classes:
+        if "missing" not in anchor.classes:
+            continue
+        page = _autolinked_page_name(anchor)
+        if page is not None and budget.get(page, 0) > 0:
+            budget[page] -= 1
             warnings.append(
                 _warning(
-                    "missing_local_target",
-                    "error",
-                    f"Link labeled '{anchor.text}' targets "
-                    f"{anchor.href or '(unknown href)'}, which does not "
-                    "exist on this instance.",
-                    {"href": anchor.href, "text": anchor.text},
+                    "incidental_wiki_autolink",
+                    "warning",
+                    f"'{page}' is a bare CamelCase word, so Trac "
+                    "auto-linked it to a page that does not exist -- "
+                    "nothing here was authored as a link. Write "
+                    f"'!{page}' to keep it as plain text.",
+                    {
+                        "href": anchor.href,
+                        "text": anchor.text,
+                        "suggestion": f"!{page}",
+                    },
                 )
             )
+            continue
+        warnings.append(
+            _warning(
+                "missing_local_target",
+                "error",
+                f"Link labeled '{anchor.text}' targets "
+                f"{anchor.href or '(unknown href)'}, which does not "
+                "exist on this instance.",
+                {"href": anchor.href, "text": anchor.text},
+            )
+        )
     return warnings
 
 
@@ -860,7 +1049,7 @@ def build_warnings(
                 markdown_source, tracwiki
             )
         )
-    warnings.extend(_check_missing_local_target(facts))
+    warnings.extend(_check_missing_local_target(facts, tracwiki))
     warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(

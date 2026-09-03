@@ -27,8 +27,12 @@ from pathlib import Path
 
 import pytest
 
-from trac_mcp_server.preview.checks import build_warnings
+from trac_mcp_server.preview.checks import (
+    _is_autolink_page_name,
+    build_warnings,
+)
 from trac_mcp_server.preview.facts import extract_facts
+from trac_mcp_server.preview.verify import build_verify_warnings
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "convert_preview"
 MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
@@ -233,6 +237,12 @@ SILENT_ROWS = [
     "row74_external_label_possessive",
     "row75_external_label_multiword",
     "row76_external_label_plain",
+    # Suite 9 (rows 79a-79h, ticket #79). Row 79d is the escaped-word
+    # pin: `!TracClient` produces NO anchor at all (measured on the
+    # deployed daemon), so it is a different silence from the rest of
+    # this list -- there is nothing for the check to classify, and it
+    # must not be counted as an incidental auto-link either.
+    "row79d_escaped_camelcase",
 ]
 
 WARNING_ROWS = [
@@ -332,6 +342,19 @@ WARNING_ROWS = [
         "tracwiki_markup_in_markdown",
     ),
     ("row71_code_span_and_bare_bold", "tracwiki_markup_in_markdown"),
+    # Suite 9 (ticket #79). Deliberately one-sided towards must-warn,
+    # for the reason #68's recall gate names: this ticket NARROWS a
+    # check, and narrowing is exactly where true positives leave
+    # quietly. Rows 79b/79e/79f are the authored population that must
+    # keep its `error`; rows 79a/79g/79h are the incidental population
+    # that must still be REPORTED, only at advisory severity. The one
+    # new silent row (79d) is a third thing again -- no anchor at all.
+    ("row79b_authored_dead_link", "missing_local_target"),
+    ("row79e_dead_link_with_label", "missing_local_target"),
+    ("row79f_non_autolink_page_name", "missing_local_target"),
+    ("row79a_bare_prose_camelcase", "incidental_wiki_autolink"),
+    ("row79g_bare_short_name", "incidental_wiki_autolink"),
+    ("row79h_autolink_shape_probe", "incidental_wiki_autolink"),
 ]
 
 # Seeded defect: row 1 rendered from ITS PRE-FIX TracWiki
@@ -751,9 +774,15 @@ def test_suite_balance_is_roughly_even():
     # a standalone test rather than a table row for the same reason as
     # row 48 -- it asserts WHICH occurrence was named, not merely that
     # something warned, and a code-only table row cannot express that.
+    #
+    # Ticket #79 added rows 79a-79h: six must-warn, one silent, one
+    # standalone (79c). One-sided again, and deliberately -- see the
+    # note on suite 9 in WARNING_ROWS. Narrowing a check risks losing
+    # true positives, so the new rows are weighted to the half that
+    # proves the check still fires.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 38
-    assert warning_count == 33
+    assert silent_count == 39
+    assert warning_count == 39
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
@@ -971,3 +1000,238 @@ def test_no_existing_row_gains_the_indentation_loss_code(name):
         for w in warnings
         if w["code"] == "code_block_indentation_loss"
     ] == []
+
+
+# ---------------------------------------------------------------------
+# Ticket #79: separating an authored dead link from a CamelCase word
+# Trac auto-linked out of ordinary prose.
+# ---------------------------------------------------------------------
+
+#: The auto-link shape, measured against the deployed daemon at
+#: `b874c81` and reproduced on ticket #79 comment 2. Each word was fed
+#: through `convert_preview(format="tracwiki")` on its own line; True
+#: means Trac emitted a `wiki` anchor for it, False means it rendered
+#: as plain text. This is Trac's OWN statement of the rule -- the
+#: regex in `checks` is checked against it rather than the other way
+#: round, because #37 is this project's evidence that a hand-reasoned
+#: CamelCase rule goes wrong in both directions (`PyVISA` is that
+#: ticket's word, and it is in here as a False row for that reason).
+MEASURED_AUTOLINK_SHAPES = [
+    ("CamelCase", True),
+    ("PyVISA", False),
+    ("WiFi", True),
+    ("LoRa", True),
+    ("KiCad", True),
+    ("GitHub", True),
+    ("TracClient", True),
+    ("ValueError", True),
+    ("ToolSpec", True),
+    ("CommonMark", True),
+    ("ABCDef", False),
+    ("Abc", False),
+    ("AbcDef2", False),
+    ("Abc2Def", False),
+    ("A1B2", False),
+    ("McDonald", True),
+    ("DeadPage/SubPage", True),
+    ("Rules/RenderVerify", True),
+    ("iPhone", False),
+    ("XMLParser", False),
+]
+
+
+def _codes(name):
+    markdown_source, tracwiki, facts, source_format = _load(name)
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    return [w["code"] for w in warnings]
+
+
+def test_seeded_pair_separates_authored_from_incidental():
+    """Ticket #79's seeded defect, asserted as a PAIR (section 6).
+
+    Watch this RED at `b874c81`: both rows report
+    `missing_local_target` at `error` there, which is the defect --
+    `The TracClient class owns the XML-RPC session.` is a correct
+    sentence about a class, and refusing a write over it is what #64's
+    error column would have done to 48 correct documents.
+
+    The pair matters more than either row. Asserting only the
+    incidental half passes just as well for a check that stopped firing
+    altogether, and #59 and #27 are this project's evidence that this
+    is how a check quietly dies. The rendered anchors are structurally
+    identical (`class="missing wiki"`, `href=".../wiki/<Name>"`, text
+    equal to the name), so nothing in `facts` separates them -- only
+    the source does.
+    """
+    incidental = _codes("row79a_bare_prose_camelcase")
+    authored = _codes("row79b_authored_dead_link")
+
+    assert incidental == ["incidental_wiki_autolink"], incidental
+    assert authored == ["missing_local_target"], authored
+
+
+def test_mixed_document_reports_one_of_each():
+    """A bare occurrence and an authored `[[...]]` for the SAME target,
+    in one document (row 79c).
+
+    This is #70's residual in a new place. A boolean "does the text
+    still occur bare" answers yes for the whole document and downgrades
+    BOTH anchors, so the dead link vanishes into the advisory column
+    while the document reports zero errors -- the exact shape #79
+    exists to prevent on the other side of the split. Counting per
+    target instead reports one of each.
+
+    Measured on the deployed daemon: this source renders two anchors,
+    byte-identical to each other.
+    """
+    codes = _codes("row79c_mixed_same_target")
+    assert codes.count("missing_local_target") == 1, codes
+    assert codes.count("incidental_wiki_autolink") == 1, codes
+
+
+def test_non_autolinkable_page_name_stays_an_error():
+    """Row 79f -- the counter-example that makes the shape gate
+    load-bearing rather than belt-and-braces.
+
+    `See [[Page]]. The Page is missing.` renders exactly ONE anchor
+    (measured), from the authored `[[Page]]`: `Page` is a single hump
+    and Trac does not auto-link it. But `Page` DOES still occur bare
+    once link syntax is blanked, so #79 section 5's one-test
+    remediation would classify that single anchor incidental and
+    downgrade a genuinely dead link.
+
+    Nothing here is auto-linkable, so nothing may be downgraded.
+    """
+    codes = _codes("row79f_non_autolink_page_name")
+    assert codes == ["missing_local_target"], codes
+
+
+def test_escaped_word_is_counted_as_neither():
+    """The escaped-word pin, ticket #79 section 6.
+
+    `!TracClient` renders with NO anchor at all (measured: zero
+    anchors), so the silence here is a different fact from the silence
+    of a correctly-resolving link -- there is nothing to classify. The
+    row is in SILENT_ROWS for the no-warning half; this asserts the
+    other half, that the escape did not merely move the finding into
+    the advisory column.
+    """
+    codes = _codes("row79d_escaped_camelcase")
+    assert codes == [], codes
+
+
+def test_advisory_carries_the_escape_suggestion():
+    """#64 section 5's argument applied here: emit the corrected string,
+    not just a diagnosis.
+
+    The advisory knows the exact word Trac linkified, so it can name the
+    one-character edit that silences it. `!`-escaping is what #27
+    section 3 prescribes and what the store already does by hand.
+    """
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row79a_bare_prose_camelcase"
+    )
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    assert len(warnings) == 1, warnings
+    assert warnings[0]["evidence"]["suggestion"] == "!TracClient"
+
+
+@pytest.mark.parametrize("word,links", MEASURED_AUTOLINK_SHAPES)
+def test_autolink_shape_matches_the_measured_probe_table(word, links):
+    """The shape gate, pinned against Trac rather than against
+    reasoning about Trac.
+
+    The safety direction here is asymmetric and worth stating: a gate
+    that is too NARROW leaves an anchor reported as `error`, which is
+    today's behaviour and a false positive we already have. A gate that
+    is too WIDE downgrades a real broken link. So this table is the
+    authority, and where it and the regex disagree the regex is wrong.
+    """
+    assert _is_autolink_page_name(word) is links
+
+
+def test_no_source_falls_back_to_error():
+    """`build_verify_warnings` passes `tracwiki=""` when `render_check`
+    could not pair a source with the render.
+
+    With no source there is no discriminator, so the check must fall
+    back to `missing_local_target` -- unchanged behaviour -- rather
+    than guess. Asserted explicitly because the alternative fails
+    SILENT: an anchor downgraded for lack of evidence looks exactly
+    like one downgraded because the evidence said so.
+    """
+    _, _, facts, _ = _load("row79a_bare_prose_camelcase")
+    warnings = build_warnings(
+        None, "", facts, probes={}, check_targets=False
+    )
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "row79a_bare_prose_camelcase",
+        "row79b_authored_dead_link",
+        "row79c_mixed_same_target",
+    ],
+)
+def test_both_assemblers_agree(name):
+    """Per ticket #77: the new code must appear identically through
+    `build_warnings` and `build_verify_warnings`.
+
+    #77 is the precedent -- a check reachable from only one of the two
+    assemblers left the pre-write gate blind to it, and two call sites
+    is precisely how that blind spot arose. `build_verify_warnings`
+    delegates today, so this is a pin on that continuing to be true,
+    not a discovery.
+    """
+    _, tracwiki, facts, _ = _load(name)
+    direct = build_warnings(
+        None,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format="tracwiki",
+    )
+    via_verify = build_verify_warnings(
+        tracwiki, facts, probes={}, check_targets=False
+    )
+    assert [w["code"] for w in direct] == [
+        w["code"] for w in via_verify
+    ]
+
+
+@pytest.mark.parametrize(
+    "name", sorted(n for n in MANIFEST if not n.startswith("row79"))
+)
+def test_no_pre_existing_row_is_downgraded(name):
+    """The recall gate, in the form this repo can check in.
+
+    Ticket #79 section 6's real gate is the two-store sweep -- all 169
+    authored findings still firing, run with `scripts/store_sweep.py`
+    against a locally cached corpus. That corpus cannot live in this
+    repo (it is public; the `auto_pm` half carries internal host
+    addresses and home-directory paths), so what is checked in is the
+    weaker but still load-bearing half: no row that existed before this
+    ticket may acquire the new advisory code.
+
+    `row13_hand_relative_url` is the row this actually guards. Its
+    anchor text IS its page name, which is the shape an auto-link has,
+    and only the source scan keeps it an error.
+    """
+    assert "incidental_wiki_autolink" not in _codes(name)
