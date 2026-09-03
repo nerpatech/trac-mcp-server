@@ -53,6 +53,21 @@ _KNOWN_MACROS = frozenset(
 )
 
 
+# Info string on the fence tracwiki_to_markdown emits for a construct that has
+# no Markdown equivalent (ticket #63).  Deliberately NOT the bare "tracwiki"
+# that someone documenting TracWiki inside a Markdown file would type: this tag
+# is the signal markdown_to_tracwiki unwraps on, so a collision with a
+# hand-written code sample would inject live markup where a code block was
+# meant -- the exact class of corruption this ticket removes.
+FALLBACK_FENCE_INFO = "tracwiki-unconverted"
+
+# Processor blocks with no Markdown equivalent, emitted verbatim rather than
+# rebuilt best-effort.  "table"/"td"/"th" are table structure Markdown cannot
+# express; "comment" is content Trac drops entirely, which the old fenced-block
+# rendering made *visible* (see Reference/trac/WikiEscapeContexts).
+_FALLBACK_PROCESSOR_RE = re.compile(r"\{\{\{#!(comment|table|td|th)\b")
+
+
 class TracWikiParser:
     """Parser for converting TracWiki syntax to Markdown format."""
 
@@ -96,7 +111,7 @@ class TracWikiParser:
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
-        text = self._convert_processor_cells(text)
+        text = self._apply_fallbacks(text)
         text = self._convert_code_blocks(text)
         text = self._convert_macros(text)
         text = self._convert_headings(text)
@@ -156,27 +171,13 @@ class TracWikiParser:
                 "Definition lists detected - converted to bold text (semantic preservation)"
             )
 
-        # Detect tables and their features
-        has_regular_tables = re.search(r"\|\|.*\|\|", text)
-        has_processor_tables = re.search(r"\{\{\{#!t[dh]", text)
-
-        if has_regular_tables:
-            # Check for cell spanning (|||| indicates spanning)
-            if re.search(r"\|\|\|\|", text):
-                self.warnings.append(
-                    "Table cell spanning detected - merged into single cell (Markdown limitation)"
-                )
-            # Check for multi-line rows (backslash continuation)
-            if re.search(r"\\\s*\n\s*\|\|", text):
-                self.warnings.append(
-                    "Multi-line table rows detected - joined into single line (Markdown limitation)"
-                )
-
-        # Check for processor-based tables (can exist without regular || tables)
-        if has_processor_tables:
-            self.warnings.append(
-                "Processor-based table cells (#td/#th) detected - converted to plain text (Markdown limitation)"
-            )
+        # Table-feature and processor-cell warnings used to live here and
+        # described a best-effort reconstruction -- "merged into single cell",
+        # "converted to plain text".  Ticket #63 replaced that reconstruction
+        # with a verbatim fallback, so _stash_fallback now raises the warning
+        # at the point it actually fires, naming what it did.  Warning off the
+        # source without consulting what the conversion did is the same defect
+        # the macro warning had before slice (b) of this ticket.
 
         # Detect TracLinks
         if re.search(r"(#\d+|ticket:\d+|wiki:\w+|changeset:\w+)", text):
@@ -184,44 +185,222 @@ class TracWikiParser:
                 "TracLinks detected - preserved as-is (agents can interpret, but not clickable in Markdown renderers)"
             )
 
-    def _convert_processor_cells(self, text: str) -> str:
-        """Convert processor-based table cells BEFORE code blocks.
+    # ------------------------------------------------------------------
+    # Unrepresentable-construct fallback (ticket #63)
+    # ------------------------------------------------------------------
 
-        {{{#!td ... }}} or {{{#!th ... }}} - these are table cells, not code blocks.
-        Convert to regular table cell content with marker for later table processing.
+    @staticmethod
+    def _matching_brace(text: str, start: int) -> int:
+        """Return the index just past the ``}}}`` closing the ``{{{`` at start.
 
-        Runs before _convert_code_blocks' backtick stashing, so a token
-        directly flanked by literal backticks (meant as a code span, not a
-        real processor cell) needs its own backtick-adjacency check here --
-        the same backstop _convert_macros already applies for the same
-        reason (see its docstring re ticket #43). Without it, `{{{#!td}}}`
-        got rewritten to `||` before the code span around it was ever
-        recognized, so the span ended up stashing the rewritten pipes
-        instead of the original token (ticket #46). `#!div`/`#!table`
-        never had this problem because nothing converts them before the
-        code-span stash gets a chance to run.
+        Depth-counted rather than regex-matched, because ``{{{#!table}}}``
+        legitimately contains ``{{{#!td}}}`` blocks and the lazy ``.*?`` the
+        other passes use stops at the *first* ``}}}``, which is the inner
+        one.  Returns -1 when the block is unterminated.
         """
-
-        def convert_processor_cell(match):
-            if self._is_backtick_wrapped(
-                text, match.start(), match.end()
-            ):
-                return match.group(0)
-            cell_type = match.group(1)  # 'td' or 'th'
-            content = match.group(2).strip()
-            # Replace newlines with spaces for single-line cell content
-            content = " ".join(content.split())
-            if cell_type == "th":
-                return f"||={content}=||"
+        depth = 0
+        i = start
+        while i < len(text):
+            if text.startswith("{{{", i):
+                depth += 1
+                i += 3
+            elif text.startswith("}}}", i):
+                depth -= 1
+                i += 3
+                if depth == 0:
+                    return i
             else:
-                return f"||{content}||"
+                i += 1
+        return -1
 
-        return re.sub(
-            r"\{\{\{#!(t[dh])\s*(.*?)\s*\}\}\}",
-            convert_processor_cell,
-            text,
-            flags=re.DOTALL,
+    def _stash_fallback(self, source: str, kind: str) -> str:
+        """Wrap unrepresentable TracWiki verbatim in a fallback fence.
+
+        The body is stashed behind the same \\x00CODE<n>\\x00 placeholder the
+        code-block pass uses, so no later pass rewrites the markup we are
+        deliberately preserving as source text.
+        """
+        self.warnings.append(
+            f"{kind} cannot be represented in Markdown - emitted verbatim "
+            f"in a {FALLBACK_FENCE_INFO} block; markdown_to_tracwiki "
+            f"restores it unchanged"
         )
+        self._code_placeholders.append(source)
+        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
+        fence = self._fence_for(source)
+        return f"{fence}{FALLBACK_FENCE_INFO}\n{placeholder}\n{fence}"
+
+    def _verbatim_mask(self, text: str) -> str:
+        """Return ``text`` with verbatim regions blanked to ``\\x01`` fillers.
+
+        Verbatim means "Trac parses no markup here": the interior of any
+        ``{{{ }}}`` block and of any backtick code span.  Newlines are kept so
+        the mask stays line-aligned with the source and callers can test the
+        mask while emitting the original.
+
+        This exists because the fallback passes run *first* -- before the
+        code-block and code-span stashing that shields everything else -- so
+        they are the one place in the converter that has to do its own
+        shielding.  Without it the fallback fires on a ``{{{#!table}}}`` token
+        quoted inside a code span, reopening tickets #45 and #46, and on a
+        ``{{{#!comment}}}`` nested inside a plain code block, reopening #51.
+        """
+        mask = list(text)
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                if end == -1:
+                    break
+                for j in range(i + 3, min(end - 3, n)):
+                    if mask[j] != "\n":
+                        mask[j] = "\x01"
+                i = end
+            elif text[i] == "`":
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    for k in range(i + 1, j):
+                        mask[k] = "\x01"
+                    i = j + 1
+                else:
+                    i += 1
+            else:
+                i += 1
+        return "".join(mask)
+
+    def _fallback_processor_blocks(self, text: str) -> str:
+        """Emit {{{#!comment}}}, {{{#!table}}}, {{{#!td}}}, {{{#!th}}} verbatim.
+
+        Each has no Markdown equivalent, and each was previously rebuilt
+        best-effort into something else -- a fenced block that *displays*
+        content Trac drops entirely, or a one-column table that reads back as
+        a header cell.  See TestUnrepresentableInventory for the measured
+        before-behaviour.
+
+        Only a block at top level qualifies.  One nested inside another
+        ``{{{ }}}`` block is that block's content, not a construct of its own
+        (ticket #51), and one inside a code span is a quoted token (#46).
+        """
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                if end == -1:
+                    out.append(text[i:])
+                    break
+                m = _FALLBACK_PROCESSOR_RE.match(text, i)
+                if m:
+                    # Coalesce a run of adjacent fallback blocks into ONE
+                    # region.  Emitting a fence each would put the closing
+                    # fence of one against the opening fence of the next --
+                    # ```````` on a single line, which is not a fence pair at
+                    # all -- and would also lose the exact whitespace between
+                    # them.  One region round-trips the whole run verbatim.
+                    names = [m.group(1).lower()]
+                    while True:
+                        j = end
+                        while j < n and text[j] in " \t\n":
+                            j += 1
+                        nxt = _FALLBACK_PROCESSOR_RE.match(text, j)
+                        if not nxt:
+                            break
+                        close = self._matching_brace(text, j)
+                        if close == -1:
+                            break
+                        names.append(nxt.group(1).lower())
+                        end = close
+                    kind = (
+                        "Processor block"
+                        + ("s " if len(names) > 1 else " ")
+                        + ", ".join(
+                            f"#!{x}" for x in dict.fromkeys(names)
+                        )
+                    )
+                    out.append(self._stash_fallback(text[i:end], kind))
+                else:
+                    out.append(text[i:end])
+                i = end
+            elif text[i] == "`":
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    out.append(text[i : j + 1])
+                    i = j + 1
+                else:
+                    out.append(text[i])
+                    i += 1
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
+
+    def _fallback_tables(self, text: str) -> str:
+        """Emit a table verbatim when it uses a Markdown-inexpressible feature.
+
+        Two features qualify, both measured on ticket #63 as destroying the
+        table on the way back:
+
+        * cell spanning (``||||``) -- the converted row carries fewer cells
+          than its header, mistune rejects it, and the whole table is stored
+          as literal text;
+        * a backslash-continued multi-line row -- the rows are joined into one
+          over-wide row that reads back as a *header* row.
+
+        Detection runs against ``_verbatim_mask`` so a ``||||`` quoted in a
+        code span does not trigger it (ticket #45), while the emitted text is
+        always the original.
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            if not masked[i].lstrip().startswith("||"):
+                out.append(lines[i])
+                i += 1
+                continue
+            start = i
+            while i < len(lines) and masked[i].lstrip().startswith(
+                "||"
+            ):
+                i += 1
+            probe = "\n".join(masked[start:i])
+            spanning = "||||" in probe
+            multiline = any(
+                ln.rstrip().endswith("\\") for ln in masked[start:i]
+            )
+            if spanning or multiline:
+                kind = (
+                    "Table cell spanning"
+                    if spanning
+                    else "Multi-line table row"
+                )
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(lines[start:i]), kind
+                    )
+                )
+            else:
+                out.extend(lines[start:i])
+        return "\n".join(out)
+
+    def _apply_fallbacks(self, text: str) -> str:
+        """Run every unrepresentable-construct fallback, outermost first."""
+        text = self._fallback_processor_blocks(text)
+        text = self._fallback_tables(text)
+        return text
+
+    # _convert_processor_cells was deleted on ticket #63.  It rebuilt
+    # {{{#!td}}} / {{{#!th}}} into ||cell|| markup so the table pass could
+    # turn it into a Markdown table -- a reconstruction the verbatim fallback
+    # replaces.  Deleting it also fixed a live defect it carried: it ran
+    # before the code-block stashing, so a processor cell nested inside a
+    # plain code block was rewritten too, destroying quoted source.  See
+    # TestUnrepresentableFallback.test_processor_cell_inside_a_code_block_is_content.
 
     @staticmethod
     def _fence_for(content: str) -> str:

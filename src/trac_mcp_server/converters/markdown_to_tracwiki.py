@@ -11,6 +11,7 @@ from .common import (
     ConversionResult,
     markdown_to_tracwiki_lang,
 )
+from .tracwiki_to_markdown import FALLBACK_FENCE_INFO
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -457,6 +458,17 @@ class TracWikiRenderer(mistune.BaseRenderer):
         """
         code = code.rstrip("\n")
         code = _restore_nested_fences(code)
+        if info and info.strip() == FALLBACK_FENCE_INFO:
+            # Unwrap, per the operator decision on ticket #63: the read leg
+            # emitted this fence around TracWiki it could not express, and the
+            # body is the ORIGINAL SOURCE verbatim.  Restoring it is a literal
+            # unwrap with nothing to infer -- unlike the [MACRO: ...]
+            # placeholder deleted earlier on this ticket, which had to be
+            # reconstructed by guessing and carried the bugs that came with
+            # that.  Without this, a read-edit-write cycle would demote the
+            # construct to a literal code block: text-lossless but no longer a
+            # table.
+            return f"{code}\n\n"
         if info:
             # Map Markdown language to TracWiki processor directive
             tracwiki_lang = markdown_to_tracwiki_lang(info)
