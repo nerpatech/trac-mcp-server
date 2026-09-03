@@ -207,49 +207,15 @@ def _is_canonical_indent(lines: list[str], depths: list[int]) -> bool:
     return True
 
 
-def _convert_definition_lists(text: str) -> str:
-    """Convert TracWiki definition lists to a bold term plus a colon.
-
-    Line-based rather than a single ``re.sub`` so that a term whose definition
-    sits on the following indented line can absorb it (ticket #71).  Leaving
-    that line in place let the blockquote pass claim it and emit ``> `` inside
-    the definition; Trac reads it as part of the ``<dd>``.
-    """
-    lines = text.split("\n")
-    out: list[str] = []
-    index = 0
-    while index < len(lines):
-        match = _DEFINITION_LIST_RE.match(lines[index])
-        if match is None:
-            out.append(lines[index])
-            index += 1
-            continue
-
-        indent, term, definition = match.groups()
-        index += 1
-        if not definition:
-            # Absorb continuation lines: indented further than the term, up to
-            # the first blank line or a line that dedents back out.
-            continuation: list[str] = []
-            while index < len(lines):
-                following = lines[index]
-                if not following.strip():
-                    break
-                following_indent = len(following) - len(
-                    following.lstrip()
-                )
-                if following_indent <= len(indent):
-                    break
-                continuation.append(following.strip())
-                index += 1
-            definition = " ".join(continuation)
-
-        converted = f"{indent}**{term}**:"
-        if definition:
-            converted += f" {definition}"
-        out.append(converted)
-
-    return "\n".join(out)
+# _convert_definition_lists was deleted on ticket #63.  It rewrote a
+# definition list as a bold term plus a colon -- a reconstruction the
+# verbatim fallback replaces, and one that did not survive the way back:
+# stored at column zero, "'''term''': definition" is prose to Trac, not a
+# <dl>.  Its continuation-absorbing loop also disagreed with Trac, taking
+# a following line only when the definition was empty AND the line was
+# indented deeper, where Trac absorbs one at the same indent too.
+# _convert_indented_blocks now carries the whole run verbatim, which
+# sidesteps that disagreement rather than having to fix it.
 
 
 class TracWikiParser:
@@ -349,19 +315,16 @@ class TracWikiParser:
                     )
                 break
 
-        # Detect definition lists.  Shares _DEFINITION_LIST_RE with the
-        # conversion itself: this warning used to carry its own copy of the
-        # pattern, so the two could drift and -- ticket #71 -- the warning
-        # fired on every line containing a double colon, announcing a
-        # definition list in prose that has none.  Tickets #57 and #59 are
-        # this project's evidence that an over-firing check gets muted and
-        # takes its true positives with it.
-        if any(
-            _DEFINITION_LIST_RE.match(line) for line in text.split("\n")
-        ):
-            self.warnings.append(
-                "Definition lists detected - converted to bold text (semantic preservation)"
-            )
+        # The definition-list warning used to live here and described the
+        # bold conversion deleted on ticket #63.  _stash_fallback now raises
+        # it where it fires, which also fixed a live false positive this
+        # placement caused: _detect_lossy_elements scans the RAW text with no
+        # shielding, so a "term::" line inside a code block announced a
+        # definition list in quoted source.  That is the over-firing shape
+        # ticket #71 removed, surviving in a second place -- and tickets #57
+        # and #59 are this project's evidence that an over-firing check gets
+        # muted and takes its true positives with it.  Pinned by
+        # TestWarningIsShielded.
 
         # Table-feature and processor-cell warnings used to live here and
         # described a best-effort reconstruction -- "merged into single cell",
@@ -580,22 +543,34 @@ class TracWikiParser:
                 out.extend(lines[start:i])
         return "\n".join(out)
 
-    def _line_is_not_a_quote(self, masked_line: str) -> bool:
+    @staticmethod
+    def _line_holds_a_brace(masked_line: str) -> bool:
+        """True for a code-block delimiter line.
+
+        ``_verbatim_mask`` blanks a block's *interior* but not its ``{{{`` and
+        ``}}}`` markers, so stashing a run containing one half would strand
+        the other.  Checked before anything else for that reason.
+        """
+        return "{{{" in masked_line or "}}}" in masked_line
+
+    @staticmethod
+    def _line_is_not_a_quote(masked_line: str) -> bool:
         """True when this indented line's whitespace belongs elsewhere.
 
         A run containing any such line is left entirely alone rather than
-        claimed or fallen back.  ``{{{`` / ``}}}`` are in the list because an
-        indented code block's *delimiters* are not masked by
-        ``_verbatim_mask`` (only its interior is), and stashing one half of a
-        block verbatim would strand the other.
+        claimed or fallen back: a list, table or heading consumes its own
+        indent, and claiming it would take the construct apart -- a multi-line
+        list item's continuation line being the case that matters most.
+
+        Definition lists were on this list until ticket #63.  They are now
+        handled a step earlier, because unlike the others they have no
+        Markdown equivalent at all and so must be carried verbatim rather
+        than left to a later pass.
         """
         return bool(
             _LIST_MARKER_RE.match(masked_line)
-            or _DEFINITION_LIST_RE.match(masked_line)
             or _INDENTED_TABLE_RE.match(masked_line)
             or _INDENTED_HEADING_RE.match(masked_line)
-            or "{{{" in masked_line
-            or "}}}" in masked_line
         )
 
     def _convert_indented_blocks(self, text: str) -> str:
@@ -609,23 +584,39 @@ class TracWikiParser:
         ordinary text to every later pass, so a quote's contents still get
         their formatting, links and macros converted.
 
-        Three outcomes per maximal run of consecutive non-blank indented
+        Four outcomes per maximal run of consecutive non-blank indented
         lines, in order:
 
-        1. **Not a quote at all** -- the run contains a list item, definition
-           list, table row, heading or code-block delimiter, whose indent
-           those constructs consume.  Left untouched, which is also what keeps
-           a multi-line list item working: its continuation line is indented
-           too, and claiming it would take the item apart.
-        2. **Canonical** -- every line's indent is exactly two spaces per
+        1. **A code-block delimiter** -- left untouched; see
+           ``_line_holds_a_brace``.
+        2. **A definition list** (ticket #63) -- carried verbatim through the
+           fallback.  Markdown has no definition list, and the bold form this
+           replaced did not survive the way back: stored at column zero,
+           ``'''term''': definition`` is *prose* to Trac, not a ``<dl>``.
+           The unit is the run rather than the term line because consecutive
+           terms are one ``<dl>``, and a non-term line following a term is
+           part of the preceding ``<dd>`` even at the same indent -- both
+           measured against Trac's renderer.
+        3. **Not a quote at all** -- the run contains a list item, table row
+           or heading, whose indent those constructs consume.  Left untouched,
+           which is also what keeps a multi-line list item working: its
+           continuation line is indented too, and claiming it would take the
+           item apart.
+        4. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
-           byte-for-byte.  Converted.
-        3. **Anything else** -- one space, three, four, a tab, a mixed run.
-           Markdown cannot carry the width, so the run goes out verbatim
-           through the ticket #63 fallback, which restores it unchanged and
-           *warns*.  Before this, one and three spaces lost the indent
-           silently and four spaces or a tab became a literal ``{{{`` code
-           block -- a change of content type, also silent.
+           byte-for-byte.  Converted.  Anything else -- one space, three,
+           four, a tab, a mixed run -- goes out verbatim through the same
+           fallback, which restores it unchanged and *warns*.  Before ticket
+           #73, one and three spaces lost the indent silently and four spaces
+           or a tab became a literal ``{{{`` code block.
+
+        Step 2 runs **before** step 3, which is the operator decision on
+        ticket #63: a run holding both a bullet and a definition term is a
+        ``<ul>`` followed by a ``<dl>``, and falling the whole run back is the
+        only option that loses nothing.  Skipping it would let the ``<dl>``
+        degrade to prose at column zero now that nothing converts it, and
+        splitting the run at the construct boundary needs a real block parser.
+        The cost is that a representable bullet list is carried verbatim too.
 
         Detection runs against ``_verbatim_mask`` so an indented line quoted
         inside a code span or block is content, not a quote (tickets #45,
@@ -654,11 +645,23 @@ class TracWikiParser:
             ):
                 index += 1
             run = lines[start:index]
+            probes = masked[start:index]
 
-            if any(
-                self._line_is_not_a_quote(m)
-                for m in masked[start:index]
-            ):
+            if any(self._line_holds_a_brace(m) for m in probes):
+                stack = []
+                out.extend(run)
+                continue
+
+            if any(_DEFINITION_LIST_RE.match(m) for m in probes):
+                stack = []
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), "Definition list"
+                    )
+                )
+                continue
+
+            if any(self._line_is_not_a_quote(m) for m in probes):
                 stack = []
                 out.extend(run)
                 continue
@@ -1035,10 +1038,11 @@ class TracWikiParser:
         return text
 
     def _convert_other_elements(self, text: str) -> str:
-        """Convert other elements (horizontal rules, definition lists).
+        """Convert horizontal rules: ``----`` -> ``---``.
 
-        Horizontal rule: ---- -> ---
-        Definition lists: term:: definition -> **term**: definition
+        The name is now wider than the contents.  Two other elements have
+        left: blockquotes on ticket #73 and definition lists on #63, both to
+        ``_convert_indented_blocks``, which runs before this pass.
 
         Blockquotes were handled here until ticket #73 and now run in
         ``_convert_indented_blocks``, before this pass.  The old code
@@ -1046,22 +1050,15 @@ class TracWikiParser:
         width fell through to the Markdown untouched, where four-space
         indentation means a code block.  It also had to run after the
         definition-list pass (ticket #71) to stop it claiming a definition's
-        continuation line -- a constraint that no longer applies, because the
-        new pass leaves a run containing a definition term alone entirely.
+        continuation line -- a constraint that disappeared with that pass,
+        which ticket #63 replaced with the verbatim fallback.
 
-        The horizontal-rule pattern is deliberately anchored with no leading
-        whitespace: measured on ticket #73, Trac renders `` ----`` as a
-        blockquote containing the literal text ``----``, not as a rule.
+        What is left is the horizontal rule, whose pattern is deliberately
+        anchored with no leading whitespace: measured on ticket #73, Trac
+        renders `` ----`` as a blockquote containing the literal text
+        ``----``, not as a rule.
         """
-        # Horizontal rule
-        text = re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
-
-        # Definition lists: term:: definition -> **term**: definition
-        # TracWiki uses :: separator, Markdown has no native definition list
-        # Convert to bold term + regular text (semantic preservation)
-        text = _convert_definition_lists(text)
-
-        return text
+        return re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
 
     def _convert_tables(self, text: str) -> str:
         """Convert tables: TracWiki ||c1||c2|| -> Markdown |c1|c2|.

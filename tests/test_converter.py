@@ -917,20 +917,28 @@ class TestTracWikiEnhancements(unittest.TestCase):
         )
 
     def test_tracwiki_definition_lists(self):
-        """Test definition lists conversion with warnings.
+        """Test definition lists take the verbatim fallback, with a warning.
 
         The input gained its leading space for ticket #71.  It previously read
         ``"term:: definition"`` at column zero, which Trac renders as an
         ordinary paragraph -- so the old form asserted the very false positive
-        that ticket fixed.  The guarantee being tested is unchanged: a real
-        definition list converts to a bold term and warns.
+        that ticket fixed.
+
+        The *guarantee* changed on ticket #63: a definition list no longer
+        converts to a bold term, because Markdown has no definition list to
+        convert it to and the bold form did not survive the way back (stored
+        at column zero it is prose, not a ``<dl>``).  It is now carried
+        verbatim in a fallback fence and round-trips byte-for-byte.  The
+        detailed rows live in ``test_converter_definition_lists.py``.
         """
         result = tracwiki_to_markdown(" term:: definition")
-        # Should convert to bold with colon
-        self.assertIn("**term**:", result.text)
-        # Should warn about lossy conversion
+        self.assertNotIn("**term**:", result.text)
+        self.assertIn(FALLBACK_FENCE_INFO, result.text)
         self.assertTrue(
             any("definition" in w.lower() for w in result.warnings)
+        )
+        self.assertEqual(
+            markdown_to_tracwiki(result.text), " term:: definition"
         )
 
     def test_tracwiki_definition_list_needs_indentation(self):
