@@ -312,5 +312,45 @@
     "markdown_input": null,
     "tracwiki": "An external link with an ordinary label: [http://example.com/x the summary page] here.",
     "source_format": "tracwiki"
+  },
+  "row79a_bare_prose_camelcase": {
+    "markdown_input": null,
+    "tracwiki": "The TracClient class owns the XML-RPC session.",
+    "source_format": "tracwiki"
+  },
+  "row79b_authored_dead_link": {
+    "markdown_input": null,
+    "tracwiki": "See [[ThisPageWasDeleted]] for the detail.",
+    "source_format": "tracwiki"
+  },
+  "row79c_mixed_same_target": {
+    "markdown_input": null,
+    "tracwiki": "The TracClient class owns it, and see [[TracClient]] for the detail.",
+    "source_format": "tracwiki"
+  },
+  "row79d_escaped_camelcase": {
+    "markdown_input": null,
+    "tracwiki": "The !TracClient class owns the XML-RPC session.",
+    "source_format": "tracwiki"
+  },
+  "row79e_dead_link_with_label": {
+    "markdown_input": null,
+    "tracwiki": "See [wiki:DeadPageXyz some label here] for the detail.",
+    "source_format": "tracwiki"
+  },
+  "row79f_non_autolink_page_name": {
+    "markdown_input": null,
+    "tracwiki": "See [[Page]]. The Page is missing.",
+    "source_format": "tracwiki"
+  },
+  "row79g_bare_short_name": {
+    "markdown_input": null,
+    "tracwiki": "Bare RenderVerify short name in prose, where the page is Rules/trac/RenderVerify.",
+    "source_format": "tracwiki"
+  },
+  "row79h_autolink_shape_probe": {
+    "markdown_input": null,
+    "tracwiki": "1 CamelCase\n2 PyVISA\n3 WiFi\n4 LoRa\n5 KiCad\n6 GitHub\n7 TracClient\n8 ValueError\n9 ToolSpec\n10 CommonMark\n11 ABCDef\n12 Abc\n13 AbcDef2\n14 Abc2Def\n15 A1B2\n16 McDonald\n17 DeadPage/SubPage\n18 Rules/RenderVerify\n19 iPhone\n20 XMLParser",
+    "source_format": "tracwiki"
   }
 }
