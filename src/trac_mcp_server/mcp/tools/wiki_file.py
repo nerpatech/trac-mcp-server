@@ -208,12 +208,22 @@ async def _handle_push(
         # examples inside code blocks (e.g. docs describing the converter
         # itself) would otherwise be mis-detected as TracWiki and pushed
         # through unchanged.
-        conversion = await auto_convert(
-            content,
-            client.config,
-            target_format="tracwiki",
-            source_format="markdown",
-        )
+        try:
+            conversion = await auto_convert(
+                content,
+                client.config,
+                target_format="tracwiki",
+                source_format="markdown",
+            )
+        except ValueError as e:
+            # See convert_preview for why this is caught rather than left to
+            # the dispatcher, which would report it as "unknown_tool".
+            return build_error_response(
+                "validation_error",
+                str(e),
+                'Remove the construct, or pass format="tracwiki" to push '
+                "the file verbatim without conversion.",
+            )
         wiki_content = conversion.text
         converted = conversion.converted
         warnings.extend(conversion.warnings)

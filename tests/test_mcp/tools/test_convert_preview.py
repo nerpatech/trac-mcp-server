@@ -79,6 +79,37 @@ class TestConvertPreviewHandler(unittest.TestCase):
         result = self._run(client, {"content": "x", "format": "html"})
         self.assertTrue(result.isError)
 
+    def test_unrepresentable_footnote_is_a_validation_error(self):
+        """A refused conversion must not surface as "unknown_tool".
+
+        Ticket #63 option (c) makes the converter raise ValueError on a
+        Markdown footnote it cannot represent.  The dispatcher in
+        ``mcp/server.py`` maps a bare ValueError to ``unknown_tool`` with the
+        hint "Use list_tools to see available tools" -- which would be
+        actively misleading for a content problem the caller can fix, so the
+        handler catches it and reports a validation error naming the escape
+        hatch instead.
+        """
+        client = _mock_client("<p>x</p>")
+        result = self._run(
+            client, {"content": "Text[^1]\n\n[^1]: note\n"}
+        )
+        self.assertTrue(result.isError)
+        payload = json.dumps(
+            [c.text for c in result.content if hasattr(c, "text")]
+        )
+        self.assertIn("validation_error", payload)
+        self.assertNotIn("unknown_tool", payload)
+        self.assertIn("tracwiki", payload)
+
+    def test_representable_content_still_converts(self):
+        """Recall gate for the check above -- ordinary content is unaffected."""
+        client = _mock_client("<p>x</p>")
+        result = self._run(
+            client, {"content": "Plain **text** here.\n"}
+        )
+        self.assertFalse(result.isError)
+
     def test_clean_markdown_produces_no_warnings(self):
         html = _fixture_html("row01_intertrac_wiki")
         client = _mock_client(html)

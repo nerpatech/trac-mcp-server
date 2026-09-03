@@ -396,16 +396,63 @@ class TestUnrepresentableFallback(unittest.TestCase):
                     [ln for ln in src.split("\n") if ln.strip()],
                 )
 
-    def test_write_leg_footnote_loses_its_definition(self):
-        """Unrepresentable *Markdown*, still unhandled -- the write-leg half.
+    def test_write_leg_rejects_a_destructive_footnote(self):
+        """Unrepresentable *Markdown* fails the call (ticket #63, option c).
 
-        Pinned here as the measured "before" for the write-leg fallback, which
-        has not landed yet.  The definition line is deleted outright and the
-        reference becomes a wiki link to a page named after the note text.
+        Updated deliberately from the previous commit, where this pinned the
+        destructive behaviour as a measured "before": the definition line was
+        deleted outright and the reference became a wiki link to a page named
+        after the note text, silently.
+
+        The read leg's answer -- emit it verbatim in a fallback fence -- does
+        not work here, which is why this leg fails instead.  A footnote is not
+        a block: its reference and its definition sit in different places, so
+        wrapping either half alone breaks the pairing.
         """
-        stored = markdown_to_tracwiki("Text[^1]\n\n[^1]: note\n")
-        self.assertEqual(stored, "Text[wiki:note ^1]")
-        self.assertNotIn("[^1]:", stored)
+        with self.assertRaises(ValueError) as ctx:
+            markdown_to_tracwiki("Text[^1]\n\n[^1]: note\n")
+        message = str(ctx.exception)
+        self.assertIn("[^1]", message)
+        # The escape hatch must be in the message; a hard failure with no way
+        # forward is worse than the silent loss it replaces.
+        self.assertIn("tracwiki", message)
+
+    def test_write_leg_footnote_rejection_stays_narrow(self):
+        """The recall gate: only the destructive PAIR may fail the call.
+
+        Measured on ticket #63 -- a reference alone and a definition alone
+        both pass through untouched, so neither is destructive and neither
+        may be rejected.  The quoted forms matter most: this check runs
+        before the converter's own code-span stashing, so it has to do its
+        own shielding or it fires on syntax the author quoted rather than
+        wrote -- the same lesson the read-leg fallback learned the hard way.
+        """
+        harmless = [
+            ("reference with no definition", "Text[^1] alone\n"),
+            ("definition with no reference", "[^1]: orphan note\n"),
+            (
+                "both, quoted in code spans",
+                "Use `[^1]` and `[^1]:` here\n",
+            ),
+            (
+                "both, inside a fenced block",
+                "```\nText[^1]\n\n[^1]: note\n```\n",
+            ),
+            ("bracketed caret in prose", "An array like a[^b] maybe\n"),
+            ("ordinary prose", "Just some text.\n"),
+        ]
+        for label, src in harmless:
+            with self.subTest(label):
+                markdown_to_tracwiki(src)  # must not raise
+
+    def test_representable_input_is_unaffected_by_the_footnote_check(
+        self,
+    ):
+        """Every retained construct must still convert (no new false alarm)."""
+        for label, src in TestRepresentableRoundTripRetained.IDENTITY:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertEqual(markdown_to_tracwiki(md), src)
 
 
 if __name__ == "__main__":
