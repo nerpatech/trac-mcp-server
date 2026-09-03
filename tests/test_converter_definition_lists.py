@@ -97,10 +97,12 @@ class TestProseWithDoubleColonNotConverted(unittest.TestCase):
     updated here deliberately, as that commit's docstring required.  Each
     ``expected`` is now the source text unchanged, and no row may warn.
 
-    The indented rows still lose their single leading space.  That is a
-    separate pre-existing defect, independent of the double colon, pinned in
-    ``TestSingleSpaceIndentStrippedPreexisting`` rather than papered over with
-    a lenient comparison here.
+    The indented rows lost their single leading space to a separate defect,
+    independent of the double colon, which was pinned in
+    ``TestSingleSpaceIndentNoLongerStripped`` rather than papered over with a
+    lenient comparison here.  Ticket #73 fixed it, so those rows are now
+    tightened to the source unchanged like the rest -- which is the payoff of
+    having pinned it instead of loosening the comparison.
     """
 
     # (label, source, expected stored bytes after the round trip)
@@ -126,21 +128,26 @@ class TestProseWithDoubleColonNotConverted(unittest.TestCase):
             "term:: definition at column zero",
             "term:: definition at column zero",
         ),
-        # Indented rows: leading space lost to the separate defect below.
+        # Indented rows.  Every one of these is a BLOCKQUOTE to Trac, and each
+        # kept its `expected` shortened by one leading space until ticket #73
+        # fixed the indent handling.  Tightened here deliberately, as this
+        # ticket's section 6 said they would be once that landed: the indent is
+        # now preserved, so `expected` is the source unchanged like every other
+        # row in the table.
         (
             "C++ scope, indented",
             " Use std::vector here indented.",
-            "Use std::vector here indented.",
+            " Use std::vector here indented.",
         ),
         (
             "ratio, indented",
             " A ratio of 3::1 was used, indented.",
-            "A ratio of 3::1 was used, indented.",
+            " A ratio of 3::1 was used, indented.",
         ),
         (
             "no whitespace after the colons",
             " term::definition with no space",
-            "term::definition with no space",
+            " term::definition with no space",
         ),
         # Trac stops at the FIRST colon pair, finds "v", and declines the line.
         # A plain non-greedy term would backtrack past it to the second pair,
@@ -148,7 +155,7 @@ class TestProseWithDoubleColonNotConverted(unittest.TestCase):
         (
             "first colon pair is not followed by whitespace",
             " std::vector:: a C++ type as the term",
-            "std::vector:: a C++ type as the term",
+            " std::vector:: a C++ type as the term",
         ),
     ]
 
@@ -272,31 +279,35 @@ class TestControl(unittest.TestCase):
         self.assertFalse(warned)
 
 
-class TestSingleSpaceIndentStrippedPreexisting(unittest.TestCase):
-    """A separate pre-existing defect, pinned so this ticket does not hide it.
+class TestSingleSpaceIndentNoLongerStripped(unittest.TestCase):
+    """The separate defect this file pinned, now fixed on ticket #73.
 
-    The write leg strips a single-space indent from any line, with or without
-    a double colon and with no warning.  Trac renders a single-space-indented
-    line as a ``<blockquote>``, so this silently demotes a quote to a
-    paragraph.  Measured on ``master`` at ``6ecbdc1``, independent of the
-    definition-list pass -- it reproduces on a line containing no colons at
-    all, which is what puts it outside ticket #71.
+    It was pinned here rather than fixed because ticket #71 was the ``::``
+    detector: the write leg stripped a single-space indent from any line, with
+    or without a double colon and with no warning, silently demoting a
+    ``<blockquote>`` to a paragraph.  It was recorded so the leading space the
+    indented rows above still lost stayed traceable to a known cause instead
+    of looking like an incomplete fix.
 
-    Pinned rather than fixed because this ticket is the ``::`` detector.  It
-    is recorded here so that when the indented rows above stop being bolded,
-    the leading space they still lose is traceable to a known cause rather
-    than looking like an incomplete fix.
+    Ticket #73 fixed it, so the assertions are inverted here rather than
+    deleted -- this is the seam between the two tickets, and a reader arriving
+    at those tightened ``expected`` values above needs it to still say why.
+    The full pin lives in ``test_converter_blockquote_indent.py``; these two
+    rows stay because they are the ones this file's own table depends on.
+
+    Note what the fix is *not*: the indent is preserved by emitting the line
+    verbatim through ticket #63's fallback, not by converting it to a Markdown
+    blockquote.  One space is not a width Markdown can carry -- see that
+    file's docstring for the measured grammar and why.
     """
 
-    def test_single_space_indent_is_stripped_without_a_double_colon(
-        self,
-    ):
+    def test_single_space_indent_survives_without_a_double_colon(self):
         stored, warned = _round_trip(" Indented prose with no colons.")
-        self.assertEqual(stored, "Indented prose with no colons.")
+        self.assertEqual(stored, " Indented prose with no colons.")
         self.assertFalse(warned)
 
     def test_two_space_indent_survives(self):
-        """The contrast: a two-space indent round-trips via the blockquote pass."""
+        """The contrast: two spaces is the width that converts to ``> ``."""
         stored, _ = _round_trip("  Two-space indented prose.")
         self.assertEqual(stored, "  Two-space indented prose.")
 

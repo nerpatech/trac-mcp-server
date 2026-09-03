@@ -99,6 +99,113 @@ _DEFINITION_LIST_RE = re.compile(
     r"^([ \t]+)((?:(?!::).)+)::(?=[ \t]|$)[ \t]*(.*)$"
 )
 
+# Indentation in TracWiki is a blockquote, and the grammar is RELATIVE
+# (ticket #73).  Measured against Trac's own renderer -- convert_preview with
+# format="tracwiki", reading the HTML -- because the ticket's own section 1
+# had it as absolute, "one <blockquote> per space":
+#
+#   one space / two / three / four / a tab, each standing alone
+#       -> exactly ONE <blockquote> every time
+#   " one" / "  two" / "   three" on consecutive lines
+#       -> THREE nested blockquotes, one per *increase*
+#   "   deep" then "  shallower"     -> two SIBLING depth-1 blockquotes
+#   " one", blank line, "  two"      -> depth 1, then depth 2
+#   a column-zero non-blank line     -> resets to depth 0
+#
+# So it is an indent stack: deeper pushes a level whatever the size of the
+# step, shallower pops, and only column-zero content clears it.  The ladder in
+# the second row is how "one blockquote per space" came to be recorded.
+#
+# The consequence for the fix is that the ticket's own remediation --
+# n spaces -> n ">" markers -- is wrong: a lone four-space quote is ONE
+# blockquote in Trac and would have become four nested ones in Markdown, which
+# is the very "Markdown that means something different from the TracWiki it
+# came from" the ticket forbids.  Underneath sits an impossibility: Markdown
+# blockquote syntax carries depth but not width, so only one indent width per
+# depth can survive byte-for-byte.  Hence the rule in
+# _convert_indented_blocks: convert only what the write leg would reproduce
+# exactly, and send everything else through ticket #63's verbatim fallback.
+
+# Two spaces per nesting level is what markdown_to_tracwiki's block_quote()
+# emits ("> a" -> "  a", "> > b" -> "    b"), so this is the one width per
+# depth that round-trips byte-for-byte.
+_CANONICAL_INDENT_PER_LEVEL = 2
+
+# Trac expands a tab to eight columns when measuring indentation, which is why
+# a tab lands deeper than four spaces in the ladder above.
+_TAB_WIDTH = 8
+
+# Lines whose leading whitespace belongs to some other construct, so the quote
+# scanner must not claim them.  All measured on the live renderer:
+#
+#   " * a", "  * a", "   * a", " - a", " 1. a", " a. x", " iv. x"
+#       -> a bare <ul>/<ol>, NO <blockquote> wrapper, at any indent
+#   "  term:: def"  -> a bare <dl class="wiki">, no blockquote, at any indent
+#   " = H ="        -> <h1>, the indent consumed
+#
+# The list markers are exact rather than generous, because generosity costs
+# recall here: " Hello. World" and " xyz. not roman" are BLOCKQUOTES to Trac,
+# not lettered lists, so "any word followed by a period" would have skipped
+# real quotes.  Trac's alpha marker is a single letter or a roman numeral.
+# " 1)" is not a marker either -- also a blockquote.
+_LIST_MARKER_RE = re.compile(
+    r"^[ \t]+(?:[*-]|\d+\.|[a-zA-Z]\.|[ivxlcdmIVXLCDM]{2,}\.)(?=[ \t])"
+)
+_INDENTED_TABLE_RE = re.compile(r"^[ \t]+\|\|")
+_INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
+
+
+def _indent_of(line: str) -> str:
+    """Return ``line``'s literal leading whitespace."""
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _indent_width(indent: str) -> int:
+    """Return ``indent``'s width in columns, tabs expanded as Trac does."""
+    return len(indent.expandtabs(_TAB_WIDTH))
+
+
+def _quote_depths(
+    lines: list[str], stack: list[int]
+) -> tuple[list[int], list[int]]:
+    """Return each line's blockquote depth, plus the indent stack after them.
+
+    ``stack`` is carried across calls because a blank line does NOT reset
+    Trac's indentation stack -- only column-zero content does (measured; see
+    the note above).
+    """
+    depths: list[int] = []
+    for line in lines:
+        width = _indent_width(_indent_of(line))
+        while stack and stack[-1] > width:
+            stack.pop()
+        if not stack or width > stack[-1]:
+            stack.append(width)
+        depths.append(len(stack))
+    return depths, stack
+
+
+def _is_canonical_indent(lines: list[str], depths: list[int]) -> bool:
+    """True when the write leg would reproduce these lines byte-for-byte.
+
+    Depth has to be uniform across the run, which was measured rather than
+    assumed: ``> a\\n> > b`` comes back from ``markdown_to_tracwiki`` as
+    ``"  a\\n  \\n    b"`` -- mistune reads the depth change as a nested
+    blockquote whose sibling paragraph contributes a blank line, and that
+    blank line is quoted too.  A depth change *across a blank line* does
+    round-trip exactly (``"  a\\n\\n    b"``), and needs nothing special here
+    because each side is its own run and the stack carries between them.
+    """
+    if len(set(depths)) > 1:
+        return False
+    for line, depth in zip(lines, depths, strict=True):
+        indent = _indent_of(line)
+        if "\t" in indent:
+            return False
+        if len(indent) != _CANONICAL_INDENT_PER_LEVEL * depth:
+            return False
+    return True
+
 
 def _convert_definition_lists(text: str) -> str:
     """Convert TracWiki definition lists to a bold term plus a colon.
@@ -473,10 +580,118 @@ class TracWikiParser:
                 out.extend(lines[start:i])
         return "\n".join(out)
 
+    def _line_is_not_a_quote(self, masked_line: str) -> bool:
+        """True when this indented line's whitespace belongs elsewhere.
+
+        A run containing any such line is left entirely alone rather than
+        claimed or fallen back.  ``{{{`` / ``}}}`` are in the list because an
+        indented code block's *delimiters* are not masked by
+        ``_verbatim_mask`` (only its interior is), and stashing one half of a
+        block verbatim would strand the other.
+        """
+        return bool(
+            _LIST_MARKER_RE.match(masked_line)
+            or _DEFINITION_LIST_RE.match(masked_line)
+            or _INDENTED_TABLE_RE.match(masked_line)
+            or _INDENTED_HEADING_RE.match(masked_line)
+            or "{{{" in masked_line
+            or "}}}" in masked_line
+        )
+
+    def _convert_indented_blocks(self, text: str) -> str:
+        """Convert an indented quote, or emit it verbatim (ticket #73).
+
+        Runs here rather than in ``_convert_other_elements`` for two reasons:
+        the fallback body has to be stashed before any other pass can rewrite
+        the markup being preserved as source, and the classification is more
+        honest against raw TracWiki than against half-converted Markdown.
+        Being early costs nothing, because the ``> `` lines it emits are
+        ordinary text to every later pass, so a quote's contents still get
+        their formatting, links and macros converted.
+
+        Three outcomes per maximal run of consecutive non-blank indented
+        lines, in order:
+
+        1. **Not a quote at all** -- the run contains a list item, definition
+           list, table row, heading or code-block delimiter, whose indent
+           those constructs consume.  Left untouched, which is also what keeps
+           a multi-line list item working: its continuation line is indented
+           too, and claiming it would take the item apart.
+        2. **Canonical** -- every line's indent is exactly two spaces per
+           level of its measured depth, so ``> `` markers reproduce it
+           byte-for-byte.  Converted.
+        3. **Anything else** -- one space, three, four, a tab, a mixed run.
+           Markdown cannot carry the width, so the run goes out verbatim
+           through the ticket #63 fallback, which restores it unchanged and
+           *warns*.  Before this, one and three spaces lost the indent
+           silently and four spaces or a tab became a literal ``{{{`` code
+           block -- a change of content type, also silent.
+
+        Detection runs against ``_verbatim_mask`` so an indented line quoted
+        inside a code span or block is content, not a quote (tickets #45,
+        #46, #51); the emitted text is always the original.
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        stack: list[int] = []
+        index = 0
+        while index < len(lines):
+            probe = masked[index]
+            if not probe.strip() or not probe[:1].isspace():
+                # Blank lines leave the stack alone; column zero clears it.
+                if probe.strip():
+                    stack = []
+                out.append(lines[index])
+                index += 1
+                continue
+
+            start = index
+            while (
+                index < len(lines)
+                and masked[index].strip()
+                and masked[index][:1].isspace()
+            ):
+                index += 1
+            run = lines[start:index]
+
+            if any(
+                self._line_is_not_a_quote(m)
+                for m in masked[start:index]
+            ):
+                stack = []
+                out.extend(run)
+                continue
+
+            depths, stack = _quote_depths(run, stack)
+            if _is_canonical_indent(run, depths):
+                out.extend(
+                    "> " * depth + line[len(_indent_of(line)) :]
+                    for depth, line in zip(depths, run, strict=True)
+                )
+            else:
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), self._indent_kind(run)
+                    )
+                )
+        return "\n".join(out)
+
+    @staticmethod
+    def _indent_kind(run: list[str]) -> str:
+        """Name the indent width in the warning, so it says what it saw."""
+        indents = {_indent_of(line) for line in run}
+        if any("\t" in indent for indent in indents):
+            return "Indented block (tab indent)"
+        if len(indents) > 1:
+            return "Indented block (mixed indent widths)"
+        return f"Indented block ({len(indents.pop())}-space indent)"
+
     def _apply_fallbacks(self, text: str) -> str:
         """Run every unrepresentable-construct fallback, outermost first."""
         text = self._fallback_processor_blocks(text)
         text = self._fallback_tables(text)
+        text = self._convert_indented_blocks(text)
         return text
 
     # _convert_processor_cells was deleted on ticket #63.  It rebuilt
@@ -820,19 +1035,23 @@ class TracWikiParser:
         return text
 
     def _convert_other_elements(self, text: str) -> str:
-        """Convert other elements (horizontal rules, blockquotes, definition lists).
+        """Convert other elements (horizontal rules, definition lists).
 
         Horizontal rule: ---- -> ---
-        Blockquote: two-space indent -> > prefix
         Definition lists: term:: definition -> **term**: definition
 
-        Definition lists are converted *before* blockquotes (ticket #71).  The
-        old order let the blockquote pass claim a definition's continuation
-        line first, so ``  the definition`` became ``> the definition`` and the
-        stray marker survived into the stored bytes.  Running the definition
-        pass first lets it absorb its own continuation lines, and it also
-        stops a two-space-indented quote containing a double colon from being
-        rewritten as a bold term.
+        Blockquotes were handled here until ticket #73 and now run in
+        ``_convert_indented_blocks``, before this pass.  The old code
+        recognised *exactly two spaces* and emitted one ``> ``; every other
+        width fell through to the Markdown untouched, where four-space
+        indentation means a code block.  It also had to run after the
+        definition-list pass (ticket #71) to stop it claiming a definition's
+        continuation line -- a constraint that no longer applies, because the
+        new pass leaves a run containing a definition term alone entirely.
+
+        The horizontal-rule pattern is deliberately anchored with no leading
+        whitespace: measured on ticket #73, Trac renders `` ----`` as a
+        blockquote containing the literal text ``----``, not as a rule.
         """
         # Horizontal rule
         text = re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
@@ -841,27 +1060,6 @@ class TracWikiParser:
         # TracWiki uses :: separator, Markdown has no native definition list
         # Convert to bold term + regular text (semantic preservation)
         text = _convert_definition_lists(text)
-
-        # Blockquote: two-space indent -> > prefix
-        # This is tricky because two-space indent is also used for other things in TracWiki
-        # We'll do a simple conversion for lines that start with exactly two spaces
-        def convert_blockquote(match):
-            lines = match.group(0).split("\n")
-            converted = []
-            for line in lines:
-                if line.startswith("  ") and not line.startswith("   "):
-                    converted.append("> " + line[2:])
-                else:
-                    converted.append(line)
-            return "\n".join(converted)
-
-        # Apply blockquote conversion to paragraphs (between blank lines)
-        text = re.sub(
-            r"(?:^|\n\n)((?:  [^\n]+\n?)+)",
-            convert_blockquote,
-            text,
-            flags=re.MULTILINE,
-        )
 
         return text
 
