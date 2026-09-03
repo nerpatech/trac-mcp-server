@@ -362,6 +362,40 @@ class TestUnrepresentableFallback(unittest.TestCase):
         self.assertNotIn(FALLBACK_FENCE_INFO, result.text)
         self.assertEqual(result.warnings, [])
 
+    def test_processor_cell_inside_a_code_block_is_content(self):
+        """A #!td nested in a code block must survive as quoted source.
+
+        Found on ticket #63 while checking whether the old
+        ``_convert_processor_cells`` reconstruction had become unreachable.
+        It had not: it runs before the code-block stashing, so it rewrote a
+        ``{{{#!td}}}`` *inside* a plain code block into ``||a||``, destroying
+        the quoted source.  The #31/#51 defect family -- a markup pass walking
+        into a verbatim region -- and nothing in the suite covered it, which
+        is why making the method a no-op left 1537 tests passing.
+        """
+        for src, inner in (
+            ("{{{\n{{{#!td\na\n}}}\n}}}", "{{{#!td"),
+            ("{{{#!python\n{{{#!th\nx\n}}}\n}}}", "{{{#!th"),
+        ):
+            with self.subTest(src):
+                md = tracwiki_to_markdown(src).text
+                # The defect: the cell was rewritten to ||...|| inside the
+                # code block, so the quoted source no longer said what the
+                # author wrote.
+                self.assertNotIn("||", md)
+                self.assertIn(inner.split("#!")[1], md)
+                # Round-tripped content is preserved.  Asserted on the
+                # non-blank lines rather than byte-for-byte, because nesting
+                # a {{{ }}} block inside another gains a blank line before
+                # the outer close -- measured as PRE-EXISTING on master for
+                # every nested block, processor cell or not, so it is a
+                # separate defect and not this ticket's to fix or to mask.
+                back = markdown_to_tracwiki(md)
+                self.assertEqual(
+                    [ln for ln in back.split("\n") if ln.strip()],
+                    [ln for ln in src.split("\n") if ln.strip()],
+                )
+
     def test_write_leg_footnote_loses_its_definition(self):
         """Unrepresentable *Markdown*, still unhandled -- the write-leg half.
 

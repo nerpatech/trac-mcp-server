@@ -112,7 +112,6 @@ class TracWikiParser:
 
         text = tracwiki_text
         text = self._apply_fallbacks(text)
-        text = self._convert_processor_cells(text)
         text = self._convert_code_blocks(text)
         text = self._convert_macros(text)
         text = self._convert_headings(text)
@@ -395,44 +394,13 @@ class TracWikiParser:
         text = self._fallback_tables(text)
         return text
 
-    def _convert_processor_cells(self, text: str) -> str:
-        """Convert processor-based table cells BEFORE code blocks.
-
-        {{{#!td ... }}} or {{{#!th ... }}} - these are table cells, not code blocks.
-        Convert to regular table cell content with marker for later table processing.
-
-        Runs before _convert_code_blocks' backtick stashing, so a token
-        directly flanked by literal backticks (meant as a code span, not a
-        real processor cell) needs its own backtick-adjacency check here --
-        the same backstop _convert_macros already applies for the same
-        reason (see its docstring re ticket #43). Without it, `{{{#!td}}}`
-        got rewritten to `||` before the code span around it was ever
-        recognized, so the span ended up stashing the rewritten pipes
-        instead of the original token (ticket #46). `#!div`/`#!table`
-        never had this problem because nothing converts them before the
-        code-span stash gets a chance to run.
-        """
-
-        def convert_processor_cell(match):
-            if self._is_backtick_wrapped(
-                text, match.start(), match.end()
-            ):
-                return match.group(0)
-            cell_type = match.group(1)  # 'td' or 'th'
-            content = match.group(2).strip()
-            # Replace newlines with spaces for single-line cell content
-            content = " ".join(content.split())
-            if cell_type == "th":
-                return f"||={content}=||"
-            else:
-                return f"||{content}||"
-
-        return re.sub(
-            r"\{\{\{#!(t[dh])\s*(.*?)\s*\}\}\}",
-            convert_processor_cell,
-            text,
-            flags=re.DOTALL,
-        )
+    # _convert_processor_cells was deleted on ticket #63.  It rebuilt
+    # {{{#!td}}} / {{{#!th}}} into ||cell|| markup so the table pass could
+    # turn it into a Markdown table -- a reconstruction the verbatim fallback
+    # replaces.  Deleting it also fixed a live defect it carried: it ran
+    # before the code-block stashing, so a processor cell nested inside a
+    # plain code block was rewritten too, destroying quoted source.  See
+    # TestUnrepresentableFallback.test_processor_cell_inside_a_code_block_is_content.
 
     @staticmethod
     def _fence_for(content: str) -> str:
