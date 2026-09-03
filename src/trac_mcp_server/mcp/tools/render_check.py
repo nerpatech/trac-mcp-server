@@ -23,7 +23,11 @@ from ...preview.live import (
     fetch_ticket_sections,
     fetch_wiki_render,
 )
-from ...preview.targets import is_probeable_wiki_href, probe_targets
+from ...preview.targets import (
+    DEFAULT_TARGET_CAP,
+    is_probeable_wiki_href,
+    probe_targets,
+)
 from ...preview.verify import build_verify_warnings
 from .errors import build_error_response
 from .registry import ToolSpec
@@ -99,6 +103,22 @@ TICKET_RENDER_CHECK_TOOL = types.Tool(
                 ),
                 "default": True,
             },
+            "target_cap": {
+                "type": "integer",
+                "description": (
+                    "Maximum cross-instance targets to probe (default: "
+                    "50). The cap keeps the FIRST N in document order, "
+                    "so anything beyond it -- the END of the document "
+                    "-- is reported as target_check_skipped rather "
+                    "than checked. Raise it only for a deliberate "
+                    "audit of an unusually link-dense page; the "
+                    "default is above anything measured in real "
+                    "content."
+                ),
+                "default": 50,
+                "minimum": 1,
+                "maximum": 500,
+            },
             "include_html": {
                 "type": "boolean",
                 "description": (
@@ -166,6 +186,22 @@ WIKI_RENDER_CHECK_TOOL = types.Tool(
                     "or not. Default: true."
                 ),
                 "default": True,
+            },
+            "target_cap": {
+                "type": "integer",
+                "description": (
+                    "Maximum cross-instance targets to probe (default: "
+                    "50). The cap keeps the FIRST N in document order, "
+                    "so anything beyond it -- the END of the document "
+                    "-- is reported as target_check_skipped rather "
+                    "than checked. Raise it only for a deliberate "
+                    "audit of an unusually link-dense page; the "
+                    "default is above anything measured in real "
+                    "content."
+                ),
+                "default": 50,
+                "minimum": 1,
+                "maximum": 500,
             },
             "include_html": {
                 "type": "boolean",
@@ -292,6 +328,7 @@ async def _probe_all_sections(
     client: TracClient,
     sections: list[RenderedSection],
     check_targets: bool,
+    target_cap: int = DEFAULT_TARGET_CAP,
 ) -> dict[str, dict]:
     if not check_targets:
         return {}
@@ -305,7 +342,7 @@ async def _probe_all_sections(
         )
     if not probeable:
         return {}
-    return await run_sync(probe_targets, client, probeable)
+    return await run_sync(probe_targets, client, probeable, target_cap)
 
 
 def _document_response(
@@ -396,6 +433,7 @@ async def _handle_ticket_render_check(
     include_comments = args.get("include_comments", True)
     only_comment = args.get("comment")
     check_targets = args.get("check_targets", True)
+    target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
     include_html = args.get("include_html", False)
 
     try:
@@ -431,7 +469,9 @@ async def _handle_ticket_render_check(
                 "Use ticket_changelog to see which comment numbers exist.",
             )
 
-    probes = await _probe_all_sections(client, sections, check_targets)
+    probes = await _probe_all_sections(
+        client, sections, check_targets, target_cap
+    )
     section_results = [
         _section_result(s, probes, check_targets, include_html)
         for s in sections
@@ -455,13 +495,16 @@ async def _handle_wiki_render_check(
 
     version = args.get("version")
     check_targets = args.get("check_targets", True)
+    target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
     include_html = args.get("include_html", False)
 
     section = await run_sync(
         fetch_wiki_render, client, page_name, version
     )
     sections = [section]
-    probes = await _probe_all_sections(client, sections, check_targets)
+    probes = await _probe_all_sections(
+        client, sections, check_targets, target_cap
+    )
     section_results = [
         _section_result(section, probes, check_targets, include_html)
     ]

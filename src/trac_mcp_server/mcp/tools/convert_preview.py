@@ -15,7 +15,12 @@ from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from ...preview.checks import build_warnings
 from ...preview.facts import extract_facts
-from ...preview.targets import is_probeable_wiki_href, probe_targets
+from ...preview.targets import (
+    DEFAULT_TARGET_CAP,
+    SKIPPED,
+    is_probeable_wiki_href,
+    probe_targets,
+)
 from .errors import build_error_response
 from .registry import ToolSpec
 
@@ -87,6 +92,22 @@ CONVERT_PREVIEW_TOOLS = [
                         "exists or not. Default: true."
                     ),
                     "default": True,
+                },
+                "target_cap": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum cross-instance targets to probe "
+                        "(default: 50). The cap keeps the FIRST N in "
+                        "document order, so anything beyond it -- the "
+                        "END of the document -- is reported as "
+                        "target_check_skipped rather than checked. "
+                        "Raise it only for a deliberate audit of an "
+                        "unusually link-dense page; the default is "
+                        "above anything measured in real content."
+                    ),
+                    "default": 50,
+                    "minimum": 1,
+                    "maximum": 500,
                 },
                 "include_html": {
                     "type": "boolean",
@@ -162,7 +183,10 @@ async def _handle_convert_preview(
         ]
         if probeable_hrefs:
             probes = await run_sync(
-                probe_targets, client, probeable_hrefs
+                probe_targets,
+                client,
+                probeable_hrefs,
+                args.get("target_cap", DEFAULT_TARGET_CAP),
             )
 
     warnings = build_warnings(
@@ -201,7 +225,13 @@ async def _handle_convert_preview(
         "anchors": len(facts.anchors),
         "code_spans": len(facts.code_spans),
         "warnings": len(warnings),
-        "targets_checked": len(probes),
+        # Counts targets actually FETCHED, not entries in the probes
+        # dict: a SKIPPED entry means "not verified" (ticket #80), and
+        # counting it here would report a capped run as a fully checked
+        # one -- the same shape the SKIPPED status exists to prevent.
+        "targets_checked": sum(
+            1 for p in probes.values() if p.get("status") != SKIPPED
+        ),
     }
 
     response_lines = [

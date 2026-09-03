@@ -7,6 +7,7 @@ response bodies rather than the live daemon -- ``test_mcp.tools.
 test_convert_preview.TestConvertPreviewLive`` covers the real substrate.
 """
 
+import threading
 import unittest
 from unittest.mock import MagicMock
 
@@ -49,9 +50,26 @@ def _mock_client(
         resp.url = (resolved or {}).get(url, url)
         return resp
 
-    client = MagicMock()
-    client.session.get.side_effect = fake_get
-    return client
+    # `session` is a PROPERTY on the real client, returning the
+    # calling thread's own session -- so the mock counts accesses
+    # rather than exposing a plain attribute, which is what lets
+    # `test_each_worker_uses_its_own_thread_local_session` see whether
+    # the implementation hoisted it out of the loop.
+    session = MagicMock()
+    session.get.side_effect = fake_get
+
+    class _Client:
+        def __init__(self):
+            self.session_access_count = 0
+            self._lock = threading.Lock()
+
+        @property
+        def session(self):
+            with self._lock:
+                self.session_access_count += 1
+            return session
+
+    return _Client()
 
 
 class TestIsProbeableWikiHref(unittest.TestCase):
@@ -153,6 +171,126 @@ class TestProbeTargets(unittest.TestCase):
         self.assertEqual(statuses.count(EXISTS), 2)
         self.assertEqual(statuses.count(SKIPPED), 3)
         self.assertEqual(client.session.get.call_count, 2)
+
+
+class TestCapPosition(unittest.TestCase):
+    """Ticket #80: which targets the cap keeps, not that it caps.
+
+    The cap takes the FIRST N in document order, so the unchecked
+    region is always the END of the document -- which is exactly where
+    an agent appends. Under #64's blocking gate a link written last is
+    the one least likely to be checked, which inverts what a write-time
+    gate is for.
+    """
+
+    def _fifteen_with_one_dead(self, dead_index: int):
+        hrefs = [f"{EXISTING_HREF}{i}" for i in range(15)]
+        responses = {h: (200, EXISTING_PAGE_STUB) for h in hrefs}
+        responses[hrefs[dead_index]] = (200, MISSING_PAGE_STUB)
+        return hrefs, responses, hrefs[dead_index]
+
+    def test_dead_target_is_found_wherever_it_sits(self):
+        """The seed, and it is a PAIR on purpose.
+
+        Watch the second half RED at `0c50e14`, where the cap is 10:
+        the dead target in position 11 is reported SKIPPED and the
+        document reports no `missing_cross_instance_target` at all.
+        Position 1 was always found.
+
+        Asserting only the appended position would pass just as well
+        for a probe that stopped capping altogether, which is the
+        opposite defect -- `test_cap_still_caps_at_the_new_default`
+        below is the other side of that.
+        """
+        for label, index in (("first", 0), ("appended", 10)):
+            with self.subTest(position=label):
+                hrefs, responses, dead = self._fifteen_with_one_dead(
+                    index
+                )
+                results = probe_targets(_mock_client(responses), hrefs)
+                self.assertEqual(
+                    results[dead]["status"],
+                    MISSING,
+                    f"a dead target in the {label} position must be "
+                    f"reported, got {results[dead]['status']}",
+                )
+
+    def test_cap_still_caps_at_the_new_default(self):
+        """Raising a cap is precisely where a bound quietly becomes no
+        bound. 51 targets must still leave one SKIPPED and named."""
+        hrefs = [f"{EXISTING_HREF}{i}" for i in range(51)]
+        responses = {h: (200, EXISTING_PAGE_STUB) for h in hrefs}
+        client = _mock_client(responses)
+        results = probe_targets(client, hrefs)
+        statuses = [v["status"] for v in results.values()]
+        self.assertEqual(statuses.count(SKIPPED), 1)
+        self.assertEqual(client.session.get.call_count, 50)
+        self.assertEqual(results[hrefs[50]]["status"], SKIPPED)
+
+
+class TestConcurrentProbe(unittest.TestCase):
+    """The cap is small because the probe is sequential; ticket #80
+    fixes the loop rather than the number."""
+
+    def test_every_target_is_classified_exactly_once(self):
+        """Completeness under concurrency: one result per unique href,
+        each fetched once, none lost and none duplicated."""
+        hrefs = [f"{EXISTING_HREF}{i}" for i in range(40)]
+        responses = {h: (200, EXISTING_PAGE_STUB) for h in hrefs}
+        responses[hrefs[7]] = (200, MISSING_PAGE_STUB)
+        responses[hrefs[31]] = (500, "boom")
+        client = _mock_client(responses)
+        results = probe_targets(client, hrefs)
+
+        self.assertEqual(set(results), set(hrefs))
+        self.assertEqual(client.session.get.call_count, 40)
+        self.assertEqual(results[hrefs[7]]["status"], MISSING)
+        self.assertEqual(results[hrefs[31]]["status"], ERROR)
+        self.assertEqual(
+            [v["status"] for v in results.values()].count(EXISTS), 38
+        )
+
+    def test_each_worker_uses_its_own_thread_local_session(self):
+        """`TracClient` hands out a THREAD-LOCAL session, so a worker
+        has to ask for it from inside its own thread.
+
+        Hoisting `client.session` once outside the loop -- which is
+        what the sequential implementation did, harmlessly -- would
+        give every worker the dispatching thread's session, quietly
+        defeating that design. Asserted on the property that matters:
+        the session is fetched per worker, not once for the batch.
+        """
+        hrefs = [f"{EXISTING_HREF}{i}" for i in range(12)]
+        responses = {h: (200, EXISTING_PAGE_STUB) for h in hrefs}
+        client = _mock_client(responses)
+        probe_targets(client, hrefs)
+        self.assertGreaterEqual(client.session_access_count, len(hrefs))
+
+    def test_probe_is_actually_concurrent(self):
+        """Sequential probing is the reason the cap was 10 (50 targets
+        at the 5s timeout is 250s of wall clock), so "it is concurrent"
+        is the load-bearing claim and gets measured rather than
+        assumed: with a blocking fetch, N targets must overlap rather
+        than serialise."""
+        barrier = threading.Barrier(4, timeout=5)
+        hrefs = [f"{EXISTING_HREF}{i}" for i in range(4)]
+
+        def fake_get(url, timeout=None, allow_redirects=None):
+            # Deadlocks and trips the barrier's timeout unless at
+            # least 4 fetches are genuinely in flight together.
+            barrier.wait()
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.text = EXISTING_PAGE_STUB
+            resp.url = url
+            return resp
+
+        client = _mock_client({})
+        client.session.get.side_effect = fake_get
+        results = probe_targets(client, hrefs)
+        self.assertEqual(
+            [v["status"] for v in results.values()], [EXISTS] * 4
+        )
 
 
 if __name__ == "__main__":
