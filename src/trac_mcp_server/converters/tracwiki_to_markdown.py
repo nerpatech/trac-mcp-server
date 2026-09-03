@@ -67,6 +67,83 @@ FALLBACK_FENCE_INFO = "tracwiki-unconverted"
 # rendering made *visible* (see Reference/trac/WikiEscapeContexts).
 _FALLBACK_PROCESSOR_RE = re.compile(r"\{\{\{#!(comment|table|td|th)\b")
 
+# A TracWiki definition-list term line (ticket #71).
+#
+# The grammar was measured against Trac's own renderer rather than inferred --
+# ``convert_preview`` with ``format="tracwiki"``, reading the HTML for a
+# ``<dl class="wiki">`` -- because the previous pattern, ``^(\s*)(.+?)::\s*(.+)$``,
+# claimed any line containing a double colon and rewrote ordinary prose such as
+# "Use std::vector here." as a bold term.  Three rules, each load-bearing:
+#
+# 1. ``[ \t]+`` -- leading whitespace is REQUIRED.  At column zero Trac renders
+#    ``term:: definition`` as a paragraph, so anchoring the term to the start of
+#    the line (as ticket #71 section 4 first proposed) would keep matching
+#    exactly the prose Trac treats as prose.
+# 2. ``(?:(?!::).)+`` -- a tempered dot, so the term cannot span a double colon
+#    and the pair matched is necessarily the FIRST one on the line.  A plain
+#    non-greedy ``.+?`` is not enough: it backtracks past a first pair that
+#    fails the lookahead and matches a later one, which would convert
+#    " std::vector:: a C++ type" that Trac renders as a blockquote.
+# 3. ``(?=[ \t]|$)`` -- the colons must be followed by whitespace or the end of
+#    the line.  This is what excludes ``std::vector`` and ``3::1``.
+#
+# The term itself may contain spaces: " multi word term:: a definition" IS a
+# definition list to Trac, so forbidding whitespace inside it -- section 4's
+# other suggestion -- would have traded a false-positive class for a
+# false-negative one.
+#
+# The definition may be empty (" trailing colons only::"), which the old
+# pattern's ``(.+)$`` required to be non-empty and therefore MISSED: a real
+# definition list drawing neither warning nor conversion.
+_DEFINITION_LIST_RE = re.compile(
+    r"^([ \t]+)((?:(?!::).)+)::(?=[ \t]|$)[ \t]*(.*)$"
+)
+
+
+def _convert_definition_lists(text: str) -> str:
+    """Convert TracWiki definition lists to a bold term plus a colon.
+
+    Line-based rather than a single ``re.sub`` so that a term whose definition
+    sits on the following indented line can absorb it (ticket #71).  Leaving
+    that line in place let the blockquote pass claim it and emit ``> `` inside
+    the definition; Trac reads it as part of the ``<dd>``.
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        match = _DEFINITION_LIST_RE.match(lines[index])
+        if match is None:
+            out.append(lines[index])
+            index += 1
+            continue
+
+        indent, term, definition = match.groups()
+        index += 1
+        if not definition:
+            # Absorb continuation lines: indented further than the term, up to
+            # the first blank line or a line that dedents back out.
+            continuation: list[str] = []
+            while index < len(lines):
+                following = lines[index]
+                if not following.strip():
+                    break
+                following_indent = len(following) - len(
+                    following.lstrip()
+                )
+                if following_indent <= len(indent):
+                    break
+                continuation.append(following.strip())
+                index += 1
+            definition = " ".join(continuation)
+
+        converted = f"{indent}**{term}**:"
+        if definition:
+            converted += f" {definition}"
+        out.append(converted)
+
+    return "\n".join(out)
+
 
 class TracWikiParser:
     """Parser for converting TracWiki syntax to Markdown format."""
@@ -165,8 +242,16 @@ class TracWikiParser:
                     )
                 break
 
-        # Detect definition lists
-        if re.search(r"^\s*.+?::\s*.+$", text, re.MULTILINE):
+        # Detect definition lists.  Shares _DEFINITION_LIST_RE with the
+        # conversion itself: this warning used to carry its own copy of the
+        # pattern, so the two could drift and -- ticket #71 -- the warning
+        # fired on every line containing a double colon, announcing a
+        # definition list in prose that has none.  Tickets #57 and #59 are
+        # this project's evidence that an over-firing check gets muted and
+        # takes its true positives with it.
+        if any(
+            _DEFINITION_LIST_RE.match(line) for line in text.split("\n")
+        ):
             self.warnings.append(
                 "Definition lists detected - converted to bold text (semantic preservation)"
             )
@@ -740,9 +825,22 @@ class TracWikiParser:
         Horizontal rule: ---- -> ---
         Blockquote: two-space indent -> > prefix
         Definition lists: term:: definition -> **term**: definition
+
+        Definition lists are converted *before* blockquotes (ticket #71).  The
+        old order let the blockquote pass claim a definition's continuation
+        line first, so ``  the definition`` became ``> the definition`` and the
+        stray marker survived into the stored bytes.  Running the definition
+        pass first lets it absorb its own continuation lines, and it also
+        stops a two-space-indented quote containing a double colon from being
+        rewritten as a bold term.
         """
         # Horizontal rule
         text = re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
+
+        # Definition lists: term:: definition -> **term**: definition
+        # TracWiki uses :: separator, Markdown has no native definition list
+        # Convert to bold term + regular text (semantic preservation)
+        text = _convert_definition_lists(text)
 
         # Blockquote: two-space indent -> > prefix
         # This is tricky because two-space indent is also used for other things in TracWiki
@@ -761,16 +859,6 @@ class TracWikiParser:
         text = re.sub(
             r"(?:^|\n\n)((?:  [^\n]+\n?)+)",
             convert_blockquote,
-            text,
-            flags=re.MULTILINE,
-        )
-
-        # Definition lists: term:: definition -> **term**: definition
-        # TracWiki uses :: separator, Markdown has no native definition list
-        # Convert to bold term + regular text (semantic preservation)
-        text = re.sub(
-            r"^(\s*)(.+?)::\s*(.+)$",
-            r"\1**\2**: \3",
             text,
             flags=re.MULTILINE,
         )

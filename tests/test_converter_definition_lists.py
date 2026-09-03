@@ -1,16 +1,16 @@
 """Definition-list detector pin for ticket #71.
 
-The detector in ``_convert_other_elements`` matches
-``^(\\s*)(.+?)::\\s*(.+)$``, which claims *any* line containing a double colon
-with a non-empty remainder.  Ordinary prose is therefore rewritten as a bold
-term plus a colon, and a full read-edit-write cycle stores that damage
+The detector in ``_convert_other_elements`` matched
+``^(\\s*)(.+?)::\\s*(.+)$``, which claimed *any* line containing a double colon
+with a non-empty remainder.  Ordinary prose was therefore rewritten as a bold
+term plus a colon, and a full read-edit-write cycle stored that damage
 permanently.
 
-**This file characterises the defect before it is fixed.**  Every ``expected``
-below is the *current, wrong* output, pinned so the fix can be diffed against a
-recorded baseline rather than against memory -- the same shape ticket #63's
-inventory class used, and like that class these rows are meant to be updated
-deliberately by the commit that fixes them.
+The previous commit pinned that damage as a characterisation baseline; this
+file now asserts the fixed behaviour, the rows updated deliberately as that
+commit's docstring required.  The baseline is what the fix was diffed against,
+rather than against memory -- the shape ticket #63's inventory class
+established.
 
 **The grammar was measured against Trac's own renderer**, not derived from the
 source or from the ticket's remediation sketch -- ``convert_preview`` with
@@ -84,158 +84,185 @@ def _round_trip(source):
     return markdown_to_tracwiki(result.text), warned
 
 
-class TestProseWithDoubleColonCharacterised(unittest.TestCase):
+class TestProseWithDoubleColonNotConverted(unittest.TestCase):
     """The false positives: none of these is a definition list to Trac.
 
-    Every row is corrupted today -- prose becomes bold markup in the stored
-    bytes, permanently -- and the warning fires as well, spending the suite's
-    credibility on content containing no definition list at all.  Tickets #57
-    and #59 are this project's evidence that an over-firing check gets muted
-    and takes its true positives with it.
+    Before this ticket every row was corrupted -- prose became bold markup in
+    the stored bytes, permanently -- and the warning fired as well, spending
+    the suite's credibility on content containing no definition list at all.
+    Tickets #57 and #59 are this project's evidence that an over-firing check
+    gets muted and takes its true positives with it.
 
-    ``expected`` records that damage rather than the correct output.  The
-    commit that tightens the detector must update every row here to the
-    source text unchanged, and flip ``warned`` to False.
+    These rows were characterised as broken in the previous commit and are
+    updated here deliberately, as that commit's docstring required.  Each
+    ``expected`` is now the source text unchanged, and no row may warn.
+
+    The indented rows still lose their single leading space.  That is a
+    separate pre-existing defect, independent of the double colon, pinned in
+    ``TestSingleSpaceIndentStrippedPreexisting`` rather than papered over with
+    a lenient comparison here.
     """
 
-    # (label, source, stored bytes today, does the warning fire today?)
+    # (label, source, expected stored bytes after the round trip)
     NOT_A_DEFINITION_LIST = [
         (
             "C++ scope, column zero",
             "Use std::vector here.",
-            "'''Use std''': vector here.",
-            True,
+            "Use std::vector here.",
         ),
         (
             "realm-shaped token, column zero",
             "See Reference::Page for detail.",
-            "'''See Reference''': Page for detail.",
-            True,
+            "See Reference::Page for detail.",
         ),
         (
             "ratio, column zero",
             "A ratio of 3::1 was used.",
-            "'''A ratio of 3''': 1 was used.",
-            True,
+            "A ratio of 3::1 was used.",
         ),
         # Term-shaped, but at column zero -- prose to Trac.
         (
             "term-shaped at column zero",
             "term:: definition at column zero",
-            "'''term''': definition at column zero",
-            True,
+            "term:: definition at column zero",
         ),
+        # Indented rows: leading space lost to the separate defect below.
         (
             "C++ scope, indented",
             " Use std::vector here indented.",
-            "'''Use std''': vector here indented.",
-            True,
+            "Use std::vector here indented.",
         ),
         (
             "ratio, indented",
             " A ratio of 3::1 was used, indented.",
-            "'''A ratio of 3''': 1 was used, indented.",
-            True,
+            "A ratio of 3::1 was used, indented.",
         ),
         (
             "no whitespace after the colons",
             " term::definition with no space",
-            "'''term''': definition with no space",
-            True,
+            "term::definition with no space",
         ),
         # Trac stops at the FIRST colon pair, finds "v", and declines the line.
+        # A plain non-greedy term would backtrack past it to the second pair,
+        # which is why the pattern uses a tempered dot.
         (
             "first colon pair is not followed by whitespace",
             " std::vector:: a C++ type as the term",
-            "'''std''': vector:: a C++ type as the term",
-            True,
+            "std::vector:: a C++ type as the term",
         ),
     ]
 
-    def test_prose_is_corrupted_today(self):
-        """The defect proper: prose is rewritten as bold in the stored bytes."""
-        for label, src, expected, _ in self.NOT_A_DEFINITION_LIST:
+    def test_prose_survives_the_round_trip(self):
+        """The defect proper: prose must not be rewritten as bold."""
+        for label, src, expected in self.NOT_A_DEFINITION_LIST:
             with self.subTest(label):
                 stored, _ = _round_trip(src)
                 self.assertEqual(stored, expected)
 
-    def test_warning_fires_on_prose_today(self):
-        """The aggravating half: the false positive is not even silent."""
-        for label, src, _, warned_today in self.NOT_A_DEFINITION_LIST:
+    def test_no_bold_markup_is_introduced(self):
+        """Stated a second way, because it is the damage a reader would see."""
+        for label, src, _ in self.NOT_A_DEFINITION_LIST:
+            with self.subTest(label):
+                stored, _ = _round_trip(src)
+                self.assertNotIn("'''", stored)
+
+    def test_no_definition_list_warning(self):
+        """The aggravating half: the warning fired on these rows too."""
+        for label, src, _ in self.NOT_A_DEFINITION_LIST:
             with self.subTest(label):
                 _, warned = _round_trip(src)
-                self.assertEqual(warned, warned_today)
+                self.assertFalse(warned)
 
 
-class TestGenuineDefinitionListCharacterised(unittest.TestCase):
-    """The recall gate: real definition lists, and what they do today.
+class TestGenuineDefinitionListStillDetected(unittest.TestCase):
+    """The recall gate: a real definition list must still be recognised.
 
     The danger on this ticket is the inverse of the usual one -- the check
-    fires too often, so tightening it risks a false negative.  These four rows
-    are definition lists to Trac (measured, see the module docstring) and must
-    stay detected once the detector is exact.
+    fired too often, so tightening it risks a false negative.  These four rows
+    are definition lists to Trac (measured, see the module docstring) and stay
+    detected.
 
-    Two of them are already wrong today, in opposite directions, and both are
-    fixed by the same tightening:
+    Two were wrong before this ticket, in opposite directions, and the same
+    tightening fixed both:
 
-    * *empty definition* is **missed entirely** -- the current pattern requires
-      a non-empty remainder, so a real ``<dl>`` draws no warning and no
-      conversion.  A false negative that was hiding underneath the false
-      positives.
-    * *definition on the next line* picks up a stray ``> `` from the blockquote
-      pass, which runs first and claims any line indented exactly two spaces.
-      Trac reads that line as part of the ``<dd>``.
+    * *empty definition* was **missed entirely** -- the old pattern required a
+      non-empty remainder, so a real ``<dl>`` drew no warning and no
+      conversion.  A false negative hiding underneath the false positives.
+    * *definition on the next line* picked up a stray ``> `` from the
+      blockquote pass, which ran first and claimed any line indented exactly
+      two spaces.  The definition pass now runs first and absorbs its own
+      continuation line, which is how Trac reads it -- as part of the ``<dd>``.
+
+    ``expected`` characterises the lossy conversion to bold.  It is not an
+    endorsement: none of these round-trips, which is why they are ticket #63's
+    fallback remainder.  Update these rows deliberately when that fallback
+    lands, exactly as ticket #63's own inventory class was updated.
     """
 
-    # (label, source, stored bytes today, does the warning fire today?)
+    # (label, source, expected stored bytes)
     DEFINITION_LISTS = [
         (
             "single-word term",
             " term:: definition indented one space",
             "'''term''': definition indented one space",
-            True,
         ),
+        # Multi-word terms are legal: forbidding whitespace inside the term
+        # would have turned this row into a false negative.
         (
             "multi-word term",
             " multi word term:: a definition",
             "'''multi word term''': a definition",
-            True,
         ),
-        # MISSED today: no warning, no conversion.
         (
             "empty definition",
             " trailing colons only::",
-            "trailing colons only::",
-            False,
+            "'''trailing colons only''':",
         ),
-        # The stray "> " comes from the blockquote pass.
         (
             "definition on the next line",
             " term::\n  the definition",
-            "'''term''': > the definition",
-            True,
+            "'''term''': the definition",
         ),
     ]
 
+    def test_definition_list_is_detected(self):
+        for label, src, _ in self.DEFINITION_LISTS:
+            with self.subTest(label):
+                _, warned = _round_trip(src)
+                self.assertTrue(warned)
+
     def test_conversion_is_characterised(self):
-        for label, src, expected, _ in self.DEFINITION_LISTS:
+        for label, src, expected in self.DEFINITION_LISTS:
             with self.subTest(label):
                 stored, _ = _round_trip(src)
                 self.assertEqual(stored, expected)
 
-    def test_detection_is_characterised(self):
-        for label, src, _, warned_today in self.DEFINITION_LISTS:
-            with self.subTest(label):
-                _, warned = _round_trip(src)
-                self.assertEqual(warned, warned_today)
+    def test_no_stray_blockquote_marker(self):
+        """The second half of ticket #71, stated on its own.
+
+        Asserted on the **intermediate Markdown** as well as the stored bytes,
+        and that is deliberate.  Measured while seeding this gate: restoring
+        the old pass order puts ``> the definition`` in the Markdown, but the
+        write leg turns that blockquote back into a two-space indent, so the
+        stored bytes come back as ``'''term''':\\n\\n  the definition`` -- no
+        ``>`` anywhere.  A stored-bytes assertion alone therefore could *not*
+        see the regression it exists to catch; it is the byte comparison in
+        ``test_conversion_is_characterised`` that fails on that seed.  Both
+        halves are kept so the marker is checked where it actually appears.
+        """
+        source = " term::\n  the definition"
+        markdown = tracwiki_to_markdown(source).text
+        self.assertNotIn(">", markdown)
+        stored, _ = _round_trip(source)
+        self.assertNotIn(">", stored)
 
 
 class TestControl(unittest.TestCase):
     """Prose with no double colon: silent and unchanged, before and after.
 
-    This row must not move.  It is the only assertion in the file that is
-    already correct today and must still be correct after the fix, which is
-    what makes it the control rather than a characterisation.
+    This row must not move.  It was the only assertion in the file already
+    correct before the fix and still correct after it, which is what makes it
+    the control rather than a characterisation.
     """
 
     def test_plain_prose_round_trips_silently(self):
