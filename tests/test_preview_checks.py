@@ -220,6 +220,19 @@ SILENT_ROWS = [
     "row66_code_span_tracwiki_block",
     "row67_code_span_tracwiki_table",
     "row68_declared_tracwiki_bold",
+    # Suite 8 (rows 73-76, tickets #70 and #78). Row 73 is the fenced
+    # token beside a real one: the fence renders no anchor, so nothing
+    # may attribute the real reference's anchor to it. Rows 74-76 are
+    # #78 -- an ORDINARY external link whose label happens to start
+    # with a short link. Rows 74/75 warned before the fix (74 with a
+    # possessive, 75 with nothing but a space after the token, which is
+    # why #78 is "any multi-word label"); row 76 is the control whose
+    # label is not token-shaped and was already silent, so the pair
+    # proves the fix removed the false positive rather than the check.
+    "row73_fence_plus_real_ticket_ref",
+    "row74_external_label_possessive",
+    "row75_external_label_multiword",
+    "row76_external_label_plain",
 ]
 
 WARNING_ROWS = [
@@ -644,6 +657,45 @@ def test_captured_punctuation_is_not_reported_as_unconfigured(name):
     assert "unconfigured_intertrac_prefix" not in codes, codes
 
 
+def test_captured_punctuation_survives_a_correct_reference_alongside():
+    """Ticket #70: the defect this whole check used to have no defence
+    against -- a CORRECT reference to the same ticket elsewhere in the
+    document silenced the broken one, and the document reported zero
+    errors while carrying a dead link.
+
+    Row 72 is that shape: `auto_pm:#87's` (dispatches on `#87's`, which
+    does not exist) followed by a correct `auto_pm:#87`. Measured
+    silent on the deployed daemon at `55d34c5`.
+
+    The assertion is on the EVIDENCE, not just the count, per #65
+    comment 3: both occurrences name the same ticket, so a test that
+    only counted warnings could not tell which one was reported. The
+    two anchors' hrefs differ (`%2387%27s` vs `%2387`), and that is
+    what makes the report discriminable -- naming the good occurrence
+    would be a worse failure than staying silent, since it sends the
+    writer to correct a line that is already right."""
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row72_ticket_possessive_and_correct_pair"
+    )
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    captured = [
+        w
+        for w in warnings
+        if w["code"] == "intertrac_target_captured_punctuation"
+    ]
+    assert len(captured) == 1, warnings
+    href = captured[0]["evidence"]["href"]
+    assert href.endswith("%2387%27s"), href
+    assert captured[0]["evidence"]["resolved_as"] == "auto_pm:#87's"
+
+
 @pytest.mark.parametrize(
     "name",
     ["row63_code_span_table_cell", "row64_code_span_adjacent_word"],
@@ -690,8 +742,17 @@ def test_suite_balance_is_roughly_even():
     # balanced, because that ticket both NARROWS the check (rows 66-68)
     # and WIDENS it (row 70), and a one-sided addition would have hidden
     # whichever direction went wrong).
+    #
+    # Tickets #70/#78 added rows 72-76, four of them silent. That is a
+    # one-sided addition and it is deliberate: both tickets are about
+    # this check firing on the WRONG anchor, and three of the four new
+    # silent rows (74/75) plus their control (76) are the false positive
+    # #78 measured. The must-warn half of that pair is row 72, which is
+    # a standalone test rather than a table row for the same reason as
+    # row 48 -- it asserts WHICH occurrence was named, not merely that
+    # something warned, and a code-only table row cannot express that.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 34
+    assert silent_count == 38
     assert warning_count == 33
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
