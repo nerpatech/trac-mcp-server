@@ -10,6 +10,7 @@ Trac actually emits -- gated behind ``--run-live`` (see conftest.py).
 
 import asyncio
 import json
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -21,6 +22,9 @@ from trac_mcp_server.mcp.tools.convert_preview import (
     CONVERT_PREVIEW_TOOLS,
     MAX_HTML_BYTES,
     _handle_convert_preview,
+)
+from trac_mcp_server.preview.targets import (
+    DEFAULT_TARGET_TIMEOUT_SECONDS,
 )
 
 FIXTURES_DIR = (
@@ -289,6 +293,22 @@ class TestConvertPreviewHandler(unittest.TestCase):
 
 
 @pytest.mark.live
+def _twelve_distinct_dead_targets() -> str:
+    """Twelve DISTINCT dead cross-instance targets, one per line.
+
+    Distinct on purpose: `probe_targets` deduplicates, so repeating one
+    href twelve times is two unique targets and tests nothing about the
+    cap. The prefix resolves only on this project's own instance, which
+    is where the live tests point (`bootstrap_config` reads TRAC_URL);
+    on the auto_pm instance `auto_pm:` is not a configured prefix at
+    all and these render as plain text.
+    """
+    return "\n\n".join(
+        f"auto_pm:wiki:Rules/trac/DoesNotExistTicket80{n}"
+        for n in range(12)
+    )
+
+
 class TestConvertPreviewLive:
     """Re-renders the acceptance-suite rows against the real daemon, so
     the checked-in fixtures can't silently drift from what Trac actually
@@ -343,6 +363,90 @@ class TestConvertPreviewLive:
         ]
         assert "missing_cross_instance_target" not in codes
         assert result.structuredContent["stats"]["targets_checked"] == 1
+
+    def test_many_targets_probed_concurrently_live(self):
+        """Ticket #80's concurrency and its raised cap, against the real
+        substrate.
+
+        The probe is transport code, and `Rules/testing/
+        RealSubstrateNotMocks` is explicit that a mock can only fail in
+        ways its author already imagined -- thread-local sessions,
+        connection-pool contention and per-request auth are exactly what
+        a `MagicMock` cannot get wrong. So this drives real concurrent
+        HTTP.
+
+        Twelve DISTINCT dead targets, which matters: `probe_targets`
+        deduplicates, so twelve repetitions of one href is two unique
+        targets and would have passed against the old cap of 10 as
+        well. (Measured -- the first draft of this test did exactly
+        that.) Distinct targets put the last two past the old cap, so
+        before this ticket they were reported `target_check_skipped`
+        and never checked.
+        """
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        started = time.monotonic()
+        result = asyncio.run(
+            _handle_convert_preview(
+                client,
+                {
+                    "content": _twelve_distinct_dead_targets(),
+                    "format": "tracwiki",
+                    "check_targets": True,
+                },
+            )
+        )
+        elapsed = time.monotonic() - started
+
+        codes = [
+            w["code"] for w in result.structuredContent["warnings"]
+        ]
+        assert codes.count("missing_cross_instance_target") == 12, codes
+        assert "target_check_skipped" not in codes, codes
+        assert (
+            result.structuredContent["stats"]["targets_checked"] == 12
+        )
+        # Concurrency, stated as the property that matters rather than a
+        # wall-clock threshold that would flake on a slow day: twelve
+        # SEQUENTIAL round trips cannot come in under one request's own
+        # timeout budget.
+        assert elapsed < DEFAULT_TARGET_TIMEOUT_SECONDS, elapsed
+
+    def test_target_cap_parameter_reaches_the_probe_live(self):
+        """The new parameter is new surface, and an unwired parameter
+        looks exactly like a wired one until something asks it to bite.
+
+        Same twelve distinct targets with `target_cap=2`: the probe must
+        stop after two and say so, which is only observable if the
+        argument actually reached `probe_targets`.
+        """
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        result = asyncio.run(
+            _handle_convert_preview(
+                client,
+                {
+                    "content": _twelve_distinct_dead_targets(),
+                    "format": "tracwiki",
+                    "check_targets": True,
+                    "target_cap": 2,
+                },
+            )
+        )
+        codes = [
+            w["code"] for w in result.structuredContent["warnings"]
+        ]
+        assert "target_check_skipped" in codes, codes
+        assert codes.count("missing_cross_instance_target") == 2, codes
+        assert result.structuredContent["stats"]["targets_checked"] == 2
 
 
 if __name__ == "__main__":

@@ -428,9 +428,27 @@ class TestRenderCheckLive:
         assert not result.isError
         assert result.structuredContent["stats"]["sections"] >= 1
 
-    def test_wiki_render_check_finds_dead_link_on_project_milestones(
+    def test_project_milestones_reports_its_autolink_as_incidental(
         self,
     ):
+        """Live content, and this test previously asserted the defect.
+
+        It was written as "finds a dead link on `ProjectMilestones`"
+        and passed on `missing_local_target`. Ticket #79 measured what
+        that finding actually is: the bare word `GitHub` in a prose
+        sentence, which Trac auto-links because it is humped. Nothing
+        on the page is broken and nothing was authored as a link -- so
+        the old assertion was pinning the false positive, and under
+        #64's blocking gate this correct page would have been refused.
+
+        Kept rather than deleted, inverted rather than relaxed: the
+        same live page now has to report the ADVISORY code and must
+        NOT report the error. That makes it a real-content regression
+        row for #79 instead of a memorial to the bug.
+
+        Found by the live suite, which `ci.sh` does not run -- the
+        offline suite was green across this change.
+        """
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
 
@@ -447,12 +465,20 @@ class TestRenderCheckLive:
             )
         )
         assert not result.isError
-        codes = [
-            w["code"]
+        warnings = [
+            w
             for s in result.structuredContent["sections"]
             for w in s["warnings"]
         ]
-        assert "missing_local_target" in codes
+        codes = [w["code"] for w in warnings]
+        assert "incidental_wiki_autolink" in codes, codes
+        assert "missing_local_target" not in codes, codes
+        suggestions = [
+            w["evidence"]["suggestion"]
+            for w in warnings
+            if w["code"] == "incidental_wiki_autolink"
+        ]
+        assert "!GitHub" in suggestions, suggestions
 
 
 if __name__ == "__main__":
