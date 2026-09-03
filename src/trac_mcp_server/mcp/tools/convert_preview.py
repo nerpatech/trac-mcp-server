@@ -124,7 +124,20 @@ async def _handle_convert_preview(
     if fmt == "tracwiki":
         tracwiki = content
     else:
-        conversion = convert_with_warnings(content)
+        try:
+            conversion = convert_with_warnings(content)
+        except ValueError as e:
+            # The converter refuses input it cannot represent (ticket #63).
+            # Caught here rather than left to propagate: the dispatcher maps
+            # a bare ValueError to "unknown_tool", which would tell the
+            # caller to run list_tools -- actively misleading for a content
+            # problem they can fix.
+            return build_error_response(
+                "validation_error",
+                str(e),
+                'Remove the construct, or pass format="tracwiki" so the '
+                "content is stored verbatim without conversion.",
+            )
         tracwiki = conversion.text
         conversion_warnings = conversion.warnings
 

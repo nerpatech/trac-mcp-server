@@ -870,6 +870,108 @@ class TracWikiRenderer(mistune.BaseRenderer):
         return result
 
 
+# Markdown footnote syntax (ticket #63).  TracWiki has no footnote construct,
+# and this is the one Markdown input the write leg cannot express -- see
+# _reject_unrepresentable_footnotes for why it fails the call rather than
+# wrapping the way the read leg does.
+_FOOTNOTE_DEF_RE = re.compile(r"^\[\^([^\]\n]+)\]:", re.MULTILINE)
+_FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]\n]+)\](?!:)")
+
+
+def _markdown_verbatim_mask(text: str) -> str:
+    """Return ``text`` with code regions blanked to ``\\x01`` fillers.
+
+    Mirrors ``tracwiki_to_markdown._verbatim_mask`` on the other leg, and
+    exists for the same reason: a check that runs before the converter's own
+    stashing has to do its own shielding, or it fires on syntax the author
+    quoted rather than wrote.  Newlines are preserved so the mask stays
+    line-aligned and ``re.MULTILINE`` anchors still land correctly.
+
+    Covers fenced blocks and inline code spans.  Indented code blocks need no
+    handling here: a footnote *definition* is anchored to column 0, so an
+    indented line cannot match it, and a bare reference inside one is
+    harmless (measured -- it passes through untouched).
+    """
+    mask = list(text)
+    in_fence = False
+    fence_char = ""
+    fence_len = 0
+    pos = 0
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        is_fence = False
+        for ch in ("`", "~"):
+            if stripped.startswith(ch * 3):
+                run = len(stripped) - len(stripped.lstrip(ch))
+                if not in_fence:
+                    in_fence, fence_char, fence_len = True, ch, run
+                    is_fence = True
+                elif ch == fence_char and run >= fence_len:
+                    in_fence = False
+                    is_fence = True
+                break
+        if in_fence and not is_fence:
+            for k in range(pos, pos + len(line)):
+                mask[k] = "\x01"
+        elif not in_fence and not is_fence:
+            # Inline code spans on an ordinary line.
+            i = 0
+            while i < len(line):
+                if line[i] == "`":
+                    j = line.find("`", i + 1)
+                    if j == -1:
+                        break
+                    for k in range(pos + i + 1, pos + j):
+                        mask[k] = "\x01"
+                    i = j + 1
+                else:
+                    i += 1
+        pos += len(line) + 1
+    return "".join(mask)
+
+
+def _reject_unrepresentable_footnotes(markdown_text: str) -> None:
+    """Fail the conversion on a Markdown footnote that would be destroyed.
+
+    Operator decision on ticket #63, option (c).  The read leg answers an
+    unrepresentable construct by emitting it verbatim in a fallback fence, but
+    that answer does not work here: a footnote is not a block.  Its reference
+    and its definition sit in *different places* in the document, so wrapping
+    either half alone breaks the pairing and wrapping the whole document to
+    catch both is disproportionate.
+
+    Measured on ticket #63, and the reason the trigger is this narrow -- only
+    the PAIR is destructive:
+
+        Text[^1] + [^1]: note   ->  Text[wiki:note ^1]   definition DELETED,
+                                                         reference replaced by
+                                                         a fabricated wiki link
+        Text[^1] alone          ->  unchanged
+        [^1]: orphan alone      ->  unchanged
+
+    Only the pair is rejected, so an author who happens to write a bracketed
+    caret in prose is unaffected.  The escape hatch is real and costs one
+    parameter: declare the source as TracWiki and nothing converts at all.
+    """
+    masked = _markdown_verbatim_mask(markdown_text)
+    defined = {m.group(1) for m in _FOOTNOTE_DEF_RE.finditer(masked)}
+    if not defined:
+        return
+    referenced = {m.group(1) for m in _FOOTNOTE_REF_RE.finditer(masked)}
+    both = sorted(defined & referenced)
+    if not both:
+        return
+    names = ", ".join(f"[^{n}]" for n in both)
+    raise ValueError(
+        "markdown_to_tracwiki: TracWiki has no footnote construct, and "
+        f"converting would destroy these: {names}. The definition line is "
+        "deleted outright and the reference becomes a link to a page named "
+        "after the note text, with no warning -- so this fails the call "
+        "instead (ticket #63). Either remove the footnote, or declare the "
+        'source as TracWiki (format="tracwiki") so nothing converts.'
+    )
+
+
 def markdown_to_tracwiki(
     markdown_text: str, *, heading_anchors: bool = False
 ) -> str:
@@ -891,6 +993,8 @@ def markdown_to_tracwiki(
     # _stash_bracket_syntax for why this can't happen inside text()).
     # Must run before the renderer is constructed -- heading() needs the
     # placeholder table to resolve a sentinel before slugifying.
+    _reject_unrepresentable_footnotes(markdown_text)
+
     stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
 
     # Create renderer and parser with table plugin enabled
