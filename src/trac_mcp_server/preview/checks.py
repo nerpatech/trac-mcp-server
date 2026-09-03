@@ -13,6 +13,8 @@ from ..converters.common import (
     TRACLINK_SCHEMES,
     blank_code_fences,
     blank_inline_code_spans,
+    describe_indentation_loss,
+    find_code_block_indentation_loss,
 )
 from .facts import PreviewFacts
 from .targets import ERROR, MISSING, SKIPPED, is_probeable_wiki_href
@@ -245,6 +247,47 @@ def _check_tracwiki_markup_in_markdown(
                 )
             )
     return warnings
+
+
+def _check_code_block_indentation_loss(
+    markdown_source: str, tracwiki: str
+) -> list[dict]:
+    """A code block whose body lost leading whitespace on the way
+    through the converter (ticket #68).
+
+    The only rule in this suite about damage that is INVISIBLE. Every
+    other one describes content a reader can see is wrong -- literal
+    markup, a dead link, a reference stuck in a code span. This one
+    describes content that is gone, with a plausible render and an
+    otherwise-empty warnings list over the top of it, which is why the
+    severity is `error` rather than `warning` (the precedent is #59,
+    where `intertrac_target_captured_punctuation` became an error for
+    naming a genuinely dead link).
+
+    `tracwiki_markup_in_markdown` cannot be widened to cover this. It
+    runs `blank_code_fences` first, and that blanks a `{{{ ... }}}`
+    region INCLUDING its delimiters -- so the `{{{` it scans for is
+    erased before the scan reaches it, and the shape that gets
+    destroyed is precisely the shape it is built to ignore. The two are
+    complements, not overlapping.
+
+    Detection lives in `converters.common` rather than here so the
+    write path (`wiki_file_push`) and the standalone `trac-convert`
+    binary can reach it too -- `preview` is not packaged into that
+    binary, and #68 comment 4 measured `wiki_file.py` storing damaged
+    bytes without ever calling `build_warnings`.
+    """
+    return [
+        _warning(
+            "code_block_indentation_loss",
+            "error",
+            describe_indentation_loss(loss),
+            loss,
+        )
+        for loss in find_code_block_indentation_loss(
+            markdown_source, tracwiki
+        )
+    ]
 
 
 def _check_missing_local_target(facts: PreviewFacts) -> list[dict]:
@@ -629,10 +672,11 @@ def build_warnings(
         markdown_source: The caller's original Markdown input, or None
             when there is no Markdown source to check against -- the
             verify path (ticket #55) checks a live render, which has no
-            corresponding Markdown candidate; ``_check_tracwiki_markup_
-            in_markdown`` is skipped in that case, since it is the only
-            rule keyed off Markdown source rather than ``facts``/
-            ``tracwiki``.
+            corresponding Markdown candidate. The two rules keyed off
+            Markdown source rather than ``facts``/``tracwiki`` --
+            ``_check_tracwiki_markup_in_markdown`` and
+            ``_check_code_block_indentation_loss`` -- are skipped in
+            that case.
         tracwiki: The converted TracWiki text (what would be stored).
         facts: Extracted from the rendered HTML (what Trac would display).
         probes: Live-probe results for cross-instance targets, from
@@ -641,14 +685,16 @@ def build_warnings(
         check_targets: Whether the live probe actually ran.
         source_format: The format the caller DECLARED its input to be,
             'markdown' (the default, and what every caller predating
-            ticket #65 meant) or 'tracwiki'. Only
-            ``_check_tracwiki_markup_in_markdown`` consults it, and only
-            to skip itself: TracWiki markup in TracWiki-declared input
-            is correct content, not a defect, and warning about it fires
-            on nearly every write once TracWiki authoring is possible
-            (#62). Never used to GUESS the format -- the declaration is
-            the caller's, and #47 is this project's evidence that
-            sniffing content instead is unreliable.
+            ticket #65 meant) or 'tracwiki'. Consulted by the two
+            Markdown-source rules, and only to skip them. TracWiki
+            markup in TracWiki-declared input is correct content, not a
+            defect, and warning about it fires on nearly every write
+            once TracWiki authoring is possible (#62); TracWiki-declared
+            input is stored verbatim, so there is no conversion step for
+            ``_check_code_block_indentation_loss`` to lose anything in
+            (ticket #68). Never used to GUESS the format -- the
+            declaration is the caller's, and #47 is this project's
+            evidence that sniffing content instead is unreliable.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -666,6 +712,11 @@ def build_warnings(
     if markdown_source is not None and source_format != "tracwiki":
         warnings.extend(
             _check_tracwiki_markup_in_markdown(markdown_source)
+        )
+        warnings.extend(
+            _check_code_block_indentation_loss(
+                markdown_source, tracwiki
+            )
         )
     warnings.extend(_check_missing_local_target(facts))
     warnings.extend(_check_bare_ticket_ref(facts))

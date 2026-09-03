@@ -11,7 +11,11 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters.common import auto_convert
+from ...converters.common import (
+    auto_convert,
+    describe_indentation_loss,
+    find_code_block_indentation_loss,
+)
 from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
@@ -32,7 +36,15 @@ logger = logging.getLogger(__name__)
 WIKI_FILE_TOOLS = [
     types.Tool(
         name="wiki_file_push",
-        description="Push a local file to a Trac wiki page. Reads the file, auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page.",
+        description=(
+            "Push a local file to a Trac wiki page. Reads the "
+            "file, auto-detects format (Markdown/TracWiki), "
+            "converts if needed, and creates or updates the wiki "
+            "page. Refuses the push when converting would strip a "
+            "code block's indentation and store syntactically "
+            'invalid content -- pass format="tracwiki" to push '
+            "the file verbatim instead."
+        ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -227,6 +239,33 @@ async def _handle_push(
         wiki_content = conversion.text
         converted = conversion.converted
         warnings.extend(conversion.warnings)
+
+        # Refuse rather than warn (ticket #68, operator decision).
+        # A TracWiki `{{{ }}}` block in a Markdown-detected file has
+        # its body indentation eaten by paragraph handling, storing
+        # syntactically invalid code -- and every signal an author
+        # checks stays clean: the call succeeds, the render looks
+        # plausible, and `warnings` comes back empty. A warning on a
+        # path that then stores the damaged bytes anyway would leave
+        # the corruption in the page and the recovery to whoever
+        # reads the response. This is the one remaining write path
+        # that converts at all (#69 left the file tools converting
+        # because they have a filename to go on, and removed the
+        # Markdown path from every inline tool), so nothing else is
+        # watching it.
+        losses = find_code_block_indentation_loss(content, wiki_content)
+        if losses:
+            return build_error_response(
+                "validation_error",
+                "Refusing to push: conversion would strip code-block "
+                "indentation and store syntactically invalid content. "
+                + " ".join(
+                    describe_indentation_loss(loss) for loss in losses
+                ),
+                'Pass format="tracwiki" to push the file verbatim '
+                "without conversion, or rewrite the block as a "
+                "Markdown fence.",
+            )
     else:
         # Already TracWiki — pass through
         wiki_content = content

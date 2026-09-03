@@ -523,3 +523,191 @@ async def auto_convert(
                 "Unknown format combination - text passed through unchanged"
             ],
         )
+
+
+# =============================================================================
+# Code-block indentation loss (ticket #68)
+# =============================================================================
+
+
+def _delimited_code_blocks(
+    text: str, tracwiki_only: bool = False
+) -> list[list[str]]:
+    """Return each DELIMITED code block's body, as a list of raw lines.
+
+    Recognises Markdown fences (``` / ~~~) and TracWiki ``{{{ }}}``
+    blocks, whichever opens first, with ``{{{`` nesting tracked by
+    depth. ``tracwiki_only`` scans for ``{{{ }}}`` alone -- what the
+    CONVERTED side is written in, where a run of backticks is content
+    rather than a delimiter.
+
+    A four-space-indented Markdown code block is deliberately NOT a
+    block here. It has no delimiters, and dropping its four-space
+    marker is exactly what correct conversion does -- counting it would
+    make `find_code_block_indentation_loss` report every one of them.
+
+    An unterminated block is dropped rather than closed at EOF: its
+    extent is unknown, and guessing it invents body lines that were
+    never in a block.
+    """
+    blocks: list[list[str]] = []
+    body: list[str] = []
+    md_fence = ""  # the opening run (``` or ~~~), "" when not in one
+    tw_depth = 0
+
+    for raw in text.splitlines():
+        stripped = raw.lstrip()
+
+        if md_fence:
+            if stripped.startswith(md_fence):
+                blocks.append(body)
+                body, md_fence = [], ""
+            else:
+                body.append(raw)
+            continue
+
+        if tw_depth:
+            tw_depth += stripped.count("{{{")
+            tw_depth -= stripped.count("}}}")
+            if tw_depth <= 0:
+                blocks.append(body)
+                body, tw_depth = [], 0
+            else:
+                body.append(raw)
+            continue
+
+        if not tracwiki_only and (
+            stripped.startswith("```") or stripped.startswith("~~~")
+        ):
+            md_fence = stripped[:3]
+            continue
+
+        if stripped.startswith("{{{"):
+            # Net depth on the opening line: `{{{ x }}}` opens and
+            # closes, leaving nothing for a body to be read into.
+            depth = stripped.count("{{{") - stripped.count("}}}")
+            if depth > 0:
+                tw_depth = depth
+            continue
+
+    return blocks
+
+
+def _relative_indent_profile(
+    lines: list[str],
+) -> list[tuple[int, str]]:
+    """``(indent relative to the block's own minimum, content)`` for
+    each non-blank line.
+
+    Measuring RELATIVE to the block's minimum is what keeps a fenced
+    block nested inside a list item silent: mistune dedents such a
+    block by the list's own indent, legitimately and by the same amount
+    on every line, so the profile is unchanged. The cost is a
+    deliberate blind spot -- a UNIFORM dedent of a whole block is not
+    reported. That is the safe direction: what makes a stripped code
+    block syntactically invalid is losing its internal structure, and
+    a uniform shift leaves that intact.
+    """
+    indents = [
+        len(line) - len(line.lstrip()) for line in lines if line.strip()
+    ]
+    base = min(indents) if indents else 0
+    return [
+        (len(line) - len(line.lstrip()) - base, line.strip())
+        for line in lines
+        if line.strip()
+    ]
+
+
+def find_code_block_indentation_loss(
+    source: str, tracwiki: str
+) -> list[dict]:
+    """Report code-block lines whose leading whitespace shrank in
+    conversion (ticket #68).
+
+    Feeding a TracWiki ``{{{ }}}`` block to the Markdown converter
+    strips the indentation from its body -- the block is not recognised
+    as a code construct, so ordinary paragraph handling eats it. The
+    result is syntactically invalid code stored with an EMPTY warnings
+    list and a render that looks entirely plausible; it is visible only
+    in the stored bytes. Every other rule in the warning suite catches
+    damage a reader can SEE.
+
+    Args:
+        source: What the caller wrote (Markdown-declared input only --
+            a TracWiki-declared write is stored verbatim and cannot
+            lose anything, so callers must not run this on one).
+        tracwiki: The converted TracWiki that would be stored.
+
+    Returns:
+        One dict per damaged block -- ``{line, content, source_indent,
+        converted_indent}`` for its FIRST shrunken line. Empty list
+        means no loss detected, which on this check means the stored
+        bytes are safe to write.
+
+    Blocks are paired by their whitespace-stripped body content, not by
+    position: a document holding both a four-space-indented Markdown
+    block (not a block here) and a damaged ``{{{`` block (one) has a
+    different block count on each side, and a positional rule skips it
+    entirely -- a false negative on a real defect. Content-pairing
+    requires an unambiguous match, so two IDENTICAL damaged blocks are
+    a known, accepted residual: both stay silent rather than risk
+    reporting against the wrong counterpart.
+    """
+    converted_profiles = [
+        _relative_indent_profile(block)
+        for block in _delimited_code_blocks(
+            tracwiki, tracwiki_only=True
+        )
+    ]
+
+    losses: list[dict] = []
+    for block in _delimited_code_blocks(source):
+        source_profile = _relative_indent_profile(block)
+        if not source_profile:
+            continue
+        key = [content for _, content in source_profile]
+        matches = [
+            profile
+            for profile in converted_profiles
+            if [content for _, content in profile] == key
+        ]
+        if len(matches) != 1:
+            continue  # absent or ambiguous -- stay silent
+        converted_profile = matches[0]
+
+        for index, (
+            (source_indent, content),
+            (converted_indent, _),
+        ) in enumerate(
+            # Equal length by construction: the two were paired
+            # on their content keys, so strict= can only fire if
+            # that pairing is ever loosened.
+            zip(source_profile, converted_profile, strict=True)
+        ):
+            if converted_indent < source_indent:
+                losses.append(
+                    {
+                        "line": index + 1,
+                        "content": content,
+                        "source_indent": source_indent,
+                        "converted_indent": converted_indent,
+                    }
+                )
+                break  # one report per block, not per line
+
+    return losses
+
+
+def describe_indentation_loss(loss: dict) -> str:
+    """One-line message for a `find_code_block_indentation_loss` entry,
+    shared by every surface that reports one as plain text."""
+    return (
+        f"Code block line {loss['line']} lost leading whitespace in "
+        f"conversion ({loss['source_indent']} -> "
+        f"{loss['converted_indent']} spaces): {loss['content']!r}. The "
+        "stored code would be syntactically invalid -- a TracWiki "
+        "{{{ }}} block in Markdown input is not recognised as a code "
+        "construct, so its indentation is eaten. Push it as TracWiki, "
+        "or write the block as a Markdown fence."
+    )

@@ -800,3 +800,113 @@ def test_same_line_fence_does_not_blind_the_rest_of_the_document():
     _, matches = _markup_warnings("row70_same_line_fence_then_bold")
     assert len(matches) == 1, matches
     assert matches[0]["evidence"]["matched"] == "'''bold'''"
+
+
+# ---------------------------------------------------------------------------
+# code_block_indentation_loss (ticket #68)
+#
+# The one rule in this suite about damage that is INVISIBLE. It reads the
+# Markdown source and the converted TracWiki and nothing else -- not the
+# render, not `facts` -- so these tests pass an empty render rather than a
+# captured fixture. That is the correct null input for a source-vs-output
+# comparison, not a laundered one: the whole reason this check exists is
+# that the render was clean while the content was being destroyed, so a
+# render fixture could only mislead about what is being asserted.
+#
+# The seeds' pre-fix (red) state and the detector's own controls live in
+# `tests/test_converter_indent_loss.py`. What is asserted here is the
+# wiring: that the code reaches `build_warnings` at the right severity,
+# that the declared-format gate turns it off, and -- the half that
+# matters most for a NEW firing rule -- that it fires on nothing in the
+# existing corpus.
+# ---------------------------------------------------------------------------
+
+_INDENT_LOSS_SEEDS = {
+    "processor_block": (
+        "{{{#!python\ndef f(x):\n    return 1\n}}}\n",
+        "{{{#!python\ndef f(x):\nreturn 1\n}}}",
+    ),
+    "plain_block": (
+        "{{{\n  two\n    four\n}}}\n",
+        "{{{\ntwo\nfour\n}}}",
+    ),
+}
+
+_NO_RENDER = extract_facts("")
+
+
+def _indent_loss_codes(source, tracwiki, source_format="markdown"):
+    return [
+        w
+        for w in build_warnings(
+            source,
+            tracwiki,
+            _NO_RENDER,
+            probes={},
+            check_targets=False,
+            source_format=source_format,
+        )
+        if w["code"] == "code_block_indentation_loss"
+    ]
+
+
+@pytest.mark.parametrize("name", sorted(_INDENT_LOSS_SEEDS))
+def test_indentation_loss_seed_reaches_build_warnings(name):
+    """Ticket #68 section 2's two measured shapes, through the suite.
+
+    Severity is asserted alongside the code: `error`, not `warning`.
+    Every other rule here describes content that is visibly wrong; this
+    one describes content that is gone, and #59 set the precedent when
+    `intertrac_target_captured_punctuation` became an error for naming
+    a genuinely dead link.
+    """
+    source, tracwiki = _INDENT_LOSS_SEEDS[name]
+    found = _indent_loss_codes(source, tracwiki)
+    assert len(found) == 1, found
+    assert found[0]["severity"] == "error"
+    assert found[0]["evidence"]["converted_indent"] == 0
+
+
+@pytest.mark.parametrize("name", sorted(_INDENT_LOSS_SEEDS))
+def test_indentation_loss_is_off_for_tracwiki_declared_input(name):
+    """The gate ticket #65 made possible.
+
+    TracWiki-declared input is stored verbatim -- no conversion runs, so
+    there is nothing to lose and the check must not fire. Asserted per
+    seed rather than once: this is the same declared-format contrast
+    `test_declared_format_decides_identical_content` pins for the markup
+    rule, and a gate that only half-works looks identical to one that
+    works until the untested half is exercised.
+    """
+    source, tracwiki = _INDENT_LOSS_SEEDS[name]
+    assert _indent_loss_codes(source, tracwiki) != []
+    assert (
+        _indent_loss_codes(source, tracwiki, source_format="tracwiki")
+        == []
+    )
+
+
+@pytest.mark.parametrize("name", sorted(MANIFEST))
+def test_no_existing_row_gains_the_indentation_loss_code(name):
+    """The recall gate, per ticket #68 section 5.
+
+    A loss check is a new FIRING rule rather than a suppression, so the
+    usual risk is inverted: the danger is over-firing on correct
+    content, and #57 and #59 are this project's evidence that an
+    over-firing check gets muted and takes its true positives with it.
+    Every row already in the corpus must stay exactly as it was.
+    """
+    markdown_source, tracwiki, facts, source_format = _load(name)
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    assert [
+        w
+        for w in warnings
+        if w["code"] == "code_block_indentation_loss"
+    ] == []

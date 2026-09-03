@@ -3,7 +3,9 @@
 from .common import (
     ConversionResult,
     auto_convert,
+    describe_indentation_loss,
     detect_format_heuristic,
+    find_code_block_indentation_loss,
     markdown_to_tracwiki_lang,
     tracwiki_to_markdown_lang,
 )
@@ -19,7 +21,9 @@ __all__ = [
     "TracWikiRenderer",
     "auto_convert",
     "convert_with_warnings",
+    "describe_indentation_loss",
     "detect_format_heuristic",
+    "find_code_block_indentation_loss",
     "markdown_to_tracwiki",
     "markdown_to_tracwiki_lang",
     "tracwiki_to_markdown",

@@ -27,7 +27,11 @@ from ..converters import (
     detect_format_heuristic,
     tracwiki_to_markdown,
 )
-from ..converters.common import ConversionResult
+from ..converters.common import (
+    ConversionResult,
+    describe_indentation_loss,
+    find_code_block_indentation_loss,
+)
 from ..converters.markdown_to_tracwiki import convert_with_warnings
 from ..core.client import TracClient
 
@@ -684,9 +688,22 @@ def convert_text(
             warnings=[],
         )
     if source == "markdown" and target == "tracwiki":
-        return convert_with_warnings(
+        result = convert_with_warnings(
             text, heading_anchors=heading_anchors
         )
+        # Ticket #68: a TracWiki `{{{ }}}` block in Markdown input has
+        # its body indentation eaten, and nothing else in this pipeline
+        # says so -- the conversion succeeds and the output looks
+        # plausible. Reported here rather than raised: unlike the MCP
+        # write tools, this binary stores nothing, so the caller still
+        # holds the input and a stderr line is enough to act on.
+        result.warnings.extend(
+            describe_indentation_loss(loss)
+            for loss in find_code_block_indentation_loss(
+                text, result.text
+            )
+        )
+        return result
     return tracwiki_to_markdown(text, unknown_macros=unknown_macros)  # type: ignore[arg-type]
 
 
