@@ -80,5 +80,25 @@
     "note": "Ticket #58: the InterTrac SHORT-LINK form backticked into a code span -- the shape HashNumberAutoLinks names first, which the realm-anchored regex could never match. Pinned in the verify path too, since the same silence reproduced through wiki_render_check.",
     "requires_check_targets": false,
     "tracwiki": "see `auto_pm:#87` here"
+  },
+  "row12_markdown_link_unconverted": {
+    "must_warn": [
+      "literal_markup_in_render"
+    ],
+    "note": "Ticket #77's seed: Markdown link syntax that never converted -- its target is an InterTrac short link, not a URL, so the converter leaves it alone on BOTH legs and the label survives as literal bracket text wrapped around a bare link. Measured warnings:[] through convert_preview against the deployed daemon at d7823de, which is the defect: the check existed but only the post-write path ran it.",
+    "requires_check_targets": false,
+    "tracwiki": "See [the ticket about connection pooling](auto_pm:#87) for the detail."
+  },
+  "row13_markdown_link_in_code_block_pin": {
+    "must_warn": [],
+    "note": "Over-correction pin for row 12, on the shape actually being seeded (rows 7/8 pin the TABLE shape). The identical bytes inside a real code block must stay silent through BOTH assemblers -- prose_text excludes <pre> subtrees.",
+    "requires_check_targets": false,
+    "tracwiki": "{{{\nSee [the ticket about connection pooling](auto_pm:#87) for the detail.\n}}}"
+  },
+  "row14_literal_markup_pragma_allowed": {
+    "must_warn": [],
+    "note": "Ticket #77's second, quieter fix. Row 7's exact markup and render, plus the ticket #58 opt-out pragma in a #!comment block (which renders to nothing, so the HTML is byte-identical to row 7's). Before the move, the verify path appended this check AFTER build_warnings had already applied the pragma filter, so the opt-out did not reach it -- red at d7823de through build_verify_warnings. Pairs with row 7: same bytes, opposite verdict, and the only difference is the pragma.",
+    "requires_check_targets": false,
+    "tracwiki": "{{{#!comment\npreview-checks: allow literal_markup_in_render\n}}}\nsome prose |=h=| more prose"
   }
 }
