@@ -66,7 +66,7 @@ class TestMacroRoundTripRetained(unittest.TestCase):
         for label, src in self.MACROS:
             with self.subTest(label):
                 md = tracwiki_to_markdown(src).text
-                self.assertEqual(markdown_to_tracwiki(md).strip(), src)
+                self.assertEqual(markdown_to_tracwiki(md), src)
 
     def test_macro_survives_round_trip_in_prose(self):
         """Same, but embedded in surrounding text rather than standing alone."""
@@ -145,6 +145,233 @@ class TestStoreCorpusBaseline(unittest.TestCase):
                     expected = fh.read()
                 md = tracwiki_to_markdown(src).text
                 self.assertEqual(markdown_to_tracwiki(md), expected)
+
+
+class TestRepresentableRoundTripRetained(unittest.TestCase):
+    """Constructs that survive ``tw -> md -> tw`` unchanged today.
+
+    This is the retained-capability list proper, extended for the ticket #63
+    fallback contract.  Every entry here maps cleanly between the formats, so
+    the fallback must never fire on any of them -- they are the *recall* gate.
+    Per ``Rules/testing/SeededDefectFirst`` a marker that always fires and one
+    that never fires look identical from a green suite, and the store corpus
+    cannot tell them apart because it contains none of the broken constructs
+    (measured on ticket #63: the only warning the four pinned pages produce is
+    the content-free "TracLinks detected").  So this class carries the "stays
+    silent" half and ``TestUnrepresentableInventory`` carries the "fires" half.
+
+    These assertions must hold before *and* after every commit on this ticket.
+    """
+
+    IDENTITY = [
+        ("plain table", "||=a=||=b=||\n||x||y||"),
+        (
+            "code block, indented body",
+            "{{{#!python\ndef f(x):\n    return 1\n}}}",
+        ),
+        ("plain code block", "{{{\nliteral\n}}}"),
+        ("div processor", "{{{#!div class=important\nhello\n}}}"),
+        ("macro, no args", "[[PageOutline]]"),
+        ("macro, args", "[[TOC(depth=2)]]"),
+        (
+            "slash-path wiki link",
+            "See [[Rules/trac/RenderVerify]] here.",
+        ),
+        ("bold and italic", "'''bold''' and ''italic''"),
+        ("bullet list", " * a\n * b"),
+        ("heading", "== Head =="),
+        (
+            "markdown container",
+            "{{{#!markdown\n| a | b |\n|---|---|\n}}}",
+        ),
+    ]
+
+    def test_round_trips_unchanged(self):
+        for label, src in self.IDENTITY:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertEqual(markdown_to_tracwiki(md), src)
+
+    def test_fallback_never_fires_on_representable_input(self):
+        """The recall gate: no fallback wrapper on anything that maps.
+
+        Asserted on the *stored* bytes rather than on the warning list, per
+        ``Rules/trac/DeclareSourceFormat`` -- an empty warning list is exactly
+        the signal that stayed clean while content was being destroyed.
+        """
+        for label, src in self.IDENTITY:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                # The {{{#!markdown}}} container is itself an IDENTITY row,
+                # so only flag it when it was not in the source to begin with.
+                if "#!markdown" not in src:
+                    self.assertNotIn("#!markdown", md)
+                    self.assertNotIn(
+                        "#!markdown", markdown_to_tracwiki(md)
+                    )
+
+
+class TestNormalisedRoundTrip(unittest.TestCase):
+    """Constructs that survive in substance but not byte-for-byte.
+
+    Measured on ticket #63: three of the four pinned store pages do *not*
+    round-trip byte-identically, and every diff is normalisation of this kind
+    rather than accommodation damage.  Pinned separately from ``IDENTITY`` so
+    the distinction stays visible -- these are representable, so the fallback
+    must not fire on them either, but the exact bytes are expected to shift
+    and asserting identity would be a false alarm.
+    """
+
+    NORMALISED = [
+        # A numbered list is renumbered rather than echoed.
+        ("numbered list", " 1. a\n 1. b", " 1. a\n 2. b"),
+        # [[BR]] gains a leading space and splits the line.
+        ("BR", "one[[BR]]two", "one [[BR]]\ntwo"),
+    ]
+
+    def test_normalisation_is_stable(self):
+        for label, src, expected in self.NORMALISED:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertEqual(markdown_to_tracwiki(md), expected)
+
+    def test_normalisation_is_idempotent(self):
+        """Re-converting the normalised form must not drift further."""
+        for label, _, expected in self.NORMALISED:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(expected).text
+                self.assertEqual(markdown_to_tracwiki(md), expected)
+
+
+class TestUnrepresentableInventory(unittest.TestCase):
+    """Characterisation of the constructs the ticket #63 fallback replaces.
+
+    **These assertions pin behaviour that is expected to CHANGE.**  They are
+    not a retained-capability list -- they are the measured "before" that each
+    fallback commit is diffed against, so every change is deliberate and
+    visible in review rather than discovered afterwards.
+
+    Every row here is a construct TracWiki can express and Markdown cannot.
+    Measured on ticket #63 against the pre-fallback converters: five of the six
+    fail to round-trip, and the sixth inverts a semantic instead --
+    ``Reference/trac/WikiEscapeContexts`` records ``{{{#!comment}}}`` as
+    "dropped entirely" by Trac, while the read leg emits a fenced block that
+    every Markdown renderer *displays*.
+
+    When a fallback lands for one of these rows, update that row and say so in
+    the commit message.  A row that changes without the commit saying so would
+    be exactly the silent damage this ticket exists to remove.
+    """
+
+    # (label, tracwiki source, markdown today, tracwiki after round trip)
+    BROKEN = [
+        (
+            "table cell spanning",
+            "||=a=||=b=||\n|||| spanned ||",
+            "| a | b |\n|---|---|\n| [span:2] spanned |",
+            "| a | b |\n|---|---|\n| [span:2] spanned |",
+        ),
+        (
+            "multi-line row",
+            "||a||b|| \\\n||c||d||",
+            "| a | b |  | c | d |\n|---|---|---|---|---|",
+            "||=a=||=b=|| ||=c=||=d=||",
+        ),
+        (
+            "standalone processor cell (td)",
+            "{{{#!td\nbody here\n}}}",
+            "| body here |\n|---|",
+            "||=body here=||",
+        ),
+        (
+            "standalone processor cell (th)",
+            "{{{#!th\nhead\n}}}",
+            "| head |\n|---|",
+            "||=head=||",
+        ),
+        (
+            # Measured on ticket #63 while seeding this pin: inverting the
+            # td/th branch of _convert_processor_cells produces BYTE-IDENTICAL
+            # output for every shape tried, standalone or in a table.  The
+            # distinction is erased downstream by _convert_tables, which makes
+            # the first row a header regardless.  So that branch's two arms
+            # are not observably different -- a deletion candidate for this
+            # ticket on its own terms, and the reason no assertion here can
+            # guard the distinction: there is nothing left to guard.
+            "processor cells, th row then td row",
+            "{{{#!th\nH\n}}}\n{{{#!td\nd\n}}}",
+            "| H |\n|---|\n| d |",
+            "||=H=||\n||d||",
+        ),
+        (
+            # A td following a th on the SAME row picks up a spurious
+            # [span:2] marker it never had in the source.
+            "processor cells, th and td on one row",
+            "{{{#!th\nH\n}}}{{{#!td\nd\n}}}",
+            "| H | [span:2] d |\n|---|---|",
+            "||=H=||=[span:2] d=||",
+        ),
+        (
+            "definition list",
+            "term::\n  definition",
+            "**term**: > definition",
+            "'''term''': > definition",
+        ),
+        (
+            "comment block",
+            "{{{#!comment\nhidden\n}}}",
+            "```comment\nhidden\n```",
+            "{{{#!comment\nhidden\n}}}",
+        ),
+    ]
+
+    def test_read_leg_output_is_as_measured(self):
+        for label, src, md_today, _ in self.BROKEN:
+            with self.subTest(label):
+                self.assertEqual(
+                    tracwiki_to_markdown(src).text, md_today
+                )
+
+    def test_round_trip_result_is_as_measured(self):
+        for label, src, _, back_today in self.BROKEN:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertEqual(markdown_to_tracwiki(md), back_today)
+
+    def test_all_but_the_comment_block_fail_to_round_trip(self):
+        """The defect, stated as an assertion rather than as prose.
+
+        The comment block is the exception: it round-trips byte-for-byte and
+        is broken in the render instead, which is why no round-trip assertion
+        could ever have caught it.
+        """
+        failures = []
+        for label, src, _, _ in self.BROKEN:
+            md = tracwiki_to_markdown(src).text
+            if markdown_to_tracwiki(md) != src:
+                failures.append(label)
+        self.assertEqual(len(failures), 7, failures)
+        self.assertNotIn("comment block", failures)
+
+    def test_comment_block_becomes_visible(self):
+        """The semantic inversion, pinned on its own.
+
+        Trac drops a comment block entirely; the read leg emits a fenced block
+        that renders as visible content.
+        """
+        md = tracwiki_to_markdown("{{{#!comment\nhidden\n}}}").text
+        self.assertIn("hidden", md)
+        self.assertNotIn("#!comment", md)
+
+    def test_write_leg_footnote_loses_its_definition(self):
+        """The one measured unrepresentable *Markdown* construct.
+
+        The definition line is deleted outright and the reference becomes a
+        wiki link to a page named after the note text.  Silent: no warning.
+        """
+        stored = markdown_to_tracwiki("Text[^1]\n\n[^1]: note\n")
+        self.assertEqual(stored, "Text[wiki:note ^1]")
+        self.assertNotIn("[^1]:", stored)
 
 
 if __name__ == "__main__":
