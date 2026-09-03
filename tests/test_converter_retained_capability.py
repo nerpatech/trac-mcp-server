@@ -43,6 +43,7 @@ import unittest
 
 from trac_mcp_server.converters import markdown_to_tracwiki
 from trac_mcp_server.converters.tracwiki_to_markdown import (
+    FALLBACK_FENCE_INFO,
     tracwiki_to_markdown,
 )
 
@@ -243,131 +244,130 @@ class TestNormalisedRoundTrip(unittest.TestCase):
                 self.assertEqual(markdown_to_tracwiki(md), expected)
 
 
-class TestUnrepresentableInventory(unittest.TestCase):
-    """Characterisation of the constructs the ticket #63 fallback replaces.
+class TestUnrepresentableFallback(unittest.TestCase):
+    """The ticket #63 fallback contract, replacing the pre-change inventory.
 
-    **These assertions pin behaviour that is expected to CHANGE.**  They are
-    not a retained-capability list -- they are the measured "before" that each
-    fallback commit is diffed against, so every change is deliberate and
-    visible in review rather than discovered afterwards.
+    This class was ``TestUnrepresentableInventory`` in the previous commit,
+    where it characterised the *broken* behaviour so the change could be
+    diffed against it.  The fallback has now landed and every row moved from
+    "fails to round-trip" to "round-trips byte-for-byte", so the rows are
+    updated here deliberately, as that class's docstring required.
 
-    Every row here is a construct TracWiki can express and Markdown cannot.
-    Measured on ticket #63 against the pre-fallback converters: five of the six
-    fail to round-trip, and the sixth inverts a semantic instead --
-    ``Reference/trac/WikiEscapeContexts`` records ``{{{#!comment}}}`` as
-    "dropped entirely" by Trac, while the read leg emits a fenced block that
-    every Markdown renderer *displays*.
+    Measured before the change: seven of these eight rows did not survive
+    ``tw -> md -> tw``, and the eighth -- the comment block -- round-tripped
+    byte-for-byte while inverting a semantic, becoming *visible* content
+    where ``Reference/trac/WikiEscapeContexts`` records Trac as dropping it
+    entirely.  All eight are now lossless.
 
-    When a fallback lands for one of these rows, update that row and say so in
-    the commit message.  A row that changes without the commit saying so would
-    be exactly the silent damage this ticket exists to remove.
+    The contract, per the operator decision on this ticket:
+
+    * read leg emits the construct verbatim inside a fallback fence and warns;
+    * write leg *unwraps* that fence, restoring the original source exactly.
+
+    Unwrapping is a literal unwrap with nothing to infer, which is what
+    separates it from the ``[MACRO: ...]`` placeholder deleted earlier on this
+    ticket -- that one had to be reconstructed by guessing.
     """
 
-    # (label, tracwiki source, markdown today, tracwiki after round trip)
-    BROKEN = [
+    # (label, tracwiki source)
+    CONSTRUCTS = [
+        ("table cell spanning", "||=a=||=b=||\n|||| spanned ||"),
+        ("multi-line row", "||a||b|| \\\n||c||d||"),
+        ("standalone processor cell (td)", "{{{#!td\nbody here\n}}}"),
+        ("standalone processor cell (th)", "{{{#!th\nhead\n}}}"),
         (
-            "table cell spanning",
-            "||=a=||=b=||\n|||| spanned ||",
-            "| a | b |\n|---|---|\n| [span:2] spanned |",
-            "| a | b |\n|---|---|\n| [span:2] spanned |",
-        ),
-        (
-            "multi-line row",
-            "||a||b|| \\\n||c||d||",
-            "| a | b |  | c | d |\n|---|---|---|---|---|",
-            "||=a=||=b=|| ||=c=||=d=||",
-        ),
-        (
-            "standalone processor cell (td)",
-            "{{{#!td\nbody here\n}}}",
-            "| body here |\n|---|",
-            "||=body here=||",
-        ),
-        (
-            "standalone processor cell (th)",
-            "{{{#!th\nhead\n}}}",
-            "| head |\n|---|",
-            "||=head=||",
-        ),
-        (
-            # Measured on ticket #63 while seeding this pin: inverting the
-            # td/th branch of _convert_processor_cells produces BYTE-IDENTICAL
-            # output for every shape tried, standalone or in a table.  The
-            # distinction is erased downstream by _convert_tables, which makes
-            # the first row a header regardless.  So that branch's two arms
-            # are not observably different -- a deletion candidate for this
-            # ticket on its own terms, and the reason no assertion here can
-            # guard the distinction: there is nothing left to guard.
-            "processor cells, th row then td row",
+            "adjacent processor cells, separate lines",
             "{{{#!th\nH\n}}}\n{{{#!td\nd\n}}}",
-            "| H |\n|---|\n| d |",
-            "||=H=||\n||d||",
         ),
         (
-            # A td following a th on the SAME row picks up a spurious
-            # [span:2] marker it never had in the source.
-            "processor cells, th and td on one row",
+            "adjacent processor cells, same line",
             "{{{#!th\nH\n}}}{{{#!td\nd\n}}}",
-            "| H | [span:2] d |\n|---|---|",
-            "||=H=||=[span:2] d=||",
         ),
+        ("comment block", "{{{#!comment\nhidden\n}}}"),
         (
-            "definition list",
-            "term::\n  definition",
-            "**term**: > definition",
-            "'''term''': > definition",
-        ),
-        (
-            "comment block",
-            "{{{#!comment\nhidden\n}}}",
-            "```comment\nhidden\n```",
-            "{{{#!comment\nhidden\n}}}",
+            "table processor block",
+            "{{{#!table\n|| {{{#!td\na\n}}} ||\n}}}",
         ),
     ]
 
-    def test_read_leg_output_is_as_measured(self):
-        for label, src, md_today, _ in self.BROKEN:
-            with self.subTest(label):
-                self.assertEqual(
-                    tracwiki_to_markdown(src).text, md_today
-                )
-
-    def test_round_trip_result_is_as_measured(self):
-        for label, src, _, back_today in self.BROKEN:
+    def test_round_trips_byte_for_byte(self):
+        """The headline: every one of these was lossy before this commit."""
+        for label, src in self.CONSTRUCTS:
             with self.subTest(label):
                 md = tracwiki_to_markdown(src).text
-                self.assertEqual(markdown_to_tracwiki(md), back_today)
+                self.assertEqual(markdown_to_tracwiki(md), src)
 
-    def test_all_but_the_comment_block_fail_to_round_trip(self):
-        """The defect, stated as an assertion rather than as prose.
+    def test_source_is_carried_verbatim(self):
+        """The fence body is the original source, not a reconstruction."""
+        for label, src in self.CONSTRUCTS:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertIn(FALLBACK_FENCE_INFO, md)
+                self.assertIn(src, md)
 
-        The comment block is the exception: it round-trips byte-for-byte and
-        is broken in the render instead, which is why no round-trip assertion
-        could ever have caught it.
+    def test_each_construct_warns_exactly_once(self):
+        """Silent loss is the defect; one warning per construct, no repeats.
+
+        Adjacent blocks coalesce into a single region, so the two adjacent
+        rows warn once rather than twice.
         """
-        failures = []
-        for label, src, _, _ in self.BROKEN:
-            md = tracwiki_to_markdown(src).text
-            if markdown_to_tracwiki(md) != src:
-                failures.append(label)
-        self.assertEqual(len(failures), 7, failures)
-        self.assertNotIn("comment block", failures)
+        for label, src in self.CONSTRUCTS:
+            with self.subTest(label):
+                self.assertEqual(
+                    len(tracwiki_to_markdown(src).warnings), 1
+                )
 
-    def test_comment_block_becomes_visible(self):
-        """The semantic inversion, pinned on its own.
+    def test_fence_pairs_are_well_formed(self):
+        """Adjacent fallback regions must not run their fences together.
 
-        Trac drops a comment block entirely; the read leg emits a fenced block
-        that renders as visible content.
+        Measured while building this: emitting one fence per block put a
+        closing fence against the next opening fence on one line
+        (``````tracwiki-unconverted``), which is not a fence pair at all.
         """
-        md = tracwiki_to_markdown("{{{#!comment\nhidden\n}}}").text
-        self.assertIn("hidden", md)
-        self.assertNotIn("#!comment", md)
+        for label, src in self.CONSTRUCTS:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                opens = [
+                    ln
+                    for ln in md.split("\n")
+                    if ln.startswith("`") and FALLBACK_FENCE_INFO in ln
+                ]
+                for ln in opens:
+                    self.assertRegex(
+                        ln, r"^`+" + FALLBACK_FENCE_INFO + r"$"
+                    )
+
+    def test_quoted_token_is_not_a_construct(self):
+        """A processor token inside a code span stays a token (ticket #46).
+
+        The recall half of the gate, at the sharpest point: the fallback runs
+        before the converter's own code-span shielding, so it has to do its
+        own -- see ``_verbatim_mask``.
+        """
+        for src in (
+            "`{{{#!td}}}`",
+            "`{{{#!table}}}`",
+            "`{{{#!comment}}}`",
+        ):
+            with self.subTest(src):
+                result = tracwiki_to_markdown(src)
+                self.assertEqual(result.text, src)
+                self.assertNotIn(FALLBACK_FENCE_INFO, result.text)
+                self.assertEqual(result.warnings, [])
+
+    def test_nested_block_is_not_a_construct(self):
+        """A fallback processor nested in a code block is content (#51)."""
+        src = "{{{\n{{{#!comment\nAGENT: do the thing\n}}}\n}}}"
+        result = tracwiki_to_markdown(src)
+        self.assertNotIn(FALLBACK_FENCE_INFO, result.text)
+        self.assertEqual(result.warnings, [])
 
     def test_write_leg_footnote_loses_its_definition(self):
-        """The one measured unrepresentable *Markdown* construct.
+        """Unrepresentable *Markdown*, still unhandled -- the write-leg half.
 
-        The definition line is deleted outright and the reference becomes a
-        wiki link to a page named after the note text.  Silent: no warning.
+        Pinned here as the measured "before" for the write-leg fallback, which
+        has not landed yet.  The definition line is deleted outright and the
+        reference becomes a wiki link to a page named after the note text.
         """
         stored = markdown_to_tracwiki("Text[^1]\n\n[^1]: note\n")
         self.assertEqual(stored, "Text[wiki:note ^1]")

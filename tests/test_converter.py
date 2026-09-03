@@ -16,6 +16,9 @@ from trac_mcp_server.converters.common import (
     markdown_to_tracwiki_lang,
     tracwiki_to_markdown_lang,
 )
+from trac_mcp_server.converters.tracwiki_to_markdown import (
+    FALLBACK_FENCE_INFO,
+)
 
 
 class TestTracWikiConverter(unittest.TestCase):
@@ -952,28 +955,40 @@ class TestTracWikiEnhancements(unittest.TestCase):
         self.assertIn("---:", lines[1])  # right
 
     def test_tracwiki_table_spanning(self):
-        """Test TracWiki cell spanning with warning."""
-        result = tracwiki_to_markdown(
-            "||= A =||= B =||= C =||\n|||| Span 2 || 3 ||"
-        )
-        # Should have span indicator
-        self.assertIn("[span:", result.text)
-        # Should warn about spanning
+        """Cell spanning is preserved verbatim and warned (ticket #63).
+
+        Rewritten rather than deleted.  The guarantee these tests were
+        written for -- spanning is detected, warned about, and the content
+        survives -- is unchanged.  What changed is the mechanism: the old
+        [span:N] reconstruction produced a row with fewer cells than its
+        header, which mistune rejected, so the whole table was stored as
+        literal text and silently stopped being a table.  Asserting on
+        "[span:" pinned that broken reconstruction rather than the guarantee.
+        """
+        src = "||= A =||= B =||= C =||\n|||| Span 2 || 3 ||"
+        result = tracwiki_to_markdown(src)
+        self.assertIn("Span 2", result.text)
         self.assertTrue(
             any("span" in w.lower() for w in result.warnings)
         )
+        # The point of the change: it survives the round trip intact.
+        self.assertEqual(markdown_to_tracwiki(result.text), src)
 
     def test_tracwiki_table_multiline(self):
-        """Test TracWiki multi-line rows (backslash continuation)."""
-        result = tracwiki_to_markdown(
-            "||= H1 =||= H2 =||\n|| column 1 \\\n|| column 2 ||"
-        )
-        # Should join into single row
-        self.assertIn("| column 1 | column 2 |", result.text)
-        # Should warn about multi-line
+        """Multi-line rows are preserved verbatim and warned (ticket #63).
+
+        Same rewrite as the spanning test above.  The old behaviour joined
+        the rows into one over-wide row that read back as a *header* row --
+        a silent semantic change the previous assertion could not see.
+        """
+        src = "||= H1 =||= H2 =||\n|| column 1 \\\n|| column 2 ||"
+        result = tracwiki_to_markdown(src)
+        self.assertIn("column 1", result.text)
+        self.assertIn("column 2", result.text)
         self.assertTrue(
             any("multi-line" in w.lower() for w in result.warnings)
         )
+        self.assertEqual(markdown_to_tracwiki(result.text), src)
 
 
 class TestFormatDetection(unittest.TestCase):
@@ -2708,11 +2723,26 @@ class TestReadPathConverterTicketRegressions(unittest.TestCase):
         result = tracwiki_to_markdown("`{{{#!td some text}}}` example")
         self.assertEqual(result.text, "`{{{#!td some text}}}` example")
 
-    def test_ticket_46_real_td_processor_cell_still_converts(self):
-        """Backstop must not disable genuine (non-backticked) #!td cells."""
-        result = tracwiki_to_markdown("{{{#!td\ncontent\n}}}")
-        self.assertIn("content", result.text)
-        self.assertNotIn("{{{#!td", result.text)
+    def test_ticket_46_real_td_processor_cell_still_handled(self):
+        """Backstop must not disable genuine (non-backticked) #!td cells.
+
+        Ticket #46's guarantee is the *distinction* between a real processor
+        cell and one quoted in a code span, and that is what is asserted here.
+        Ticket #63 changed what "handled" means -- a real cell is now emitted
+        verbatim in a fallback fence and warned about, rather than rebuilt as
+        a one-column table that read back as a header cell -- so the old
+        assertion that the source token disappears no longer states the
+        guarantee.
+        """
+        real = tracwiki_to_markdown("{{{#!td\ncontent\n}}}")
+        self.assertIn("content", real.text)
+        self.assertIn(FALLBACK_FENCE_INFO, real.text)
+        self.assertTrue(real.warnings)
+
+        quoted = tracwiki_to_markdown("`{{{#!td}}}`")
+        self.assertEqual(quoted.text, "`{{{#!td}}}`")
+        self.assertNotIn(FALLBACK_FENCE_INFO, quoted.text)
+        self.assertFalse(quoted.warnings)
 
 
 class TestIsLinkTarget(unittest.TestCase):
