@@ -74,7 +74,13 @@ from trac_mcp_server.converters.tracwiki_to_markdown import (
     tracwiki_to_markdown,
 )
 
-DEFINITION_LIST_WARNING = "Definition lists detected"
+# The fallback's warning, raised by ``_stash_fallback`` at the point it fires
+# (ticket #63).  Deliberately matched on the new wording rather than on a
+# prefix both spellings share: the old ``"Definition lists detected"`` warning
+# came from ``_detect_lossy_elements``, which scanned the **raw** text with no
+# shielding and so announced a definition list inside quoted source.  A
+# constant matching both would have let that false positive pass as a hit.
+DEFINITION_LIST_WARNING = "Definition list cannot be represented"
 
 
 def _round_trip(source):
@@ -181,8 +187,14 @@ class TestProseWithDoubleColonNotConverted(unittest.TestCase):
                 self.assertFalse(warned)
 
 
-class TestGenuineDefinitionListStillDetected(unittest.TestCase):
+class TestGenuineDefinitionListFallsBack(unittest.TestCase):
     """The recall gate: a real definition list must still be recognised.
+
+    **Renamed and re-pointed on ticket #63**, whose verbatim fallback this
+    class's own docstring told the next reader to expect.  What "recognised"
+    buys changed with it: these rows used to convert to bold and be warned
+    about, and they now travel verbatim and round-trip byte-for-byte.  The
+    ``expected`` values below are the source unchanged for the first time.
 
     The danger on this ticket is the inverse of the usual one -- the check
     fired too often, so tightening it risks a false negative.  These four rows
@@ -200,35 +212,58 @@ class TestGenuineDefinitionListStillDetected(unittest.TestCase):
       two spaces.  The definition pass now runs first and absorbs its own
       continuation line, which is how Trac reads it -- as part of the ``<dd>``.
 
-    ``expected`` characterises the lossy conversion to bold.  It is not an
-    endorsement: none of these round-trips, which is why they are ticket #63's
-    fallback remainder.  Update these rows deliberately when that fallback
-    lands, exactly as ticket #63's own inventory class was updated.
+    ``expected`` was the lossy conversion to bold, and was explicitly *not*
+    an endorsement -- none of these round-tripped, which is what made them
+    ticket #63's fallback remainder.  That fallback has now landed, so the
+    rows are updated deliberately here, exactly as that ticket's own inventory
+    class was updated when the other eight constructs moved.
+
+    Two extra rows join the four, both measured against Trac's own renderer
+    and neither expressible before the fallback existed:
+
+    * *two terms* -- consecutive term lines are **one** ``<dl>`` to Trac, so
+      the fallback's unit has to be the run, not the line.
+    * *absorbed same-indent line* -- a non-term line following a term is part
+      of the preceding ``<dd>`` **even at the same indent**.  The deleted
+      ``_convert_definition_lists`` absorbed a continuation only when the
+      definition was empty *and* the line was indented deeper, so it
+      disagreed with Trac on exactly this shape.  Carrying the run verbatim
+      sidesteps the disagreement instead of having to fix it.
     """
 
-    # (label, source, expected stored bytes)
+    # (label, source, expected stored bytes -- now the source, unchanged)
     DEFINITION_LISTS = [
         (
             "single-word term",
             " term:: definition indented one space",
-            "'''term''': definition indented one space",
+            " term:: definition indented one space",
         ),
         # Multi-word terms are legal: forbidding whitespace inside the term
         # would have turned this row into a false negative.
         (
             "multi-word term",
             " multi word term:: a definition",
-            "'''multi word term''': a definition",
+            " multi word term:: a definition",
         ),
         (
             "empty definition",
             " trailing colons only::",
-            "'''trailing colons only''':",
+            " trailing colons only::",
         ),
         (
             "definition on the next line",
             " term::\n  the definition",
-            "'''term''': the definition",
+            " term::\n  the definition",
+        ),
+        (
+            "two terms, one <dl>",
+            " first:: one\n second:: two",
+            " first:: one\n second:: two",
+        ),
+        (
+            "absorbed same-indent line",
+            " term:: def\n not a term, just a quote line",
+            " term:: def\n not a term, just a quote line",
         ),
     ]
 
@@ -238,11 +273,20 @@ class TestGenuineDefinitionListStillDetected(unittest.TestCase):
                 _, warned = _round_trip(src)
                 self.assertTrue(warned)
 
-    def test_conversion_is_characterised(self):
+    def test_round_trips_byte_for_byte(self):
+        """The headline: every one of these was lossy before ticket #63."""
         for label, src, expected in self.DEFINITION_LISTS:
             with self.subTest(label):
                 stored, _ = _round_trip(src)
                 self.assertEqual(stored, expected)
+
+    def test_no_bold_is_introduced(self):
+        """The conversion this fallback replaces, stated as its absence."""
+        for label, src, _ in self.DEFINITION_LISTS:
+            with self.subTest(label):
+                stored, _ = _round_trip(src)
+                self.assertNotIn("'''", stored)
+                self.assertNotIn("**", tracwiki_to_markdown(src).text)
 
     def test_no_stray_blockquote_marker(self):
         """The second half of ticket #71, stated on its own.
@@ -310,6 +354,96 @@ class TestSingleSpaceIndentNoLongerStripped(unittest.TestCase):
         """The contrast: two spaces is the width that converts to ``> ``."""
         stored, _ = _round_trip("  Two-space indented prose.")
         self.assertEqual(stored, "  Two-space indented prose.")
+
+
+class TestWarningIsShielded(unittest.TestCase):
+    """The warning must not fire on a definition list someone *quoted*.
+
+    Its own seeded defect, and it genuinely failed before ticket #63: the old
+    warning came from ``_detect_lossy_elements``, which scanned the raw text,
+    so a ``term::`` line inside a code block announced a definition list in
+    quoted source.  That is the over-firing shape this file's ticket (#71)
+    was about, surviving in a second place -- and tickets #57 and #59 are
+    this project's evidence that an over-firing check gets muted and takes
+    its true positives with it.
+
+    The fallback's warning is raised by ``_stash_fallback`` at the point it
+    fires, against ``_verbatim_mask``, so the false positive goes away as a
+    consequence of the design rather than needing a fix of its own.
+    """
+
+    QUOTED = [
+        ("plain code block", "{{{\n term:: not a definition\n}}}"),
+        (
+            "processor block",
+            "{{{#!python\n term:: not a definition\n}}}",
+        ),
+        ("code span", "A `term:: def` span."),
+    ]
+
+    def test_quoted_definition_list_does_not_warn(self):
+        """Matched on *any* definition warning, not on the fallback's wording.
+
+        Deliberate, and the class would otherwise be untestable: matching the
+        new wording alone would have passed before the fix as well, because
+        the old warning spelled it differently -- a gate that cannot fail,
+        which ``Rules/testing/SeededDefectFirst`` says looks exactly like a
+        gate that always passes.  Watched failing on all three rows first.
+        """
+        for label, src in self.QUOTED:
+            with self.subTest(label):
+                warnings = tracwiki_to_markdown(src).warnings
+                self.assertFalse(
+                    [w for w in warnings if "definition" in w.lower()],
+                    f"{label}: warned about a definition list in quoted "
+                    f"source: {warnings}",
+                )
+
+    def test_quoted_definition_list_round_trips(self):
+        """The content half: it is source text, and must survive as such."""
+        for label, src in self.QUOTED:
+            with self.subTest(label):
+                stored, _ = _round_trip(src)
+                self.assertEqual(stored, src)
+
+
+class TestRunContainingBothConstructs(unittest.TestCase):
+    """A list item and a definition term sharing one indented run.
+
+    Measured: `` * bullet`` followed by `` term:: def`` with no blank line is
+    a ``<ul>`` **followed by** a ``<dl>`` -- two constructs in one run of
+    indented lines.
+
+    Per the operator decision on ticket #63, the whole run falls back.  The
+    two alternatives both lose something the fallback does not: skipping the
+    run would let the ``<dl>`` degrade to prose at column zero now that
+    nothing converts it, and splitting the run at the construct boundary
+    needs a real block parser to know where each construct starts and ends --
+    more machinery than the rest of the change put together.
+
+    The cost is recorded rather than hidden: the bullet list is carried
+    verbatim too, even though Markdown could have expressed it.
+    """
+
+    SOURCE = " * bullet\n term:: def after a list"
+
+    def test_the_whole_run_round_trips(self):
+        stored, _ = _round_trip(self.SOURCE)
+        self.assertEqual(stored, self.SOURCE)
+
+    def test_it_warns_rather_than_degrading_silently(self):
+        _, warned = _round_trip(self.SOURCE)
+        self.assertTrue(warned)
+
+    def test_the_definition_does_not_reach_column_zero(self):
+        """The failure the other two options would have produced.
+
+        A definition term at column zero is prose to Trac, not a ``<dl>``, so
+        this is the assertion that the construct is still a definition list
+        after the round trip -- not merely that some bytes came back.
+        """
+        stored, _ = _round_trip(self.SOURCE)
+        self.assertNotIn("\nterm::", stored)
 
 
 if __name__ == "__main__":

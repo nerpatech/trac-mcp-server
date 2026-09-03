@@ -288,6 +288,15 @@ class TestUnrepresentableFallback(unittest.TestCase):
             "table processor block",
             "{{{#!table\n|| {{{#!td\na\n}}} ||\n}}}",
         ),
+        # The ninth, added when the definition-list remainder landed.  It was
+        # held back from the original eight because its detector matched any
+        # line containing a double colon, so handing it a fallback would have
+        # wrapped ordinary prose in a fence.  Ticket #71 fixed the detector
+        # against Trac's measured grammar, which is what unblocked this row.
+        ("definition list", " term:: definition"),
+        # Consecutive terms are ONE <dl> to Trac, so the fallback's unit is
+        # the run of indented lines rather than the term line.
+        ("definition list, two terms", " first:: one\n second:: two"),
     ]
 
     def test_round_trips_byte_for_byte(self):
