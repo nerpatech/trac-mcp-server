@@ -50,6 +50,7 @@ from trac_mcp_server.preview.checks import (  # noqa: E402
     build_warnings,
 )
 from trac_mcp_server.preview.facts import extract_facts  # noqa: E402
+from trac_mcp_server.preview.gate import is_blocking  # noqa: E402
 
 #: The two stores ticket #79 section 3 measured. Named by Trac instance
 #: path; the base URL comes from TRAC_URL with its path replaced, so one
@@ -234,16 +235,15 @@ def fetch(cache: Path, instances: tuple[str, ...]) -> None:
         _fetch_instance(cache, instance)
 
 
-#: Codes ticket #64 section 4 promotes to errors that refuse a write.
-#: The point of the sweep is how many CORRECT documents each of them
-#: would have refused, so they are tallied per document, not just per
-#: finding.
-BLOCKING_CODES = (
-    "missing_local_target",
-    "literal_markup_in_render",
-    "missing_cross_instance_target",
-    "intertrac_target_captured_punctuation",
-)
+# Whether a finding refuses a write is asked of `preview.gate`, never
+# re-listed here. This script used to carry its own copy of ticket #64
+# section 4's error column, and by the time the policy became real code
+# that copy was already wrong in two places: it omitted
+# `escaped_link_target` (ruling 1) and `target_check_capped` (ruling 2),
+# so it would have reported a refusal count for a gate nobody was
+# shipping. A second copy of a rule is a rule that goes stale silently,
+# and a measurement taken against the stale copy is worse than no
+# measurement -- it looks like evidence.
 
 
 def replay(cache: Path, instances: tuple[str, ...]) -> dict:
@@ -286,7 +286,7 @@ def replay(cache: Path, instances: tuple[str, ...]) -> dict:
                 examples.setdefault(code, [])
                 if len(examples[code]) < 5:
                     examples[code].append(doc["ref"])
-            if found & set(BLOCKING_CODES):
+            if any(is_blocking(w) for w in warnings):
                 refused += 1
 
         report["instances"][instance] = {
