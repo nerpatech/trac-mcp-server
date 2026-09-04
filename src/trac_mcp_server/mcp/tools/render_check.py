@@ -25,7 +25,7 @@ from ...preview.live import (
 )
 from ...preview.targets import (
     DEFAULT_TARGET_CAP,
-    is_probeable_wiki_href,
+    is_probeable_href,
     probe_targets,
 )
 from ...preview.verify import build_verify_warnings
@@ -338,7 +338,7 @@ async def _probe_all_sections(
         probeable.extend(
             a.href
             for a in facts.anchors
-            if a.href and is_probeable_wiki_href(a.href)
+            if a.href and is_probeable_href(a.href)
         )
     if not probeable:
         return {}
