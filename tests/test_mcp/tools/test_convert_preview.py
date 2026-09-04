@@ -448,6 +448,119 @@ class TestConvertPreviewLive:
         assert codes.count("missing_cross_instance_target") == 2, codes
         assert result.structuredContent["stats"]["targets_checked"] == 2
 
+    # --- Ticket #82: the ticket realm -------------------------------
+    #
+    # These are live rather than mocked because the whole design rests on
+    # transport facts a mock would simply restate: a ticket that exists
+    # answers 200 and redirects, one that does not answers a bare 500,
+    # and a wiki-realm dispatcher target answers 200 whether or not the
+    # page exists. `Rules/testing/RealSubstrateNotMocks`.
+
+    def test_dead_and_live_cross_instance_ticket_refs_live(self):
+        """The pair in one document, not the dead row alone.
+
+        Before this ticket both were invisible: the probe matched only
+        `/intertrac/wiki%3A`, so a cross-instance TICKET reference was
+        never fetched and `missing_cross_instance_target` was
+        structurally incapable of firing for it -- 695 references across
+        two stores, none checked.
+
+        The live reference is auto_pm ticket 93; if it is ever deleted
+        this test fails loudly, which is the correct outcome for a
+        regression row that asserts a link resolves.
+        """
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        result = asyncio.run(
+            _handle_convert_preview(
+                client,
+                {
+                    "content": (
+                        "Live: auto_pm:#93\n\nDead: auto_pm:#999999\n"
+                    ),
+                    "format": "tracwiki",
+                    "check_targets": True,
+                },
+            )
+        )
+        warnings = result.structuredContent["warnings"]
+        codes = [w["code"] for w in warnings]
+        assert codes.count("missing_cross_instance_target") == 1, codes
+        assert "target_check_skipped" not in codes, codes
+        dead = [
+            w
+            for w in warnings
+            if w["code"] == "missing_cross_instance_target"
+        ]
+        assert "999999" in dead[0]["evidence"]["href"], dead
+        assert result.structuredContent["stats"]["targets_checked"] == 2
+
+    def test_realm_form_ticket_ref_is_probed_live(self):
+        """`prefix:ticket:N` renders as `/intertrac/ticket%3AN`, a
+        different dispatcher shape from the `prefix:#N` short link. Ten
+        references in the measured corpus take it, and a fix keyed on
+        the short link alone would leave every one of them unchecked."""
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        result = asyncio.run(
+            _handle_convert_preview(
+                client,
+                {
+                    "content": (
+                        "Live: auto_pm:ticket:93\n\n"
+                        "Dead: auto_pm:ticket:999999\n"
+                    ),
+                    "format": "tracwiki",
+                    "check_targets": True,
+                },
+            )
+        )
+        codes = [
+            w["code"] for w in result.structuredContent["warnings"]
+        ]
+        assert codes.count("missing_cross_instance_target") == 1, codes
+        assert result.structuredContent["stats"]["targets_checked"] == 2
+
+    def test_liveness_control_answers_200_for_a_missing_page_live(self):
+        """The assumption the whole ticket-realm check rests on.
+
+        A 500 is only evidence of a dead ticket once the instance has
+        answered a control, and the control is a WIKI-realm dispatcher
+        target chosen precisely because Trac answers 200 for it whether
+        or not the page exists. If that ever stopped being true, every
+        control would fail, every dead ticket would degrade to
+        `target_check_skipped`, and the check would go quietly dead --
+        indistinguishable from one that always passes, which is what
+        `Rules/testing/SeededDefectFirst` is about.
+
+        So it is pinned here against the real dispatcher rather than
+        left as a comment.
+        """
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.preview.targets import _control_url
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        base = config.trac_url.rstrip("/")
+        control = _control_url(f"{base}/intertrac/%2387")
+        assert control is not None
+        response = client.session.get(control, timeout=10)
+        assert response.status_code == 200, (
+            f"{control} answered {response.status_code}; the liveness "
+            "control no longer discriminates and the ticket-realm check "
+            "is now inert"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

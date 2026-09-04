@@ -18,7 +18,7 @@ from ..converters.common import (
     find_code_block_indentation_loss,
 )
 from .facts import PreviewFacts
-from .targets import ERROR, MISSING, SKIPPED, is_probeable_wiki_href
+from .targets import ERROR, MISSING, SKIPPED, is_probeable_href
 
 # A code span whose entire body is a cross-instance/TracLink reference --
 # e.g. `auto_pm:wiki:Reference/trac/InterTrac` or bare `wiki:Page` -- rather
@@ -916,14 +916,21 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
 def _check_target_probes(
     facts: PreviewFacts, probes: dict[str, dict], check_targets: bool
 ) -> list[dict]:
-    """Live-probe results for cross-instance InterTrac wiki targets
-    (row 15), plus an explicit note whenever a probeable target existed
-    but wasn't actually checked -- capped, disabled, or network-failed
-    must never look like a clean pass."""
+    """Live-probe results for cross-instance InterTrac targets (row 15),
+    plus an explicit note whenever a probeable target existed but wasn't
+    actually checked -- capped, disabled, or network-failed must never
+    look like a clean pass.
+
+    Both realms since ticket #82: a cross-instance TICKET reference used
+    to be invisible here, because it was never probeable and so could not
+    reach either branch below. A ticket-realm target whose instance could
+    not be confirmed reachable arrives as ERROR, which lands in
+    ``target_check_skipped`` -- uncertainty, never a broken link.
+    """
     probeable_hrefs: list[str] = [
         a.href
         for a in facts.anchors
-        if a.href and is_probeable_wiki_href(a.href)
+        if a.href and is_probeable_href(a.href)
     ]
     if not probeable_hrefs:
         return []
@@ -944,7 +951,7 @@ def _check_target_probes(
 
     skipped_or_failed: list[str] = []
     for anchor in facts.anchors:
-        if not anchor.href or not is_probeable_wiki_href(anchor.href):
+        if not anchor.href or not is_probeable_href(anchor.href):
             continue
         outcome = probes.get(anchor.href, {})
         status = outcome.get("status")
@@ -976,7 +983,8 @@ def _check_target_probes(
                 "target_check_skipped",
                 "info",
                 f"{len(set(skipped_or_failed))} cross-instance target(s) "
-                "could not be checked (capped or network-failed) -- not "
+                "could not be checked (capped, network-failed, or on an "
+                "instance that did not answer a liveness control) -- not "
                 "verified, not necessarily clean.",
                 {"hrefs": sorted(set(skipped_or_failed))},
             )

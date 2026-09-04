@@ -40,6 +40,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from trac_mcp_server.config import Config  # noqa: E402
@@ -55,14 +57,44 @@ from trac_mcp_server.preview.facts import extract_facts  # noqa: E402
 DEFAULT_INSTANCES = ("auto_pm", "trac_mcp_server")
 
 
+def _credentials() -> tuple[str, str, str]:
+    """Read TRAC_URL/USERNAME/PASSWORD, .env included.
+
+    The fetch phase is the only one that needs them, and it used to read
+    ``os.environ`` directly and die with a bare ``KeyError: 'TRAC_URL'``.
+    Sourcing .env from a shell is not a workaround: this project's .env
+    carries ``TRAC_URL= http://...`` with a leading space, which
+    python-dotenv strips and ``.  ./.env`` does not -- it assigns the
+    empty string and then tries to run the URL as a command.
+    """
+    load_dotenv()
+    missing = [
+        name
+        for name in ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        raise SystemExit(
+            "store_sweep: live Trac credentials are not available. "
+            f"Missing: {', '.join(missing)}. Set them in .env (see "
+            ".env.example) or export them; the fetch phase cannot run "
+            "without them."
+        )
+    return (
+        os.environ["TRAC_URL"].strip().rstrip("/"),
+        os.environ["TRAC_USERNAME"].strip(),
+        os.environ["TRAC_PASSWORD"].strip(),
+    )
+
+
 def _client(instance: str) -> TracClient:
-    url = os.environ["TRAC_URL"].strip().rstrip("/")
+    url, username, password = _credentials()
     base = url.rsplit("/", 1)[0]
     return TracClient(
         Config(
             trac_url=f"{base}/{instance}",
-            username=os.environ["TRAC_USERNAME"].strip(),
-            password=os.environ["TRAC_PASSWORD"].strip(),
+            username=username,
+            password=password,
         )
     )
 
@@ -245,7 +277,12 @@ def replay(cache: Path, instances: tuple[str, ...]) -> dict:
                 codes[warning["code"]] = (
                     codes.get(warning["code"], 0) + 1
                 )
-            for code in found:
+            # Sorted, because `found` is a set and its iteration order
+            # varies with the interpreter's hash seed -- which put the
+            # `examples` keys in a different order on every run and made
+            # a `diff` of two --json reports show changes where there
+            # were none. This script exists to be diffed mechanically.
+            for code in sorted(found):
                 examples.setdefault(code, [])
                 if len(examples[code]) < 5:
                     examples[code].append(doc["ref"])

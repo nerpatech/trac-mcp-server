@@ -1,5 +1,5 @@
 """Tests for preview.targets -- the capped live probe for cross-instance
-InterTrac wiki targets (ticket #56).
+InterTrac targets (tickets #56 and #82).
 
 Calibrated against a known-missing AND a known-existing page (the ticket's
 own requirement, since Trac returns HTTP 200 for both), using canned
@@ -16,6 +16,8 @@ from trac_mcp_server.preview.targets import (
     EXISTS,
     MISSING,
     SKIPPED,
+    is_probeable_href,
+    is_probeable_ticket_href,
     is_probeable_wiki_href,
     probe_targets,
 )
@@ -35,6 +37,23 @@ EXISTING_HREF = (
 )
 MISSING_HREF = (
     "http://192.168.10.4:8000/auto_pm/intertrac/wiki%3ADoesNotExist"
+)
+
+# Ticket realm, both dispatcher shapes. Measured against the live
+# dispatcher 2026-09-04: a ticket that exists answers 200 and redirects
+# to /ticket/N; one that does not answers a bare 500. Same on
+# trac.edgewall.org, whose body differs (9 KB error page vs empty) --
+# which is why the classification is on STATUS.
+TICKET_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2387"
+REALM_TICKET_HREF = (
+    "http://192.168.10.4:8000/auto_pm/intertrac/ticket%3A87"
+)
+DEAD_TICKET_HREF = (
+    "http://192.168.10.4:8000/auto_pm/intertrac/%23999999"
+)
+CONTROL_URL = (
+    "http://192.168.10.4:8000/auto_pm"
+    "/intertrac/wiki%3ATracMcpServerProbeLivenessControl"
 )
 
 
@@ -76,17 +95,43 @@ class TestIsProbeableWikiHref(unittest.TestCase):
     def test_intertrac_wiki_href_is_probeable(self):
         self.assertTrue(is_probeable_wiki_href(EXISTING_HREF))
 
-    def test_intertrac_ticket_href_is_not_probeable(self):
-        """Ticket-realm InterTrac (`auto_pm:#87`) is out of scope --
-        different not-found template, not covered by this probe."""
+    def test_intertrac_ticket_href_is_probeable(self):
+        """This test used to assert the defect.
+
+        It read `test_intertrac_ticket_href_is_not_probeable` and
+        justified it as "out of scope -- different not-found template".
+        Ticket #82 measured that claim and it was false twice over:
+        there is no template, a missing ticket answers a bare 500, and
+        the realm being out of scope is exactly why 695 cross-instance
+        ticket references across two stores were never checked at all.
+
+        Inverted rather than deleted, so the row stays a witness.
+        """
+        self.assertTrue(is_probeable_href(TICKET_HREF))
+        self.assertTrue(is_probeable_ticket_href(TICKET_HREF))
+        # The wiki predicate itself stays narrow: it decides how a
+        # target is CLASSIFIED, and the two realms classify by opposite
+        # rules.
+        self.assertFalse(is_probeable_wiki_href(TICKET_HREF))
+
+    def test_realm_form_ticket_href_is_probeable(self):
+        """`prefix:ticket:N` renders as /intertrac/ticket%3AN, not
+        /intertrac/%23N. Ten references in the corpus take this shape,
+        and a fix keyed on the short link alone would leave every one of
+        them invisible."""
+        self.assertTrue(is_probeable_href(REALM_TICKET_HREF))
+        self.assertTrue(is_probeable_ticket_href(REALM_TICKET_HREF))
+
+    def test_non_intertrac_href_is_not_probeable(self):
+        """A plain local ticket link is not a dispatcher href at all."""
         self.assertFalse(
-            is_probeable_wiki_href(
-                "http://192.168.10.4:8000/auto_pm/intertrac/%2387"
-            )
+            is_probeable_href("http://host/auto_pm/ticket/87")
         )
 
     def test_none_href_is_not_probeable(self):
         self.assertFalse(is_probeable_wiki_href(None))
+        self.assertFalse(is_probeable_ticket_href(None))
+        self.assertFalse(is_probeable_href(None))
 
 
 class TestProbeTargets(unittest.TestCase):
@@ -155,7 +200,7 @@ class TestProbeTargets(unittest.TestCase):
     def test_non_probeable_hrefs_are_dropped(self):
         client = _mock_client({})
         results = probe_targets(
-            client, ["http://host/auto_pm/intertrac/%2387"]
+            client, ["http://host/auto_pm/ticket/87"]
         )
         self.assertEqual(results, {})
         client.session.get.assert_not_called()
@@ -291,6 +336,146 @@ class TestConcurrentProbe(unittest.TestCase):
         self.assertEqual(
             [v["status"] for v in results.values()], [EXISTS] * 4
         )
+
+
+class TestTicketRealmProbe(unittest.TestCase):
+    """Ticket #82. The ticket realm classifies by the OPPOSITE rule from
+    the wiki realm: a 200 is positive proof a ticket exists, while a 500
+    is only evidence once the instance has answered a control."""
+
+    def test_existing_ticket_classified_exists(self):
+        client = _mock_client(
+            {TICKET_HREF: (200, "<html>a ticket page</html>")},
+            resolved={
+                TICKET_HREF: "http://192.168.10.4:8000/auto_pm/ticket/87"
+            },
+        )
+        results = probe_targets(client, [TICKET_HREF])
+        self.assertEqual(results[TICKET_HREF]["status"], EXISTS)
+        self.assertEqual(
+            results[TICKET_HREF]["resolved_url"],
+            "http://192.168.10.4:8000/auto_pm/ticket/87",
+        )
+
+    def test_realm_form_classified_like_the_short_link(self):
+        client = _mock_client(
+            {REALM_TICKET_HREF: (200, "<html>a ticket page</html>")}
+        )
+        results = probe_targets(client, [REALM_TICKET_HREF])
+        self.assertEqual(results[REALM_TICKET_HREF]["status"], EXISTS)
+
+    def test_dead_ticket_reported_missing_when_instance_answers(self):
+        """The seed: a 500 with a healthy control is a dead link."""
+        client = _mock_client(
+            {
+                DEAD_TICKET_HREF: (500, ""),
+                CONTROL_URL: (200, "<html>the control stub</html>"),
+            }
+        )
+        results = probe_targets(client, [DEAD_TICKET_HREF])
+        self.assertEqual(results[DEAD_TICKET_HREF]["status"], MISSING)
+        self.assertNotIn("needs_control", results[DEAD_TICKET_HREF])
+
+    def test_dead_and_live_in_one_document(self):
+        """The pair, not the row: a check that called every ticket
+        reference dead would pass a dead-only test just as well."""
+        client = _mock_client(
+            {
+                TICKET_HREF: (200, "<html>a ticket page</html>"),
+                DEAD_TICKET_HREF: (500, ""),
+                CONTROL_URL: (200, "<html>the control stub</html>"),
+            }
+        )
+        results = probe_targets(client, [TICKET_HREF, DEAD_TICKET_HREF])
+        self.assertEqual(results[TICKET_HREF]["status"], EXISTS)
+        self.assertEqual(results[DEAD_TICKET_HREF]["status"], MISSING)
+
+    def test_instance_down_is_uncertainty_not_a_broken_link(self):
+        """The row that matters. With the control failing, a 500 is
+        indistinguishable from the instance being unwell, and reporting
+        it as a dead link would refuse a write under ticket #64 while
+        telling the author to fix links that are fine."""
+        client = _mock_client(
+            {
+                DEAD_TICKET_HREF: (500, ""),
+                CONTROL_URL: (503, ""),
+            }
+        )
+        results = probe_targets(client, [DEAD_TICKET_HREF])
+        self.assertEqual(results[DEAD_TICKET_HREF]["status"], ERROR)
+
+    def test_control_unreachable_is_uncertainty(self):
+        """Same row, by exception rather than by status code."""
+
+        def fake_get(url, timeout=None, allow_redirects=None):
+            if url == CONTROL_URL:
+                raise OSError("no route to host")
+            resp = MagicMock()
+            resp.status_code = 500
+            resp.text = ""
+            resp.url = url
+            return resp
+
+        client = _mock_client({})
+        client.session.get.side_effect = fake_get
+        results = probe_targets(client, [DEAD_TICKET_HREF])
+        self.assertEqual(results[DEAD_TICKET_HREF]["status"], ERROR)
+
+    def test_no_control_fetched_when_nothing_looks_dead(self):
+        """The common document pays nothing: the control is fetched only
+        when a candidate came back 500."""
+        client = _mock_client(
+            {TICKET_HREF: (200, "<html>a ticket page</html>")}
+        )
+        probe_targets(client, [TICKET_HREF])
+        urls = [
+            call.args[0] for call in client.session.get.call_args_list
+        ]
+        self.assertEqual(urls, [TICKET_HREF])
+
+    def test_one_control_per_instance_not_per_target(self):
+        dead_b = "http://192.168.10.4:8000/auto_pm/intertrac/%23999998"
+        client = _mock_client(
+            {
+                DEAD_TICKET_HREF: (500, ""),
+                dead_b: (500, ""),
+                CONTROL_URL: (200, "<html>the control stub</html>"),
+            }
+        )
+        results = probe_targets(client, [DEAD_TICKET_HREF, dead_b])
+        self.assertEqual(
+            [v["status"] for v in results.values()], [MISSING, MISSING]
+        )
+        controls = [
+            call.args[0]
+            for call in client.session.get.call_args_list
+            if call.args[0] == CONTROL_URL
+        ]
+        self.assertEqual(len(controls), 1)
+
+    def test_other_status_codes_are_never_missing(self):
+        """404 (no such instance), 401/403 (credentials): the probe
+        learned nothing, and nothing is not a broken link."""
+        for code in (401, 403, 404, 302):
+            with self.subTest(code=code):
+                client = _mock_client({DEAD_TICKET_HREF: (code, "")})
+                results = probe_targets(client, [DEAD_TICKET_HREF])
+                self.assertEqual(
+                    results[DEAD_TICKET_HREF]["status"], ERROR
+                )
+
+    def test_wiki_realm_classification_is_unchanged(self):
+        """The recall side: widening a probe is where the existing path
+        quietly changes shape."""
+        client = _mock_client(
+            {
+                EXISTING_HREF: (200, EXISTING_PAGE_STUB),
+                MISSING_HREF: (200, MISSING_PAGE_STUB),
+            }
+        )
+        results = probe_targets(client, [EXISTING_HREF, MISSING_HREF])
+        self.assertEqual(results[EXISTING_HREF]["status"], EXISTS)
+        self.assertEqual(results[MISSING_HREF]["status"], MISSING)
 
 
 if __name__ == "__main__":

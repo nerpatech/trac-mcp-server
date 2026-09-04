@@ -18,7 +18,7 @@ from ...preview.facts import extract_facts
 from ...preview.targets import (
     DEFAULT_TARGET_CAP,
     SKIPPED,
-    is_probeable_wiki_href,
+    is_probeable_href,
     probe_targets,
 )
 from .errors import build_error_response
@@ -177,9 +177,7 @@ async def _handle_convert_preview(
     probes: dict[str, str] = {}
     if check_targets:
         probeable_hrefs = [
-            a.href
-            for a in facts.anchors
-            if is_probeable_wiki_href(a.href)
+            a.href for a in facts.anchors if is_probeable_href(a.href)
         ]
         if probeable_hrefs:
             probes = await run_sync(
