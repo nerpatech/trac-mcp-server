@@ -9,6 +9,15 @@ render.
 
 from .checks import build_warnings
 from .facts import Anchor, CodeBlock, PreviewFacts, extract_facts
+from .gate import (
+    ADVISORY_CODES,
+    BLOCKING_CODES,
+    classify,
+    corrective_action,
+    format_refusal,
+    is_blocking,
+    suggestion_for,
+)
 from .live import (
     RenderCheckError,
     RenderedSection,
@@ -24,6 +33,13 @@ __all__ = [
     "PreviewFacts",
     "extract_facts",
     "build_warnings",
+    "ADVISORY_CODES",
+    "BLOCKING_CODES",
+    "classify",
+    "corrective_action",
+    "format_refusal",
+    "is_blocking",
+    "suggestion_for",
     "build_verify_warnings",
     "RenderedSection",
     "RenderCheckError",

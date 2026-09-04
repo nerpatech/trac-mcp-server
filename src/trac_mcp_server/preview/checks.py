@@ -61,6 +61,15 @@ _MARKDOWN_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
 _MARKDOWN_FENCE_RE = re.compile(r"```")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
 
+# The same shape with its halves named, for the fix suggestion (ticket
+# #64 section 5). Kept separate from `_MARKDOWN_LINK_RE` rather than
+# adding groups to it: that one is used with `.search` against a whole
+# render and its job is detection, this one is used with `.fullmatch`
+# against a single already-matched token and its job is rewriting.
+_MARKDOWN_LINK_PARTS_RE = re.compile(
+    r"\[(?P<label>[^\]\n]+)\]\((?P<target>[^)\n]+)\)"
+)
+
 # A `prefix:#N` token -- the only shape that distinguishes an unconfigured
 # InterTrac ticket prefix (row 16, must warn) from an ordinary colon-shaped
 # token that happens to produce no anchor (row 10, must stay silent). See
@@ -211,8 +220,16 @@ def _check_link_ref_in_code_span(facts: PreviewFacts) -> list[dict]:
         if is_realm_form or is_short_link:
             warnings.append(
                 _warning(
+                    # `warning`, not `error`, since ticket #64: severity
+                    # is now the blocking column, and #64 section 4 puts
+                    # this code in the advisory one. Its legitimate
+                    # population is a page documenting link syntax --
+                    # measured on `Reference/trac/InterTrac`, which
+                    # returns 8 of these on entirely correct content
+                    # (see `_PRAGMA_RE`). Refusing that write is worse
+                    # than reporting it.
                     "link_ref_in_code_span",
-                    "error",
+                    "warning",
                     "A link-shaped reference is backticked, so it "
                     "renders as inert text instead of a link.",
                     {"code_span": span},
@@ -661,6 +678,14 @@ def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
         # the swallowed tail -- the same `token` value the pre-#70
         # implementation reported, so nothing downstream changes shape.
         token = text[: -len(tail)] if text.endswith(tail) else text
+        evidence: dict[str, Any] = {
+            "token": token,
+            "resolved_as": text,
+            "href": anchor.href,
+        }
+        suggestion = _bracket_form_for_captured_token(token, tail)
+        if suggestion is not None:
+            evidence["suggestion"] = suggestion
         warnings.append(
             _warning(
                 "intertrac_target_captured_punctuation",
@@ -668,15 +693,39 @@ def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
                 f"'{token}' rendered as a link, but Trac captured "
                 f"trailing text into the target: it dispatches on "
                 f"'{text}', not the reference you wrote. The prefix is "
-                "fine; the link is dead.",
-                {
-                    "token": token,
-                    "resolved_as": text,
-                    "href": anchor.href,
-                },
+                "fine; the link is dead. Rephrasing so the reference "
+                "ends the clause avoids the capture entirely.",
+                evidence,
             )
         )
     return warnings
+
+
+def _bracket_form_for_captured_token(
+    token: str, tail: str
+) -> str | None:
+    """The bracket form that stops Trac swallowing `tail` into the
+    target, or None when the token is not the expected shape.
+
+    `auto_pm:#87's` becomes `[auto_pm:#87 #87]'s`: the bracket form
+    from auto_pm:wiki:Rules/trac/PreferInterTracLinks's decision table
+    ends the target at the space, so the possessive stays outside it.
+    The label is the token's own suffix (`#87`), which keeps the
+    rendered text as close to what the author typed as the fix allows.
+
+    **Verified against the live daemon before being emitted as advice**
+    (2026-09-04): the defect line reports
+    `intertrac_target_captured_punctuation` and this exact replacement
+    renders silent, with a live anchor. A suggestion that had never
+    been rendered would be the same guess the check already refuses to
+    make about a diagnosis.
+    """
+    if ":" not in token or not tail:
+        return None
+    label = token.split(":", 1)[1]
+    if not label:
+        return None
+    return f"[{token} {label}]{tail}"
 
 
 def _captured_punctuation_anchor(raw: str, anchors) -> Any | None:
@@ -899,18 +948,55 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
     ):
         match = pattern.search(facts.prose_text)
         if match:
+            evidence: dict[str, Any] = {"matched": match.group(0)}
+            suggestion = _bracket_form_for_markdown_link(match.group(0))
+            if suggestion is not None:
+                evidence["suggestion"] = suggestion
             warnings.append(
                 _warning(
                     "literal_markup_in_render",
-                    "warning",
+                    # `error`, not `warning`, since ticket #64:
+                    # section 4's table puts this in the blocking
+                    # column and the code did not agree. Markup that
+                    # did not convert is provable breakage -- the
+                    # reader sees punctuation where a link should be.
+                    "error",
                     f"{label} syntax ('{match.group(0)}') appears "
                     "as literal text in the rendered page instead "
                     "of being rendered -- it did not convert "
                     "cleanly.",
-                    {"matched": match.group(0)},
+                    evidence,
                 )
             )
     return warnings
+
+
+def _bracket_form_for_markdown_link(matched: str) -> str | None:
+    """`[label](target)` rewritten as TracWiki's `[target label]`, or
+    None when the match is not a Markdown link (ticket #64 section 5).
+
+    The highest-value suggestion in the suite, because this shape is
+    the one auto_pm:wiki:Rules/trac/PreferInterTracLinks calls out as
+    rendering *three* wrong things from one reference: `[label]` becomes
+    a dead LOCAL wiki link, the parenthesised target auto-links on its
+    own, and the brackets survive as visible punctuation. That rule
+    names the pair of codes it produces -- `literal_markup_in_render`
+    plus `missing_local_target` -- so an author who fixes this one
+    finding clears both.
+
+    Emitting the corrected string rather than a description is #64
+    section 5's point: #59 comment 1 is a check that reported real
+    breakage with the wrong diagnosis, and a suggestion showing the
+    corrected text cannot mislead that way.
+    """
+    match = _MARKDOWN_LINK_PARTS_RE.fullmatch(matched)
+    if not match:
+        return None
+    label = match.group("label").strip()
+    target = match.group("target").strip()
+    if not label or not target:
+        return None
+    return f"[{target} {label}]"
 
 
 def _check_target_probes(
@@ -1006,7 +1092,17 @@ def _check_target_probes(
         warnings.append(
             _warning(
                 "target_check_capped",
-                "info",
+                # `error`, not `info`, since ticket #64 ruling 2 --
+                # which confirmed what the docstring above already
+                # argued. This is the only one of the three that the
+                # AUTHOR can act on, and letting it pass would mean a
+                # link-dense document reports no errors while part of
+                # it was never looked at: "no errors" degrading from
+                # "nothing was found" to "this was certified clean",
+                # which is the exact failure #64 section 3 refuses to
+                # ship. Measured population on real content is zero
+                # since #80 raised the cap to 50.
+                "error",
                 f"{len(set(capped))} cross-instance target(s) beyond "
                 "the probe cap and not checked -- not verified, not "
                 "necessarily clean. Raise target_cap, or split the "

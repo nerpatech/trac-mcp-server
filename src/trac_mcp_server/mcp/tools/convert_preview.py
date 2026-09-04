@@ -15,6 +15,7 @@ from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from ...preview.checks import build_warnings
 from ...preview.facts import extract_facts
+from ...preview.gate import suggestion_for
 from ...preview.targets import (
     DEFAULT_TARGET_CAP,
     SKIPPED,
@@ -174,7 +175,7 @@ async def _handle_convert_preview(
     rendered_html = await run_sync(client.wiki_to_html, tracwiki)
     facts = extract_facts(rendered_html)
 
-    probes: dict[str, str] = {}
+    probes: dict[str, dict] = {}
     if check_targets:
         probeable_hrefs = [
             a.href for a in facts.anchors if is_probeable_href(a.href)
@@ -242,6 +243,14 @@ async def _handle_convert_preview(
             response_lines.append(
                 f"- [{w['severity']}] {w['code']}: {w['message']}"
             )
+            # Ticket #64 section 5: show the corrected string where a
+            # check has one. It was already in `evidence`, where only a
+            # caller that thought to look would find it -- and the whole
+            # argument for suggestions is that the author does NOT think
+            # to look up a separate thing.
+            suggestion = suggestion_for(w)
+            if suggestion:
+                response_lines.append(f"  Write instead: {suggestion}")
     else:
         response_lines.append("No warnings.")
     response_lines.append("")
