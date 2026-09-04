@@ -69,6 +69,14 @@ class TracConfig(BaseModel):
         le=300,
         description="Read timeout in seconds for XML-RPC requests (5-300)",
     )
+    write_gate: bool = Field(
+        default=True,
+        description=(
+            "Run the link checks on every write and refuse a write "
+            "carrying a broken link (ticket #64). Emergency off switch "
+            "for the shared daemon; leave on."
+        ),
+    )
 
     model_config = {"frozen": True}
 

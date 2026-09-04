@@ -39,6 +39,12 @@ class Config:
     max_parallel_requests: int = 5
     max_batch_size: int = 500
     rpc_timeout: int = 60
+    # Ticket #64 ruling 5. The write-time link gate can refuse writes,
+    # and it runs on a daemon every project on this host writes
+    # through, so a gate misbehaving in production needs an answer
+    # cheaper than a revert and a redeploy. Default on: this exists to
+    # be switched off in an emergency, not to be opted into.
+    write_gate: bool = True
 
 
 def validate_config(config: Config) -> None:
@@ -270,6 +276,23 @@ def load_config(
     else:
         final_rpc_timeout = 60
 
+    # Off only on an explicit falsey value, so a typo'd or empty
+    # TRAC_WRITE_GATE leaves the gate ON. A kill switch that fails open
+    # on a malformed value disables the check exactly when nobody meant
+    # to, and silently.
+    write_gate_raw = os.getenv("TRAC_WRITE_GATE")
+    if write_gate_raw is not None:
+        final_write_gate = write_gate_raw.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+    elif "write_gate" in fb:
+        final_write_gate = bool(fb["write_gate"])
+    else:
+        final_write_gate = True
+
     config = Config(
         trac_url=trac_url,
         username=trac_username,
@@ -279,6 +302,7 @@ def load_config(
         max_parallel_requests=final_max_parallel,
         max_batch_size=final_max_batch,
         rpc_timeout=final_rpc_timeout,
+        write_gate=final_write_gate,
     )
 
     validate_config(config)

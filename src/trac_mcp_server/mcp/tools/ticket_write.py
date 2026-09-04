@@ -21,6 +21,7 @@ from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -80,6 +81,7 @@ def _build_ticket_create_tool() -> types.Tool:
                     "type": "string",
                     "description": "Keywords/tags",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["summary", "description"],
         },
@@ -159,6 +161,7 @@ TICKET_WRITE_TOOLS = [
                     "type": "string",
                     "description": "Keywords/tags",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "reply_to": {
                     "type": "integer",
                     "description": "Comment number to reply to. Prepends Trac's standard \"Replying to [comment:N author]:\" quote block (quoting that comment's own text) before the new comment. Requires 'comment' to also be provided.",
@@ -224,6 +227,12 @@ async def _handle_create(
     # (#69) -- the author's bytes are the bytes that land.
     description_tracwiki = description
 
+    refusal, gate_lines = await gate_or_refuse(
+        client, {"description": description_tracwiki}, args
+    )
+    if refusal is not None:
+        return refusal
+
     # Build attributes (hardcoded default for standalone server)
     ticket_type = args.get("ticket_type", DEFAULT_TICKET_TYPE)
     attributes: dict[str, Any] = {}
@@ -277,7 +286,10 @@ async def _handle_create(
         content=[
             types.TextContent(
                 type="text",
-                text=f"Created ticket #{ticket_id}: {summary}",
+                text="\n".join(
+                    [f"Created ticket #{ticket_id}: {summary}"]
+                    + gate_lines
+                ),
             )
         ]
     )
@@ -442,6 +454,27 @@ async def _handle_update(
                     f"action."
                 )
 
+    # The link gate (ticket #64), on the author's OWN text.
+    #
+    # `comment` may by now carry a quoted copy of an earlier comment,
+    # prepended by reply_to. `args["comment"]` is what this author
+    # actually wrote, and that is what is checked: refusing a reply
+    # because the comment being QUOTED contains a broken link would
+    # charge an author for text they did not write and cannot edit --
+    # this host has no comment edit at all (#38). Ruling 4 says block on
+    # everything in the submitted content; the quoted block is not
+    # content this write is submitting, it is content it is repeating.
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {
+            "description": attributes.get("description"),
+            "comment": args.get("comment", ""),
+        },
+        args,
+    )
+    if refusal is not None:
+        return refusal
+
     # Update ticket. base_ts, when supplied, is forwarded verbatim as
     # Trac's optimistic-lock token -- see TracClient.update_ticket (#50).
     base_ts = args.get("base_ts")
@@ -487,7 +520,10 @@ async def _handle_update(
         content=[
             types.TextContent(
                 type="text",
-                text=f"Updated ticket #{ticket_id} ({change_summary})",
+                text="\n".join(
+                    [f"Updated ticket #{ticket_id} ({change_summary})"]
+                    + gate_lines
+                ),
             )
         ]
     )
