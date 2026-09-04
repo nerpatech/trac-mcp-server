@@ -292,7 +292,6 @@ class TestConvertPreviewHandler(unittest.TestCase):
         self.assertEqual(result.structuredContent["warnings"], [])
 
 
-@pytest.mark.live
 def _twelve_distinct_dead_targets() -> str:
     """Twelve DISTINCT dead cross-instance targets, one per line.
 
@@ -309,6 +308,7 @@ def _twelve_distinct_dead_targets() -> str:
     )
 
 
+@pytest.mark.live
 class TestConvertPreviewLive:
     """Re-renders the acceptance-suite rows against the real daemon, so
     the checked-in fixtures can't silently drift from what Trac actually
