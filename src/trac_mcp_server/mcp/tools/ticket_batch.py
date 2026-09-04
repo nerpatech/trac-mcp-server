@@ -14,10 +14,16 @@ import mcp.types as types
 
 from ...core.async_utils import gather_limited, run_sync_limited
 from ...core.client import TracClient
+from ...preview.targets import DEFAULT_TARGET_CAP
 from .constants import DEFAULT_TICKET_TYPE
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
+from .write_gate import (
+    TARGET_CAP_SCHEMA,
+    check_write,
+    gate_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,7 @@ TICKET_BATCH_TOOLS = [
                     },
                     "description": "List of ticket objects to create",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["tickets"],
         },
@@ -115,6 +122,7 @@ TICKET_BATCH_TOOLS = [
                     },
                     "description": "List of update objects with ticket_id and fields to change",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["updates"],
         },
@@ -164,6 +172,26 @@ async def _handle_batch_create(
                 "summary": summary,
                 "error": "description is required",
             }
+
+        # The link gate (ticket #64), PER ITEM rather than per call.
+        # A refused item is reported as that item's error and the rest
+        # are still written -- these tools already report per-item
+        # failures, and a batch is not all-or-nothing today. Making one
+        # broken link refuse nineteen good tickets would be a new
+        # behaviour smuggled in under a link check.
+        if gate_enabled(client):
+            outcome = await check_write(
+                client,
+                description,
+                field="description",
+                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+            )
+            if outcome.refused:
+                return {
+                    "index": index,
+                    "summary": summary,
+                    "error": outcome.refusal_text,
+                }
 
         try:
             # Stored as written -- no conversion step (#69).
@@ -329,6 +357,20 @@ async def _handle_batch_update(
                 "id": update_data.get("ticket_id", 0),
                 "error": "ticket_id is required",
             }
+
+        # Per item, for the reason spelled out in _create_one.
+        if gate_enabled(client):
+            outcome = await check_write(
+                client,
+                update_data.get("comment", ""),
+                field="comment",
+                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+            )
+            if outcome.refused:
+                return {
+                    "id": ticket_id,
+                    "error": outcome.refusal_text,
+                }
 
         try:
             # Stored as written -- no conversion step (#69).

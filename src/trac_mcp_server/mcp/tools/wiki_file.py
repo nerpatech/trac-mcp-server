@@ -28,6 +28,7 @@ from ...file_handler import (
 )
 from .errors import build_error_response
 from .registry import ToolSpec
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ WIKI_FILE_TOOLS = [
                     "default": "auto",
                     "description": "Source format override. Default auto-detects from extension then content",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "strip_frontmatter": {
                     "type": "boolean",
                     "default": True,
@@ -270,6 +272,22 @@ async def _handle_push(
         # Already TracWiki — pass through
         wiki_content = content
 
+    # The link gate (ticket #64), on the bytes that will actually land
+    # rather than on the file as read: this is the one write path that
+    # still converts (#69 left the file tools converting because they
+    # have a filename to go on), so the Markdown a caller wrote and the
+    # TracWiki Trac will render are different documents. Checking the
+    # input would check something nobody stores.
+    #
+    # Joins the #68 refusal a few lines above rather than replacing it:
+    # that one catches indentation the CONVERTER strips, which is
+    # invisible in a render and so unreachable from `facts`.
+    refusal, gate_lines = await gate_or_refuse(
+        client, {"content": wiki_content}, args
+    )
+    if refusal is not None:
+        return refusal
+
     # Create or update page (client already provided)
 
     try:
@@ -326,6 +344,7 @@ async def _handle_push(
         text_parts.append("Conversion warnings:")
         for w in warnings:
             text_parts.append(f"- {w}")
+    text_parts.extend(gate_lines)
 
     structured = {
         "page_name": page_name,

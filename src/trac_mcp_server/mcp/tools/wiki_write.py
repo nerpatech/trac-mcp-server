@@ -16,6 +16,7 @@ from ...core.client import TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ WIKI_WRITE_TOOLS = [
                     "type": "string",
                     "description": "Page content (required). TracWiki, stored verbatim.",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "comment": {
                     "type": "string",
                     "description": "Change comment (optional)",
@@ -75,6 +77,7 @@ WIKI_WRITE_TOOLS = [
                     "description": "Current page version for optimistic locking (required)",
                     "minimum": 1,
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "comment": {
                     "type": "string",
                     "description": "Change comment (optional)",
@@ -158,6 +161,17 @@ async def _handle_create(
             # Different error - re-raise
             raise
 
+    # The link gate (ticket #64) AFTER the existence check: that check
+    # is one call the handler makes anyway, while the gate costs a
+    # render plus probes. A create aimed at a page that already exists
+    # was never going to land, and "already_exists" is the error its
+    # caller can act on.
+    refusal, gate_lines = await gate_or_refuse(
+        client, {"content": wiki_content}, args
+    )
+    if refusal is not None:
+        return refusal
+
     # Create the page (version=None creates new page)
     result = await run_sync(
         client.put_wiki_page, page_name, wiki_content, comment, None
@@ -170,6 +184,7 @@ async def _handle_create(
     response_lines = [
         f"Created wiki page '{page_name}' (version {new_version})"
     ]
+    response_lines.extend(gate_lines)
 
     return types.CallToolResult(
         content=[
@@ -216,6 +231,12 @@ async def _handle_update(
     # Stored as written -- see the matching comment in _handle_create.
     wiki_content = content
 
+    refusal, gate_lines = await gate_or_refuse(
+        client, {"content": wiki_content}, args
+    )
+    if refusal is not None:
+        return refusal
+
     # Update the page with version check
     try:
         result = await run_sync(
@@ -260,6 +281,7 @@ async def _handle_update(
     response_lines = [
         f"Updated wiki page '{page_name}' to version {new_version}"
     ]
+    response_lines.extend(gate_lines)
 
     return types.CallToolResult(
         content=[
