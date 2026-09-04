@@ -1424,14 +1424,40 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 #   - TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD env vars pointing at a
 #     real Trac instance
 #   - Optional: TRAC_TEST_WIKI_PAGE env var (default:
-#     "TracConvertLiveTest") — the test writes to this page, so pick
-#     a scratch page the test user has WIKI_MODIFY on
+#     "TracConvertLiveTest") — the test OVERWRITES this page with a
+#     fixed seed body on every run, creating it if absent, so point
+#     it only at a scratch page the test user has WIKI_MODIFY on.
+#     Never point it at a page whose content matters.
 #   - Optional: TRAC_INSECURE=1 to disable SSL verification for
 #     self-signed test servers
 #
 # Mirrors the convention used by
 # tests/test_mcp/tools/test_wiki_attachment.py:578-644.
 # ---------------------------------------------------------------------------
+
+
+# Body the scratch page is reset to at the start of every live run.
+# Authored as Markdown because it is written through --from md.
+_LIVE_SEED_BODY = (
+    "Scratch page for `trac-convert`'s live round-trip test in\n"
+    "`tests/test_cli_convert_trac.py`.\n"
+    "\n"
+    "Everything below this line is machine-appended by that test\n"
+    "and carries no meaning. The page is reset to this header at\n"
+    "the start of every run.\n"
+    "\n"
+    "Created for auto_pm:#93.\n"
+)
+
+
+def _main_with_stdin(argv, text):
+    """Run main(argv) with `text` on stdin, restoring stdin after."""
+    original_stdin = sys.stdin
+    sys.stdin = io.StringIO(text)
+    try:
+        return main(argv)
+    finally:
+        sys.stdin = original_stdin
 
 
 @pytest.mark.live
@@ -1445,17 +1471,23 @@ def test_live_round_trip_check_from_edit_to(capsys):
 
     Sequence:
       1. --check-trac → exit 0, stdout mentions "OK (Trac API version".
-      2. --from-wiki <page> --to md → exit 0, MD content captured.
-      3. Append a timestamped marker to the MD (proves edit fidelity).
-      4. --to-wiki <page> --from md with edited MD on stdin →
+      2. --to-wiki <page> with a fixed seed body → exit 0. Creates
+         the page when absent and resets it when present, so the
+         test is self-contained and the page cannot grow run over
+         run.
+      3. --from-wiki <page> --to md → exit 0, MD content captured.
+      4. Append a timestamped marker to the MD (proves edit fidelity).
+      5. --to-wiki <page> --from md with edited MD on stdin →
          exit 0, verbose stderr line mentions the page name.
-      5. --from-wiki <page> --to md (re-read) → exit 0, MD contains
-         the marker written in step 4 (proves the round-trip actually
+      6. --from-wiki <page> --to md (re-read) → exit 0, MD contains
+         the marker written in step 5 (proves the round-trip actually
          persisted).
 
-    Does NOT delete the wiki page or reset its state — Trac accumulates
-    versions, which matches test_wiki_attachment.py's convention (only
-    attachments are cleaned; pages persist). Ops can prune manually.
+    Seeds the page rather than deleting it. Trac keeps every version,
+    so the page's history still grows one version per run, but the
+    rendered page stays at the seed body plus a single marker. This
+    departs from test_wiki_attachment.py's "pages persist, ops can
+    prune manually" convention, which nothing ever pruned — see #84.
 
     IMPORTANT: The test does NOT unset the real env vars. It reads
     them via os.environ.get and relies on the actual live Trac.
@@ -1483,32 +1515,35 @@ def test_live_round_trip_check_from_edit_to(capsys):
     captured = capsys.readouterr()
     assert "OK (Trac API version" in captured.out
 
-    # Step 2: --from-wiki → md on stdout
-    rc = main(["--from-wiki", page_name, "--to", "md"])
-    assert rc == EXIT_OK, (
-        f"live --from-wiki {page_name} should succeed"
-        f" (does the page exist?)"
+    # Step 2: seed the scratch page to a known body. Creates it if
+    #   it does not exist, so the test needs no manual fixture, and
+    #   resets it if it does, so markers cannot accumulate.
+    rc = _main_with_stdin(
+        ["--to-wiki", page_name, "--from", "md"], _LIVE_SEED_BODY
     )
+    assert rc == EXIT_OK, (
+        f"live seed of {page_name} should succeed"
+        f" (does the test user have WIKI_MODIFY?)"
+    )
+    capsys.readouterr()
+
+    # Step 3: --from-wiki → md on stdout
+    rc = main(["--from-wiki", page_name, "--to", "md"])
+    assert rc == EXIT_OK, f"live --from-wiki {page_name} should succeed"
     md_original = capsys.readouterr().out
     assert md_original, (
         "live --from-wiki should return non-empty content"
     )
 
-    # Step 3: local edit — append a timestamped marker.
+    # Step 4: local edit — append a timestamped marker.
     marker = f"\n\nLive round-trip marker {time.time():.6f}\n"
     md_edited = md_original + marker
 
-    # Step 4: --to-wiki with edited MD on stdin, verbose to check
+    # Step 5: --to-wiki with edited MD on stdin, verbose to check
     #   "info: wrote" line surfaces on stderr.
-    monkeypatch_stdin_via_replace = md_edited
-    import io as _io
-
-    original_stdin = sys.stdin
-    sys.stdin = _io.StringIO(monkeypatch_stdin_via_replace)
-    try:
-        rc = main(["--to-wiki", page_name, "--from", "md", "-v"])
-    finally:
-        sys.stdin = original_stdin
+    rc = _main_with_stdin(
+        ["--to-wiki", page_name, "--from", "md", "-v"], md_edited
+    )
     assert rc == EXIT_OK, (
         f"live --to-wiki {page_name} should succeed"
         f" (does the test user have WIKI_MODIFY?)"
@@ -1517,10 +1552,10 @@ def test_live_round_trip_check_from_edit_to(capsys):
     assert "info: wrote" in captured.err
     assert page_name in captured.err
 
-    # Step 5: re-fetch and verify the marker landed.
+    # Step 6: re-fetch and verify the marker landed.
     rc = main(["--from-wiki", page_name, "--to", "md"])
     assert rc == EXIT_OK
     md_reread = capsys.readouterr().out
     assert marker.strip() in md_reread, (
-        "marker written in step 4 must appear in the re-read page"
+        "marker written in step 5 must appear in the re-read page"
     )
