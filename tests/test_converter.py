@@ -629,10 +629,13 @@ plain code
         fully, with no unresolved \\x00CODEn\\x00 sentinel surviving into
         the output (ticket #51).
 
-        The outer fence must be longer than the inner one -- CommonMark
-        closes a fence on the first line with at least as many backticks
-        as the opener, so an equal-length nested fence would terminate
-        the outer block early and swallow everything after it.
+        Ticket #72 changed what the Markdown looks like. The inner block
+        used to be converted in its own right, into a fence the outer one
+        had to be widened past; it is now carried verbatim as what it
+        actually is -- literal text inside a block Trac renders verbatim
+        -- so one plain fence holds the whole thing. The guarantee #51
+        states is unchanged and asserted below: both bodies survive with
+        no sentinel leak, and no fence terminates another early.
         """
         tracwiki = """{{{
 {{{#!comment
@@ -644,7 +647,7 @@ AGENT: do the thing
         self.assertIn("AGENT: do the thing", result.text)
         self.assertEqual(
             result.text,
-            "````\n```comment\nAGENT: do the thing\n```\n````",
+            "```\n{{{#!comment\nAGENT: do the thing\n}}}\n```",
         )
 
     def test_nested_code_block_round_trip(self):
@@ -2771,6 +2774,157 @@ class TestReadPathConverterTicketRegressions(unittest.TestCase):
         self.assertEqual(quoted.text, "`{{{#!td}}}`")
         self.assertNotIn(FALLBACK_FENCE_INFO, quoted.text)
         self.assertFalse(quoted.warnings)
+
+
+class TestTicket72NestedBlockExtent(unittest.TestCase):
+    """A ``{{{ }}}`` block nested inside another (ticket #72).
+
+    The lazy ``.*?`` in the old code-block regexes stopped at the *first*
+    ``}}}``, which is the inner block's, so the outer block's extent was
+    wrong from the start: the Markdown fence closed before the content did
+    and the outer ``}}}`` was left outside it, reading as body text.  The
+    round trip recovered the content but gained a blank line where that
+    stray brace had become its own paragraph, which cost the zero-diff pass
+    criterion the whole-body replacement procedure on
+    ``Rules/trac/DeclareSourceFormat`` depends on.
+
+    A nested block is *content*: Trac renders the outer block verbatim, so
+    the inner delimiters are literal text and belong inside the fence
+    unchanged.  That is the same rule ``_fallback_processor_blocks`` already
+    applies ("only a block at top level qualifies", ticket #51).
+
+    Both halves are asserted.  The round trip alone would pass a fix that
+    merely papered over the malformed intermediate, so the Markdown is
+    pinned exactly -- that is the only place the misplaced brace is visible.
+    """
+
+    # (label, tracwiki source, expected Markdown)
+    NESTED = [
+        (
+            "#!lang inside #!lang",
+            "{{{#!python\nouter\n{{{#!sh\ninner\n}}}\nafter\n}}}",
+            "```python\nouter\n{{{#!sh\ninner\n}}}\nafter\n```",
+        ),
+        (
+            "plain inside #!lang",
+            "{{{#!python\nouter\n{{{\ninner\n}}}\nafter\n}}}",
+            "```python\nouter\n{{{\ninner\n}}}\nafter\n```",
+        ),
+        (
+            "plain inside plain",
+            "{{{\nouter\n{{{\ninner\n}}}\nafter\n}}}",
+            "```\nouter\n{{{\ninner\n}}}\nafter\n```",
+        ),
+        (
+            "#!lang inside plain",
+            "{{{\n{{{#!comment\nAGENT: do the thing\n}}}\n}}}",
+            "```\n{{{#!comment\nAGENT: do the thing\n}}}\n```",
+        ),
+    ]
+
+    def test_inner_delimiters_stay_inside_the_fence(self):
+        """The malformed intermediate, asserted directly."""
+        for label, src, expected_md in self.NESTED:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertEqual(md, expected_md)
+
+    def test_nothing_follows_the_closing_fence(self):
+        """The symptom in isolation: a brace outside the code block.
+
+        Stated separately from the exact-Markdown assertion because this is
+        the property that actually broke -- an expected string can be
+        updated to match whatever the converter emits, a structural claim
+        about where the block ends cannot.
+        """
+        for label, src, _ in self.NESTED:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                opener = md.split("\n", 1)[0]
+                fence = "`" * (len(opener) - len(opener.lstrip("`")))
+                self.assertTrue(md.endswith("\n" + fence), md)
+                self.assertEqual(md.count("\n" + fence), 1, md)
+
+    def test_round_trip_is_byte_identical(self):
+        for label, src, _ in self.NESTED:
+            with self.subTest(label):
+                md = tracwiki_to_markdown(src).text
+                self.assertNotIn("\x00", md)
+                self.assertEqual(markdown_to_tracwiki(md), src)
+
+    def test_no_fallback_fires_on_a_nested_block(self):
+        """A nested `#!comment` is quoted source, not a construct (#51)."""
+        for label, src, _ in self.NESTED:
+            with self.subTest(label):
+                result = tracwiki_to_markdown(src)
+                self.assertNotIn(FALLBACK_FENCE_INFO, result.text)
+                self.assertEqual(result.warnings, [])
+
+    def test_three_levels_deep(self):
+        """Depth is counted, not guessed: only the outermost block converts."""
+        src = "{{{\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n}}}"
+        md = tracwiki_to_markdown(src).text
+        self.assertEqual(
+            md, "```\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n```"
+        )
+        self.assertEqual(markdown_to_tracwiki(md), src)
+
+    def test_an_indented_closing_brace_closes_its_own_block(self):
+        """The other half of "the extent is wrong from the start".
+
+        Trac lets the closing ``}}}`` carry indentation; the old regex
+        demanded a bare ``\\n}}}``, and rather than decline the block it
+        went looking for the next one *anywhere in the document* and
+        swallowed everything up to it.  Measured on master with this very
+        fixture: one fence opened at ``[components]`` and did not close
+        until the second block, taking the prose and the second block's
+        opener into the code with it.
+
+        Found by sweeping the two live stores rather than by reasoning:
+        the stock ``TracReports`` and ``TracInterfaceCustomization`` pages
+        both indent a processor block, and both had ~80-line runs
+        swallowed this way.
+
+        The round trip normalises rather than preserving here -- the
+        block loses its own indent, and gains ticket #53's blank line
+        before the following paragraph -- so this asserts the Markdown,
+        where the swallowing was.
+        """
+        src = (
+            "  {{{#!ini\n"
+            "  [components]\n"
+            "  }}}\n"
+            "Prose between the blocks.\n"
+            "{{{\nsecond\n}}}"
+        )
+        md = tracwiki_to_markdown(src).text
+        self.assertEqual(
+            md,
+            "  ```ini\n"
+            "  [components]\n"
+            "```\n"
+            "Prose between the blocks.\n"
+            "```\nsecond\n```",
+        )
+
+    def test_backticks_in_a_nested_body_still_widen_the_fence(self):
+        """`_fence_for` still sizes the fence against the *whole* body.
+
+        The body it measures is now the outer block's true extent, so a
+        backtick run inside the nested block counts -- the fence collision
+        ticket #51 fixed cannot come back through the wider capture.
+
+        Read leg only.  This row does not round-trip, and not because of
+        anything here: `markdown_to_tracwiki` rewrites the quoted
+        ```` ``` ```` fence back into a `{{{ }}}` block on the way out.
+        That is ticket #88, measured as identical before and after this
+        fix and reproducing with no nesting at all.
+        """
+        src = "{{{\nouter\n{{{\n```\ninner\n```\n}}}\n}}}"
+        md = tracwiki_to_markdown(src).text
+        self.assertEqual(
+            md, "````\nouter\n{{{\n```\ninner\n```\n}}}\n````"
+        )
 
 
 class TestIsLinkTarget(unittest.TestCase):

@@ -393,17 +393,15 @@ class TestUnrepresentableFallback(unittest.TestCase):
                 # author wrote.
                 self.assertNotIn("||", md)
                 self.assertIn(inner.split("#!")[1], md)
-                # Round-tripped content is preserved.  Asserted on the
-                # non-blank lines rather than byte-for-byte, because nesting
-                # a {{{ }}} block inside another gains a blank line before
-                # the outer close -- measured as PRE-EXISTING on master for
-                # every nested block, processor cell or not, so it is a
-                # separate defect and not this ticket's to fix or to mask.
+                # Round-tripped content is preserved, byte for byte.  This
+                # was asserted on the non-blank lines only until ticket #72:
+                # nesting a {{{ }}} block inside another gained a blank line
+                # before the outer close, because the outer fence closed at
+                # the INNER }}} and the outer one became a paragraph of its
+                # own.  Fixing the extent removed the blank line with it, so
+                # the assertion no longer has to look away from the bytes.
                 back = markdown_to_tracwiki(md)
-                self.assertEqual(
-                    [ln for ln in back.split("\n") if ln.strip()],
-                    [ln for ln in src.split("\n") if ln.strip()],
-                )
+                self.assertEqual(back, src)
 
     def test_write_leg_rejects_a_destructive_footnote(self):
         """Unrepresentable *Markdown* fails the call (ticket #63, option c).

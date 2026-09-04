@@ -221,12 +221,19 @@ def _restore_nested_fences(code: str) -> str:
     """Recursively convert literal backtick fences inside a code block's
     body back into TracWiki ``{{{ }}}`` blocks.
 
-    `tracwiki_to_markdown` emits a nested {{{ }}} block by widening the
-    *outer* fence so it never collides with the inner one it contains
+    `tracwiki_to_markdown` used to emit a nested {{{ }}} block by widening
+    the *outer* fence so it never collided with the inner one it contained
     (ticket #51's fix on the read side). On the way back, mistune hands
     that inner fence to `block_code` as inert literal text -- it never
-    becomes its own `block_code` call -- so it has to be recognized and
+    becomes its own `block_code` call -- so it had to be recognized and
     restored here instead of by the renderer's normal per-token dispatch.
+
+    Ticket #72 stopped the read leg emitting that shape: a nested block is
+    now carried verbatim, so a fence arriving inside a code body is one the
+    author wrote and quoted on purpose, and rewriting it is corruption
+    rather than restoration. That is ticket #88; this helper is kept for
+    now because Markdown produced by the pre-#72 read leg still relies on
+    it, and how much such content exists has not been measured.
     """
 
     def restore(m: re.Match[str]) -> str:
