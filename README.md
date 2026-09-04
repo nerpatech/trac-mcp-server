@@ -223,6 +223,26 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+### The two CI halves
+
+```bash
+./ci.sh        # lint + offline tests + dual-binary build. Hermetic:
+               # no credentials, no daemon, no network
+./ci-live.sh   # the same suite with --run-live, against a real Trac
+```
+
+`ci.sh` is what GitHub Actions runs, and it deliberately does **not** pass
+`--run-live`, so every `@pytest.mark.live` test is skipped there. Those tests
+are the only place this project exercises the real Trac substrate, so run
+`ci-live.sh` too before deploying a change to a shared daemon. It needs
+`TRAC_URL`, `TRAC_USERNAME` and `TRAC_PASSWORD` (see `.env.example`), and
+without them it exits non-zero without running pytest — *not run* must not be
+able to look like *passed*.
+
+`ci.sh` runs the offline suite with `TRAC_*` scrubbed from the environment,
+and `.env` is loaded only under `--run-live`. An offline test that needs
+credentials therefore fails locally rather than only on Actions.
+
 ### Project Structure
 
 ```
