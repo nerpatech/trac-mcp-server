@@ -923,9 +923,28 @@ def _check_target_probes(
 
     Both realms since ticket #82: a cross-instance TICKET reference used
     to be invisible here, because it was never probeable and so could not
-    reach either branch below. A ticket-realm target whose instance could
-    not be confirmed reachable arrives as ERROR, which lands in
-    ``target_check_skipped`` -- uncertainty, never a broken link.
+    reach any branch below. A ticket-realm target whose instance could
+    not be confirmed reachable arrives as ERROR -- uncertainty, never a
+    broken link.
+
+    **Three codes, one per reason, since ticket #83.** They used to be
+    one ``target_check_skipped``, and the three want different answers
+    from ticket #64's blocking gate, so no single severity is right for
+    the merged code:
+
+    ``target_check_disabled``
+        The caller passed ``check_targets=false``. Nobody asked for this
+        check; that is the caller's deliberate choice, not a finding.
+    ``target_check_capped``
+        More probeable targets than the cap. The DOCUMENT is denser than
+        the gate handles, and the author can act -- raise ``target_cap``
+        or split the document -- so this is the candidate for #64's
+        error column.
+    ``target_check_failed``
+        The probe could not reach the instance. The CHECKER could not do
+        its job, the author can do nothing about it, and blocking here
+        would stop all writes while a remote instance is down and charge
+        the author for an outage they did not cause. Stays advisory.
     """
     probeable_hrefs: list[str] = [
         a.href
@@ -940,7 +959,7 @@ def _check_target_probes(
     if not check_targets:
         warnings.append(
             _warning(
-                "target_check_skipped",
+                "target_check_disabled",
                 "info",
                 f"{len(set(probeable_hrefs))} cross-instance target(s) "
                 "found but not checked (check_targets=false).",
@@ -949,7 +968,8 @@ def _check_target_probes(
         )
         return warnings
 
-    skipped_or_failed: list[str] = []
+    capped: list[str] = []
+    failed: list[str] = []
     for anchor in facts.anchors:
         if not anchor.href or not is_probeable_href(anchor.href):
             continue
@@ -974,19 +994,37 @@ def _check_target_probes(
                     {"href": anchor.href, "text": anchor.text},
                 )
             )
-        elif status in (SKIPPED, ERROR) or status is None:
-            skipped_or_failed.append(anchor.href)
+        elif status == SKIPPED:
+            capped.append(anchor.href)
+        elif status == ERROR or status is None:
+            # `None` is "no result at all" for a target that was
+            # supposed to be probed -- the checker's problem, like a
+            # failed fetch, and not something the author can act on.
+            failed.append(anchor.href)
 
-    if skipped_or_failed:
+    if capped:
         warnings.append(
             _warning(
-                "target_check_skipped",
+                "target_check_capped",
                 "info",
-                f"{len(set(skipped_or_failed))} cross-instance target(s) "
-                "could not be checked (capped, network-failed, or on an "
-                "instance that did not answer a liveness control) -- not "
-                "verified, not necessarily clean.",
-                {"hrefs": sorted(set(skipped_or_failed))},
+                f"{len(set(capped))} cross-instance target(s) beyond "
+                "the probe cap and not checked -- not verified, not "
+                "necessarily clean. Raise target_cap, or split the "
+                "document.",
+                {"hrefs": sorted(set(capped))},
+            )
+        )
+
+    if failed:
+        warnings.append(
+            _warning(
+                "target_check_failed",
+                "info",
+                f"{len(set(failed))} cross-instance target(s) could "
+                "not be reached (network failure, or the instance did "
+                "not answer a liveness control) -- not verified, not "
+                "necessarily clean.",
+                {"hrefs": sorted(set(failed))},
             )
         )
 
@@ -1034,7 +1072,8 @@ def build_warnings(
     Returns:
         List of warning dicts, each ``{code, severity, message,
         evidence}``. Empty list means clean input, not "not checked" --
-        pair with ``target_check_skipped`` for the latter.
+        pair with ``target_check_capped``/``target_check_failed``
+        for the latter.
 
         Includes ``literal_markup_in_render``, which reads ``facts``
         only and so applies to every caller, pre-write and post-write

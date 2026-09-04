@@ -100,7 +100,7 @@ CONVERT_PREVIEW_TOOLS = [
                         "(default: 50). The cap keeps the FIRST N in "
                         "document order, so anything beyond it -- the "
                         "END of the document -- is reported as "
-                        "target_check_skipped rather than checked. "
+                        "target_check_capped rather than checked. "
                         "Raise it only for a deliberate audit of an "
                         "unusually link-dense page; the default is "
                         "above anything measured in real content."

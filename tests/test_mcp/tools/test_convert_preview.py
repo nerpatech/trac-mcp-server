@@ -128,12 +128,12 @@ class TestConvertPreviewHandler(unittest.TestCase):
         )
         self.assertFalse(result.isError)
         # check_targets=False on a row with a probeable target still
-        # notes that skip (target_check_skipped) -- that is not itself a
+        # notes that (target_check_disabled) -- that is not itself a
         # defect warning, so it's the only thing expected here.
         codes = [
             w["code"] for w in result.structuredContent["warnings"]
         ]
-        self.assertEqual(codes, ["target_check_skipped"])
+        self.assertEqual(codes, ["target_check_disabled"])
         self.assertEqual(
             result.structuredContent["tracwiki"],
             MANIFEST["row01_intertrac_wiki"]["tracwiki"],
@@ -227,7 +227,7 @@ class TestConvertPreviewHandler(unittest.TestCase):
         codes = [
             w["code"] for w in result.structuredContent["warnings"]
         ]
-        self.assertIn("target_check_skipped", codes)
+        self.assertIn("target_check_disabled", codes)
         self.assertEqual(
             result.structuredContent["stats"]["targets_checked"], 0
         )
@@ -380,7 +380,7 @@ class TestConvertPreviewLive:
         targets and would have passed against the old cap of 10 as
         well. (Measured -- the first draft of this test did exactly
         that.) Distinct targets put the last two past the old cap, so
-        before this ticket they were reported `target_check_skipped`
+        before this ticket they were reported `target_check_capped`
         and never checked.
         """
         from trac_mcp_server.config_bootstrap import bootstrap_config
@@ -406,7 +406,8 @@ class TestConvertPreviewLive:
             w["code"] for w in result.structuredContent["warnings"]
         ]
         assert codes.count("missing_cross_instance_target") == 12, codes
-        assert "target_check_skipped" not in codes, codes
+        assert "target_check_capped" not in codes, codes
+        assert "target_check_failed" not in codes, codes
         assert (
             result.structuredContent["stats"]["targets_checked"] == 12
         )
@@ -444,7 +445,7 @@ class TestConvertPreviewLive:
         codes = [
             w["code"] for w in result.structuredContent["warnings"]
         ]
-        assert "target_check_skipped" in codes, codes
+        assert "target_check_capped" in codes, codes
         assert codes.count("missing_cross_instance_target") == 2, codes
         assert result.structuredContent["stats"]["targets_checked"] == 2
 
@@ -490,7 +491,8 @@ class TestConvertPreviewLive:
         warnings = result.structuredContent["warnings"]
         codes = [w["code"] for w in warnings]
         assert codes.count("missing_cross_instance_target") == 1, codes
-        assert "target_check_skipped" not in codes, codes
+        assert "target_check_capped" not in codes, codes
+        assert "target_check_failed" not in codes, codes
         dead = [
             w
             for w in warnings
@@ -537,7 +539,7 @@ class TestConvertPreviewLive:
         target chosen precisely because Trac answers 200 for it whether
         or not the page exists. If that ever stopped being true, every
         control would fail, every dead ticket would degrade to
-        `target_check_skipped`, and the check would go quietly dead --
+        `target_check_failed`, and the check would go quietly dead --
         indistinguishable from one that always passes, which is what
         `Rules/testing/SeededDefectFirst` is about.
 

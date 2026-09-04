@@ -395,7 +395,7 @@ def test_silent_rows_produce_no_warning(name):
     codes = [
         w["code"]
         for w in warnings
-        if w["code"] != "target_check_skipped"
+        if w["code"] != "target_check_disabled"
     ]
     assert codes == [], f"{name} should be silent, got {codes}"
 
@@ -534,7 +534,7 @@ def test_same_label_bracket_pair_is_a_known_accepted_residual():
     codes = [
         w["code"]
         for w in warnings
-        if w["code"] != "target_check_skipped"
+        if w["code"] != "target_check_disabled"
     ]
     assert codes == [], (
         f"expected the documented residual (silent); got {codes} -- "
@@ -1235,3 +1235,108 @@ def test_no_pre_existing_row_is_downgraded(name):
     and only the source scan keeps it an error.
     """
     assert "incidental_wiki_autolink" not in _codes(name)
+
+
+# --- Ticket #83: three codes where there was one --------------------
+#
+# `target_check_skipped` merged three unrelated outcomes -- the caller
+# disabled the check, the document overflowed the cap, the probe could
+# not reach the instance -- and they want different answers from ticket
+# #64's blocking gate, so no single severity was right for it.
+
+_TICKET_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2387"
+_OTHER_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2388"
+
+_TWO_TARGETS_HTML = (
+    '<p><a class="ext-link" href="' + _TICKET_HREF + '"'
+    ' title="#87 in Automated Project Manager">auto_pm:#87</a> and '
+    '<a class="ext-link" href="' + _OTHER_HREF + '"'
+    ' title="#88 in Automated Project Manager">auto_pm:#88</a></p>'
+)
+
+
+def _probe_codes(probes, check_targets=True):
+    warnings = build_warnings(
+        markdown_source=None,
+        tracwiki="auto_pm:#87 and auto_pm:#88",
+        facts=extract_facts(_TWO_TARGETS_HTML),
+        probes=probes,
+        check_targets=check_targets,
+        source_format="tracwiki",
+    )
+    return [w["code"] for w in warnings]
+
+
+def test_capped_and_failed_are_different_codes():
+    """The pair, in one assertion (ticket #83 section 5).
+
+    A capped target and an unreachable one used to report the SAME
+    code. Asserting either alone passes just as well for a rename, so
+    both are asserted here, together, and asserted DIFFERENT.
+    """
+    capped = _probe_codes(
+        {
+            _TICKET_HREF: {"status": "skipped", "resolved_url": None},
+            _OTHER_HREF: {"status": "exists", "resolved_url": None},
+        }
+    )
+    failed = _probe_codes(
+        {
+            _TICKET_HREF: {"status": "error", "resolved_url": None},
+            _OTHER_HREF: {"status": "exists", "resolved_url": None},
+        }
+    )
+    assert capped != failed, (capped, failed)
+    assert "target_check_capped" in capped, capped
+    assert "target_check_failed" in failed, failed
+
+
+def test_neither_branch_goes_silent():
+    """A split is exactly where one branch quietly stops firing, and
+    the whole point of this family is that an unchecked target must
+    never look like a checked one. So each code is asserted PRESENT,
+    not merely different from the other."""
+    assert "target_check_capped" in _probe_codes(
+        {_TICKET_HREF: {"status": "skipped", "resolved_url": None}}
+    )
+    assert "target_check_failed" in _probe_codes(
+        {_TICKET_HREF: {"status": "error", "resolved_url": None}}
+    )
+    assert "target_check_disabled" in _probe_codes(
+        {}, check_targets=False
+    )
+
+
+def test_a_target_with_no_probe_result_counts_as_failed():
+    """`None` -- a probeable target the probe returned nothing for --
+    is the checker's problem, like a failed fetch, and not something
+    the author can act on."""
+    codes = _probe_codes({})
+    assert "target_check_failed" in codes, codes
+    assert "target_check_capped" not in codes, codes
+
+
+def test_capped_and_failed_can_both_fire_on_one_document():
+    """They are counted per target, not decided per document: a run
+    that overflows the cap AND fails a fetch has both things to say,
+    and collapsing to one would lose whichever came second."""
+    codes = _probe_codes(
+        {
+            _TICKET_HREF: {"status": "skipped", "resolved_url": None},
+            _OTHER_HREF: {"status": "error", "resolved_url": None},
+        }
+    )
+    assert "target_check_capped" in codes, codes
+    assert "target_check_failed" in codes, codes
+
+
+def test_the_merged_code_is_gone():
+    """`target_check_skipped` is deleted, not aliased: leaving it on
+    any one of the three paths puts the ambiguity back where #64 has to
+    rule on it."""
+    for probes, check in (
+        ({_TICKET_HREF: {"status": "skipped"}}, True),
+        ({_TICKET_HREF: {"status": "error"}}, True),
+        ({}, False),
+    ):
+        assert "target_check_skipped" not in _probe_codes(probes, check)
