@@ -67,6 +67,13 @@ FALLBACK_FENCE_INFO = "tracwiki-unconverted"
 # rendering made *visible* (see Reference/trac/WikiEscapeContexts).
 _FALLBACK_PROCESSOR_RE = re.compile(r"\{\{\{#!(comment|table|td|th)\b")
 
+# The opener of a {{{ }}} block that becomes a Markdown fence: either bare or
+# carrying a single-word ``#!lang`` directive, and in both cases followed
+# immediately by a newline.  A directive with arguments (``{{{#!div class=x``)
+# deliberately does not match -- its body is wiki markup rather than verbatim
+# text, so it is scanned into rather than fenced (see _convert_code_blocks).
+_CODE_BLOCK_OPEN_RE = re.compile(r"\{\{\{(?:#!(\w+))?\n")
+
 # A TracWiki definition-list term line (ticket #71).
 #
 # The grammar was measured against Trac's own renderer rather than inferred --
@@ -710,16 +717,17 @@ class TracWikiParser:
         """Return a backtick fence strictly longer than any backtick run
         already present in ``content``.
 
-        A {{{ }}} block nested inside another is matched innermost-first
-        (the lazy ``.*?`` in the regexes below stops at the nearest
-        ``}}}``), so by the time the *outer* block is converted, its
-        captured ``code`` already contains the inner block's own
-        ```` ``` ```` fence as literal text. Emitting a fixed 3-backtick
-        fence for the outer block too would collide with it: CommonMark
-        closes a fence on the first line with at least as many backticks
-        as the opener, so the inner fence would terminate the outer one
-        early and the rest of the document would be swallowed as raw
-        code (ticket #51).
+        CommonMark closes a fence on the first line carrying at least as
+        many backticks as the opener, so a 3-backtick fence around a body
+        that itself contains ```` ``` ```` terminates early and the rest
+        of the document is swallowed as raw code (ticket #51).
+
+        On #51 the body that did this was the converter's own doing: a
+        nested {{{ }}} block was matched innermost-first, so the outer
+        block's capture already held the inner one's finished Markdown
+        fence. Ticket #72 removed that -- a nested block is now carried
+        verbatim -- and the remaining source of a backtick run in a body
+        is the ordinary one: a code block quoting Markdown.
         """
         longest = 0
         for m in re.finditer(r"`+", content):
@@ -745,41 +753,87 @@ class TracWikiParser:
         (ticket #31).
 
         The fence itself is sized by _fence_for() rather than fixed at
-        3 backticks, so a nested {{{ }}} block's fence never collides
+        3 backticks, so a backtick run inside the body never collides
         with the fence enclosing it (ticket #51).
+
+        Each block's extent is established by _matching_brace() -- a
+        depth-counted scan -- rather than by a lazy ``.*?``, which stops
+        at the *first* ``}}}`` and so ends a nested block's outer fence
+        at the INNER close, leaving the outer ``}}}`` outside the fence
+        as body text (ticket #72).  A nested block is content: Trac
+        renders the enclosing block verbatim, so the inner delimiters
+        are literal text and stay inside the fence unchanged.  Same rule
+        _fallback_processor_blocks applies -- only a block at top level
+        is a construct of its own (ticket #51).
         """
 
         def stash(body: str) -> str:
             self._code_placeholders.append(body)
             return f"\x00CODE{len(self._code_placeholders) - 1}\x00"
 
-        # Map TracWiki processor directive to Markdown language (e.g., 'sh' -> 'bash')
-        def convert_code_block_with_lang(match: re.Match[str]) -> str:
-            tracwiki_lang = match.group(1)
-            code = match.group(2)
-            md_lang = tracwiki_to_markdown_lang(tracwiki_lang)
-            fence = self._fence_for(code)
-            return f"{fence}{md_lang}\n{stash(code)}\n{fence}"
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                m = _CODE_BLOCK_OPEN_RE.match(text, i)
+                # The body runs from the opener's newline to the closing
+                # brace, which Trac requires to start its own line -- so
+                # everything after the body's last newline must be blank.
+                # A block closed mid-line is not one, and is left to the
+                # passes below.  The old regex demanded a bare "\n}}}",
+                # which an INDENTED closer fails; rather than decline, it
+                # went looking for the next "\n}}}" in the document and
+                # swallowed everything up to it (measured on the stock
+                # TracReports page, where the run was ~80 lines).
+                body = (
+                    text[m.end() : end - 3] if (m and end != -1) else ""
+                )
+                nl = body.rfind("\n")
+                if (
+                    m
+                    and end != -1
+                    and nl != -1
+                    and not body[nl + 1 :].strip(" \t")
+                ):
+                    code = body[:nl]
+                    fence = self._fence_for(code)
+                    # Map the processor directive to a Markdown language
+                    # (e.g. 'sh' -> 'bash'); a bare {{{ has none.
+                    info = (
+                        tracwiki_to_markdown_lang(m.group(1))
+                        if m.group(1)
+                        else ""
+                    )
+                    out.append(f"{fence}{info}\n{stash(code)}\n{fence}")
+                    i = end
+                    continue
+                # Not a fenceable block: an unterminated one, or an opener
+                # this pass does not claim ({{{#!div class=x, {{{ inline }}}).
+                # Emit the brace and keep scanning its interior -- a
+                # {{{#!div}}} body is wiki markup, and any real code block
+                # inside it still has to be converted.
+                out.append("{{{")
+                i += 3
+            elif text[i] == "`":
+                # Step over a code span rather than into it, so a {{{ or
+                # }}} quoted inside one cannot shift the brace depth
+                # (tickets #45, #46).  The span's own body is shielded by
+                # the stashing pass below.
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    out.append(text[i : j + 1])
+                    i = j + 1
+                else:
+                    out.append(text[i])
+                    i += 1
+            else:
+                out.append(text[i])
+                i += 1
+        text = "".join(out)
 
-        text = re.sub(
-            r"\{\{\{#!(\w+)\n(.*?)\n\}\}\}",
-            convert_code_block_with_lang,
-            text,
-            flags=re.DOTALL,
-        )
-
-        # Code block without language
-        def convert_code_block_no_lang(match: re.Match[str]) -> str:
-            code = match.group(1)
-            fence = self._fence_for(code)
-            return f"{fence}\n{stash(code)}\n{fence}"
-
-        text = re.sub(
-            r"\{\{\{\n(.*?)\n\}\}\}",
-            convert_code_block_no_lang,
-            text,
-            flags=re.DOTALL,
-        )
         # Inline code span: `code`. Not TracWiki syntax on its own (Trac's
         # WikiFormatting doesn't recognize a bare backtick), so it already
         # passes through unchanged -- but its contents are still ordinary
@@ -1272,16 +1326,21 @@ class TracWikiParser:
         body for TracWiki markup, so the restored text is byte-identical
         to the original source (ticket #31).
 
-        A ``{{{ }}}`` block nested inside another one gets stashed twice:
-        the inner block is replaced by its own ``CODEn`` placeholder first,
-        and then the *outer* block's capture -- which still contains that
-        unresolved placeholder literally -- gets stashed as a second,
-        higher-numbered placeholder whose stored body itself contains the
-        first placeholder's sentinel bytes. ``re.sub`` only scans its input
-        once, so a single restore pass would substitute the outer
-        placeholder and leave the inner sentinel it exposes untouched in
-        the output. Looping to a fixed point resolves arbitrarily deep
-        nesting (ticket #51).
+        Loops to a fixed point rather than substituting once, because
+        ``re.sub`` scans its input once and would leave a sentinel that
+        another substitution had just exposed sitting in the output.
+
+        That used to happen on every nested ``{{{ }}}`` block: the inner
+        one was stashed first, and the outer block's capture -- still
+        holding the inner placeholder literally -- was stashed as a
+        second, higher-numbered placeholder whose body contained the
+        first one's sentinel bytes (ticket #51). Ticket #72 stashes a
+        nested block once, as part of its enclosing block's body, so no
+        input in the converter suite needs more than one pass any more
+        (measured: max 1 iteration across all 309 converter tests). The
+        loop stays as the guard for a stash path that has not been
+        enumerated; without it such a case leaks a sentinel, which
+        ``parse`` turns into a loud ValueError rather than corruption.
         """
 
         def restore(m: re.Match[str]) -> str:
