@@ -480,3 +480,65 @@ class TestTicketRealmProbe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _RealSessionClient:
+    """A client whose `session` is a genuine `requests.Session`.
+
+    Not a MagicMock: the point of these two tests is that the socket,
+    the connection error and `requests`' exception wrapping are real.
+    """
+
+    @property
+    def session(self):
+        import requests
+
+        return requests.Session()
+
+
+class TestUnreachableInstanceIsReal(unittest.TestCase):
+    """Ticket #83 asks for the unreachable-instance row against a REAL
+    unreachable host rather than a mock returning a canned exception --
+    that branch is the one a mock is most likely to get wrong, since it
+    is `requests`' own failure path, not ours.
+
+    It sits in the OFFLINE suite rather than in `ci-live.sh`, which is
+    where the ticket suggested. A refused port and a blackholed address
+    are real sockets and real `requests` exceptions, but they need no
+    credentials and no Trac -- and a `live` marker on a test that does
+    not need the substrate is a test that stops running on GitHub
+    Actions and for anyone without an .env, which is exactly what
+    ticket #85 cost. Real substrate, cheapest environment that provides
+    it.
+    """
+
+    # Port 9 is discard; nothing listens, so the connection is refused
+    # immediately rather than hanging.
+    REFUSED = "http://127.0.0.1:9/auto_pm/intertrac/wiki%3AAnyPage"
+
+    def test_refused_connection_is_error_not_missing(self):
+        client = _RealSessionClient()
+        results = probe_targets(client, [self.REFUSED], timeout=5)
+        self.assertEqual(results[self.REFUSED]["status"], ERROR)
+
+    def test_blackholed_address_is_error_not_missing(self):
+        """The other real failure shape: an address that swallows the
+        packet rather than refusing it, so the request dies on timeout
+        instead of on connect. TEST-NET-1 (RFC 5737) is reserved for
+        documentation and routed nowhere, and the timeout is kept short
+        because the assertion is about the classification, not the
+        wait."""
+        href = "http://192.0.2.1/auto_pm/intertrac/%2387"
+        client = _RealSessionClient()
+        results = probe_targets(client, [href], timeout=1)
+        self.assertEqual(results[href]["status"], ERROR)
+
+    def test_refused_ticket_target_is_error_not_missing(self):
+        """The ticket realm's dangerous direction: an unreachable host
+        must never be read as `MISSING`, because under ticket #64 that
+        refuses the write and tells the author to fix links that are
+        fine."""
+        href = "http://127.0.0.1:9/auto_pm/intertrac/%2387"
+        client = _RealSessionClient()
+        results = probe_targets(client, [href], timeout=5)
+        self.assertEqual(results[href]["status"], ERROR)
