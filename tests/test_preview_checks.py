@@ -1340,3 +1340,94 @@ def test_the_merged_code_is_gone():
         ({}, False),
     ):
         assert "target_check_skipped" not in _probe_codes(probes, check)
+
+
+# ---------------------------------------------------------------------
+# Fix suggestions (ticket #64 section 5).
+#
+# Every string asserted here was rendered through the live daemon before
+# being shipped as advice (2026-09-04): all three come back with an
+# anchor and zero warnings. A suggestion nobody had rendered would be
+# the same guess #59 comment 1 caught a check making about a diagnosis
+# -- confidently wrong, and pointing the author somewhere useless.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "row,expected",
+    [
+        ("row61_ticket_possessive", "[auto_pm:#87 #87]'s"),
+        ("row62_ticket_hyphen_suffix", "[auto_pm:#87 #87]-ish"),
+    ],
+)
+def test_captured_punctuation_suggests_the_bracket_form(row, expected):
+    """The bracket form ends the target at the space, so the swallowed
+    tail stays outside it -- the fix the decision table on
+    `Rules/trac/PreferInterTracLinks` prescribes.
+
+    Both suffixes are asserted because they are different shapes of the
+    same defect: an apostrophe and a hyphen. A suggestion builder keyed
+    on punctuation class rather than on the measured tail would pass one
+    and fail the other.
+    """
+    markdown_source, tracwiki, facts, source_format = _load(row)
+    found = [
+        w
+        for w in build_warnings(
+            markdown_source,
+            tracwiki,
+            facts,
+            probes={},
+            check_targets=False,
+            source_format=source_format,
+        )
+        if w["code"] == "intertrac_target_captured_punctuation"
+    ]
+    assert len(found) == 1, found
+    assert found[0]["evidence"]["suggestion"] == expected
+
+
+def test_markdown_link_suggests_the_tracwiki_bracket_form():
+    """The highest-value suggestion in the suite.
+
+    `Rules/trac/PreferInterTracLinks` calls this shape out as rendering
+    THREE wrong things from one reference -- a dead local wiki link, a
+    stray auto-link, and visible punctuation -- and names the two codes
+    it produces as a pair. An author who applies this one suggestion
+    clears both.
+    """
+    facts = extract_facts(
+        "<p>See [the ticket](auto_pm:#87) for detail.</p>"
+    )
+    found = [
+        w
+        for w in build_warnings(
+            None, "", facts, probes={}, check_targets=False
+        )
+        if w["code"] == "literal_markup_in_render"
+    ]
+    assert len(found) == 1, found
+    assert (
+        found[0]["evidence"]["suggestion"] == "[auto_pm:#87 the ticket]"
+    )
+
+
+def test_non_link_literal_markup_carries_no_suggestion():
+    """The other four patterns this check scans for -- a stray fence, a
+    TracWiki table, bold, a block delimiter -- have no mechanical
+    rewrite, so they must carry no `suggestion` key at all rather than
+    an empty or guessed one.
+
+    Stated as its own row because "absent" and "present but useless"
+    look identical to a caller that only checks `.get`.
+    """
+    facts = extract_facts("<p>A stray fence ``` in prose.</p>")
+    found = [
+        w
+        for w in build_warnings(
+            None, "", facts, probes={}, check_targets=False
+        )
+        if w["code"] == "literal_markup_in_render"
+    ]
+    assert len(found) == 1, found
+    assert "suggestion" not in found[0]["evidence"]
