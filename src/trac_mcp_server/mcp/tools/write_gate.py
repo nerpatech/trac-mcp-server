@@ -64,7 +64,7 @@ from .errors import build_error_response
 logger = logging.getLogger(__name__)
 
 #: Schema fragment for the one probe parameter a write path exposes.
-#: Shared so the seven call sites cannot drift into describing it
+#: Shared so the nine call sites cannot drift into describing it
 #: differently -- the same reason ``source_format`` is one module.
 TARGET_CAP_SCHEMA = {
     "type": "integer",
@@ -162,6 +162,7 @@ async def check_write(
     content: str | None,
     *,
     field: str,
+    recheck_with: str | None,
     target_cap: int = DEFAULT_TARGET_CAP,
 ) -> GateOutcome:
     """Run the link checks on one field of a pending write.
@@ -175,6 +176,18 @@ async def check_write(
         field: Which field is being written (``description``,
             ``comment``, ``content``), so a multi-field write's refusal
             says which half failed.
+        recheck_with: The tool that re-runs these checks on this
+            content after the fact, named in the note the render-failed
+            path emits, or ``None`` when no tool covers this surface.
+            Keyword-only and mandatory on purpose: this used to be
+            inferred from ``field`` (``content`` -> wiki, anything else
+            -> ticket), which silently produced ``ticket_render_check``
+            for the milestone description ticket #87 added -- a tool
+            that cannot see a milestone. An inference that is right for
+            every caller that exists is still wrong for the next one,
+            and the note it lands in is the one place a wrong answer
+            costs the most: see the module docstring on why a check
+            that could not run must not read as a check that passed.
         target_cap: Maximum cross-instance targets to probe.
 
     Returns:
@@ -198,6 +211,14 @@ async def check_write(
             type(exc).__name__,
             exc,
         )
+        recheck = (
+            f"Re-check it with {recheck_with}."
+            if recheck_with
+            else (
+                "No render-check tool covers this field, so the only "
+                "way to re-check it is to read the rendered page."
+            )
+        )
         return GateOutcome(
             None,
             [],
@@ -205,9 +226,7 @@ async def check_write(
             note=(
                 f"NOTE: the link check could not run on {field} "
                 f"({type(exc).__name__}), so this content is "
-                "UNCHECKED -- not verified clean. Re-check it with "
-                f"{'wiki' if field == 'content' else 'ticket'}"
-                "_render_check."
+                f"UNCHECKED -- not verified clean. {recheck}"
             ),
         )
 
@@ -245,6 +264,8 @@ async def gate_or_refuse(
     client: TracClient,
     fields: dict[str, str | None],
     args: dict,
+    *,
+    recheck_with: str | None,
 ) -> tuple[types.CallToolResult | None, list[str]]:
     """Gate several fields of one write, refusing on the first failure.
 
@@ -256,6 +277,12 @@ async def gate_or_refuse(
     rather than all of them being collected. Each check costs a render
     round trip, and an author who must fix the description will re-send
     the comment with it anyway.
+
+    ``recheck_with`` names the after-the-fact checker for this handler's
+    surface -- one value per handler rather than per field, because the
+    tool that re-checks a write is a property of what was written to,
+    not of which field of it. See :func:`check_write` on why it is not
+    inferred.
     """
     if not gate_enabled(client):
         return None, []
@@ -264,7 +291,11 @@ async def gate_or_refuse(
     lines: list[str] = []
     for field, content in fields.items():
         outcome = await check_write(
-            client, content, field=field, target_cap=target_cap
+            client,
+            content,
+            field=field,
+            recheck_with=recheck_with,
+            target_cap=target_cap,
         )
         if outcome.refused:
             return outcome.refusal, []

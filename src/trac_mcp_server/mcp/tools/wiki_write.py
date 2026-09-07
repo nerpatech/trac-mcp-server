@@ -167,7 +167,10 @@ async def _handle_create(
     # was never going to land, and "already_exists" is the error its
     # caller can act on.
     refusal, gate_lines = await gate_or_refuse(
-        client, {"content": wiki_content}, args
+        client,
+        {"content": wiki_content},
+        args,
+        recheck_with="wiki_render_check",
     )
     if refusal is not None:
         return refusal
@@ -232,7 +235,10 @@ async def _handle_update(
     wiki_content = content
 
     refusal, gate_lines = await gate_or_refuse(
-        client, {"content": wiki_content}, args
+        client,
+        {"content": wiki_content},
+        args,
+        recheck_with="wiki_render_check",
     )
     if refusal is not None:
         return refusal

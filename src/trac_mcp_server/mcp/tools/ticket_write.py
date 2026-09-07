@@ -228,7 +228,10 @@ async def _handle_create(
     description_tracwiki = description
 
     refusal, gate_lines = await gate_or_refuse(
-        client, {"description": description_tracwiki}, args
+        client,
+        {"description": description_tracwiki},
+        args,
+        recheck_with="ticket_render_check",
     )
     if refusal is not None:
         return refusal
@@ -471,6 +474,7 @@ async def _handle_update(
             "comment": args.get("comment", ""),
         },
         args,
+        recheck_with="ticket_render_check",
     )
     if refusal is not None:
         return refusal

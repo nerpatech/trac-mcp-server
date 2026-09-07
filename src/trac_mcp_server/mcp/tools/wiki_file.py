@@ -283,7 +283,10 @@ async def _handle_push(
     # that one catches indentation the CONVERTER strips, which is
     # invisible in a render and so unreachable from `facts`.
     refusal, gate_lines = await gate_or_refuse(
-        client, {"content": wiki_content}, args
+        client,
+        {"content": wiki_content},
+        args,
+        recheck_with="wiki_render_check",
     )
     if refusal is not None:
         return refusal

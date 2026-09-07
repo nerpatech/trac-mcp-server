@@ -184,6 +184,7 @@ async def _handle_batch_create(
                 client,
                 description,
                 field="description",
+                recheck_with="ticket_render_check",
                 target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
             )
             if outcome.refused:
@@ -364,6 +365,7 @@ async def _handle_batch_update(
                 client,
                 update_data.get("comment", ""),
                 field="comment",
+                recheck_with="ticket_render_check",
                 target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
             )
             if outcome.refused:
