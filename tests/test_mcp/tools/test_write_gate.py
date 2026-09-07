@@ -28,6 +28,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trac_mcp_server.mcp.tools.milestone import (
+    _handle_create as _handle_milestone_create,
+)
+from trac_mcp_server.mcp.tools.milestone import (
+    _handle_update as _handle_milestone_update,
+)
 from trac_mcp_server.mcp.tools.ticket_batch import (
     _handle_batch_create,
     _handle_batch_update,
@@ -94,7 +100,10 @@ def _text(result):
 def test_check_write_refuses_a_broken_link():
     outcome = asyncio.run(
         check_write(
-            _client(BROKEN_HTML), BROKEN_SOURCE, field="content"
+            _client(BROKEN_HTML),
+            BROKEN_SOURCE,
+            field="content",
+            recheck_with="wiki_render_check",
         )
     )
     assert outcome.refused
@@ -105,7 +114,12 @@ def test_check_write_refuses_a_broken_link():
 
 def test_check_write_allows_clean_content():
     outcome = asyncio.run(
-        check_write(_client(), CLEAN_SOURCE, field="content")
+        check_write(
+            _client(),
+            CLEAN_SOURCE,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
     )
     assert not outcome.refused
     assert outcome.checked
@@ -115,7 +129,14 @@ def test_empty_content_is_not_checked_and_not_a_finding():
     """A write that carries no text for this field has nothing to
     check. Distinct from clean content: `checked` is False, so nothing
     downstream can report it as verified."""
-    outcome = asyncio.run(check_write(_client(), "", field="comment"))
+    outcome = asyncio.run(
+        check_write(
+            _client(),
+            "",
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
     assert not outcome.refused
     assert not outcome.checked
 
@@ -130,13 +151,49 @@ def test_a_render_failure_does_not_refuse_but_says_so_loudly():
     client.wiki_to_html.side_effect = xmlrpc.client.Fault(1, "boom")
 
     outcome = asyncio.run(
-        check_write(client, BROKEN_SOURCE, field="description")
+        check_write(
+            client,
+            BROKEN_SOURCE,
+            field="description",
+            recheck_with="ticket_render_check",
+        )
     )
     assert not outcome.refused
     assert not outcome.checked
     note = "\n".join(outcome.summary_lines())
     assert "UNCHECKED" in note
     assert "not verified clean" in note
+    assert "Re-check it with ticket_render_check." in note
+
+
+def test_the_unchecked_note_names_no_tool_when_none_covers_the_field():
+    """Ticket #87. This note used to infer its tool from the field name
+    -- `content` meant wiki, anything else meant ticket -- which was
+    right for all five write paths that existed and wrong for the
+    milestone description this ticket added, where NO render-check tool
+    can see the content.
+
+    Asserted as an absence as well as a presence, because the failure
+    being guarded against is a confidently wrong instruction, not a
+    missing one: naming `ticket_render_check` here sends the author to
+    a tool that will not show them their milestone, on the one path
+    whose entire purpose is to stop an unchecked write reading as a
+    clean one."""
+    client = _client()
+    client.wiki_to_html.side_effect = xmlrpc.client.Fault(1, "boom")
+
+    outcome = asyncio.run(
+        check_write(
+            client,
+            BROKEN_SOURCE,
+            field="description",
+            recheck_with=None,
+        )
+    )
+    note = "\n".join(outcome.summary_lines())
+    assert "UNCHECKED" in note
+    assert "render_check" not in note
+    assert "read the rendered page" in note
 
 
 def test_the_pragma_lets_deliberate_content_through():
@@ -146,7 +203,12 @@ def test_the_pragma_lets_deliberate_content_through():
         BROKEN_SOURCE + "\npreview-checks: allow missing_local_target\n"
     )
     outcome = asyncio.run(
-        check_write(_client(BROKEN_HTML), source, field="content")
+        check_write(
+            _client(BROKEN_HTML),
+            source,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
     )
     assert not outcome.refused, outcome.refusal_text
 
@@ -159,7 +221,12 @@ def test_the_pragma_is_scoped_to_the_code_it_names():
         BROKEN_SOURCE + "\npreview-checks: allow escaped_link_target\n"
     )
     outcome = asyncio.run(
-        check_write(_client(BROKEN_HTML), source, field="content")
+        check_write(
+            _client(BROKEN_HTML),
+            source,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
     )
     assert outcome.refused
     assert "missing_local_target" in outcome.refusal_text
@@ -175,7 +242,12 @@ def test_the_kill_switch_turns_the_gate_off():
     assert not gate_enabled(client)
 
     refusal, lines = asyncio.run(
-        gate_or_refuse(client, {"content": BROKEN_SOURCE}, {})
+        gate_or_refuse(
+            client,
+            {"content": BROKEN_SOURCE},
+            {},
+            recheck_with="wiki_render_check",
+        )
     )
     assert refusal is None and lines == []
     client.wiki_to_html.assert_not_called()
@@ -201,6 +273,7 @@ def test_first_refusal_wins_across_fields():
             _client(BROKEN_HTML),
             {"description": BROKEN_SOURCE, "comment": BROKEN_SOURCE},
             {},
+            recheck_with="ticket_render_check",
         )
     )
     assert refusal is not None
@@ -277,12 +350,50 @@ def _ticket_update_description(client, description):
         )
 
 
+def _milestone_create(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.milestone.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_milestone_create(
+                client,
+                {
+                    "name": "M",
+                    "attributes": {"description": description},
+                },
+            )
+        )
+
+
+def _milestone_update(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.milestone.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_milestone_update(
+                client,
+                {
+                    "name": "M",
+                    "attributes": {"description": description},
+                },
+            )
+        )
+
+
 WRITE_PATHS = [
     ("wiki_create", _wiki_create),
     ("wiki_update", _wiki_update),
     ("ticket_create", _ticket_create),
     ("ticket_update.comment", _ticket_update_comment),
     ("ticket_update.description", _ticket_update_description),
+    # Ticket #87. A milestone description is TracWiki on the same
+    # substrate as the five above, and was outside #64's enumerated
+    # write paths -- deliberately, but that left it the one gap in an
+    # otherwise blocking gate.
+    ("milestone_create", _milestone_create),
+    ("milestone_update", _milestone_update),
 ]
 
 
@@ -523,3 +634,157 @@ class TestWriteGateLive:
 
         assert not result.isError, _text(result)
         assert client.get_wiki_page(page) == body
+
+
+# ---------------------------------------------------------------------
+# Ticket #87: the milestone half, live.
+#
+# On `/trac_test` rather than the project's own instance, because these
+# rows CREATE and DELETE a real milestone and there is no scratch
+# milestone to reset the way #84 seeded a scratch wiki page. That
+# instance exists for exactly this and carries standing authorisation
+# (auto_pm `Reference/trac/TestingInstance`); cleaning up after is still
+# expected, so every row does.
+#
+# Measured here before these tests were written, and the reason the
+# ticket asked rather than assumed: Trac renders a milestone description
+# through the wiki formatter and marks a dead local target
+# `class="missing wiki"` -- the SAME classes `wiki_to_html` hands the
+# gate. So what the gate refuses is what a reader of the milestone page
+# would actually have seen.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestMilestoneWriteGateLive:
+    """The gate watched refusing and allowing a REAL milestone write."""
+
+    NAME = "Ticket87WriteGateLive"
+
+    @staticmethod
+    def _live():
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config, _ = bootstrap_config()
+        return TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
+        )
+
+    @pytest.fixture(autouse=True)
+    def _scratch(self):
+        """Delete the scratch milestone before AND after each row.
+
+        Before as well as after: a previous run interrupted between
+        create and cleanup would otherwise leave a milestone behind,
+        and its presence would make
+        `test_a_broken_link_is_refused_and_no_milestone_is_created`
+        pass for entirely the wrong reason.
+        """
+        client = self._live()
+        self._remove(client)
+        try:
+            yield
+        finally:
+            self._remove(client)
+
+    @classmethod
+    def _remove(cls, client):
+        try:
+            client.delete_milestone(cls.NAME)
+        except Exception:
+            # Absent is the desired state; not existing is not an error.
+            pass
+
+    def test_a_broken_link_is_refused_and_no_milestone_is_created(self):
+        """Not just that an error came back, but that the store did not
+        gain a milestone anyway -- the case an offline test cannot see,
+        and the one #64's live row exists for."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": BROKEN_SOURCE},
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert self.NAME not in client.get_all_milestones(), (
+            "the gate returned an error but the milestone was created"
+        )
+
+    def test_correct_content_is_allowed_through_to_the_store(self):
+        """The other half: a gate that refuses everything passes the
+        row above and is useless. Asserted by reading the description
+        back, not from the success response."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+        # Deliberately link-free. An earlier draft of this row said it
+        # "links to trac_mcp_server:#87 and nothing else" and the gate
+        # refused it -- correctly: the `trac_mcp_server` InterTrac
+        # prefix is not configured on /trac_test, so that renders as a
+        # bare ticket link resolved against /trac_test, where 87 does
+        # not exist. The allow row has to be clean ON THE INSTANCE IT
+        # WRITES TO, which is not the instance this ticket lives on.
+        body = (
+            "Seeded for the ticket 87 live gate row. Nothing to "
+            "link to.\n"
+        )
+
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": body},
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        stored = client.get_milestone(self.NAME)
+        assert stored["description"] == body
+
+    def test_a_refused_update_leaves_the_old_description_intact(self):
+        """The update path's own half of the "error returned but the
+        bytes landed" question. Distinct from the create row: a create
+        that half-lands leaves a milestone that was not there before,
+        an update that half-lands destroys one that was."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_update as handle_update,
+        )
+
+        client = self._live()
+        original = (
+            "Seeded for the ticket 87 live gate row. Original body.\n"
+        )
+        client.create_milestone(self.NAME, {"description": original})
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": BROKEN_SOURCE},
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert (
+            client.get_milestone(self.NAME)["description"] == original
+        ), "the gate returned an error but the update still landed"
