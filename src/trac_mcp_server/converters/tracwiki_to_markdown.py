@@ -155,9 +155,34 @@ _TAB_WIDTH = 8
 # not lettered lists, so "any word followed by a period" would have skipped
 # real quotes.  Trac's alpha marker is a single letter or a roman numeral.
 # " 1)" is not a marker either -- also a blockquote.
+#
+# Split into fragments rather than written out once, because ticket #74 needs
+# the lettered/roman subset ON ITS OWN -- those markers have no Markdown
+# equivalent and take the verbatim fallback, while the bullet and numeric ones
+# convert -- and the ticket's recall gate asks for the two to read from the
+# same place instead of re-deriving the grammar.
+_BULLET_MARKER = r"[*-]"
+_NUMERIC_MARKER = r"\d+\."
+_ALPHA_MARKER = r"(?:[a-zA-Z]|[ivxlcdmIVXLCDM]{2,})\."
 _LIST_MARKER_RE = re.compile(
-    r"^[ \t]+(?:[*-]|\d+\.|[a-zA-Z]\.|[ivxlcdmIVXLCDM]{2,}\.)(?=[ \t])"
+    rf"^[ \t]+(?:{_BULLET_MARKER}|{_NUMERIC_MARKER}|{_ALPHA_MARKER})(?=[ \t])"
 )
+
+# The subset of the marker set above that Markdown cannot express at all
+# (ticket #74).  CommonMark's ordered-list marker is digits only, so there is
+# nothing for ``a.`` or ``iv.`` to convert TO: measured, mistune parses
+# " a. first\n b. second" as one paragraph and the same input with "1."/"2."
+# as a list.  Converting to a numbered list is rejected explicitly -- it would
+# renumber a./b./c. as 1./2./3., changing what the page says, and the write leg
+# could not tell the difference on the way back.
+#
+# Indented only, like every other pattern here.  A lettered list at column zero
+# is an <ol class="loweralpha"> to Trac as well and is lost the same way, but
+# its grammar differs (a marker line opens a list mid-paragraph, and a
+# column-zero continuation line ENDS it), and a sweep of 1020 store documents
+# found 22 marker lines in 4 documents, all indented and none at column zero.
+# So it is ticket #89 rather than a wider pattern here.
+_ALPHA_LIST_MARKER_RE = re.compile(rf"^[ \t]+{_ALPHA_MARKER}(?=[ \t])")
 _INDENTED_TABLE_RE = re.compile(r"^[ \t]+\|\|")
 _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
 
@@ -569,10 +594,13 @@ class TracWikiParser:
         indent, and claiming it would take the construct apart -- a multi-line
         list item's continuation line being the case that matters most.
 
-        Definition lists were on this list until ticket #63.  They are now
-        handled a step earlier, because unlike the others they have no
-        Markdown equivalent at all and so must be carried verbatim rather
-        than left to a later pass.
+        Definition lists were on this list until ticket #63, and lettered or
+        roman ordered lists until ticket #74.  Both are now handled a step
+        earlier, for the same reason: unlike the others they have no Markdown
+        equivalent at all, so leaving them to a later pass leaves them as
+        prose.  This predicate still matches them -- it is asking whether the
+        indent belongs to a construct, which it does -- but by the time it
+        runs they have already been claimed.
         """
         return bool(
             _LIST_MARKER_RE.match(masked_line)
@@ -591,7 +619,7 @@ class TracWikiParser:
         ordinary text to every later pass, so a quote's contents still get
         their formatting, links and macros converted.
 
-        Four outcomes per maximal run of consecutive non-blank indented
+        Five outcomes per maximal run of consecutive non-blank indented
         lines, in order:
 
         1. **A code-block delimiter** -- left untouched; see
@@ -604,12 +632,22 @@ class TracWikiParser:
            terms are one ``<dl>``, and a non-term line following a term is
            part of the preceding ``<dd>`` even at the same indent -- both
            measured against Trac's renderer.
-        3. **Not a quote at all** -- the run contains a list item, table row
+        3. **A lettered or roman ordered list** (ticket #74) -- carried
+           verbatim through the fallback.  `` a. x``/`` iv. x`` are ordered
+           lists to Trac (``<ol class="loweralpha">``/``lowerroman``), and
+           CommonMark's ordered-list marker is digits only, so there is
+           nothing to convert them *to*: before this they fell to step 4 and
+           reached the Markdown as a paragraph, silently.  Renumbering them
+           as ``1./2./3.`` is rejected -- it changes what the page says, and
+           the write leg could not tell the rewrite from an original.
+           **Column zero is ticket #89**, deliberately: the grammar differs
+           there and the store sweep found no instances.
+        4. **Not a quote at all** -- the run contains a list item, table row
            or heading, whose indent those constructs consume.  Left untouched,
            which is also what keeps a multi-line list item working: its
            continuation line is indented too, and claiming it would take the
            item apart.
-        4. **Canonical** -- every line's indent is exactly two spaces per
+        5. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
            byte-for-byte.  Converted.  Anything else -- one space, three,
            four, a tab, a mixed run -- goes out verbatim through the same
@@ -617,13 +655,15 @@ class TracWikiParser:
            #73, one and three spaces lost the indent silently and four spaces
            or a tab became a literal ``{{{`` code block.
 
-        Step 2 runs **before** step 3, which is the operator decision on
-        ticket #63: a run holding both a bullet and a definition term is a
-        ``<ul>`` followed by a ``<dl>``, and falling the whole run back is the
-        only option that loses nothing.  Skipping it would let the ``<dl>``
-        degrade to prose at column zero now that nothing converts it, and
-        splitting the run at the construct boundary needs a real block parser.
-        The cost is that a representable bullet list is carried verbatim too.
+        Steps 2 and 3 run **before** step 4, which is the operator decision on
+        ticket #63 applied twice: a run holding both a bullet and a definition
+        term is a ``<ul>`` followed by a ``<dl>``, and a run holding a numbered
+        list with a lettered item nested inside it is one ``<ol>`` containing
+        another -- in both cases falling the whole run back is the only option
+        that loses nothing.  Skipping it would let the unrepresentable half
+        degrade to prose now that nothing converts it, and splitting the run at
+        the construct boundary needs a real block parser.  The cost is that a
+        representable list in the same run is carried verbatim too.
 
         Detection runs against ``_verbatim_mask`` so an indented line quoted
         inside a code span or block is content, not a quote (tickets #45,
@@ -664,6 +704,15 @@ class TracWikiParser:
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Definition list"
+                    )
+                )
+                continue
+
+            if any(_ALPHA_LIST_MARKER_RE.match(m) for m in probes):
+                stack = []
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), "Lettered or roman ordered list"
                     )
                 )
                 continue
