@@ -246,14 +246,25 @@ class TestListsAreNotQuotes(unittest.TestCase):
     # * ``  * a`` and ``   * a`` normalise to `` * a`` in the write leg.
     #   Render-neutral: Trac renders every width as the same bare <ul>.
     # * `` - a`` normalises to `` * a``, the write leg's one bullet character.
-    # * `` a. a`` / `` iv. a`` lose the indent entirely and come back as
+    # * `` a. a`` / `` iv. a`` lost the indent entirely and came back as
     #   paragraphs -- Markdown has no lettered or roman list to carry them.
-    #   That one is NOT render-neutral and deserves its own ticket.
+    #   That one was NOT render-neutral, and it got the ticket this comment
+    #   asked for: #74, fixed with ticket #63's verbatim fallback.  Both rows
+    #   now round-trip byte-for-byte, which is why they are absent from
+    #   NO_FENCE below and asserted in test_converter_lettered_lists.py
+    #   instead.
     ROUND_TRIPPING = [
         " * a",
         " 1. a",
         " * a\n   * b",
         " * a\n * b\n * c",
+    ]
+
+    # Every row EXCEPT the lettered and roman ones, which ticket #74 carries
+    # verbatim on purpose.  Kept as a subset of LISTS rather than as its own
+    # literal list, so a row added above cannot silently escape this gate.
+    NO_FENCE = [
+        row for row in LISTS if row[0] not in ("lettered", "roman")
     ]
 
     def test_lists_round_trip_unchanged(self):
@@ -280,11 +291,20 @@ class TestListsAreNotQuotes(unittest.TestCase):
     def test_no_list_is_buried_in_a_verbatim_fence(self):
         """The other way a quote scanner could damage a list.
 
-        Stated separately from the width assertions because it is the one that
-        must hold for *every* row, including the lettered and roman ones whose
-        indent the write leg drops for unrelated reasons.
+        Stated separately from the width assertions because it is the one
+        that must hold for every list Markdown can actually express.
+
+        It used to run over *every* row, on the reasoning that a fence is
+        always damage.  Ticket #74 measured otherwise for the two rows
+        Markdown cannot express at all: `` a. a`` and `` iv. a`` reached the
+        Markdown as prose, so the fence is what restores them rather than
+        what buries them.  Those two rows are therefore excluded here and
+        asserted the other way round -- fenced, verbatim, and warning -- in
+        test_converter_lettered_lists.py.  The exclusion is deliberately
+        narrow: it names the two rows, so a quote scanner that started
+        fencing `` * a`` would still fail here.
         """
-        for label, src in self.LISTS:
+        for label, src in self.NO_FENCE:
             with self.subTest(label):
                 stored, md, _ = _round_trip(src)
                 self.assertNotIn("```", md)
