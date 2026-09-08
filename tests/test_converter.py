@@ -2914,17 +2914,19 @@ class TestTicket72NestedBlockExtent(unittest.TestCase):
         backtick run inside the nested block counts -- the fence collision
         ticket #51 fixed cannot come back through the wider capture.
 
-        Read leg only.  This row does not round-trip, and not because of
-        anything here: `markdown_to_tracwiki` rewrites the quoted
-        ```` ``` ```` fence back into a `{{{ }}}` block on the way out.
-        That is ticket #88, measured as identical before and after this
-        fix and reproducing with no nesting at all.
+        This row used not to round-trip: `markdown_to_tracwiki` rewrote
+        the quoted ```` ``` ```` fence back into a `{{{ }}}` block on the
+        way out, corrupting content the author quoted on purpose (ticket
+        #88, fixed by deleting the helper that did the rewriting -- see
+        test_converter_nested_fence_restore.py for that ticket's own
+        seeds). It round-trips byte-for-byte now.
         """
         src = "{{{\nouter\n{{{\n```\ninner\n```\n}}}\n}}}"
         md = tracwiki_to_markdown(src).text
         self.assertEqual(
             md, "````\nouter\n{{{\n```\ninner\n```\n}}}\n````"
         )
+        self.assertEqual(markdown_to_tracwiki(md), src)
 
 
 class TestIsLinkTarget(unittest.TestCase):

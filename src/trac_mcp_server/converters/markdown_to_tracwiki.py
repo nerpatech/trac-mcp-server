@@ -206,47 +206,6 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
 
 
-# A backtick-fenced block sitting literally inside another code block's
-# body. CommonMark only lets an *outer* fence be closed by a line with at
-# least as many backticks as the opener, so a properly-nested inner fence
-# (shorter than its enclosing one, per `tracwiki_to_markdown._fence_for`)
-# survives into `block_code`'s `code` argument as plain text rather than
-# being parsed as its own block -- see `_restore_nested_fences` (ticket #51).
-_NESTED_FENCE_RE = re.compile(
-    r"^(`{3,})(\w*)\n(.*?)\n\1[ \t]*$", re.DOTALL | re.MULTILINE
-)
-
-
-def _restore_nested_fences(code: str) -> str:
-    """Recursively convert literal backtick fences inside a code block's
-    body back into TracWiki ``{{{ }}}`` blocks.
-
-    `tracwiki_to_markdown` used to emit a nested {{{ }}} block by widening
-    the *outer* fence so it never collided with the inner one it contained
-    (ticket #51's fix on the read side). On the way back, mistune hands
-    that inner fence to `block_code` as inert literal text -- it never
-    becomes its own `block_code` call -- so it had to be recognized and
-    restored here instead of by the renderer's normal per-token dispatch.
-
-    Ticket #72 stopped the read leg emitting that shape: a nested block is
-    now carried verbatim, so a fence arriving inside a code body is one the
-    author wrote and quoted on purpose, and rewriting it is corruption
-    rather than restoration. That is ticket #88; this helper is kept for
-    now because Markdown produced by the pre-#72 read leg still relies on
-    it, and how much such content exists has not been measured.
-    """
-
-    def restore(m: re.Match[str]) -> str:
-        info = m.group(2)
-        inner = _restore_nested_fences(m.group(3))
-        if info:
-            tracwiki_lang = markdown_to_tracwiki_lang(info)
-            return f"{{{{{{#!{tracwiki_lang}\n{inner}\n}}}}}}"
-        return f"{{{{{{\n{inner}\n}}}}}}"
-
-    return _NESTED_FENCE_RE.sub(restore, code)
-
-
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -449,10 +408,17 @@ class TracWikiRenderer(mistune.BaseRenderer):
         Language identifiers are mapped from Markdown to TracWiki equivalents
         (e.g., 'bash' -> 'sh').
 
-        Restores any nested fence first (see `_restore_nested_fences`) --
-        a {{{ }}} block nested inside another arrives here as one
-        `block_code` call whose `code` still contains the inner fence as
-        literal text (ticket #51).
+        A {{{ }}} block nested inside another arrives here as one
+        `block_code` call whose `code` still contains the inner block's
+        delimiters as literal text -- Trac renders the outer block
+        verbatim, so those delimiters are content, not a construct of
+        their own (ticket #72), and are emitted back unchanged. A helper
+        used to rewrite a quoted backtick fence found in that literal
+        text into a `{{{ }}}` block, restoring a shape the read leg no
+        longer produces (ticket #51, superseded by #72's read-leg fix);
+        removed rather than kept, since by ticket #88 it had become a
+        pure source of corruption -- rewriting fences the author quoted
+        on purpose, that were never a real nested block at all.
 
         Ends with a blank line (two trailing newlines), like `paragraph()`
         and `table()`, so a sibling block immediately following in the
@@ -464,7 +430,6 @@ class TracWikiRenderer(mistune.BaseRenderer):
         here never leaks into their output.
         """
         code = code.rstrip("\n")
-        code = _restore_nested_fences(code)
         if info and info.strip() == FALLBACK_FENCE_INFO:
             # Unwrap, per the operator decision on ticket #63: the read leg
             # emitted this fence around TracWiki it could not express, and the
