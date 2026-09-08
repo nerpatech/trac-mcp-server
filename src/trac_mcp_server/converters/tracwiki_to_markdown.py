@@ -198,6 +198,26 @@ _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
 # leading-whitespace requirement.
 _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 
+# A line shape that CommonMark already treats as "interrupting" -- it starts
+# a new sibling block on its own, without needing a blank line, rather than
+# being read as a lazy continuation of the preceding list item's paragraph
+# (ticket #90). Measured against mistune with this project's own plugin set
+# (``plugins=["table"]``, matching ``markdown_to_tracwiki``'s parser):
+# an ATX heading, a blockquote marker, a fenced code block, and a thematic
+# break all interrupt; a GFM table row does NOT (it lazily absorbs exactly
+# like plain prose) and is deliberately left off this list so it still gets
+# the separating blank line. By the point ``_convert_lists`` runs, a
+# TracWiki heading is already "#", and a blockquote line is already "> "
+# (``_convert_indented_blocks`` runs earlier in ``_apply_fallbacks``) or
+# already a fenced fallback placeholder starting with a code fence -- but a
+# TracWiki horizontal rule is still "----", not yet "---"
+# (``_convert_other_elements`` runs after this pass), so the thematic-break
+# check matches Trac's own dash-run syntax directly rather than the
+# Markdown it will eventually become.
+_LAZY_CONTINUATION_INTERRUPT_RE = re.compile(
+    r"^(?:#{1,6}(?:[ \t]|$)|>|```|~~~|-{3,}[ \t]*$)"
+)
+
 
 def _indent_of(line: str) -> str:
     """Return ``line``'s literal leading whitespace."""
@@ -1183,7 +1203,14 @@ class TracWikiParser:
         Unordered lists: ' * item' -> '- item'
         Handle nested lists: ' * * item' -> ' - - item'
         Ordered lists are already compatible: ' 1. item' is valid in both
+
+        Runs the blank-line separator (ticket #90) before the marker-
+        character rewrite -- the two passes commute, since indentation
+        (the only thing the separator reads) is untouched by swapping
+        ``*`` for ``-``, but running it first keeps this method's own
+        order matching the order the two defects were found in.
         """
+        text = self._separate_list_from_trailing_paragraph(text)
 
         def convert_list_marker(match):
             leading_space = match.group(1)
@@ -1200,6 +1227,94 @@ class TracWikiParser:
             flags=re.MULTILINE,
         )
         return text
+
+    def _separate_list_from_trailing_paragraph(self, text: str) -> str:
+        """Insert a blank line where a list ends with nothing marking it
+        (ticket #90).
+
+        A paragraph that follows a TracWiki list with no blank line and no
+        indentation ends the list -- Trac renders it as a separate ``<p>``,
+        not part of the last item (the same fact #75 measured for a
+        flush-left *continuation* line: not deep enough, so the list ends).
+        Passed through unchanged, that paragraph is indistinguishable to
+        CommonMark from a genuine lazy continuation of the last list item,
+        so mistune (and hence ``markdown_to_tracwiki``) absorbs it into the
+        item. Inserting the blank line here reproduces the separation
+        Trac's own renderer already gives it, which is exactly what
+        CommonMark needs to stop reading it as a continuation.
+
+        Runs after ``_convert_code_blocks``, unlike the fallback passes in
+        ``_apply_fallbacks``, so no ``_verbatim_mask`` shielding is needed:
+        every ``{{{ }}}`` block and code span is already a
+        ``\\x00CODE<n>\\x00`` placeholder by this point, and #89's
+        alpha/roman lists are already fenced away the same way -- neither
+        can still contain a marker-shaped line for this pass to misread.
+
+        Mechanism: a stack of marker columns, the same shape as
+        ``_convert_indented_blocks``'s ``_quote_depths`` stack, walked line
+        by line.
+
+        * A blank line passes through untouched and leaves the stack alone
+          -- a loose list survives a blank line, and #52/#53's existing
+          blank-line behavior around lists is unaffected since this pass
+          never removes a blank line, only adds one where none exists.
+        * A line matching ``_LIST_MARKER_RE`` pops every stack entry at or
+          past its own column (closing any list level this marker doesn't
+          nest under, or replacing a same-column sibling item) and pushes
+          its own column. This generalizes to nested lists with no special
+          case: a marker at any depth is just another push.
+        * Any other non-blank line pops every stack entry at or past its
+          own indent width. An empty stack afterward means this line did
+          not stay deeper than *any* currently open list level, so the
+          list has ended. A blank line is inserted first, unless the
+          previously emitted line is already blank OR this line is itself
+          one of CommonMark's list-interrupting shapes (heading, blockquote,
+          code fence, thematic break -- see
+          ``_LAZY_CONTINUATION_INTERRUPT_RE``): those already start a new
+          sibling block on their own, so adding a blank line ahead of them
+          would be a needless, unmeasured stored-byte change rather than a
+          fix for anything. A non-empty stack means the line is a genuine
+          continuation of the remaining (outer) level and is left exactly
+          as it is.
+
+        The pop threshold is strict ("deeper than", not "at least as
+        deep") -- ticket #75's own measured boundary (section 2's
+        two-space continuation under a one-space marker: continues;
+        section 4: "deeper than the marker... does not have to align
+        exactly"), read directly off the marker's column via
+        ``_indent_of``. #75's write-leg re-indentation
+        (``len(prefix) + 1``) is that method's own choice of how deep to
+        put a continuation back on the way OUT; it is not Trac's read-side
+        threshold for what still counts as one, which is the marker's
+        column alone.
+        """
+        lines = text.split("\n")
+        out: list[str] = []
+        stack: list[int] = []
+        for line in lines:
+            if not line.strip():
+                out.append(line)
+                continue
+            if _LIST_MARKER_RE.match(line):
+                column = len(_indent_of(line))
+                while stack and stack[-1] >= column:
+                    stack.pop()
+                stack.append(column)
+                out.append(line)
+                continue
+            if stack:
+                column = len(_indent_of(line))
+                while stack and stack[-1] >= column:
+                    stack.pop()
+                if (
+                    not stack
+                    and out
+                    and out[-1].strip()
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(line)
+                ):
+                    out.append("")
+            out.append(line)
+        return "\n".join(out)
 
     def _convert_other_elements(self, text: str) -> str:
         """Convert horizontal rules: ``----`` -> ``---``.
