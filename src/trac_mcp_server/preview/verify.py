@@ -24,6 +24,7 @@ def build_verify_warnings(
     facts: PreviewFacts,
     probes: dict[str, dict],
     check_targets: bool,
+    local_intertrac_bases: frozenset[str] = frozenset(),
 ) -> list[dict]:
     """Run every check applicable to a live render and return the list.
 
@@ -38,6 +39,7 @@ def build_verify_warnings(
         probes: Live-probe results for cross-instance targets, from
             :func:`trac_mcp_server.preview.targets.probe_targets`.
         check_targets: Whether the live probe actually ran.
+        local_intertrac_bases: See ``build_warnings`` -- ticket #86.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -50,4 +52,5 @@ def build_verify_warnings(
         facts=facts,
         probes=probes,
         check_targets=check_targets,
+        local_intertrac_bases=local_intertrac_bases,
     )

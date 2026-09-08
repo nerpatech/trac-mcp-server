@@ -61,6 +61,37 @@ def set_instance_registry(registry: InstanceRegistry | None) -> None:
     _registry_ref = registry
 
 
+def get_instance_registry() -> InstanceRegistry | None:
+    """The installed InstanceRegistry, or ``None`` before startup wires
+    one in. Ticket #86's other tool modules read it through here rather
+    than through ``server.py`` for the same reason ``_registry_ref``
+    exists at all: a direct ``tools -> server`` import would be
+    circular, since ``server.py`` imports tool specs from this package."""
+    return _registry_ref
+
+
+def local_intertrac_bases() -> frozenset[str]:
+    """InterTrac dispatcher bases -- one per configured instance -- that
+    are ours, for ``preview.checks``'s ``missing_intertrac_realm`` check
+    (ticket #86). One helper rather than three call sites each reading
+    the registry and stripping trailing slashes their own way -- the
+    project's own "not a check re-implemented per handler" rule
+    (``write_gate.py``'s module docstring) applies just as much to the
+    piece that FEEDS a check as to the check itself.
+
+    Empty before the registry is wired in (mirrors ``describe()``'s own
+    None guard in ``_handle_list_instances``) -- the check simply does
+    not fire, which is the status quo this ticket is about, not a new
+    failure mode.
+    """
+    registry = _registry_ref
+    if registry is None:
+        return frozenset()
+    return frozenset(
+        entry["url"].rstrip("/") for entry in registry.describe()
+    )
+
+
 def _host_root(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"

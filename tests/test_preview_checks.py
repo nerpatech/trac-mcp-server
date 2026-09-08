@@ -243,6 +243,14 @@ SILENT_ROWS = [
     # this list -- there is nothing for the check to classify, and it
     # must not be counted as an incidental auto-link either.
     "row79d_escaped_camelcase",
+    # Ticket #86. Silent here because this suite's default
+    # `build_warnings` call carries no `local_intertrac_bases` --
+    # exactly the "empty instance table" case the ticket's fix degrades
+    # to. The row DOES contain the realm-less/slashed defect shape; see
+    # `TestMissingIntertracRealm` below for it actually firing once a
+    # local base is supplied, and for the upstream (trac.edgewall.org)
+    # target staying silent even then.
+    "row86_missing_intertrac_realm",
 ]
 
 WARNING_ROWS = [
@@ -780,8 +788,13 @@ def test_suite_balance_is_roughly_even():
     # note on suite 9 in WARNING_ROWS. Narrowing a check risks losing
     # true positives, so the new rows are weighted to the half that
     # proves the check still fires.
+    #
+    # Ticket #86 added row86, silent here for the reason its own comment
+    # in SILENT_ROWS gives (no instance table supplied by this suite's
+    # default call) -- the defect it carries is exercised by the
+    # standalone tests instead, so it counts here as one-sided too.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 39
+    assert silent_count == 40
     assert warning_count == 39
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
@@ -1340,6 +1353,81 @@ def test_the_merged_code_is_gone():
         ({}, False),
     ):
         assert "target_check_skipped" not in _probe_codes(probes, check)
+
+
+# ---------------------------------------------------------------------
+# Ticket #86: a realm-less, slashed InterTrac target is always dead on a
+# LOCAL dispatcher, and needs no live probe to know it -- unlike the
+# `target_check_*` family above. `row86_missing_intertrac_realm` (in
+# SILENT_ROWS, since the default call above supplies no instance table)
+# carries the defect anchor plus four shapes that must stay silent no
+# matter what: the realm form, the single-segment form, and -- the
+# scoping trap ticket #86 itself measured -- the identical shape on a
+# genuinely foreign dispatcher (trac.edgewall.org), which resolves it
+# correctly and must never be flagged just because it LOOKS the same.
+# ---------------------------------------------------------------------
+
+_LOCAL_BASE = frozenset({"http://192.168.10.4:8000/auto_pm"})
+
+
+def _row86_warnings(local_intertrac_bases=frozenset()):
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row86_missing_intertrac_realm"
+    )
+    return build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+        local_intertrac_bases=local_intertrac_bases,
+    )
+
+
+def _row86_codes(local_intertrac_bases=frozenset()):
+    return [w["code"] for w in _row86_warnings(local_intertrac_bases)]
+
+
+def test_missing_intertrac_realm_fires_only_once_a_local_base_is_known():
+    """Shape alone (the default, empty instance table) stays silent --
+    already covered by `row86_missing_intertrac_realm` in SILENT_ROWS.
+    Supplying the LOCAL base is what turns the shape into a finding."""
+    assert "missing_intertrac_realm" not in _row86_codes()
+    assert "missing_intertrac_realm" in _row86_codes(_LOCAL_BASE)
+
+
+def test_missing_intertrac_realm_stays_silent_for_a_foreign_dispatcher():
+    """The scoping trap itself: `trac:TracDev/ApiDocs` renders the
+    IDENTICAL realm-less/slashed shape as the defect, dispatched to
+    trac.edgewall.org rather than a local base. Upstream Trac resolves
+    it correctly, so it must stay silent even with a local base known --
+    the predicate has to look at the BASE, not just the shape."""
+    codes = _row86_codes(_LOCAL_BASE)
+    assert codes.count("missing_intertrac_realm") == 1, codes
+
+
+def test_missing_intertrac_realm_leaves_the_safe_shapes_alone():
+    """The realm form and the single-segment realm-less form both
+    resolve correctly even on this host, and must not be swept up by a
+    local base being known."""
+    codes = _row86_codes(_LOCAL_BASE)
+    assert "missing_local_target" not in codes
+    assert "unconfigured_intertrac_prefix" not in codes
+
+
+def test_missing_intertrac_realm_is_a_blocking_code():
+    """Ticket #86's own severity call, cross-checked against the
+    inventory `preview.gate` actually ships -- the same recall gate
+    `test_blocking_codes_match_severity_across_the_corpus` runs, pinned
+    here so a revert shows up on this file too."""
+    from trac_mcp_server.preview.gate import BLOCKING_CODES
+
+    assert "missing_intertrac_realm" in BLOCKING_CODES
+    codes_and_severities = {
+        (w["code"], w["severity"]) for w in _row86_warnings(_LOCAL_BASE)
+    }
+    assert ("missing_intertrac_realm", "error") in codes_and_severities
 
 
 # ---------------------------------------------------------------------

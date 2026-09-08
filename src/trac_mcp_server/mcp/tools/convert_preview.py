@@ -23,6 +23,7 @@ from ...preview.targets import (
     probe_targets,
 )
 from .errors import build_error_response
+from .instances import local_intertrac_bases
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,7 @@ async def _handle_convert_preview(
         # The caller already told us what it wrote; pass it on rather
         # than letting the checks assume Markdown (ticket #65).
         source_format=fmt,
+        local_intertrac_bases=local_intertrac_bases(),
     )
     for message in conversion_warnings:
         warnings.append(

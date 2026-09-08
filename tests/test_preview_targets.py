@@ -16,6 +16,8 @@ from trac_mcp_server.preview.targets import (
     EXISTS,
     MISSING,
     SKIPPED,
+    dispatcher_base,
+    is_missing_realm_href,
     is_probeable_href,
     is_probeable_ticket_href,
     is_probeable_wiki_href,
@@ -132,6 +134,103 @@ class TestIsProbeableWikiHref(unittest.TestCase):
         self.assertFalse(is_probeable_wiki_href(None))
         self.assertFalse(is_probeable_ticket_href(None))
         self.assertFalse(is_probeable_href(None))
+
+
+# Ticket #86's own two measured tables, reproduced as the shape predicate's
+# acceptance suite. Every row of "measured on the deployed daemon" and
+# "the scoping trap" becomes one assertion here.
+class TestIsMissingRealmHref(unittest.TestCase):
+    def test_slashed_realm_less_target_is_flagged(self):
+        """The defect itself: a full-path page name with no wiki: realm."""
+        self.assertTrue(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/Rules/trac/RenderVerify"
+            )
+        )
+
+    def test_slashed_realm_less_missing_page_is_also_flagged(self):
+        """The shape is dead regardless of whether the page exists."""
+        self.assertTrue(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/Rules/trac/NoSuchPageAtAll"
+            )
+        )
+
+    def test_single_segment_realm_less_target_is_not_flagged(self):
+        """No slash at all -- the form that resolves correctly even on
+        this host."""
+        self.assertFalse(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/WikiStart"
+            )
+        )
+        self.assertFalse(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/NoSuchPageAtAll"
+            )
+        )
+
+    def test_wiki_realm_form_is_not_flagged_even_when_slashed(self):
+        """The realm form works regardless of slashes -- `%3A` precedes
+        the first `/`."""
+        self.assertFalse(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/wiki%3ARules/trac/RenderVerify"
+            )
+        )
+
+    def test_ticket_short_link_is_not_flagged(self):
+        self.assertFalse(
+            is_missing_realm_href("http://h/auto_pm/intertrac/%233754")
+        )
+
+    def test_ticket_realm_form_is_not_flagged(self):
+        self.assertFalse(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/ticket%3A42"
+            )
+        )
+
+    def test_none_href_is_not_flagged(self):
+        self.assertFalse(is_missing_realm_href(None))
+
+    def test_non_intertrac_href_is_not_flagged(self):
+        self.assertFalse(
+            is_missing_realm_href(
+                "http://host/auto_pm/wiki/Rules/trac/Foo"
+            )
+        )
+
+    def test_upstream_slashed_realm_less_shape_still_matches(self):
+        """The scoping trap: upstream Trac (trac.edgewall.org) resolves
+        this identical shape correctly, but the predicate is SHAPE ONLY
+        -- it is the caller's job (via `dispatcher_base`) to know this
+        base isn't local before treating a match as a defect."""
+        self.assertTrue(
+            is_missing_realm_href(
+                "https://trac.edgewall.org/intertrac/TracDev/ApiDocs"
+            )
+        )
+
+    def test_upstream_realm_form_is_not_flagged(self):
+        self.assertFalse(
+            is_missing_realm_href(
+                "https://trac.edgewall.org/intertrac/wiki%3ATracDev/ApiDocs"
+            )
+        )
+
+
+class TestDispatcherBase(unittest.TestCase):
+    def test_extracts_base_before_intertrac_marker(self):
+        self.assertEqual(
+            dispatcher_base(
+                "http://h/auto_pm/intertrac/wiki%3ARules/trac/Foo"
+            ),
+            "http://h/auto_pm",
+        )
+
+    def test_non_dispatcher_href_has_no_base(self):
+        self.assertIsNone(dispatcher_base("http://h/auto_pm/wiki/Foo"))
 
 
 class TestProbeTargets(unittest.TestCase):

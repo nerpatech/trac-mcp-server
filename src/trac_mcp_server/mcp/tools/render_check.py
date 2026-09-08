@@ -30,6 +30,7 @@ from ...preview.targets import (
 )
 from ...preview.verify import build_verify_warnings
 from .errors import build_error_response
+from .instances import local_intertrac_bases
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -276,6 +277,7 @@ def _section_result(
         facts=facts,
         probes=probes,
         check_targets=check_targets,
+        local_intertrac_bases=local_intertrac_bases(),
     )
     if not section.source_paired:
         warnings.append(
