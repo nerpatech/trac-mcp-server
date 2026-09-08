@@ -179,12 +179,24 @@ _LIST_MARKER_RE = re.compile(
 # Indented only, like every other pattern here.  A lettered list at column zero
 # is an <ol class="loweralpha"> to Trac as well and is lost the same way, but
 # its grammar differs (a marker line opens a list mid-paragraph, and a
-# column-zero continuation line ENDS it), and a sweep of 1020 store documents
-# found 22 marker lines in 4 documents, all indented and none at column zero.
-# So it is ticket #89 rather than a wider pattern here.
+# column-zero continuation line ENDS it) -- handled separately below by
+# _ALPHA_LIST_MARKER_COL0_RE and _fallback_column_zero_lists (ticket #89),
+# rather than folded in here, because a run there is bounded by consecutive
+# MARKER lines rather than by consecutive indented ones.
 _ALPHA_LIST_MARKER_RE = re.compile(rf"^[ \t]+{_ALPHA_MARKER}(?=[ \t])")
 _INDENTED_TABLE_RE = re.compile(r"^[ \t]+\|\|")
 _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
+
+# The column-zero counterpart of _ALPHA_LIST_MARKER_RE (ticket #89), built
+# from the same _ALPHA_MARKER fragment so the marker grammar has one
+# definition read from three places -- indented, column zero, and this
+# module's quote-scanner exclusion list -- instead of three copies free to
+# drift apart.  Trac opens one of these lists at column zero even in the
+# middle of a paragraph (measured against the live renderer: "some prose"
+# then "a. first" renders as a <p> followed by a separate <ol>), so unlike
+# the indented form this pattern is anchored directly on the marker with no
+# leading-whitespace requirement.
+_ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 
 
 def _indent_of(line: str) -> str:
@@ -575,6 +587,53 @@ class TracWikiParser:
                 out.extend(lines[start:i])
         return "\n".join(out)
 
+    def _fallback_column_zero_lists(self, text: str) -> str:
+        """Emit a column-zero lettered or roman list verbatim (ticket #89).
+
+        Trac's grammar here is different from the indented form
+        ``_convert_indented_blocks`` handles for the same marker set: a
+        marker line opens a list even mid-paragraph, and the run is the
+        maximal set of *consecutive* marker lines only -- a following
+        column-zero line that is not itself a marker ends the list rather
+        than being absorbed into the last item (measured against Trac's own
+        renderer: ``A. first`` / a continuation line / ``B. second`` comes
+        back as ``<ol>``, ``<p>``, ``<ol start="2">``). So this scans for
+        runs of the marker itself, not runs of indentation, and never
+        touches a line around it -- prose above, below, or between two runs
+        is left exactly as written.
+
+        Runs as its own top-level pass rather than a branch inside
+        ``_convert_indented_blocks``, per the ticket: a column-zero marker
+        line's first character is never whitespace, so the two passes can
+        never contend for the same line regardless of ordering.
+
+        Detection runs against ``_verbatim_mask``, like every other fallback
+        here, so a marker line quoted inside a code block or code span is
+        content, not a construct (tickets #45, #46, #51).
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        index = 0
+        n = len(lines)
+        while index < n:
+            if not _ALPHA_LIST_MARKER_COL0_RE.match(masked[index]):
+                out.append(lines[index])
+                index += 1
+                continue
+            start = index
+            while index < n and _ALPHA_LIST_MARKER_COL0_RE.match(
+                masked[index]
+            ):
+                index += 1
+            out.append(
+                self._stash_fallback(
+                    "\n".join(lines[start:index]),
+                    "Lettered or roman ordered list",
+                )
+            )
+        return "\n".join(out)
+
     @staticmethod
     def _line_holds_a_brace(masked_line: str) -> bool:
         """True for a code-block delimiter line.
@@ -640,8 +699,9 @@ class TracWikiParser:
            reached the Markdown as a paragraph, silently.  Renumbering them
            as ``1./2./3.`` is rejected -- it changes what the page says, and
            the write leg could not tell the rewrite from an original.
-           **Column zero is ticket #89**, deliberately: the grammar differs
-           there and the store sweep found no instances.
+           A marker at column zero is a sibling defect with a different
+           grammar -- ``_fallback_column_zero_lists`` handles it as its own
+           top-level pass, before this method runs (ticket #89).
         4. **Not a quote at all** -- the run contains a list item, table row
            or heading, whose indent those constructs consume.  Left untouched,
            which is also what keeps a multi-line list item working: its
@@ -750,6 +810,7 @@ class TracWikiParser:
         """Run every unrepresentable-construct fallback, outermost first."""
         text = self._fallback_processor_blocks(text)
         text = self._fallback_tables(text)
+        text = self._fallback_column_zero_lists(text)
         text = self._convert_indented_blocks(text)
         return text
 
