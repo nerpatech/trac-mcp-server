@@ -171,30 +171,31 @@ class TestRecallGate(unittest.TestCase):
             " * beta\n   '''Bold lead:''' first paragraph.\n\n", result
         )
 
-    def test_known_gap_a_flush_left_tracwiki_paragraph_after_a_list_gets_absorbed(
+    def test_flush_left_tracwiki_paragraph_after_a_list_stays_separate(
         self,
     ):
-        """Documents ticket #90, filed while fixing this one: a TracWiki
-        paragraph that follows a list with no blank line and no indentation
-        is meant to terminate the list (Trac renders it as a separate
-        ``<p>``, confirmed on the live renderer) -- but the read leg never
-        inserts a blank line to stop CommonMark's lazy continuation from
-        absorbing it into the last item on the way through. This fix
-        correctly indents whatever the AST says is a continuation; it
-        cannot by itself distinguish that shape from a paragraph that was
-        never meant to be list content. Not this ticket's bug (see #75
-        comment 1) -- pinned here so a future change to either leg doesn't
-        silently alter this known, tracked gap without noticing."""
+        """Ticket #90, filed while fixing this one: a TracWiki paragraph
+        that follows a list with no blank line and no indentation is meant
+        to terminate the list (Trac renders it as a separate ``<p>``,
+        confirmed on the live renderer). This fix by itself could only
+        correctly indent whatever the AST said was a continuation -- it
+        could not distinguish that shape from a paragraph that was never
+        meant to be list content, which is what left this absorbing
+        (see #75 comment 1). #90's read-leg fix inserts the blank line
+        Trac's own renderer already implies, so the paragraph now comes
+        back untouched rather than pulled into the last item -- see
+        ``tests/test_converter_list_trailing_paragraph.py`` for the fuller
+        pin, including the live-render assertion."""
         src = (
             " * one\n"
             " * two\n"
             "This paragraph was not meant to be part of the list."
         )
         stored, _, _ = _round_trip(src)
-        self.assertNotEqual(stored, src)
         self.assertEqual(
             stored,
             " * one\n"
             " * two\n"
-            "   This paragraph was not meant to be part of the list.",
+            "\n"
+            "This paragraph was not meant to be part of the list.",
         )
