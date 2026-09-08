@@ -1,0 +1,29 @@
+{
+  "_comment": "Rendered HTML captured from the live Trac renderer (convert_preview, format=tracwiki, /trac_test) on 2026-09-07, per Rules/testing/RealSubstrateNotMocks. Ticket #75 section 5 requires asserting on the rendered HTML, not stored bytes alone, because the defect is a change of document structure -- one <li> becoming an <li> plus a separate <p>.",
+  "rows": [
+    {
+      "name": "item_one_continuation_aligned",
+      "tracwiki": " * item one\n   continuation of item one",
+      "html": "item_one_continuation_aligned.html",
+      "note": "Ticket #75 section 2 row 1. Continuation already aligned under the item text in the source; stored bytes are unchanged by the fix and render as one <li>."
+    },
+    {
+      "name": "item_one_continuation_unaligned",
+      "tracwiki": " * item one\n   continuation",
+      "html": "item_one_continuation_unaligned.html",
+      "note": "Ticket #75 section 2 row 2. Source has only a 2-space continuation (not aligned under 'item one'); the fixed write leg normalises it to 3 spaces (aligned under the item text), which still renders as one <li> -- confirmed the source's own 2-space form does too, so the fix's requirement is 'deeper than the marker', not an exact column."
+    },
+    {
+      "name": "one_more_of_one_two",
+      "tracwiki": " * one\n   more of one\n * two",
+      "html": "one_more_of_one_two.html",
+      "note": "Ticket #75 section 2 row 3. A continuation in the middle of a list: before the fix this split into three <li>s around an absorbed paragraph. Fixed output renders as two <li>s, the continuation staying inside the first."
+    },
+    {
+      "name": "ordered_one_more_of_one",
+      "tracwiki": " 1. one\n    more of one",
+      "html": "ordered_one_more_of_one.html",
+      "note": "Ticket #75 section 2 row 4. Same defect in an ordered list."
+    }
+  ]
+}

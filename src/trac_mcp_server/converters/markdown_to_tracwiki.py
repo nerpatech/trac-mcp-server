@@ -841,6 +841,27 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                 text = text.rstrip("\n")
 
+                # A soft break inside the item (or a blank line between two
+                # loose paragraphs) lands in `text` as a literal "\n": at
+                # column zero it dedents the continuation out of the item
+                # into its own paragraph on the way back through Trac's
+                # renderer (ticket #75). Indent every line after the first
+                # to line up under the item text -- Trac's list grammar
+                # only requires "deeper than the marker", not an exact
+                # column, but aligning under the text is what the source
+                # itself does. A blank line stays blank rather than
+                # picking up trailing whitespace.
+                if "\n" in text:
+                    continuation_indent = " " * (len(prefix) + 1)
+                    lines = text.split("\n")
+                    text = "\n".join(
+                        [lines[0]]
+                        + [
+                            continuation_indent + line if line else line
+                            for line in lines[1:]
+                        ]
+                    )
+
                 # Combine text and nested list
                 if nested_text:
                     result = f"{prefix} {text}\n{nested_text}\n"

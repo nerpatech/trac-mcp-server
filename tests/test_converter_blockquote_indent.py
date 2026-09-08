@@ -253,11 +253,18 @@ class TestListsAreNotQuotes(unittest.TestCase):
     #   now round-trip byte-for-byte, which is why they are absent from
     #   NO_FENCE below and asserted in test_converter_lettered_lists.py
     #   instead.
+    #
+    # ``multi-line item`` used to belong on that same "not touched by this
+    # ticket" list too -- its continuation line was dedented to column zero
+    # by a separate write-leg bug, fixed in #75 (see
+    # test_converter_list_continuation.py for that ticket's own seeds and
+    # fixtures). It round-trips byte-for-byte now.
     ROUND_TRIPPING = [
         " * a",
         " 1. a",
         " * a\n   * b",
         " * a\n * b\n * c",
+        " * item\n   continuation",
     ]
 
     # Every row EXCEPT the lettered and roman ones, which ticket #74 carries
