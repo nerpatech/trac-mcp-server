@@ -192,12 +192,27 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
 
 
 def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
-    """Restore sentinels stashed by `_stash_bracket_syntax` after rendering."""
+    """Restore sentinels stashed by `_stash_bracket_syntax` after rendering.
+
+    A placeholder's own stored text can itself contain another sentinel:
+    `_stash_bracket_syntax` stashes code spans before `[[...]]` and
+    single-bracket links, so a code span quoted *inside* one of those
+    (e.g. ``[[html(<code>`{{{-}}}`)]]``) is already a placeholder by the
+    time the outer span is stashed, and that inner sentinel becomes part
+    of the outer span's own stored text. A single non-recursive
+    substitution pass leaves it behind -- a raw NUL byte in the final
+    output (ticket #91). Looping until no sentinel remains resolves any
+    nesting depth; a stashed span can only ever contain a placeholder
+    from an *earlier* pass (never itself or a later one), so each pass
+    strictly reduces what is left and this always terminates.
+    """
 
     def restore(m: re.Match[str]) -> str:
         return placeholders[int(m.group(1))]
 
-    return _PLACEHOLDER_RE.sub(restore, text)
+    while _PLACEHOLDER_RE.search(text):
+        text = _PLACEHOLDER_RE.sub(restore, text)
+    return text
 
 
 # The TracLink resolver allowlist and `scheme:target` pattern live in
