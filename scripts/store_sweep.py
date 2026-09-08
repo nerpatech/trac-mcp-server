@@ -141,7 +141,18 @@ def _store(
         cache,
         instance,
         ref,
-        {"kind": kind, "ref": label, "source": source, "html": html},
+        {
+            "kind": kind,
+            "ref": label,
+            "source": source,
+            "html": html,
+            # Ticket #86: the InterTrac dispatcher base this document
+            # was rendered against, so `replay` can tell a LOCAL
+            # dispatcher from a foreign one (trac.edgewall.org) without
+            # needing live credentials of its own -- the cache stays
+            # self-describing rather than replay depending on `.env`.
+            "instance_base": client.config.trac_url,
+        },
     )
     return True
 
@@ -252,17 +263,37 @@ def replay(cache: Path, instances: tuple[str, ...]) -> dict:
     grand_docs = 0
     grand_refused = 0
 
+    # Loaded once per instance, up front, rather than streamed: ticket
+    # #86's check needs every LOCAL dispatcher base the corpus carries
+    # before any document's findings are computed, and a document under
+    # one instance can reference the other -- so the set has to be
+    # global, not scoped to whichever directory is currently being
+    # replayed. `instance_base` comes from the cache itself (see
+    # `_store`), so this stays offline: no credentials, no `.env`.
+    loaded: dict[str, list[dict]] = {}
+    local_bases: set[str] = set()
     for instance in instances:
         directory = cache / instance
         if not directory.is_dir():
             continue
+        parsed = [
+            json.loads(path.read_text())
+            for path in sorted(directory.glob("*.json"))
+        ]
+        loaded[instance] = parsed
+        for doc in parsed:
+            base = doc.get("instance_base")
+            if base:
+                local_bases.add(base)
+    local_intertrac_bases = frozenset(local_bases)
+
+    for instance, instance_docs in loaded.items():
         codes: dict[str, int] = {}
         docs = 0
         refused = 0
         examples: dict[str, list[str]] = {}
 
-        for path in sorted(directory.glob("*.json")):
-            doc = json.loads(path.read_text())
+        for doc in instance_docs:
             warnings = build_warnings(
                 markdown_source=None,
                 tracwiki=doc["source"],
@@ -270,6 +301,7 @@ def replay(cache: Path, instances: tuple[str, ...]) -> dict:
                 probes={},
                 check_targets=False,
                 source_format="tracwiki",
+                local_intertrac_bases=local_intertrac_bases,
             )
             docs += 1
             found = {w["code"] for w in warnings}

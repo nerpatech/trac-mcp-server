@@ -89,6 +89,12 @@ _INTERTRAC_TICKET_HREF_RE = re.compile(
     r"/intertrac/(?:%23|ticket%3A)\d+"
 )
 
+# Ticket #86. Grabs the dispatcher TARGET -- everything after
+# `/intertrac/`, stopping short of a query string or fragment if either
+# is present. Used to classify the realm-less/slashed shape below, not
+# to select probeable candidates (that stays `is_probeable_href`'s job).
+_INTERTRAC_TARGET_RE = re.compile(r"/intertrac/([^?#]+)")
+
 # The control target: a WIKI-realm dispatcher path on the same instance.
 # Trac answers 200 for it whether or not the page exists, on this host and
 # on trac.edgewall.org alike, so a non-200 means the instance did not
@@ -151,6 +157,55 @@ def is_probeable_href(href: str | None) -> bool:
     )
 
 
+def is_missing_realm_href(href: str | None) -> bool:
+    """Whether ``href`` is an InterTrac dispatcher link whose target is
+    realm-less AND slashed -- ticket #86's shape, always dead on a
+    dispatcher that shares this host's bug, whether or not the target
+    page exists.
+
+    A realm-form target always carries the encoded colon ``%3A`` before
+    any ``/`` (``wiki%3ARules/trac/Foo``); a realm-less slashed target
+    has a ``/`` with no ``%3A`` before it, or none at all. Single-segment
+    realm-less targets (``/intertrac/WikiStart``) have no ``/`` at all
+    and are the form that resolves correctly even on this host, so they
+    are excluded here.
+
+    Shape only: says nothing about whether ``href``'s dispatcher is one
+    of ours. Upstream Trac (``trac.edgewall.org``) resolves the
+    identical shape correctly -- see the module docstring's scoping
+    trap -- so a caller must additionally confirm the dispatcher base
+    with ``dispatcher_base`` before treating this as a defect.
+    """
+    if not href:
+        return False
+    match = _INTERTRAC_TARGET_RE.search(href)
+    if not match:
+        return False
+    target = match.group(1)
+    slash_index = target.find("/")
+    if slash_index == -1:
+        return False
+    colon_index = target.find("%3A")
+    return colon_index == -1 or slash_index < colon_index
+
+
+def dispatcher_base(href: str) -> str | None:
+    """The instance base ``href`` dispatches on -- everything before
+    ``/intertrac/`` -- or ``None`` if ``href`` is not an InterTrac
+    dispatcher link at all.
+
+    Works for a prefix pointing at a foreign Trac
+    (``https://trac.edgewall.org/intertrac/%233754``) exactly the same
+    as one of ours; it is the caller's job to decide which bases count
+    as local.
+    """
+    marker = "/intertrac/"
+    index = href.find(marker)
+    if index < 0:
+        return None
+    return href[:index]
+
+
 def _control_url(href: str) -> str | None:
     """The liveness-control URL for the instance ``href`` dispatches on.
 
@@ -159,11 +214,8 @@ def _control_url(href: str) -> str | None:
     a foreign Trac (``https://trac.edgewall.org/intertrac/%233754``),
     where "is the instance up" is a question about that host, not ours.
     """
-    marker = "/intertrac/"
-    index = href.find(marker)
-    if index < 0:
-        return None
-    return href[:index] + _CONTROL_TARGET
+    base = dispatcher_base(href)
+    return None if base is None else base + _CONTROL_TARGET
 
 
 def _probe_one(client: TracClient, href: str, timeout: float) -> dict:

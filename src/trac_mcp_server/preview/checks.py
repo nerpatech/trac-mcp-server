@@ -18,7 +18,14 @@ from ..converters.common import (
     find_code_block_indentation_loss,
 )
 from .facts import PreviewFacts
-from .targets import ERROR, MISSING, SKIPPED, is_probeable_href
+from .targets import (
+    ERROR,
+    MISSING,
+    SKIPPED,
+    dispatcher_base,
+    is_missing_realm_href,
+    is_probeable_href,
+)
 
 # A code span whose entire body is a cross-instance/TracLink reference --
 # e.g. `auto_pm:wiki:Reference/trac/InterTrac` or bare `wiki:Page` -- rather
@@ -1127,6 +1134,50 @@ def _check_target_probes(
     return warnings
 
 
+def _check_missing_intertrac_realm(
+    facts: PreviewFacts, local_intertrac_bases: frozenset[str]
+) -> list[dict]:
+    """A realm-less, slashed InterTrac dispatcher target on a LOCAL
+    dispatcher -- ticket #86. Unlike ``_check_target_probes``, this needs
+    no live fetch: the shape is provably dead on a dispatcher that
+    shares this host's bug, whether or not the target page exists.
+    Upstream Trac (``trac.edgewall.org``) resolves the identical shape
+    correctly, which is why the check stops at the shape alone only when
+    the dispatcher base is one of ``local_intertrac_bases`` -- the caller's
+    instance table, not something this function can discover on its own.
+
+    ``local_intertrac_bases`` empty (the caller has no instance table to
+    offer, e.g. an offline unit test) degrades to this check never
+    firing -- the status quo before ticket #86, not a new failure mode.
+    """
+    warnings = []
+    for anchor in facts.anchors:
+        href = anchor.href
+        if not href or not is_missing_realm_href(href):
+            continue
+        base = dispatcher_base(href)
+        if base is None or base not in local_intertrac_bases:
+            continue
+        # Same rationale as `_check_target_probes`: prefer the resolved
+        # title Trac attaches to the anchor over the anchor's visible
+        # text, which for a `[target label]`-style link is the LABEL,
+        # not the target.
+        target_desc = anchor.title or href or anchor.text
+        warnings.append(
+            _warning(
+                "missing_intertrac_realm",
+                "error",
+                f"Link labeled '{anchor.text}' targets {target_desc}, "
+                "which is missing the wiki: realm before a slashed page "
+                "name -- on this host that dispatches to a 404 whether "
+                "or not the page exists. Insert 'wiki:' before the page "
+                "name.",
+                {"href": href, "text": anchor.text},
+            )
+        )
+    return warnings
+
+
 def build_warnings(
     markdown_source: str | None,
     tracwiki: str,
@@ -1134,6 +1185,7 @@ def build_warnings(
     probes: dict[str, dict],
     check_targets: bool,
     source_format: str = "markdown",
+    local_intertrac_bases: frozenset[str] = frozenset(),
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
@@ -1164,6 +1216,13 @@ def build_warnings(
             (ticket #68). Never used to GUESS the format -- the
             declaration is the caller's, and #47 is this project's
             evidence that sniffing content instead is unreliable.
+        local_intertrac_bases: InterTrac dispatcher bases (everything
+            before ``/intertrac/``) that are ours -- from the caller's
+            instance table, ticket #86. Consulted only by
+            ``missing_intertrac_realm``, which needs it to tell a local
+            dispatcher's bug from upstream Trac resolving the identical
+            href shape correctly. Empty (the default) means that check
+            never fires, matching the behaviour before ticket #86.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -1199,6 +1258,9 @@ def build_warnings(
         _check_unconfigured_intertrac_prefix(tracwiki, facts)
     )
     warnings.extend(_check_target_probes(facts, probes, check_targets))
+    warnings.extend(
+        _check_missing_intertrac_realm(facts, local_intertrac_bases)
+    )
     # Last (ticket #77), so the verify path's warning ordering stays
     # byte-identical to what `build_verify_warnings` produced when it
     # appended this itself.

@@ -1,0 +1,5 @@
+ * auto_pm:Rules/trac/RenderVerify
+ * auto_pm:wiki:Rules/trac/RenderVerify
+ * auto_pm:WikiStart
+ * trac:TracDev/ApiDocs
+ * trac:wiki:TracDev/ApiDocs

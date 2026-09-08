@@ -43,6 +43,12 @@ from trac_mcp_server.preview.gate import (
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "convert_preview"
 MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 
+# Ticket #86's fixture (`row86_missing_intertrac_realm`) carries a
+# realm-less/slashed InterTrac anchor whose dispatcher base is this one --
+# supplying it here is what lets `missing_intertrac_realm` actually reach
+# the corpus below, rather than sitting untested next to the codes that do.
+_LOCAL_INTERTRAC_BASES = frozenset({"http://192.168.10.4:8000/auto_pm"})
+
 
 def _warning(code, severity, message="m", evidence=None):
     return {
@@ -76,6 +82,7 @@ def _all_findings():
             probes={},
             check_targets=False,
             source_format=data.get("source_format", "markdown"),
+            local_intertrac_bases=_LOCAL_INTERTRAC_BASES,
         ):
             yield name, warning["code"], warning["severity"]
 

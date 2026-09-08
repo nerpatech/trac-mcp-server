@@ -60,6 +60,7 @@ from ...preview.targets import (
     probe_targets,
 )
 from .errors import build_error_response
+from .instances import local_intertrac_bases
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,7 @@ async def _run_checks(
         # ticket #64 ruling 3.
         check_targets=True,
         source_format="tracwiki",
+        local_intertrac_bases=local_intertrac_bases(),
     )
 
 

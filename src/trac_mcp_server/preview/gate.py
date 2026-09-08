@@ -60,6 +60,12 @@ BLOCKING_CODES = frozenset(
         # (ticket #68). Blocking is what that path already does; listing
         # it here makes the two agree instead of merely coinciding.
         "code_block_indentation_loss",
+        # Ticket #86. Not in #64's own table -- it postdates that
+        # ticket -- but the same "provable breakage" argument as
+        # `escaped_link_target`: a realm-less slashed InterTrac target
+        # on a LOCAL dispatcher 404s unconditionally, whether or not the
+        # page exists, and the fix is a mechanical `wiki:` insertion.
+        "missing_intertrac_realm",
     }
 )
 
