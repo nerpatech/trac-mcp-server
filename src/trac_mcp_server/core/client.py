@@ -353,6 +353,48 @@ class TracClient:
             "ticket", "replyToComment", ticket_id, cnum, comment, quote
         )
 
+    def get_timeline_filters(self) -> Any:
+        """
+        Get the available timeline event kinds as (name, label) pairs.
+
+        These are the names accepted by ``get_timeline_events``'s
+        ``filters`` argument. Which filters exist depends on the enabled
+        components, so this is worth reading rather than assuming.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server.
+        """
+        return self._rpc_request("timeline", "getFilters")
+
+    def get_timeline_events(
+        self,
+        start_ts: int,
+        stop_ts: int,
+        filters: list[str],
+        max_results: int,
+    ) -> Any:
+        """
+        Get timeline events between start_ts and stop_ts (unix
+        timestamps, seconds since epoch), newest first. filters is a
+        list of filter names from ``get_timeline_filters``; pass every
+        name to get everything. max_results is capped server-side at
+        1000.
+
+        Each event is a struct with kind, date, author, title,
+        description and url. title/description are the provider's own
+        server-side rendering with markup stripped to plain text -- not
+        TracWiki or Markdown, and this method does not convert them.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server.
+        """
+        return self._rpc_request(
+            "timeline",
+            "getEvents",
+            xmlrpc.client.DateTime(start_ts),
+            xmlrpc.client.DateTime(stop_ts),
+            filters,
+            max_results,
+        )
+
     def validate_connection(self) -> str:
         """
         Validate connection by calling system.getAPIVersion().

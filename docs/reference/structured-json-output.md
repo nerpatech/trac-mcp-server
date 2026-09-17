@@ -55,6 +55,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 | `wiki_file_push` | `page_name`, `action`, `version`, `source_format`, `converted`, `file_path`, `warnings` |
 | `wiki_file_pull` | `page_name`, `file_path`, `format`, `version`, `bytes_written`, `converted` |
 | `wiki_file_detect_format` | `file_path`, `format`, `encoding`, `size_bytes` |
+| `timeline_search` | `events[]` (each: `kind`, `date`, `author`, `title`, `description`, `url`), `total`, `showing` |
 
 ## Schema Details
 
