@@ -428,11 +428,24 @@ class TestAllToolsCarryReadOnlyHint(unittest.TestCase):
     def test_read_only_hint_matches_write_tool_naming(self):
         """Sanity-check the hint direction, not just its presence.
 
-        A tool named *_create/_update/_delete must be readOnlyHint=False;
-        every other registered tool must be readOnlyHint=True. Catches an
-        annotation copy-pasted onto the wrong tool.
+        A tool named *_create/_update/_delete/_edit/_reply must be
+        readOnlyHint=False; every other registered tool must be
+        readOnlyHint=True. Catches an annotation copy-pasted onto the wrong
+        tool.
+
+        ``_edit`` and ``_reply`` joined the list with the comment tools
+        (ticket #96). They are write verbs, so extending the convention keeps
+        this a rule about naming; adding those two tools to the exception set
+        below would instead have turned it into a list of things the rule
+        does not apply to.
         """
-        write_suffixes = ("_create", "_update", "_delete")
+        write_suffixes = (
+            "_create",
+            "_update",
+            "_delete",
+            "_edit",
+            "_reply",
+        )
         for spec in [PING_SPEC] + ALL_SPECS:
             name = spec.tool.name
             assert spec.tool.annotations is not None, name

@@ -289,6 +289,70 @@ class TracClient:
         """
         return self._rpc_request("ticket", "changeLog", ticket_id)
 
+    def edit_ticket_comment(
+        self, ticket_id: int, cnum: int, comment: str
+    ) -> Any:
+        """
+        Replace the body of comment ``cnum`` on a ticket.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server (see
+        ``plugins/`` in this repo); stock XmlRpcPlugin has no comment-edit
+        method. The previous text is kept as a revision, readable through
+        ``get_ticket_comment_history``.
+        """
+        return self._rpc_request(
+            "ticket", "editComment", ticket_id, cnum, comment
+        )
+
+    def delete_ticket_comment(
+        self, ticket_id: int, cnum: int, force: bool = False
+    ) -> Any:
+        """
+        Delete comment ``cnum`` on a ticket. Irreversible.
+
+        The server refuses unless the comment stands alone, because Trac
+        deletes the whole change-set at that timestamp and reverts any field
+        changes recorded with it. ``force`` overrides that; the refusal names
+        the fields at risk.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server.
+        """
+        return self._rpc_request(
+            "ticket", "deleteComment", ticket_id, cnum, force
+        )
+
+    def get_ticket_comment_history(
+        self, ticket_id: int, cnum: int
+    ) -> Any:
+        """
+        Get the edit revisions of comment ``cnum`` on a ticket.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server.
+        """
+        return self._rpc_request(
+            "ticket", "getCommentHistory", ticket_id, cnum
+        )
+
+    def reply_to_ticket_comment(
+        self,
+        ticket_id: int,
+        cnum: int,
+        comment: str,
+        quote: bool = False,
+    ) -> Any:
+        """
+        Post a threaded reply to comment ``cnum``. Returns the new number.
+
+        Not the same as ``update_ticket`` with quoted text: Trac records
+        threading in the comment row itself, and ``ticket.update`` cannot set
+        it, so a comment posted that way is always flat.
+
+        Requires the ``tracrpc_comment`` plugin on the Trac server.
+        """
+        return self._rpc_request(
+            "ticket", "replyToComment", ticket_id, cnum, comment, quote
+        )
+
     def validate_connection(self) -> str:
         """
         Validate connection by calling system.getAPIVersion().
