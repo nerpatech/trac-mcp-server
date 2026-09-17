@@ -18,6 +18,17 @@ instead of the default one -- see
 [Multiple Instances](configuration.md#multiple-instances). Call
 `list_instances` to discover what's reachable.
 
+**Every result names the instance it reached.** Omitting the argument falls
+back to the server's default instance, which used to be silent: a page or
+ticket that exists on both the intended project and the default one was
+written to the wrong one with no error. Each result now carries `instance`
+(the resolved path, e.g. `/bcs`) and `instance_source` (`explicit` when the
+caller passed the argument, `server_default` when the fallback answered), in
+`structuredContent` when the tool returns it and as a trailing
+`[instance: /bcs (explicit)]` content block either way. Errors are annotated
+too -- that is where it matters most, since "ticket does not exist" and
+"wrong instance" read identically without it.
+
 ---
 
 ## ping

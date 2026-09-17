@@ -182,6 +182,9 @@ named instances in your config file's `instances:` section. Every MCP tool
 accepts an optional `instance` argument that routes the call to one of these
 instead of the default -- see the [MCP Tools Reference](mcp-tools.md) for the
 argument, and the `list_instances` tool for discovering what's reachable.
+Every result reports which instance answered, in `instance` and
+`instance_source`, so a call that silently fell back to the default is
+visible from the response alone.
 
 ```yaml
 trac:

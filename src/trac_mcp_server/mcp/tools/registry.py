@@ -202,18 +202,27 @@ def with_instance_param(
         New list of ToolSpec with the same permissions/handler but an
         updated inputSchema.
     """
+    # Every result names the instance it reached, in `instance` /
+    # `instance_source` (ticket #94), so the omitted case is stated rather
+    # than guessed at. Said here because this description is the only place
+    # a caller reads about the argument at all.
+    echoed = (
+        " Omitting it uses the server's default instance; the result says "
+        "which instance answered, as instance/instance_source."
+    )
     if names:
         description = (
             "Optional. Route this call to another configured Trac instance "
             f"instead of the default. Configured instances: {', '.join(names)}. "
             "Any other project on the same Trac host as the default instance "
             "is also reachable ad-hoc via its path, e.g. '/project'."
+            + echoed
         )
     else:
         description = (
             "Optional. Route this call to another project on the same Trac "
             "host as the default instance, addressed by path, e.g. "
-            "'/project'. No named instances are configured."
+            "'/project'. No named instances are configured." + echoed
         )
 
     result = []

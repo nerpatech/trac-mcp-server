@@ -45,6 +45,7 @@ from .tools import (
     build_error_response,
     load_permissions_file,
 )
+from .tools.instance_echo import annotate
 from .tools.instances import set_instance_registry
 from .tools.registry import ToolSpec, with_instance_param
 
@@ -248,6 +249,10 @@ async def handle_call_tool(
     ever sees an unexpected key, and resolves it against the InstanceRegistry
     to pick which Trac project's client to use.
 
+    Annotates whatever comes back with the instance it actually reached, so
+    the silent fallback to the server's default is visible from the response
+    alone -- see ``tools.instance_echo`` and ticket #94.
+
     Args:
         name: The name of the tool to execute.
         arguments: Tool arguments (optional).
@@ -271,15 +276,22 @@ async def handle_call_tool(
             "Call list_instances to see what is reachable.",
         )
 
+    # Resolution happened above; from here every exit is a call that reached a
+    # real instance, so every exit is annotated with which one (ticket #94).
+    # The unknown_instance branch is not: nothing was reached to report.
+    url = getattr(getattr(client, "config", None), "trac_url", None)
+    explicit = instance is not None
+
     try:
-        return await get_registry().call_tool(name, args, client)
+        result = await get_registry().call_tool(name, args, client)
     except ValueError as e:
         # Unknown or filtered-out tool name
-        return build_error_response(
+        result = build_error_response(
             "unknown_tool",
             str(e),
             "Use list_tools to see available tools.",
         )
+    return annotate(result, url, explicit)
 
 
 # ---------------------------------------------------------------------------
