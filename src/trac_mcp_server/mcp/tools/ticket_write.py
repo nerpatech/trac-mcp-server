@@ -53,6 +53,10 @@ def _build_ticket_create_tool() -> types.Tool:
                     "description": f"Ticket type (default: {default_type}). Available types: {type_list}.",
                     "default": default_type,
                 },
+                "type": {
+                    "type": "string",
+                    "description": "Alias for ticket_type (accepted since ticket_update's own field is named 'type').",
+                },
                 "priority": {
                     "type": "string",
                     "description": "Priority level",

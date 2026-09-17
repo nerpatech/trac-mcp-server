@@ -20,6 +20,7 @@ from trac_mcp_server.mcp.tools.registry import (
     ToolRegistry,
     ToolSpec,
     load_permissions_file,
+    with_page_alias,
 )
 
 
@@ -203,7 +204,15 @@ class TestToolRegistry(unittest.TestCase):
         self.assertEqual(calls[0], {})
 
     def test_call_tool_normalizes_page_alias(self):
-        """call_tool() fills page_name from page for wiki_* tools."""
+        """call_tool()'s normalizer fills page_name from page for
+        wiki_* tools, in isolation from the MCP SDK's own jsonschema
+        validation pass. `_make_spec`'s synthetic schema (empty
+        properties/required) accepts anything, so this only proves the
+        normalizer itself works -- it does not prove an aliased call
+        survives the real schema the SDK validates against first; see
+        ``test_wiki_get_page_alias_survives_real_schema_validation``
+        (ticket #97) for that.
+        """
         calls = []
 
         async def mock_handler(client, args):
@@ -221,6 +230,65 @@ class TestToolRegistry(unittest.TestCase):
             )
         )
 
+        self.assertEqual(
+            calls[0], {"page": "Index", "page_name": "Index"}
+        )
+
+    def test_wiki_get_page_alias_survives_real_schema_validation(self):
+        """Ticket #97: the MCP SDK validates call arguments against a
+        tool's real advertised inputSchema *before* dispatch ever
+        reaches ``call_tool()``'s normalizer. Reproduce that ordering
+        directly with jsonschema against wiki_get's actual schema,
+        rather than the synthetic empty-schema spec `_make_spec` builds
+        (which accepts anything and so cannot show this failure).
+        """
+        import jsonschema
+
+        plain_spec = next(
+            s for s in ALL_SPECS if s.tool.name == "wiki_get"
+        )
+        # Reproduces the originally-reported bug: page_name is required
+        # and page isn't an accepted property at all, so the real
+        # pre-fix schema rejects a page-only call before the alias
+        # normalizer ever runs.
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                instance={"page": "Index"},
+                schema=plain_spec.tool.inputSchema,
+            )
+
+        # with_page_alias is what server.py applies to every real spec
+        # before building the registry -- confirm the *aliased* schema
+        # both survives validation and the call still normalizes.
+        aliased_spec = next(
+            s
+            for s in with_page_alias(ALL_SPECS)
+            if s.tool.name == "wiki_get"
+        )
+        jsonschema.validate(
+            instance={"page": "Index"},
+            schema=aliased_spec.tool.inputSchema,
+        )
+
+        calls = []
+
+        async def capture_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = ToolSpec(
+            tool=aliased_spec.tool,
+            permissions=aliased_spec.permissions,
+            handler=capture_handler,
+        )
+        registry = ToolRegistry([spec])
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get", {"page": "Index"}, MagicMock()
+            )
+        )
         self.assertEqual(
             calls[0], {"page": "Index", "page_name": "Index"}
         )
