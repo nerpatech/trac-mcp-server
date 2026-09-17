@@ -2327,6 +2327,31 @@ class TestConverterTicketRegressions(unittest.TestCase):
         self.assertIn("!WiFi", result)
         self.assertIn("!LoRa", result)
 
+    def test_ticket_92_acronym_tailed_bang_kept_in_link_label(self):
+        """`_CAMELCASE_ESCAPE_RE` (used to undo `text()`'s "!"-escaping
+        inside a link label) must match exactly what `_CAMELCASE_RE`
+        would have added -- ticket #37 tightened the latter to require a
+        real lowercase letter in every hump after the first, but the
+        "undo" regex was left loose, so a literal author-typed "!" in a
+        link label ahead of an acronym- or digit-tailed word (which
+        `_CAMELCASE_RE` never escapes in the first place) was being
+        silently stripped instead of left alone.
+        """
+        self.assertEqual(
+            markdown_to_tracwiki("[!LilyGO](wiki:LilyGO)"),
+            "[wiki:LilyGO !LilyGO]",
+        )
+        self.assertEqual(
+            markdown_to_tracwiki("[!LoRa32](wiki:LoRa32)"),
+            "[wiki:LoRa32 !LoRa32]",
+        )
+        # Regression guard: a genuine two-lowercase-hump word in a label
+        # is still unescaped (ticket #27's original case).
+        self.assertEqual(
+            markdown_to_tracwiki("[!SomePage](wiki:SomePage)"),
+            "[wiki:SomePage SomePage]",
+        )
+
     def test_ticket_29_br_gets_leading_space_after_colon_token(self):
         """A hard line break directly after a colon-valued token (e.g.
         "substrate:trac") gets a leading space before [[BR]] -- without
