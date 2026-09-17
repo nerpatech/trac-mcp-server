@@ -37,8 +37,11 @@ ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/<env> \
 ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
 ```
 
-The egg can be left installed in the shared venv -- a disabled component is
-inert, so nothing further needs uninstalling.
+The egg file can be left in place in that environment's own `plugins/`
+directory -- a disabled component is inert, so nothing further needs
+uninstalling. Because it was installed per environment rather than into the
+shared venv (see below), disabling it on one instance cannot affect any
+other.
 
 ### Two behaviours worth knowing before you use it
 
@@ -60,12 +63,25 @@ prepends Trac's own `Replying to [comment:N author]:` block.
 Requires no root: uWSGI's master runs as `user`, and `master = true` makes
 `HUP` a graceful worker reload.
 
-```
-# 1. install into the SHARED Trac venv (one install serves all instances)
-scp -r plugins/tracrpc_comment kpoxa:/tmp/
-ssh kpoxa '/home/user/trac/.venv/bin/pip install /tmp/tracrpc_comment'
+Installed as a **per-environment egg**, not into the shared Trac venv: each
+instance gets its own copy in its own `plugins/` directory, so disabling or
+removing it on one instance can never affect another (confirmed by the
+`TracRpcComment-1.0.0-py3.11.egg` deployed for #98 -- see the rollback note
+above).
 
-# 2. enable per environment -- /trac_test FIRST, the rest once proven
+```
+# 1. build the egg -- with a Python matching the target Trac venv's own
+#    version (3.11 on kpoxa), not necessarily this repo's own venv; the
+#    Trac venv's own interpreter is a convenient way to guarantee that.
+#    This only BUILDS a distributable egg file, it does not install
+#    anything into that venv's site-packages.
+scp -r plugins/tracrpc_comment kpoxa:/tmp/
+ssh kpoxa 'cd /tmp/tracrpc_comment && /home/user/trac/.venv/bin/python setup.py bdist_egg'
+
+# 2. copy the egg into ONE environment's own plugins/ directory --
+#    /trac_test FIRST, the rest once proven -- then enable it there
+ssh kpoxa 'cp /tmp/tracrpc_comment/dist/TracRpcComment-1.0.0-py3.11.egg \
+    /home/user/trac/projects/trac_test/plugins/'
 ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/trac_test \
     config set components "tracrpc_comment.*" enabled'
 
@@ -75,6 +91,11 @@ ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
 
 Confirm by content, not by the install exiting 0 — `system.listMethods` from a
 reconnected session must list `ticket.editComment`.
+
+Step 1's exact build command is reconstructed from the deployed artifact's
+name and Trac's own per-environment-egg convention, not a verbatim transcript
+of what was run on kpoxa -- worth a quick check against that host before
+relying on it to bring up an eleventh instance.
 
 As of 2026-09-17, step 2 has been repeated for every instance on this host
 except `/trac_test` (already covered above): `auto_pm`, `bcs`, `bfg`, `grow`,
