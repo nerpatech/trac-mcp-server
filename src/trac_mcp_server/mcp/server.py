@@ -47,7 +47,12 @@ from .tools import (
 )
 from .tools.instance_echo import annotate
 from .tools.instances import set_instance_registry
-from .tools.registry import ToolSpec, with_instance_param
+from .tools.registry import (
+    ToolSpec,
+    with_instance_param,
+    with_page_alias,
+    with_strict_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,8 +363,10 @@ async def main(config_overrides: dict | None = None):
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
     declared_names = sorted(load_declared_instances())
-    all_specs = with_instance_param(
-        [PING_SPEC] + ALL_SPECS, declared_names
+    all_specs = with_strict_schema(
+        with_instance_param(
+            with_page_alias([PING_SPEC] + ALL_SPECS), declared_names
+        )
     )
     registry = ToolRegistry(all_specs, allowed_permissions)
     logger.info(
