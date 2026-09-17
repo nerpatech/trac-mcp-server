@@ -176,6 +176,19 @@ TICKET_WRITE_TOOLS = [
                     "description": "Change token from a prior ticket_get() call's _ts field (a numeric string -- pass it through as-is, don't parse it as a number). When provided, the update is rejected with a version_conflict error (naming what changed) if the ticket was modified since that token was read. Strongly recommended -- without it, this write silently overwrites any concurrent change.",
                 },
             },
+            # Action-specific input fields (action_<action>_<action>_<field>,
+            # e.g. action_resolve_resolve_resolution) can't be declared as
+            # static properties -- the field name depends on which action is
+            # chosen. additionalProperties: false only restricts keys not
+            # covered by `properties` OR `patternProperties`, so this lets
+            # every documented dynamic field through without reopening the
+            # door to an actually-unknown key (ticket #99).
+            "patternProperties": {
+                r"^action_[A-Za-z0-9_]+$": {
+                    "type": "string",
+                    "description": "Action-specific input field, named action_<action>_<action>_<field> per the `action` property's own description.",
+                },
+            },
             "required": ["ticket_id"],
         },
     ),
