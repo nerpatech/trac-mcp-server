@@ -29,7 +29,16 @@ existing `ticket` namespace as long as it yields names the incumbent does not.
 Stock `TicketRPC` yields none of the four above.
 
 The installed `tracxmlrpc` is never modified. Rollback is one `config set
-... disabled` plus a reload, and cannot affect the rest of the RPC surface.
+... disabled` plus a reload, and cannot affect the rest of the RPC surface:
+
+```
+ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/<env> \
+    config set components "tracrpc_comment.*" disabled'
+ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
+```
+
+The egg can be left installed in the shared venv -- a disabled component is
+inert, so nothing further needs uninstalling.
 
 ### Two behaviours worth knowing before you use it
 
@@ -66,6 +75,16 @@ ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
 
 Confirm by content, not by the install exiting 0 — `system.listMethods` from a
 reconnected session must list `ticket.editComment`.
+
+As of 2026-09-17, step 2 has been repeated for every instance on this host
+except `/trac_test` (already covered above): `auto_pm`, `bcs`, `bfg`, `grow`,
+`llm_balancer`, `nerpasite`, `scopemate`, `trac_mcp_server` -- each confirmed
+by `system.listMethods` returning 85 methods (was 79), including all six new
+ones. `/core` had `config set` run too and the egg is installed there, but it
+cannot be confirmed the same way: `agent_rpc` holds no `XML_RPC` permission
+grant on `/core` at all, so `system.listMethods` itself returns `403 XML_RPC
+privileges are required` -- pre-existing on that instance and unrelated to
+this plugin.
 
 ## Tests
 
