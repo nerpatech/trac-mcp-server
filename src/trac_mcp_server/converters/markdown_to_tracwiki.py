@@ -63,7 +63,7 @@ _CAMELCASE_RE = re.compile(r"(?<!!)\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b")
 # Matches exactly the "!" a `_CAMELCASE_RE` substitution would have added
 # (a "!" directly before a CamelCase-shaped word), so `link()` can undo it
 # for its own `text` argument -- see `_unescape_camelcase`.
-_CAMELCASE_ESCAPE_RE = re.compile(r"!(?=[A-Z][a-z]+(?:[A-Z][a-z]*)+\b)")
+_CAMELCASE_ESCAPE_RE = re.compile(r"!(?=[A-Z][a-z]+(?:[A-Z][a-z]+)+\b)")
 
 # A bare absolute URL sitting directly in prose (no Markdown link syntax
 # around it, no backticks). A resolved `[text](url)`/autolink never
