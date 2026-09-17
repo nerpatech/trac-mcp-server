@@ -31,6 +31,12 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 - **Text output unchanged**: All tools continue to return `content` with `type: "text"` as before
 - **Structured JSON is additive**: `structuredContent` is an additional field, not a replacement
 - **No breaking changes**: Clients that only read `content[].text` are unaffected
+- **Instance echo is appended, never merged**: every result gains `instance`
+  and `instance_source` keys in `structuredContent` (when the tool returns
+  one) plus one trailing `[instance: ... ]` text block. `content[0]` is left
+  byte-for-byte alone, so a client parsing the first block -- including
+  `ticket_component_list` and `ticket_enum_list`, whose whole text body is
+  JSON -- is unaffected. A key the tool already set of either name wins.
 
 ## Tools with Structured JSON Output
 
