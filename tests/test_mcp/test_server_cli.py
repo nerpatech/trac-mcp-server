@@ -1,8 +1,7 @@
 """Tests for trac-mcp-server CLI argument parsing (mcp/server.py).
 
-Closes the gap recorded in docs/project/codebase/CONCERNS.md: "What's not
-tested: CLI argument parsing, config override building, stdio transport
-setup, version display."
+Covers what had no tests before this module existed: CLI argument parsing,
+config override building, stdio transport setup and version display.
 """
 
 import argparse
