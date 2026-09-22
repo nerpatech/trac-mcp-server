@@ -71,7 +71,7 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
-async def _healthz(request: Request) -> JSONResponse:
+async def _healthz(_request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 

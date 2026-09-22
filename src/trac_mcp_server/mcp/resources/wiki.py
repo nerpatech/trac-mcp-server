@@ -198,7 +198,7 @@ def _format_page_tree(pages: list[str]) -> str:
 
     # Format tree recursively
     lines: list[str] = []
-    _format_tree_node(tree, "", lines, is_last=True, is_root=True)
+    _format_tree_node(tree, "", lines, is_root=True)
     return "\n".join(lines)
 
 
@@ -206,7 +206,6 @@ def _format_tree_node(
     node: dict[str, Any],
     prefix: str,
     lines: list[str],
-    is_last: bool,
     is_root: bool = False,
 ) -> None:
     """Recursively format tree node with box-drawing characters.
@@ -215,7 +214,6 @@ def _format_tree_node(
         node: Dict representing tree node (children as nested dicts)
         prefix: Current line prefix for indentation
         lines: Output lines list (mutated)
-        is_last: Whether this is the last sibling
         is_root: Whether this is the root node
     """
     keys = sorted(node.keys())
@@ -239,9 +237,7 @@ def _format_tree_node(
         # Recurse into children
         children = node[key]
         if children:
-            _format_tree_node(
-                children, child_prefix, lines, is_last_child
-            )
+            _format_tree_node(children, child_prefix, lines)
 
 
 def _format_page_response(
