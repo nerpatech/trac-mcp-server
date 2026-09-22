@@ -24,6 +24,7 @@ import mcp.types as types
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from ...file_handler import validate_file_path, validate_output_path
+from .attachment_common import coerce_attachment_payload
 from .errors import build_error_response
 from .registry import ToolSpec
 
@@ -282,20 +283,7 @@ async def _handle_get(
         client.get_ticket_attachment, ticket_id, filename
     )
 
-    # _parse_xmlrpc_value's base64 arm returns bytes; defensively coerce
-    # so callers always get a file written to disk even if a future
-    # parser change hands back something else.
-    if isinstance(data, str):
-        # Treat as already-decoded text payload (rare); encode to utf-8
-        payload = data.encode("utf-8")
-    elif isinstance(data, (bytes, bytearray)):
-        payload = bytes(data)
-    elif isinstance(data, xmlrpc.client.Binary):
-        payload = data.data
-    else:
-        raise ValueError(
-            f"Unexpected attachment payload type: {type(data).__name__}"
-        )
+    payload = coerce_attachment_payload(data)
 
     await run_sync(resolved.write_bytes, payload)
     bytes_written = len(payload)
