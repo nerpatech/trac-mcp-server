@@ -9,7 +9,11 @@ from starlette.testclient import TestClient
 
 from trac_mcp_server import __version__
 from trac_mcp_server.config_schema import ServerConfig
-from trac_mcp_server.mcp.http_app import build_http_app
+from trac_mcp_server.instances import Identity
+from trac_mcp_server.mcp.http_app import (
+    BearerAuthMiddleware,
+    build_http_app,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -151,6 +155,126 @@ class TestBearerAuth:
                 "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
             )
         assert f'"version":"{__version__}"' in response.text
+
+
+# ---------------------------------------------------------------------------
+# BearerAuthMiddleware identities (ticket #102) -- exercised at the raw
+# ASGI level, below the full MCP protocol machinery TestBearerAuth above
+# drives, so a downstream ``scope["trac_identity"]`` is directly visible.
+# ---------------------------------------------------------------------------
+
+
+async def _noop_receive():
+    return {"type": "http.disconnect"}
+
+
+class _RecordingApp:
+    """A minimal downstream ASGI app that records the scope it receives
+    and always answers 200, so the middleware's forwarding decision and
+    its scope mutation can both be asserted independently of any real
+    session/routing logic."""
+
+    def __init__(self):
+        self.received_scope: dict | None = None
+
+    async def __call__(self, scope, receive, send):
+        self.received_scope = scope
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [],
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+
+async def _call_middleware(
+    middleware: BearerAuthMiddleware, token: str | None
+) -> list[dict]:
+    """Drive ``middleware`` with one bare ASGI request, no header at all
+    when ``token`` is ``None``. Returns the messages sent to ``send``."""
+    sent: list[dict] = []
+
+    async def send(message):
+        sent.append(message)
+
+    headers = (
+        [(b"authorization", f"Bearer {token}".encode())]
+        if token is not None
+        else []
+    )
+    scope = {"type": "http", "path": "/mcp", "headers": headers}
+    await middleware(scope, _noop_receive, send)
+    return sent
+
+
+class TestBearerAuthMiddlewareIdentities:
+    """BearerAuthMiddleware resolving a bearer token to zero, one, or
+    many identities (ticket #102)."""
+
+    async def test_legacy_token_accepted_no_identity_in_scope(self):
+        app = _RecordingApp()
+        middleware = BearerAuthMiddleware(app, token="legacy-token")
+
+        sent = await _call_middleware(middleware, "legacy-token")
+
+        assert sent[0]["status"] == 200
+        assert "trac_identity" not in app.received_scope
+
+    async def test_identity_token_accepted_and_stored(self):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token="legacy-token", identities={"tok-alice": alice}
+        )
+
+        sent = await _call_middleware(middleware, "tok-alice")
+
+        assert sent[0]["status"] == 200
+        assert app.received_scope["trac_identity"] is alice
+
+    async def test_unknown_token_rejected(self):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token="legacy-token", identities={"tok-alice": alice}
+        )
+
+        sent = await _call_middleware(middleware, "wrong-token")
+
+        assert sent[0]["status"] == 401
+        assert app.received_scope is None
+
+    async def test_identities_only_no_static_token_rejects_missing_token(
+        self,
+    ):
+        """No TRAC_MCP_AUTH_TOKEN configured, only identities -- the
+        endpoint is still gated, not the falsy-token "no-op" open case."""
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token=None, identities={"tok-alice": alice}
+        )
+
+        sent = await _call_middleware(middleware, None)
+
+        assert sent[0]["status"] == 401
+        assert app.received_scope is None
+
+    async def test_identities_only_no_static_token_accepts_identity(
+        self,
+    ):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token=None, identities={"tok-alice": alice}
+        )
+
+        sent = await _call_middleware(middleware, "tok-alice")
+
+        assert sent[0]["status"] == 200
+        assert app.received_scope["trac_identity"] is alice
 
 
 # ---------------------------------------------------------------------------

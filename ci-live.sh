@@ -29,6 +29,12 @@ echo "=== Live credentials ==="
 # shell variables alone would tell a developer with a working .env that they
 # have no credentials.
 # A non-zero exit here aborts the script under `set -e`, before pytest.
+#
+# Ticket #102 adds a second required pair, TRAC_USERNAME_2/TRAC_PASSWORD_2 --
+# the second real Trac account (auto_pm) the multi-identity live test needs
+# to prove two identities land as two different Trac usernames. Missing it
+# must fail this same way, before pytest ever runs -- not skip silently the
+# way a bare @pytest.mark.live would (that shape is exactly what #81 fixed).
 python - <<'PY'
 import os
 import sys
@@ -39,7 +45,13 @@ from dotenv import load_dotenv
 # script has no file -- it arrives on stdin.
 load_dotenv(".env")
 
-REQUIRED = ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD")
+REQUIRED = (
+    "TRAC_URL",
+    "TRAC_USERNAME",
+    "TRAC_PASSWORD",
+    "TRAC_USERNAME_2",
+    "TRAC_PASSWORD_2",
+)
 missing = [name for name in REQUIRED if not os.environ.get(name)]
 
 if missing:
@@ -48,13 +60,16 @@ if missing:
     print("Missing: " + ", ".join(missing), file=sys.stderr)
     print("", file=sys.stderr)
     print(
-        "Set them in .env (see .env.example) or export them. The live suite "
-        "was NOT run -- this is not a passing result.",
+        "Set them in .env (see .env.example) or export them. "
+        "TRAC_USERNAME_2/TRAC_PASSWORD_2 is a second real Trac account "
+        "(ticket #102's multi-identity live test writes as it). The live "
+        "suite was NOT run -- this is not a passing result.",
         file=sys.stderr,
     )
     sys.exit(1)
 
 print(f"TRAC_URL={os.environ['TRAC_URL']} as {os.environ['TRAC_USERNAME']}")
+print(f"Second identity: {os.environ['TRAC_USERNAME_2']}")
 PY
 
 echo ""

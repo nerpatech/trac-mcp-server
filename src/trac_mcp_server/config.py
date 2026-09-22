@@ -107,17 +107,66 @@ def validate_server_config(server_config: "ServerConfig") -> None:
     otherwise "add HTTP" silently becomes "expose the operator's Trac
     credentials to the network".
 
+    Also validates ``server_config.identities`` (ticket #102) against the
+    rest of the server config -- checks that need the auth_token and
+    transport together, so they belong here rather than in
+    ``instances.load_identities()``, which only sees the identities file
+    in isolation.
+
     Args:
         server_config: ServerConfig instance to validate.
 
     Raises:
         ValueError: If an unauthenticated http transport would bind a
-            non-loopback host.
+            non-loopback host, or an identities config is invalid (see
+            below).
     """
+    if server_config.identities:
+        if server_config.transport != "http":
+            raise ValueError(
+                "TRAC_IDENTITIES is set but transport is "
+                f"'{server_config.transport}'. Per-caller identity "
+                "resolution reads a bearer token off each HTTP request; "
+                "stdio has no per-request signal to read one from, so an "
+                "identities file there could never be honoured. Use "
+                "--transport http, or drop TRAC_IDENTITIES."
+            )
+        if (
+            server_config.auth_token
+            and server_config.auth_token in server_config.identities
+        ):
+            raise ValueError(
+                "An identity token in TRAC_IDENTITIES collides with "
+                "TRAC_MCP_AUTH_TOKEN. Every token must be distinct, or a "
+                "caller presenting the shared value would be ambiguous "
+                "between the static token and that identity."
+            )
+        if (
+            server_config.allow_unauthenticated
+            and not server_config.auth_token
+        ):
+            raise ValueError(
+                "TRAC_IDENTITIES is set together with "
+                "allow_unauthenticated and no TRAC_MCP_AUTH_TOKEN. "
+                "Declaring per-caller identities and then opting the "
+                "endpoint out of authentication is contradictory: no "
+                "caller could ever present a token for one of them to "
+                "be resolved. Set TRAC_MCP_AUTH_TOKEN, or drop "
+                "allow_unauthenticated/TRAC_IDENTITIES."
+            )
+
     if server_config.transport != "http":
         return
 
-    if server_config.auth_token or server_config.allow_unauthenticated:
+    # Identities alone (no static auth_token) still gate every request --
+    # BearerAuthMiddleware is open only when there is neither a token nor
+    # any identities (ticket #102) -- so they count as authentication for
+    # bind safety exactly like auth_token does.
+    if (
+        server_config.auth_token
+        or server_config.allow_unauthenticated
+        or server_config.identities
+    ):
         return
 
     if _is_loopback_host(server_config.host):

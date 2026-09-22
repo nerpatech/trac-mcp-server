@@ -14,6 +14,7 @@ import pytest
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.instances import (
+    Identity,
     InstanceRegistry,
     InstanceSpec,
     UnknownInstanceError,
@@ -171,6 +172,131 @@ class TestResolveAdHoc:
 
 
 # ---------------------------------------------------------------------------
+# resolve() -- caller identity (ticket #102)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveIdentity:
+    """Every resolve() entry point takes an optional caller identity.
+
+    An identity's credentials replace only *inherited* default
+    credentials -- never a declared instance's own explicit ones (gap 3,
+    CONFIRMED by the operator) -- and are a no-op when omitted, so every
+    case here has a with-identity and a without-identity twin.
+    """
+
+    _IDENTITY = Identity(
+        name="alice", username="alice-trac", password="alice-pw"
+    )
+
+    def test_none_with_identity_uses_identity_credentials(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        config = registry.resolve(None, self._IDENTITY)
+
+        assert config.trac_url == default.trac_url
+        assert config.username == "alice-trac"
+        assert config.password == "alice-pw"
+
+    def test_none_without_identity_is_exactly_today(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        assert registry.resolve(None, None) is default
+
+    def test_default_literal_with_identity_uses_identity_credentials(
+        self,
+    ):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        config = registry.resolve("default", self._IDENTITY)
+
+        assert config.username == "alice-trac"
+
+    def test_declared_inherited_with_identity_uses_identity(self):
+        default = _default_config()
+        declared = {"bcs": InstanceSpec(name="bcs", url="/bcs")}
+        registry = InstanceRegistry(default, declared)
+
+        config = registry.resolve("bcs", self._IDENTITY)
+
+        assert config.username == "alice-trac"
+        assert config.password == "alice-pw"
+
+    def test_declared_inherited_without_identity_is_exactly_today(self):
+        default = _default_config()
+        declared = {"bcs": InstanceSpec(name="bcs", url="/bcs")}
+        registry = InstanceRegistry(default, declared)
+
+        config = registry.resolve("bcs", None)
+
+        assert config.username == default.username
+        assert config.password == default.password
+
+    def test_declared_explicit_credentials_win_over_identity(self):
+        """Gap 3 (CONFIRMED): a declared instance's own explicit
+        credentials are never replaced by the caller's identity."""
+        default = _default_config()
+        declared = {
+            "other": InstanceSpec(
+                name="other",
+                url="http://192.168.10.4:8000/other",
+                username="otheruser",
+                password="otherpass",
+            )
+        }
+        registry = InstanceRegistry(default, declared)
+
+        config = registry.resolve("other", self._IDENTITY)
+
+        assert config.username == "otheruser"
+        assert config.password == "otherpass"
+
+    def test_adhoc_path_with_identity_uses_identity(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        config = registry.resolve("/auto_pm", self._IDENTITY)
+
+        assert config.username == "alice-trac"
+        assert config.password == "alice-pw"
+
+    def test_adhoc_path_without_identity_is_exactly_today(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        config = registry.resolve("/auto_pm", None)
+
+        assert config.username == default.username
+        assert config.password == default.password
+
+    def test_adhoc_same_host_url_with_identity_uses_identity(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        config = registry.resolve(
+            "http://192.168.10.4:8000/core", self._IDENTITY
+        )
+
+        assert config.username == "alice-trac"
+
+    def test_cross_host_still_rejected_with_identity(self):
+        """An identity does not loosen the cross-host restriction --
+        rejection happens before any credential is chosen."""
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+
+        with pytest.raises(
+            UnknownInstanceError, match="different host"
+        ):
+            registry.resolve(
+                "https://evil.example.com/trac", self._IDENTITY
+            )
+
+
+# ---------------------------------------------------------------------------
 # get_client() -- caching
 # ---------------------------------------------------------------------------
 
@@ -194,6 +320,41 @@ class TestClientCache:
 
         assert registry.get_client(None) is seeded
         assert registry.get_client("default") is seeded
+
+    def test_two_identities_same_url_get_distinct_clients(self):
+        """Ticket #102 gap 4: the cache key includes the password, so two
+        identities sharing a URL never share a TracClient."""
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+        alice = Identity(
+            name="alice", username="alice", password="a-pw"
+        )
+        bob = Identity(name="bob", username="bob", password="b-pw")
+
+        client_alice = registry.get_client(None, alice)
+        client_bob = registry.get_client(None, bob)
+
+        assert client_alice is not client_bob
+
+    def test_same_identity_reuses_one_client(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+        alice = Identity(
+            name="alice", username="alice", password="a-pw"
+        )
+
+        client_a = registry.get_client(None, alice)
+        client_b = registry.get_client("default", alice)
+
+        assert client_a is client_b
+
+    def test_no_identity_result_is_exactly_todays_client(self):
+        default = _default_config()
+        registry = InstanceRegistry(default, {})
+        seeded = MagicMock()
+        registry.seed_default(seeded)
+
+        assert registry.get_client(None, None) is seeded
 
 
 # ---------------------------------------------------------------------------

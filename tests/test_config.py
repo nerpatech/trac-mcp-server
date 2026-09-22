@@ -16,6 +16,7 @@ from trac_mcp_server.config import (
     validate_server_config,
 )
 from trac_mcp_server.config_schema import ServerConfig
+from trac_mcp_server.instances import Identity
 
 # -------------------------------------------------------------------------
 # validate_config()
@@ -226,6 +227,84 @@ class TestValidateServerConfig:
             transport="http",
             host="0.0.0.0",
             allow_unauthenticated=True,
+        )
+        validate_server_config(config)  # should not raise
+
+
+# -------------------------------------------------------------------------
+# validate_server_config() -- identities (ticket #102)
+# -------------------------------------------------------------------------
+
+
+class TestValidateServerConfigIdentities:
+    """identities cross-checked against transport/auth_token/allow_unauthenticated."""
+
+    _IDENTITY = {
+        "tok-a": Identity(name="a", username="a", password="a")
+    }
+
+    def test_no_identities_unaffected(self):
+        """The identity checks never fire when identities is empty --
+        the existing bind-safety tests above cover that path."""
+        config = ServerConfig(transport="http", host="127.0.0.1")
+        validate_server_config(config)  # should not raise
+
+    def test_identities_on_stdio_raises(self):
+        config = ServerConfig(
+            transport="stdio", identities=self._IDENTITY
+        )
+        with pytest.raises(ValueError, match="stdio"):
+            validate_server_config(config)
+
+    def test_identities_on_http_allowed(self):
+        config = ServerConfig(
+            transport="http", identities=self._IDENTITY
+        )
+        validate_server_config(config)  # should not raise
+
+    def test_identity_token_colliding_with_auth_token_raises(self):
+        config = ServerConfig(
+            transport="http",
+            auth_token="tok-a",
+            identities=self._IDENTITY,
+        )
+        with pytest.raises(ValueError, match="collides"):
+            validate_server_config(config)
+
+    def test_distinct_auth_token_allowed(self):
+        config = ServerConfig(
+            transport="http",
+            auth_token="tok-static",
+            identities=self._IDENTITY,
+        )
+        validate_server_config(config)  # should not raise
+
+    def test_allow_unauthenticated_with_no_auth_token_raises(self):
+        config = ServerConfig(
+            transport="http",
+            allow_unauthenticated=True,
+            identities=self._IDENTITY,
+        )
+        with pytest.raises(ValueError, match="allow_unauthenticated"):
+            validate_server_config(config)
+
+    def test_allow_unauthenticated_with_auth_token_allowed(self):
+        """A static token still gates the endpoint even with
+        allow_unauthenticated=True (which only concerns bind safety, not
+        the middleware's own open/closed decision) -- not contradictory."""
+        config = ServerConfig(
+            transport="http",
+            allow_unauthenticated=True,
+            auth_token="tok-static",
+            identities=self._IDENTITY,
+        )
+        validate_server_config(config)  # should not raise
+
+    def test_identities_alone_permit_non_loopback_bind(self):
+        """Identities gate every request exactly like auth_token does, so
+        they satisfy the same bind-safety check (ticket #102)."""
+        config = ServerConfig(
+            transport="http", host="0.0.0.0", identities=self._IDENTITY
         )
         validate_server_config(config)  # should not raise
 

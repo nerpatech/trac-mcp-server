@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -146,6 +146,19 @@ class ServerConfig(BaseModel):
     allowed_origins: list[str] = Field(
         default_factory=list,
         description="Extra Origin header values to accept for DNS-rebinding protection",
+    )
+    identities: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Bearer token -> instances.Identity, for per-caller Trac "
+            "credential resolution (ticket #102). Values are typed as "
+            "Any rather than instances.Identity to avoid a circular "
+            "import (instances.py already imports from this module); "
+            "load_identities() is the only producer and it always "
+            "returns Identity instances. Loaded once at startup from "
+            "TRAC_IDENTITIES, never from YAML or CLI -- see "
+            "config_bootstrap.bootstrap_server_config()."
+        ),
     )
 
     model_config = {"frozen": True}

@@ -58,9 +58,49 @@ When `auth_token` is set, every request to the MCP endpoint (not `/healthz`) mus
 Authorization: Bearer <token>
 ```
 
-A missing or incorrect token gets `401 Unauthorized` with a `WWW-Authenticate: Bearer` header. The comparison uses `secrets.compare_digest` (constant-time). When no token is configured, the endpoint is open to anyone who can reach it -- see Bind Safety below for when that's disallowed.
+A missing or incorrect token gets `401 Unauthorized` with a `WWW-Authenticate: Bearer` header. The comparison uses `secrets.compare_digest` (constant-time), checked against *every* configured token -- the static one and every identity's (see below) -- rather than stopping at the first match, so response timing never reveals which token, if any, was presented. When no token and no identities are configured, the endpoint is open to anyone who can reach it -- see Bind Safety below for when that's disallowed.
 
-This is a single static shared secret, not per-user OAuth. The MCP SDK's OAuth machinery (`mcp.server.auth.*`) is a separate, larger feature and is out of scope here.
+This is a single static shared secret, not per-user OAuth. The MCP SDK's OAuth machinery (`mcp.server.auth.*`) is a separate, larger feature and is out of scope here. For per-caller credentials without full OAuth, see Multiple Identities below.
+
+## Multiple Identities (`TRAC_IDENTITIES`)
+
+By default every request that presents a valid token -- the static `TRAC_MCP_AUTH_TOKEN` -- reaches Trac as the single identity `TRAC_USERNAME`/`TRAC_PASSWORD` configured for the whole process. Ticket #102 adds an alternative: a `TRAC_IDENTITIES` file mapping several *distinct* bearer tokens to their own Trac username/password, so one shared daemon can serve several callers under their own Trac identities instead of one process per identity.
+
+```bash
+TRAC_IDENTITIES=/path/to/identities.yml \
+  trac-mcp-server --transport http --host 127.0.0.1 --port 8080
+```
+
+```yaml
+# identities.yml -- YAML or JSON, ${VAR} interpolated from .env just like
+# TRAC_INSTANCES.
+identities:
+  alice:
+    token: ${ALICE_MCP_TOKEN}
+    username: ${ALICE_TRAC_USER}
+    password: ${ALICE_TRAC_PASSWORD}
+  bob:
+    token: ${BOB_MCP_TOKEN}
+    username: ${BOB_TRAC_USER}
+    password: ${BOB_TRAC_PASSWORD}
+```
+
+A request whose `Authorization: Bearer <token>` matches one of these resolves as that identity for the rest of that call: the default instance (and any declared/ad-hoc instance that doesn't set its own username/password) is reached using the identity's credentials instead of the process's own `TRAC_USERNAME`/`TRAC_PASSWORD`. The legacy static `TRAC_MCP_AUTH_TOKEN`, if still configured alongside identities, keeps resolving to no identity at all -- a caller using it gets the same behaviour as before this ticket.
+
+**Precedence: a declared instance's own explicit credentials always win over the caller's identity.** If `instances:` (or `TRAC_INSTANCES`) gives an instance its own `username`/`password`, every token holder reaches that instance through those explicit credentials, never their own -- otherwise one identity's password could reach a host a *different* declared instance deliberately points credentials at. Only *inherited* credentials (the default instance itself, a declared instance that leaves username/password unset, or ad-hoc same-host addressing) are replaced by the caller's identity.
+
+Validation, at startup:
+
+- every identity needs a non-empty token, username, and password;
+- every token must be unique, including against `TRAC_MCP_AUTH_TOKEN`;
+- `TRAC_IDENTITIES` on the `stdio` transport is an error -- there is no per-request signal (a bearer header) for stdio to read an identity from;
+- `TRAC_IDENTITIES` together with `allow_unauthenticated` and no `TRAC_MCP_AUTH_TOKEN` is an error -- declaring identities and then opting the endpoint out of authentication is contradictory, since no caller could ever present a token to be resolved as one of them.
+
+Identities alone (no static token) still gate every request, so they satisfy the same bind-safety rule `TRAC_MCP_AUTH_TOKEN` does: a non-loopback bind is allowed once `TRAC_IDENTITIES` is configured, without also requiring a static token.
+
+**Loaded once at startup; changing identities needs a restart.** Unlike `TRAC_INSTANCES` (which reloads on an mtime change), there is no live-reload here.
+
+**A deployment using only `TRAC_MCP_AUTH_TOKEN` -- no `TRAC_IDENTITIES` at all -- behaves exactly as it did before this ticket.** Nothing about the single-identity path changes.
 
 ## Bind Safety
 
