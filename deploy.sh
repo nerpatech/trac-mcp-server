@@ -6,8 +6,8 @@
 # absent, which the working checkout deliberately does not carry.
 #
 # Pulls master, reinstalls trac-mcp-server into this clone's own (non-
-# editable) venv, restarts both systemd --user units, health-checks them,
-# then rebuilds trac-convert with PyInstaller from that SAME checkout state
+# editable) venv, restarts the daemon unit, health-checks it, then rebuilds
+# trac-convert with PyInstaller from that SAME checkout state
 # and installs it to ~/.local/bin. One script run, one commit, both
 # binaries -- see ticket #84 (auto_pm instance) for why the daemon's
 # converter and the human-facing CLI converter used to drift apart.
@@ -18,7 +18,7 @@
 #     test the particular tool/converter behaviour that changed -- those
 #     are change-shaped and need a human (or the deploying session) to
 #     know what to look for. Do that after this script exits 0.
-#   - Reconnect any already-open MCP session -- restarting the units drops
+#   - Reconnect any already-open MCP session -- restarting the unit drops
 #     existing connections; sessions with an old tool schema cached need a
 #     fresh connection to see a changed tool name/params/description.
 
@@ -34,8 +34,8 @@ if [ ! -f deploy-constraints.txt ]; then
 fi
 
 BIN_DIR="${HOME}/.local/bin"
-UNITS=(trac-mcp-server-http.service trac-mcp-server-http-autopm.service)
-PORTS=(8080 8081)
+UNITS=(trac-mcp-server-http.service)
+PORTS=(8080)
 
 echo "=== 1/5: pull master ==="
 git fetch origin master
@@ -49,7 +49,7 @@ echo "=== 2/5: reinstall trac-mcp-server (daemon) ==="
 .venv/bin/pip install -q -c deploy-constraints.txt .
 
 echo ""
-echo "=== 3/5: restart daemon units ==="
+echo "=== 3/5: restart daemon unit ==="
 systemctl --user restart "${UNITS[@]}"
 sleep 1
 
