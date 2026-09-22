@@ -25,6 +25,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config_schema import ServerConfig
+from ..instances import Identity
 
 logger = logging.getLogger(__name__)
 
@@ -32,23 +33,39 @@ logger = logging.getLogger(__name__)
 class BearerAuthMiddleware:
     """Pure-ASGI middleware requiring ``Authorization: Bearer <token>``.
 
-    No-op when ``token`` is falsy -- some deployments intentionally run
-    unauthenticated (loopback-only bind, see ``config.validate_server_config``).
-    Does not touch ``/healthz`` so health probes work without a token.
+    No-op when there is no static ``token`` and no ``identities`` -- some
+    deployments intentionally run unauthenticated (loopback-only bind, see
+    ``config.validate_server_config``). Does not touch ``/healthz`` so
+    health probes work without a token.
+
+    Ticket #102: ``identities`` maps each per-caller bearer token to the
+    ``Identity`` it resolves to; the static ``token`` (if any) resolves to
+    no identity at all -- a caller using it gets the default instance's
+    own configured credentials, exactly as before this ticket. A matched
+    identity is stashed on ``scope["trac_identity"]`` for
+    ``mcp/server.py``'s ``_caller_identity()`` to read back out of the
+    in-flight request later in the dispatch (see that function's
+    docstring for the mechanism and its mcp-SDK-version caveat).
     """
 
-    def __init__(self, app: ASGIApp, token: str | None) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        token: str | None,
+        identities: dict[str, Identity] | None = None,
+    ) -> None:
         self._app = app
         self._token = token
+        self._identities = identities or {}
 
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        if (
-            scope["type"] != "http"
-            or not self._token
-            or scope["path"] == "/healthz"
-        ):
+        if scope["type"] != "http" or scope["path"] == "/healthz":
+            await self._app(scope, receive, send)
+            return
+
+        if not self._token and not self._identities:
             await self._app(scope, receive, send)
             return
 
@@ -57,9 +74,27 @@ class BearerAuthMiddleware:
             "latin-1"
         )
         scheme, _, credential = auth_header.partition(" ")
-        if scheme.lower() != "bearer" or not secrets.compare_digest(
-            credential, self._token
-        ):
+
+        # Compare against every configured token -- the static one AND
+        # every identity's -- rather than looking one up in a dict and
+        # stopping at the first hit, so response timing never reveals
+        # which of several valid tokens (or none) was presented.
+        matched = False
+        identity: Identity | None = None
+        if scheme.lower() == "bearer":
+            if self._token and secrets.compare_digest(
+                credential, self._token
+            ):
+                matched = True
+            for (
+                candidate_token,
+                candidate_identity,
+            ) in self._identities.items():
+                if secrets.compare_digest(credential, candidate_token):
+                    matched = True
+                    identity = candidate_identity
+
+        if not matched:
             response = Response(
                 "Unauthorized",
                 status_code=401,
@@ -67,6 +102,9 @@ class BearerAuthMiddleware:
             )
             await response(scope, receive, send)
             return
+
+        if identity is not None:
+            scope["trac_identity"] = identity
 
         await self._app(scope, receive, send)
 
@@ -153,7 +191,9 @@ def build_http_app(
         ],
         middleware=[
             Middleware(
-                BearerAuthMiddleware, token=server_config.auth_token
+                BearerAuthMiddleware,
+                token=server_config.auth_token,
+                identities=server_config.identities,
             )
         ],
         lifespan=lifespan,

@@ -31,6 +31,7 @@ from ..instances import (
     UnknownInstanceError,
     load_declared_instances,
 )
+from ..instances import caller_identity as _caller_identity
 from ..logger import setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
@@ -64,6 +65,13 @@ _instances: InstanceRegistry | None = None
 
 # Global registry instance (initialized in main)
 _registry: ToolRegistry | None = None
+
+# Ticket #102: `_caller_identity` (imported above as an alias for
+# `instances.caller_identity`) is called at the two dispatch sites below
+# to resolve the in-flight HTTP request's bearer-token identity, if any.
+# It depends on the mcp SDK setting `request_context.request` for every
+# message -- see its docstring for the exact mechanism and the note to
+# re-verify this on any `mcp` version bump.
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +232,9 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = get_instances().get_client(instance)
+            client = get_instances().get_client(
+                instance, identity=_caller_identity()
+            )
         except ValueError as e:
             error_type = (
                 "unknown_instance"
@@ -268,7 +278,9 @@ async def handle_call_tool(
     args = dict(arguments or {})
     instance = args.pop("instance", None)
     try:
-        client = get_instances().get_client(instance)
+        client = get_instances().get_client(
+            instance, identity=_caller_identity()
+        )
     except ValueError as e:
         error_type = (
             "unknown_instance"

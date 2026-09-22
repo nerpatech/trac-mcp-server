@@ -11,7 +11,7 @@ import mcp.types as types
 
 from ...core.client import TracClient
 from ...detection.web_scraper import scrape_project_index
-from ...instances import InstanceRegistry
+from ...instances import InstanceRegistry, caller_identity
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -115,7 +115,11 @@ async def _handle_list_instances(
 
     discover = args.get("discover", True)
     configured = registry.describe()
-    default_config = registry.resolve(None)
+    # Gap 5 (ticket #102 review): the discovery scrape below authenticates
+    # as the caller's own identity, not whichever identity happened to
+    # start this process -- describe() itself stays identity-agnostic
+    # (it never includes credentials, only URLs and names).
+    default_config = registry.resolve(None, caller_identity())
 
     structured: dict = {
         "configured": configured,
