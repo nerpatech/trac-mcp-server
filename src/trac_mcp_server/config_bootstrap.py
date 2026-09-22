@@ -19,6 +19,7 @@ from .config_loader import (
     load_hierarchical_config,
 )
 from .config_schema import ServerConfig, build_config
+from .instances import load_identities
 
 
 def bootstrap_config(
@@ -117,7 +118,10 @@ def bootstrap_server_config(
     ``path``, ``allow_unauthenticated``. ``auth_token`` is intentionally
     not accepted here -- it must come from ``TRAC_MCP_AUTH_TOKEN`` or the
     YAML ``server:`` section, never a CLI flag, so it never appears in the
-    process list.
+    process list. ``identities`` (ticket #102) is likewise never a CLI
+    override, and unlike ``auth_token`` it is not a YAML setting either --
+    it always comes from ``instances.load_identities()``, which reads the
+    file named by ``TRAC_IDENTITIES``.
 
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
@@ -197,6 +201,11 @@ def bootstrap_server_config(
     allowed_hosts = list(yaml_server.get("allowed_hosts", []))
     allowed_origins = list(yaml_server.get("allowed_origins", []))
 
+    # Ticket #102: loaded once here, env-var only (see docstring) -- never
+    # merged with yaml_server, so an identities file can't be declared in
+    # config.yaml only to be silently ignored at runtime.
+    identities = load_identities()
+
     server_config = ServerConfig(
         transport=transport,
         host=host,
@@ -206,6 +215,7 @@ def bootstrap_server_config(
         allow_unauthenticated=allow_unauthenticated,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
+        identities=identities,
     )
 
     validate_server_config(server_config)
