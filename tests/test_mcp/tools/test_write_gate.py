@@ -38,6 +38,12 @@ from trac_mcp_server.mcp.tools.ticket_batch import (
     _handle_batch_create,
     _handle_batch_update,
 )
+from trac_mcp_server.mcp.tools.ticket_comment import (
+    _handle_edit as _handle_comment_edit,
+)
+from trac_mcp_server.mcp.tools.ticket_comment import (
+    _handle_reply as _handle_comment_reply,
+)
 from trac_mcp_server.mcp.tools.ticket_write import (
     _handle_create as _handle_ticket_create,
 )
@@ -350,6 +356,44 @@ def _ticket_update_description(client, description):
         )
 
 
+def _ticket_comment_edit(client, comment):
+    # Ticket #104: _handle_edit makes three run_sync calls in order when
+    # nothing refuses -- get_ticket (the base_ts precondition),
+    # get_ticket_comment_history (the previous-text snippet), then
+    # edit_ticket_comment. A refused call stops after the first.
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_comment.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            [1, "created", "modified", {"_ts": "100"}],
+            [],
+            True,
+        ]
+        return asyncio.run(
+            _handle_comment_edit(
+                client,
+                {
+                    "ticket_id": 1,
+                    "cnum": 1,
+                    "comment": comment,
+                    "base_ts": "100",
+                },
+            )
+        )
+
+
+def _ticket_comment_reply(client, comment):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_comment.run_sync"
+    ) as run_sync:
+        run_sync.return_value = 2
+        return asyncio.run(
+            _handle_comment_reply(
+                client, {"ticket_id": 1, "cnum": 1, "comment": comment}
+            )
+        )
+
+
 def _milestone_create(client, description):
     with patch(
         "trac_mcp_server.mcp.tools.milestone.run_sync"
@@ -394,6 +438,11 @@ WRITE_PATHS = [
     # otherwise blocking gate.
     ("milestone_create", _milestone_create),
     ("milestone_update", _milestone_update),
+    # Ticket #104. editComment/replyToComment are tracrpc_comment RPCs
+    # with no check of their own, and were the one write surface left
+    # outside #64's gate after #87 closed the milestone gap.
+    ("ticket_comment_edit", _ticket_comment_edit),
+    ("ticket_comment_reply", _ticket_comment_reply),
 ]
 
 
@@ -788,3 +837,191 @@ class TestMilestoneWriteGateLive:
         assert (
             client.get_milestone(self.NAME)["description"] == original
         ), "the gate returned an error but the update still landed"
+
+
+# ---------------------------------------------------------------------
+# Ticket #104: the comment-edit/reply half, live, plus the base_ts
+# precondition that has no offline equivalent -- it depends on Trac's
+# own change-tracking, which a mocked client cannot reproduce.
+#
+# On /trac_test, not this project's own instance, because these rows
+# create and delete a real ticket (Reference/trac/TestingInstance).
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestTicketCommentWriteGateLive:
+    """The gate and the base_ts precondition, watched against a REAL
+    ticket and a REAL comment."""
+
+    @staticmethod
+    def _live():
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config, _ = bootstrap_config()
+        return TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
+        )
+
+    @pytest.fixture
+    def ticket(self):
+        """A scratch ticket with one comment, deleted after the row."""
+        client = self._live()
+        ticket_id = client.create_ticket(
+            "Ticket104WriteGateLive",
+            "Seeded for the ticket 104 live gate rows.",
+        )
+        client.update_ticket(ticket_id, "the original comment")
+        try:
+            yield client, ticket_id
+        finally:
+            try:
+                client.delete_ticket(ticket_id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _base_ts(client, ticket_id):
+        current = client.get_ticket(ticket_id)
+        return current[3]["_ts"]
+
+    def test_a_broken_link_edit_is_refused_and_the_comment_is_intact(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        base_ts = self._base_ts(client, ticket_id)
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": BROKEN_SOURCE,
+                    "base_ts": base_ts,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == "the original comment", (
+            "the gate returned an error but the edit still landed"
+        )
+
+    def test_a_clean_edit_is_allowed_through_to_the_store(self, ticket):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        base_ts = self._base_ts(client, ticket_id)
+        body = "Seeded for the ticket 104 live gate row. Corrected."
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": body,
+                    "base_ts": base_ts,
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == body
+
+    def test_a_stale_base_ts_is_refused_and_the_comment_is_intact(
+        self, ticket
+    ):
+        """The incident's actual shape: a base_ts read before the
+        ticket changed underneath must not still authorize an edit
+        afterward -- whether that change was a genuine race or, as in
+        #104, evidence this was never the ticket the caller meant to
+        target."""
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        stale_base_ts = self._base_ts(client, ticket_id)
+        client.update_ticket(ticket_id, "an unrelated second comment")
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": "an edit riding a stale base_ts",
+                    "base_ts": stale_base_ts,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "version_conflict" in _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == "the original comment", (
+            "the gate returned an error but the edit still landed"
+        )
+
+    def test_a_broken_link_reply_is_refused_and_posts_no_comment(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_reply as handle_reply,
+        )
+
+        client, ticket_id = ticket
+        before = client.get_ticket_changelog(ticket_id)
+
+        result = asyncio.run(
+            handle_reply(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": BROKEN_SOURCE,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert client.get_ticket_changelog(ticket_id) == before, (
+            "the gate returned an error but a reply was still posted"
+        )
+
+    def test_a_clean_reply_is_allowed_through_to_the_store(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_reply as handle_reply,
+        )
+
+        client, ticket_id = ticket
+        body = "Seeded for the ticket 104 live gate row. A clean reply."
+
+        result = asyncio.run(
+            handle_reply(
+                client,
+                {"ticket_id": ticket_id, "cnum": 1, "comment": body},
+            )
+        )
+
+        assert not result.isError, _text(result)
+        # Trac numbers the reply after the seeded first comment; read
+        # it back rather than parse the number out of the message.
+        history = client.get_ticket_comment_history(ticket_id, 2)
+        assert history and history[-1][3] == body, _text(result)

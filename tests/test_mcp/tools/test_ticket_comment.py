@@ -34,6 +34,20 @@ def text_of(result):
     )
 
 
+def _client_at_ts(current_ts="100"):
+    """A client whose ``get_ticket`` reports ``current_ts`` -- the
+    ticket #104 precondition's read. ``wiki_to_html`` is left as a bare
+    MagicMock, so the write gate takes its documented fail-open path
+    (`test_write_gate.py`'s module docstring): the checks it runs are
+    covered there, not duplicated here.
+    """
+    client = MagicMock()
+    client.get_ticket = MagicMock(
+        return_value=[1, "created", "modified", {"_ts": current_ts}]
+    )
+    return client
+
+
 class TicketCommentToolDefinitionTestCase(unittest.TestCase):
     def test_four_tools_defined(self):
         self.assertEqual(4, len(TICKET_COMMENT_TOOLS))
@@ -94,11 +108,27 @@ class TicketCommentToolDefinitionTestCase(unittest.TestCase):
 
 
 class TicketCommentValidationTestCase(unittest.TestCase):
-    def test_edit_requires_all_three_args(self):
+    def test_edit_requires_all_four_args(self):
         result = run(_handle_edit(MagicMock(), {"ticket_id": 1}))
         self.assertTrue(result.isError)
         self.assertIn("cnum", text_of(result))
         self.assertIn("comment", text_of(result))
+        self.assertIn("base_ts", text_of(result))
+
+    def test_edit_omitted_base_ts_never_reaches_get_ticket(self):
+        """Ticket #104: base_ts is required, not merely recommended --
+        unlike ticket_update there is no server-side lock to fall back
+        to, so a call missing it must refuse before touching the
+        ticket at all."""
+        client = MagicMock()
+        result = run(
+            _handle_edit(
+                client, {"ticket_id": 1, "cnum": 1, "comment": "x"}
+            )
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("base_ts", text_of(result))
+        client.get_ticket.assert_not_called()
 
     def test_delete_requires_ticket_and_cnum(self):
         result = run(_handle_delete(MagicMock(), {"ticket_id": 1}))
@@ -111,24 +141,126 @@ class TicketCommentValidationTestCase(unittest.TestCase):
         Trac never issues comment 0, but a validator that conflates 0 with
         "not provided" reports the wrong error and hides the real one.
         """
-        client = MagicMock()
+        client = _client_at_ts("100")
         client.edit_ticket_comment = MagicMock(return_value=True)
         result = run(
             _handle_edit(
-                client, {"ticket_id": 1, "cnum": 0, "comment": "x"}
+                client,
+                {
+                    "ticket_id": 1,
+                    "cnum": 0,
+                    "comment": "x",
+                    "base_ts": "100",
+                },
             )
         )
         self.assertFalse(result.isError)
         client.edit_ticket_comment.assert_called_once_with(1, 0, "x")
 
 
-class TicketCommentHappyPathTestCase(unittest.TestCase):
-    def test_edit_passes_args_through(self):
-        client = MagicMock()
+class TicketCommentBaseTsTestCase(unittest.TestCase):
+    """Ticket #104's precondition on ticket_comment_edit."""
+
+    def test_matching_base_ts_proceeds(self):
+        client = _client_at_ts("100")
         client.edit_ticket_comment = MagicMock(return_value=True)
         result = run(
             _handle_edit(
-                client, {"ticket_id": 7, "cnum": 3, "comment": "fixed"}
+                client,
+                {
+                    "ticket_id": 7,
+                    "cnum": 3,
+                    "comment": "fixed",
+                    "base_ts": "100",
+                },
+            )
+        )
+        self.assertFalse(result.isError, text_of(result))
+        client.get_ticket.assert_called_once_with(7)
+        client.edit_ticket_comment.assert_called_once_with(
+            7, 3, "fixed"
+        )
+
+    def test_mismatched_base_ts_refuses_without_editing(self):
+        """The exact shape of #104's incident: the ticket this
+        ticket_id/instance pair actually resolves to is not the one the
+        caller read, so its _ts differs and the edit must not happen."""
+        client = _client_at_ts("999")
+        client.edit_ticket_comment = MagicMock(return_value=True)
+        result = run(
+            _handle_edit(
+                client,
+                {
+                    "ticket_id": 7,
+                    "cnum": 3,
+                    "comment": "fixed",
+                    "base_ts": "100",
+                },
+            )
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("version_conflict", text_of(result))
+        self.assertIn("999", text_of(result))
+        client.edit_ticket_comment.assert_not_called()
+
+    def test_previous_text_snippet_is_included(self):
+        """Ticket #104 item 3: visible even when the call succeeds."""
+        client = _client_at_ts("100")
+        client.edit_ticket_comment = MagicMock(return_value=True)
+        client.get_ticket_comment_history = MagicMock(
+            return_value=[[0, "2026-09-17", "alice", "the old text"]]
+        )
+        result = run(
+            _handle_edit(
+                client,
+                {
+                    "ticket_id": 7,
+                    "cnum": 3,
+                    "comment": "new text",
+                    "base_ts": "100",
+                },
+            )
+        )
+        self.assertFalse(result.isError, text_of(result))
+        self.assertIn("the old text", text_of(result))
+
+    def test_a_history_read_failure_does_not_block_the_edit(self):
+        """Best-effort: fetching the snippet is a bonus, not a gate."""
+        client = _client_at_ts("100")
+        client.edit_ticket_comment = MagicMock(return_value=True)
+        client.get_ticket_comment_history = MagicMock(
+            side_effect=xmlrpc.client.Fault(1, "boom")
+        )
+        result = run(
+            _handle_edit(
+                client,
+                {
+                    "ticket_id": 7,
+                    "cnum": 3,
+                    "comment": "new text",
+                    "base_ts": "100",
+                },
+            )
+        )
+        self.assertFalse(result.isError, text_of(result))
+        client.edit_ticket_comment.assert_called_once_with(
+            7, 3, "new text"
+        )
+
+
+class TicketCommentHappyPathTestCase(unittest.TestCase):
+    def test_edit_passes_args_through(self):
+        client = _client_at_ts("100")
+        client.edit_ticket_comment = MagicMock(return_value=True)
+        result = run(
+            _handle_edit(
+                client,
+                {
+                    "ticket_id": 7,
+                    "cnum": 3,
+                    "comment": "fixed",
+                    "base_ts": "100",
+                },
             )
         )
         client.edit_ticket_comment.assert_called_once_with(
@@ -200,7 +332,10 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
     """The two faults that must not reach the caller raw."""
 
     def _client_raising(self, attr, fault_string):
-        client = MagicMock()
+        # get_ticket defaults to a matching base_ts of "100" so the edit
+        # cases below reach the RPC under test rather than being turned
+        # away by ticket #104's precondition first.
+        client = _client_at_ts("100")
         setattr(
             client,
             attr,
@@ -215,7 +350,13 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
         )
         result = run(
             _handle_edit(
-                client, {"ticket_id": 1, "cnum": 1, "comment": "x"}
+                client,
+                {
+                    "ticket_id": 1,
+                    "cnum": 1,
+                    "comment": "x",
+                    "base_ts": "100",
+                },
             )
         )
         self.assertTrue(result.isError)
@@ -227,7 +368,12 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
             (
                 "edit_ticket_comment",
                 _handle_edit,
-                {"ticket_id": 1, "cnum": 1, "comment": "x"},
+                {
+                    "ticket_id": 1,
+                    "cnum": 1,
+                    "comment": "x",
+                    "base_ts": "100",
+                },
             ),
             (
                 "delete_ticket_comment",
@@ -282,7 +428,13 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
         with self.assertRaises(xmlrpc.client.Fault):
             run(
                 _handle_edit(
-                    client, {"ticket_id": 1, "cnum": 1, "comment": "x"}
+                    client,
+                    {
+                        "ticket_id": 1,
+                        "cnum": 1,
+                        "comment": "x",
+                        "base_ts": "100",
+                    },
                 )
             )
 
