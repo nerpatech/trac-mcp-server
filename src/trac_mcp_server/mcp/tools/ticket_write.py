@@ -492,6 +492,7 @@ async def _handle_update(
         },
         args,
         recheck_with="ticket_render_check",
+        ticket_id=ticket_id,
     )
     if refusal is not None:
         return refusal

@@ -92,6 +92,37 @@ def local_intertrac_bases() -> frozenset[str]:
     )
 
 
+def own_intertrac_prefix(client: TracClient) -> str | None:
+    """The InterTrac prefix OTHER instances would use to reach the one
+    ``client`` is talking to right now, for ``preview.checks``'s
+    ``self_intertrac_prefix`` check (ticket #105).
+
+    Unlike ``local_intertrac_bases``, this is per-``client``, not
+    per-registry: which instance a call is writing to depends on the
+    ``instance`` argument that resolved ``client`` (`Reference/mcp/
+    TracMcpMultiInstance`), and every configured prefix on this host
+    already equals its instance's own URL path segment (confirmed
+    against `Reference/trac/InterTrac`'s list -- `/trac_mcp_server` is
+    prefix ``trac_mcp_server``, etc.), so the path segment IS the
+    prefix rather than merely resembling it.
+
+    ``None`` when ``client.config`` carries no usable ``trac_url`` --
+    a ``Config`` a test constructs by hand, or a bare ``MagicMock``
+    whose auto-created ``trac_url`` attribute is not a string at all
+    (``urlparse`` raises ``TypeError`` on one, not the ``AttributeError``
+    a ``getattr`` default would catch) -- and the check this feeds
+    simply does not fire, the same convention ``local_intertrac_bases``
+    follows when the registry isn't wired in.
+    """
+    trac_url = getattr(client.config, "trac_url", None)
+    if not isinstance(trac_url, str) or not trac_url:
+        return None
+    path = urlparse(trac_url).path.rstrip("/")
+    if not path:
+        return None
+    return path.rsplit("/", 1)[-1] or None
+
+
 def _host_root(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"

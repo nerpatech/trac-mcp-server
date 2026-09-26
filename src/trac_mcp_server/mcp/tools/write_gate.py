@@ -60,7 +60,7 @@ from ...preview.targets import (
     probe_targets,
 )
 from .errors import build_error_response
-from .instances import local_intertrac_bases
+from .instances import local_intertrac_bases, own_intertrac_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +127,10 @@ class GateOutcome:
 
 
 async def _run_checks(
-    client: TracClient, content: str, target_cap: int
+    client: TracClient,
+    content: str,
+    target_cap: int,
+    known_comment_numbers: frozenset[int] | None,
 ) -> list[dict]:
     """Render, probe, and assemble findings. Every step that can touch
     the network or the parser lives here, so `check_write`'s one guard
@@ -156,6 +159,8 @@ async def _run_checks(
         check_targets=True,
         source_format="tracwiki",
         local_intertrac_bases=local_intertrac_bases(),
+        own_prefix=own_intertrac_prefix(client),
+        known_comment_numbers=known_comment_numbers,
     )
 
 
@@ -166,6 +171,7 @@ async def check_write(
     field: str,
     recheck_with: str | None,
     target_cap: int = DEFAULT_TARGET_CAP,
+    known_comment_numbers: frozenset[int] | None = None,
 ) -> GateOutcome:
     """Run the link checks on one field of a pending write.
 
@@ -191,6 +197,13 @@ async def check_write(
             costs the most: see the module docstring on why a check
             that could not run must not read as a check that passed.
         target_cap: Maximum cross-instance targets to probe.
+        known_comment_numbers: Ticket #105. The comment numbers that
+            exist on the ticket this write targets, plus the number
+            this write's own comment will become, for
+            ``dangling_comment_ref``. ``None`` (the default) when there
+            is no ticket to check against (a wiki/milestone write) or
+            the caller hasn't computed it -- that check simply does not
+            run.
 
     Returns:
         A :class:`GateOutcome`. ``refusal`` is non-None exactly when a
@@ -200,7 +213,9 @@ async def check_write(
         return GateOutcome(None, [], checked=False)
 
     try:
-        warnings = await _run_checks(client, content, target_cap)
+        warnings = await _run_checks(
+            client, content, target_cap, known_comment_numbers
+        )
     except Exception as exc:
         # The gate could not do its job. See the module docstring: a
         # failure HERE is not the author's fault, and refusing would
@@ -262,12 +277,62 @@ def gate_enabled(client: TracClient) -> bool:
     return bool(getattr(client.config, "write_gate", True))
 
 
+async def _known_comment_numbers(
+    client: TracClient, ticket_id: int
+) -> frozenset[int] | None:
+    """Ticket #105. The comment numbers ``ticket_id`` has right now,
+    plus the number this write's own comment will become.
+
+    Every ``ticket.update`` call -- even a comment-less field edit --
+    consumes the next number in sequence (``ticket_comment.py``'s
+    module docstring: "description edits consume comment numbers
+    without producing a comment"), so the highest number ANY changelog
+    entry with ``field == "comment"`` carries, plus one, is what this
+    write's own comment will become if it posts one. A comment number
+    only counts as an EXISTING comment when that entry's ``newvalue``
+    is non-empty -- the same population ``ticket_read.py``'s
+    ``_extract_comments`` shows a caller, not duplicated from there
+    since that helper returns display-ready dicts, not a bare set of
+    ints this module can compare against.
+
+    ``None`` if the changelog can't be fetched: fail OPEN, same as
+    every other checker-failure path in this module -- a ticket the
+    author cannot currently read is not the author's fault, and this
+    check simply does not run rather than refusing on a guess.
+    """
+    try:
+        changelog = await run_sync(
+            client.get_ticket_changelog, ticket_id
+        )
+    except Exception:
+        return None
+
+    known: set[int] = set()
+    max_cnum = 0
+    for entry in changelog or []:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 5:
+            continue
+        _timestamp, _author, field, oldvalue, newvalue = entry[:5]
+        if field != "comment":
+            continue
+        try:
+            cnum = int(str(oldvalue).strip())
+        except (TypeError, ValueError):
+            continue
+        max_cnum = max(max_cnum, cnum)
+        if newvalue:
+            known.add(cnum)
+    known.add(max_cnum + 1)
+    return frozenset(known)
+
+
 async def gate_or_refuse(
     client: TracClient,
     fields: dict[str, str | None],
     args: dict,
     *,
     recheck_with: str | None,
+    ticket_id: int | None = None,
 ) -> tuple[types.CallToolResult | None, list[str]]:
     """Gate several fields of one write, refusing on the first failure.
 
@@ -285,11 +350,26 @@ async def gate_or_refuse(
     tool that re-checks a write is a property of what was written to,
     not of which field of it. See :func:`check_write` on why it is not
     inferred.
+
+    ``ticket_id``, ticket #105: pass the ticket THIS write targets so
+    ``dangling_comment_ref`` can run -- omitted by every caller with no
+    ticket to check against (wiki, milestone) or no ticket yet
+    (``ticket_create``). Fetching the changelog is skipped unless a
+    field actually contains the substring ``comment:``, so an ordinary
+    write pays no extra round trip for a check that could not fire.
     """
     if not gate_enabled(client):
         return None, []
 
     target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
+    known_comment_numbers: frozenset[int] | None = None
+    if ticket_id is not None and any(
+        content and "comment:" in content for content in fields.values()
+    ):
+        known_comment_numbers = await _known_comment_numbers(
+            client, ticket_id
+        )
+
     lines: list[str] = []
     for field, content in fields.items():
         outcome = await check_write(
@@ -298,6 +378,7 @@ async def gate_or_refuse(
             field=field,
             recheck_with=recheck_with,
             target_cap=target_cap,
+            known_comment_numbers=known_comment_numbers,
         )
         if outcome.refused:
             return outcome.refusal, []

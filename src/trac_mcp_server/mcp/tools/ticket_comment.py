@@ -307,6 +307,7 @@ async def _handle_edit(
         {"comment": comment},
         args,
         recheck_with="ticket_render_check",
+        ticket_id=ticket_id,
     )
     if refusal is not None:
         return refusal
@@ -416,6 +417,7 @@ async def _handle_reply(
         {"comment": comment},
         args,
         recheck_with="ticket_render_check",
+        ticket_id=ticket_id,
     )
     if refusal is not None:
         return refusal

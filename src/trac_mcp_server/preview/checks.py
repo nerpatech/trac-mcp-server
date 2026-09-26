@@ -91,6 +91,19 @@ _MARKDOWN_LINK_PARTS_RE = re.compile(
 # `prefix:#N` has no digits.
 _PREFIX_TICKET_RE = re.compile(r"\b[A-Za-z][\w.+-]*:#\d+\b")
 
+# Ticket #105. `PR #100`, `pull request #100`, `merge request #100` --
+# GitHub/GitLab vocabulary that reads as a ticket number when written
+# next to Trac's `#N` autolink syntax, but never is one. Case-insensitive
+# on the label because `gh`/merge-commit text and human prose both vary.
+_PR_NUMBER_AS_TICKET_RE = re.compile(
+    r"\b(?:PR|pull request|merge request)\s+#(\d+)\b", re.IGNORECASE
+)
+
+# A bare `comment:N` NOT already scoped to another ticket -- the scoped
+# form is blanked out first so it never reaches the bare pattern below.
+_TICKET_COMMENT_SCOPED_RE = re.compile(r"\bticket:\d+#comment:\d+\b")
+_BARE_COMMENT_REF_RE = re.compile(r"\bcomment:(\d+)\b")
+
 # Opt-out pragma (ticket #58). A document that DOCUMENTS this syntax has
 # to quote it, and an anti-pattern section has to show what not to write
 # -- measured, `auto_pm:wiki:Reference/trac/InterTrac` returns 8
@@ -580,6 +593,184 @@ def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
     return warnings
 
 
+def _check_pr_number_as_ticket(
+    tracwiki: str, facts: PreviewFacts
+) -> list[dict]:
+    """Ticket #105. `PR #100`, `pull request #100`, `merge request #100`
+    outside a code span -- `#100` autolinks to THIS instance's ticket
+    100 regardless of whether that ticket exists, so the sentence reads
+    as a Trac reference it never meant to make. `bare_ticket_ref` does
+    already fire here, but it fires on every legitimate ticket citation
+    too (598 lines in one week's write responses, per the ticket), so
+    in practice nobody reads it before the write lands. This is its own
+    code specifically so this one shape can block.
+
+    Verified against `facts.anchors`, not source alone: a source-only
+    match cannot tell a live `PR #100` from one somebody had already
+    escaped, and a false positive here refuses a write for no reason.
+    """
+    scan_text = blank_inline_code_spans(blank_code_fences(tracwiki))
+    warnings = []
+    for match in _PR_NUMBER_AS_TICKET_RE.finditer(scan_text):
+        raw = match.group(0)
+        target = f"#{match.group(1)}"
+        linked = any(
+            "ticket" in a.classes
+            and "ext-link" not in a.classes
+            and a.text.replace(_ZERO_WIDTH_ICON, "") == target
+            for a in facts.anchors
+        )
+        if not linked:
+            continue
+        suggestion = raw.replace("#", "")
+        warnings.append(
+            _warning(
+                "pr_number_as_ticket",
+                "error",
+                f"'{raw}' renders as a link to this instance's ticket "
+                f"{match.group(1)} -- a GitHub/GitLab PR number, not a "
+                f"Trac ticket. Write '{suggestion}' instead.",
+                {"token": raw, "suggestion": suggestion},
+            )
+        )
+    return warnings
+
+
+def _check_bare_ref_shadows_prefixed(
+    tracwiki: str, facts: PreviewFacts, own_prefix: str | None = None
+) -> list[dict]:
+    """Ticket #105. A bare `#N` that resolves to THIS instance's own
+    ticket N, in a document that ALSO carries `<prefix>:#N` for the
+    same N -- almost always the same reference, meant for that other
+    instance, typed once correctly and once as if the prefix still
+    applied.
+
+    The prefixed token only counts when it is itself CONFIGURED (an
+    anchor whose text matches it, the same test
+    `_check_unconfigured_intertrac_prefix` uses for "configured"): an
+    unconfigured prefix never produces a real link, so it cannot read
+    as a correct cross-instance reference for the bare form to be
+    confused with -- that population is `unconfigured_intertrac_prefix`'s.
+
+    ``own_prefix`` excludes the one case "configured" alone cannot:
+    verified live against this host (2026-09-26), a SELF-prefixed token
+    -- ``own_prefix:#N`` written on the instance ``own_prefix`` names --
+    now resolves too, because the operator has since added self-entries
+    to `[intertrac]` (auto_pm:#155). `Reference/trac/InterTrac` still
+    documents a table omitting its own two lines, which was true when
+    this ticket was filed and may be true again; either way, when it
+    resolves, ``own_prefix:#N`` and bare ``#N`` written on that same
+    instance name the identical ticket, not two different ones -- there
+    is no shadow to report. ``own_prefix=None`` (the default) treats
+    every configured prefix as foreign, matching the pre-self-entry
+    host and every caller that cannot supply this context.
+
+    A lone bare foreign reference with no prefixed twin in the same
+    document is NOT caught -- there is nothing here to shadow it, and
+    telling that case apart from an ordinary same-instance reference
+    would need knowing what the author meant, not just what they wrote.
+    That population stays a `bare_ticket_ref` render-check-only concern.
+    """
+    scan_text = blank_code_fences(tracwiki)
+    code_span_texts = list(facts.code_spans)
+    prefixed_by_number: dict[str, str] = {}
+    for match in _PREFIX_TICKET_RE.finditer(scan_text):
+        raw = match.group(0)
+        if any(_code_span_contains(raw, s) for s in code_span_texts):
+            continue
+        if (
+            own_prefix is not None
+            and raw.split(":", 1)[0] == own_prefix
+        ):
+            continue
+        configured = any(
+            _prefix_boundary_match(
+                raw, a.text.replace(_ZERO_WIDTH_ICON, "")
+            )
+            for a in facts.anchors
+        )
+        if not configured:
+            continue
+        number = raw.rsplit("#", 1)[1]
+        prefixed_by_number.setdefault(number, raw)
+
+    if not prefixed_by_number:
+        return []
+
+    warnings = []
+    for anchor in facts.anchors:
+        if (
+            "ticket" not in anchor.classes
+            or "ext-link" in anchor.classes
+        ):
+            continue
+        text = anchor.text.replace(_ZERO_WIDTH_ICON, "")
+        if not text.startswith("#"):
+            continue
+        prefixed = prefixed_by_number.get(text[1:])
+        if prefixed is None:
+            continue
+        warnings.append(
+            _warning(
+                "bare_ref_shadows_prefixed",
+                "error",
+                f"'{text}' resolves to THIS instance's own ticket "
+                f"{text[1:]}, but the document also references "
+                f"'{prefixed}' -- likely the same reference, meant "
+                f"for that other instance. Write '{prefixed}' here too.",
+                {"bare": text, "prefixed": prefixed},
+            )
+        )
+    return warnings
+
+
+def _check_dangling_comment_ref(
+    tracwiki: str,
+    known_comment_numbers: frozenset[int] | None,
+) -> list[dict]:
+    """Ticket #105. A bare `comment:N` -- not scoped to another ticket
+    with `ticket:M#comment:N` -- where the ticket THIS write targets has
+    no comment N. Trac renders both forms as ordinary text (there is no
+    `missing` class for a dead `comment:N` the way there is for a wiki
+    or ticket target), so this is invisible on the render entirely;
+    catching it needs the ticket's own comment numbers, not the HTML.
+
+    ``known_comment_numbers`` is the set of comment numbers that exist
+    on the ticket right now, PLUS the number this write's own comment
+    will become if it posts one -- "counting the comment being
+    written" is the ticket's own phrasing, since a comment legitimately
+    referencing its own number by the time a reader sees it is not a
+    defect. Computing that set needs the ticket's changelog, which this
+    module has no way to fetch -- ``None`` (the default, and every
+    caller before this ticket) means no ticket context was available
+    and this check does not run, the same convention
+    `_check_missing_intertrac_realm` uses for `local_intertrac_bases`.
+    """
+    if known_comment_numbers is None:
+        return []
+    scan_text = blank_inline_code_spans(blank_code_fences(tracwiki))
+    scan_text = _TICKET_COMMENT_SCOPED_RE.sub(
+        _blank_preserving_layout, scan_text
+    )
+    warnings = []
+    for match in _BARE_COMMENT_REF_RE.finditer(scan_text):
+        number = int(match.group(1))
+        if number in known_comment_numbers:
+            continue
+        raw = match.group(0)
+        warnings.append(
+            _warning(
+                "dangling_comment_ref",
+                "error",
+                f"'{raw}' -- this ticket has no comment {number}. If "
+                f"this means a comment on another ticket, scope it as "
+                f"'ticket:M#comment:{number}'.",
+                {"token": raw, "n": number},
+            )
+        )
+    return warnings
+
+
 def _prefix_boundary_match(raw: str, candidate: str) -> bool:
     """True if `candidate` is `raw` verbatim, or `raw` with trailing
     punctuation the token regex's greedy `\\S+` glued on -- i.e.
@@ -828,7 +1019,7 @@ def _bracket_label(
 
 
 def _check_unconfigured_intertrac_prefix(
-    tracwiki: str, facts: PreviewFacts
+    tracwiki: str, facts: PreviewFacts, own_prefix: str | None = None
 ) -> list[dict]:
     """A `prefix:#N` or `prefix:realm:target` token whose prefix is not in
     the `[intertrac]` table renders as plain text, not a link (rows 16 and
@@ -856,6 +1047,18 @@ def _check_unconfigured_intertrac_prefix(
     the GOOD occurrence instead (which order-based tie-breaking was
     checked and found to do here, since the anchor is the second
     occurrence's while the first is the dead one).
+
+    Ticket #105: when the token's prefix equals ``own_prefix`` -- the
+    rendering instance's own name -- this promotes to `self_intertrac_prefix`
+    at `error` instead, with the bare form (the token minus
+    ``own_prefix:``) as the suggestion. A self-prefixed token is a special
+    case of "unconfigured": `Reference/trac/InterTrac` documents that
+    every instance's `[intertrac]` table omits its own two lines, so
+    ``own_prefix:#N`` written here can never resolve, not even in
+    principle, unlike a genuine typo or an instance that just hasn't been
+    added to the table yet. ``own_prefix=None`` (the default, and every
+    caller before this ticket) leaves this branch permanently closed and
+    reproduces the old behaviour exactly.
     """
     code_span_texts = list(facts.code_spans)
     anchors = facts.anchors
@@ -925,6 +1128,22 @@ def _check_unconfigured_intertrac_prefix(
                     if _captured_punctuation_anchor(raw, anchors):
                         continue
             if configured:
+                continue
+
+            prefix = raw.split(":", 1)[0]
+            if own_prefix is not None and prefix == own_prefix:
+                bare_form = raw[len(own_prefix) + 1 :]
+                warnings.append(
+                    _warning(
+                        "self_intertrac_prefix",
+                        "error",
+                        f"'{raw}' names this instance's OWN prefix -- "
+                        f"every instance's [intertrac] table omits its "
+                        f"own two lines, so this can never resolve. "
+                        f"Write '{bare_form}' instead.",
+                        {"token": raw, "suggestion": bare_form},
+                    )
+                )
                 continue
 
             warnings.append(
@@ -1196,6 +1415,8 @@ def build_warnings(
     check_targets: bool,
     source_format: str = "markdown",
     local_intertrac_bases: frozenset[str] = frozenset(),
+    own_prefix: str | None = None,
+    known_comment_numbers: frozenset[int] | None = None,
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
@@ -1233,6 +1454,24 @@ def build_warnings(
             dispatcher's bug from upstream Trac resolving the identical
             href shape correctly. Empty (the default) means that check
             never fires, matching the behaviour before ticket #86.
+        own_prefix: The rendering instance's own InterTrac prefix (its
+            name in the ``[intertrac]`` table other instances use to
+            reach it), ticket #105. Consulted by
+            ``_check_unconfigured_intertrac_prefix`` to reclassify a
+            self-referencing token as ``self_intertrac_prefix``, and by
+            ``_check_bare_ref_shadows_prefixed`` to exclude a
+            self-prefixed token from counting as a foreign "prefixed
+            twin" -- on a host where self-entries are configured, that
+            token and a bare same-instance reference name the identical
+            ticket, not two different ones. ``None`` (the default)
+            leaves both closed and reproduces the pre-#105 behaviour.
+        known_comment_numbers: The comment numbers that exist on the
+            ticket this write targets, plus the number this write's own
+            comment will become (ticket #105). Consulted only by
+            ``dangling_comment_ref``, which needs ticket state no other
+            rule here does. ``None`` (the default, and every caller
+            outside a ticket write) means no ticket context is
+            available and that check does not run.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -1265,7 +1504,16 @@ def build_warnings(
     warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(
-        _check_unconfigured_intertrac_prefix(tracwiki, facts)
+        _check_unconfigured_intertrac_prefix(
+            tracwiki, facts, own_prefix
+        )
+    )
+    warnings.extend(_check_pr_number_as_ticket(tracwiki, facts))
+    warnings.extend(
+        _check_bare_ref_shadows_prefixed(tracwiki, facts, own_prefix)
+    )
+    warnings.extend(
+        _check_dangling_comment_ref(tracwiki, known_comment_numbers)
     )
     warnings.extend(_check_target_probes(facts, probes, check_targets))
     warnings.extend(

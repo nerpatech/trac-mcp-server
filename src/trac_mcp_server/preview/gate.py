@@ -66,6 +66,45 @@ BLOCKING_CODES = frozenset(
         # on a LOCAL dispatcher 404s unconditionally, whether or not the
         # page exists, and the fix is a mechanical `wiki:` insertion.
         "missing_intertrac_realm",
+        # Ticket #105, four checks a one-week audit (auto_pm:#155) found
+        # catching nothing before the write -- either advisory or
+        # invisible -- for a shape with no legitimate population in
+        # prose. Blocking moves the fix in front of the write, where it
+        # costs no revision and no repair write (the wrong-instance
+        # overwrite #104 fixed is what a repair write risks).
+        #
+        # `pr_number_as_ticket`: `PR #100`/`pull request #100`/`merge
+        # request #100` always autolinks to THIS instance's own ticket
+        # 100, which is never what the sentence meant. `bare_ticket_ref`
+        # already fires here but on every legitimate citation too (598
+        # lines in one week's write responses), so in practice nobody
+        # reads it before the write lands.
+        "pr_number_as_ticket",
+        # `bare_ref_shadows_prefixed`: a bare `#N` alongside a configured
+        # `<prefix>:#N` for the same N almost always means the SAME
+        # reference, typed once correctly and once as if the prefix
+        # still applied -- and the bare form silently resolves to this
+        # instance's own ticket N instead. Evidence: two auto_pm wiki
+        # pages did exactly this for ticket 103, both caught only after
+        # the write, in the next version.
+        "bare_ref_shadows_prefixed",
+        # `self_intertrac_prefix`: the subtype of
+        # `unconfigured_intertrac_prefix` whose prefix is the rendering
+        # instance's OWN name. `Reference/trac/InterTrac` documents that
+        # every instance's `[intertrac]` table omits its own two lines,
+        # so this can never resolve, not even in principle -- unlike an
+        # ordinary typo or an instance simply missing from the table,
+        # which stay `unconfigured_intertrac_prefix` and advisory.
+        "self_intertrac_prefix",
+        # `dangling_comment_ref`: a bare `comment:N` on a ticket write
+        # where the ticket has no comment N (counting the comment this
+        # write itself creates). Trac renders a dead `comment:N` as
+        # ordinary text -- no `missing` class the way a wiki or ticket
+        # target gets -- so this is invisible on the render, the one of
+        # the four that a post-write render-check could not have caught
+        # either; only the write-time gate, which has the ticket's own
+        # comment numbers in hand, can.
+        "dangling_comment_ref",
     }
 )
 

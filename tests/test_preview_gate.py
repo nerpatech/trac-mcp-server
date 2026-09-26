@@ -234,6 +234,33 @@ def test_target_check_capped_blocks_and_its_siblings_do_not():
     assert not is_blocking(_warning("target_check_disabled", "info"))
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "pr_number_as_ticket",
+        "bare_ref_shadows_prefixed",
+        "self_intertrac_prefix",
+        "dangling_comment_ref",
+    ],
+)
+def test_ticket_105_codes_block(code):
+    """The four checks a one-week audit (auto_pm:#155) found catching
+    nothing before the write -- postdate #64's own section 4 table, the
+    same way `missing_intertrac_realm` (#86) did, so pinned here rather
+    than folded into that table's parametrized cases above."""
+    assert code in BLOCKING_CODES
+
+
+def test_self_intertrac_prefix_is_not_the_same_code_as_unconfigured():
+    """The two are related -- one is a subtype of the other -- but they
+    must answer differently: self can never resolve even in principle,
+    an ordinary unconfigured prefix might just need the table updated.
+    Conflating them would either block every typo (a 598-line-a-week
+    population, per #105's own measurement) or leave self silent."""
+    assert "self_intertrac_prefix" in BLOCKING_CODES
+    assert "unconfigured_intertrac_prefix" not in BLOCKING_CODES
+
+
 # ---------------------------------------------------------------------
 # classify / is_blocking
 # ---------------------------------------------------------------------
