@@ -431,23 +431,29 @@ class TestRenderCheckLive:
     def test_project_milestones_reports_its_autolink_as_incidental(
         self,
     ):
-        """Live content, and this test previously asserted the defect.
+        """Live content, and this test has already been inverted once.
 
         It was written as "finds a dead link on `ProjectMilestones`"
         and passed on `missing_local_target`. Ticket #79 measured what
-        that finding actually is: the bare word `GitHub` in a prose
+        that finding actually was: the bare word `GitHub` in a prose
         sentence, which Trac auto-links because it is humped. Nothing
         on the page is broken and nothing was authored as a link -- so
         the old assertion was pinning the false positive, and under
         #64's blocking gate this correct page would have been refused.
+        #79 inverted the assertion to require the advisory
+        `incidental_wiki_autolink` code instead.
 
-        Kept rather than deleted, inverted rather than relaxed: the
-        same live page now has to report the ADVISORY code and must
-        NOT report the error. That makes it a real-content regression
-        row for #79 instead of a memorial to the bug.
+        Ticket #106 inverts it again. The operator is turning on
+        `[wiki] ignore_missing_pages` on this instance (auto_pm:#155),
+        which makes Trac's bare-word rule return the plain label
+        instead of a `missing`-classed anchor -- so `GitHub` now
+        renders as ordinary text, with no anchor and nothing for
+        `_check_missing_local_target` to see at all. Neither code
+        fires; the page reports zero warnings.
 
         Found by the live suite, which `ci.sh` does not run -- the
-        offline suite was green across this change.
+        offline suite is green across this change, since the offline
+        fixtures pin the pre-option render and are unaffected.
         """
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
@@ -461,6 +467,7 @@ class TestRenderCheckLive:
                 {
                     "page_name": "ProjectMilestones",
                     "check_targets": False,
+                    "include_html": True,
                 },
             )
         )
@@ -471,14 +478,13 @@ class TestRenderCheckLive:
             for w in s["warnings"]
         ]
         codes = [w["code"] for w in warnings]
-        assert "incidental_wiki_autolink" in codes, codes
+        assert "incidental_wiki_autolink" not in codes, codes
         assert "missing_local_target" not in codes, codes
-        suggestions = [
-            w["evidence"]["suggestion"]
-            for w in warnings
-            if w["code"] == "incidental_wiki_autolink"
-        ]
-        assert "!GitHub" in suggestions, suggestions
+        html = "".join(
+            s["html"] or ""
+            for s in result.structuredContent["sections"]
+        )
+        assert '/wiki/GitHub"' not in html, html
 
 
 if __name__ == "__main__":

@@ -507,6 +507,16 @@ def _check_missing_local_target(
     render. With no source there is no discriminator, so every anchor
     stays an error -- unchanged behaviour -- rather than being
     downgraded for lack of evidence, which would fail silent.
+
+    UNREACHABLE ON A HOST WITH `[wiki] ignore_missing_pages` SET.
+    Ticket #106: that option makes both the bare-word rule and the
+    `[CamelCase label]` bracket rule return the plain label instead of
+    a `missing`-classed anchor, so this check -- and
+    `incidental_wiki_autolink` with it -- sees nothing to report for
+    either form on such a host. `[wiki:X]`/`[[X]]`/`wiki:X` still
+    render missing regardless, so an authored dead link stays caught.
+    No source-side change here: this docstring is the record, for a
+    host without the option, of what the check still does.
     """
     budget = _bare_autolink_counts(tracwiki) if tracwiki else {}
     warnings = []
