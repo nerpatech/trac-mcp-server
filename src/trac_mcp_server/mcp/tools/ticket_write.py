@@ -249,6 +249,7 @@ async def _handle_create(
         {"description": description_tracwiki},
         args,
         recheck_with="ticket_render_check",
+        new_ticket=True,
     )
     if refusal is not None:
         return refusal

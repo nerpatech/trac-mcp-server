@@ -20,6 +20,7 @@ from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import (
+    NEW_TICKET_COMMENT_NUMBERS,
     TARGET_CAP_SCHEMA,
     check_write,
     gate_enabled,
@@ -186,6 +187,7 @@ async def _handle_batch_create(
                 field="description",
                 recheck_with="ticket_render_check",
                 target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+                known_comment_numbers=NEW_TICKET_COMMENT_NUMBERS,
             )
             if outcome.refused:
                 return {
