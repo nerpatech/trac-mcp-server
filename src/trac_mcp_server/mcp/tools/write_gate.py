@@ -278,6 +278,12 @@ def gate_enabled(client: TracClient) -> bool:
     return bool(getattr(client.config, "write_gate", True))
 
 
+# Ticket #108. ``known_comment_numbers`` for a ticket being created: it
+# has no comments, and a create posts none. Empty, not ``None`` --
+# ``None`` means "no ticket context, skip the check".
+NEW_TICKET_COMMENT_NUMBERS: frozenset[int] = frozenset()
+
+
 async def _known_comment_numbers(
     client: TracClient, ticket_id: int
 ) -> frozenset[int] | None:
@@ -334,6 +340,7 @@ async def gate_or_refuse(
     *,
     recheck_with: str | None,
     ticket_id: int | None = None,
+    new_ticket: bool = False,
 ) -> tuple[types.CallToolResult | None, list[str]]:
     """Gate several fields of one write, refusing on the first failure.
 
@@ -354,17 +361,25 @@ async def gate_or_refuse(
 
     ``ticket_id``, ticket #105: pass the ticket THIS write targets so
     ``dangling_comment_ref`` can run -- omitted by every caller with no
-    ticket to check against (wiki, milestone) or no ticket yet
-    (``ticket_create``). Fetching the changelog is skipped unless a
-    field actually contains the substring ``comment:``, so an ordinary
-    write pays no extra round trip for a check that could not fire.
+    ticket to check against (wiki, milestone). Fetching the changelog
+    is skipped unless a field actually contains the substring
+    ``comment:``, so an ordinary write pays no extra round trip for a
+    check that could not fire.
+
+    ``new_ticket``, ticket #108: ``ticket_create`` has no ticket id yet,
+    but it does know the answer -- a ticket that does not exist has no
+    comments, so every bare ``comment:N`` in its description is
+    dangling. Skipping the check there used to let a description in
+    that no later ``ticket_update`` could re-save.
     """
     if not gate_enabled(client):
         return None, []
 
     target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
     known_comment_numbers: frozenset[int] | None = None
-    if ticket_id is not None and any(
+    if new_ticket:
+        known_comment_numbers = NEW_TICKET_COMMENT_NUMBERS
+    elif ticket_id is not None and any(
         content and "comment:" in content for content in fields.values()
     ):
         known_comment_numbers = await _known_comment_numbers(

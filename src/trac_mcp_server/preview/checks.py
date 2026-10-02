@@ -100,8 +100,23 @@ _PR_NUMBER_AS_TICKET_RE = re.compile(
 )
 
 # A bare `comment:N` NOT already scoped to another ticket -- the scoped
-# form is blanked out first so it never reaches the bare pattern below.
-_TICKET_COMMENT_SCOPED_RE = re.compile(r"\bticket:\d+#comment:\d+\b")
+# forms are blanked out first so they never reach the bare pattern
+# below. First `ticket:M#comment:N`, then Trac's own
+# `comment:N:ticket:M` (ticket #108), whose leading `comment:N` the bare
+# pattern otherwise matches. Any realm, not just `ticket`: Trac's
+# comment resolver takes the three-part form as `cnum:realm:id` and
+# maps `bug`/`issue` onto `ticket`, and whatever realm it names, it is
+# not a comment on the ticket being written. The old-style
+# `comment:ticket:M:N` needs no entry -- the bare pattern wants digits
+# straight after `comment:`. And an absolute URL is never this ticket's
+# own reference either: `http://host/x/ticket/67#comment:1` carries a
+# `comment:1` fragment the bare pattern would otherwise match (found by
+# #108's store sweep, on a description the create path would refuse).
+_TICKET_COMMENT_SCOPED_RE = re.compile(
+    r"\bticket:\d+#comment:\d+\b"
+    r"|\bcomment:\d+:[A-Za-z]+:\d+\b"
+    r"|\b[A-Za-z][\w+.-]*://\S+"
+)
 _BARE_COMMENT_REF_RE = re.compile(r"\bcomment:(\d+)\b")
 
 # Opt-out pragma (ticket #58). A document that DOCUMENTS this syntax has
@@ -729,8 +744,8 @@ def _check_dangling_comment_ref(
     known_comment_numbers: frozenset[int] | None,
 ) -> list[dict]:
     """Ticket #105. A bare `comment:N` -- not scoped to another ticket
-    with `ticket:M#comment:N` -- where the ticket THIS write targets has
-    no comment N. Trac renders both forms as ordinary text (there is no
+    with `ticket:M#comment:N` or `comment:N:ticket:M` (#108) -- where
+    the ticket THIS write targets has no comment N. Trac renders both forms as ordinary text (there is no
     `missing` class for a dead `comment:N` the way there is for a wiki
     or ticket target), so this is invisible on the render entirely;
     catching it needs the ticket's own comment numbers, not the HTML.

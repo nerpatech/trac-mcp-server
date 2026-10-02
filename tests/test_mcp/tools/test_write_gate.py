@@ -23,6 +23,7 @@ is.
 """
 
 import asyncio
+import re
 import xmlrpc.client
 from unittest.mock import MagicMock, patch
 
@@ -122,6 +123,20 @@ SELF_PREFIX_SOURCE = "See auto_pm:#99999 for the self case."
 # numbers, not the HTML, can tell the two apart.
 DANGLING_COMMENT_HTML = "<p>\nSee comment:99 for context.\n</p>\n"
 DANGLING_COMMENT_SOURCE = "See comment:99 for context."
+
+# Ticket #108. `comment:N:ticket:M` is Trac's own form for a comment on
+# ANOTHER ticket, and it resolves -- captured from /trac_test
+# (2026-10-02), where ticket 1 has six comments. The bare pattern used
+# to match the leading `comment:5` and refuse it as dangling on the
+# ticket being written.
+SCOPED_COMMENT_HTML = (
+    '<p>\nSee <a class="closed ticket" '
+    'href="http://192.168.10.4:8000/trac_test/ticket/1#comment:5" '
+    'title="Comment 5 for #1: task: Update CLI reference to document '
+    '--json flag behavior (closed: fixed)">comment:5:ticket:1</a> '
+    "for context.\n</p>\n"
+)
+SCOPED_COMMENT_SOURCE = "See comment:5:ticket:1 for context."
 
 
 def _client(html=CLEAN_HTML):
@@ -468,6 +483,110 @@ def test_dangling_comment_ref_does_not_run_without_ticket_context():
         )
     )
     assert not outcome.refused
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        SCOPED_COMMENT_SOURCE,
+        # Trac maps `bug` and `issue` to the ticket realm.
+        "See comment:5:bug:1 for context.",
+        "See comment:5:issue:1 for context.",
+        # The bracket form carries the same target.
+        "See [comment:5:ticket:1 the fifth one] for context.",
+        # An absolute URL's fragment is not a TracLinks reference --
+        # shape from auto_pm:#71's description, found by #108's sweep.
+        "See http://192.168.10.4:8000/trac_test/ticket/1#comment:5 too.",
+        "See [http://192.168.10.4:8000/trac_test/ticket/1#comment:5 it].",
+    ],
+)
+def test_comment_scoped_to_another_ticket_is_not_dangling(source):
+    """Ticket #108: comment 5 does not exist on THIS ticket, but the
+    reference names comment 5 of ticket 1, so this check has nothing
+    to say about it."""
+    outcome = asyncio.run(
+        check_write(
+            _client(SCOPED_COMMENT_HTML),
+            source,
+            field="description",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1}),
+        )
+    )
+    assert not outcome.refused, outcome.refusal_text
+
+
+def test_a_bare_ref_beside_a_scoped_one_still_refuses():
+    """Blanking the scoped form must not hide a genuinely dangling bare
+    `comment:N` in the same document -- it is the bare one reported."""
+    outcome = asyncio.run(
+        check_write(
+            _client(SCOPED_COMMENT_HTML),
+            "See comment:5:ticket:1 and comment:9 for context.",
+            field="description",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1}),
+        )
+    )
+    assert outcome.refused
+    assert "'comment:9'" in outcome.refusal_text
+    assert "'comment:5'" not in outcome.refusal_text
+
+
+def test_ticket_create_refuses_a_bare_comment_ref():
+    """Ticket #108's second half: a new ticket has no comments, so a
+    bare `comment:N` in its description is dangling for every N. The
+    create path used to skip the check for want of a ticket id, which
+    let a description in that no update could ever re-save."""
+    result = _ticket_create(
+        _client(DANGLING_COMMENT_HTML), DANGLING_COMMENT_SOURCE
+    )
+    assert result.isError, _text(result)
+    assert "dangling_comment_ref" in _text(result)
+
+
+def test_ticket_create_allows_a_scoped_comment_ref():
+    result = _ticket_create(
+        _client(SCOPED_COMMENT_HTML), SCOPED_COMMENT_SOURCE
+    )
+    assert not result.isError, _text(result)
+
+
+def test_batch_create_refuses_a_bare_comment_ref_per_item():
+    client = _client()
+
+    def render(content):
+        if "comment:5:ticket:1" in content:
+            return SCOPED_COMMENT_HTML
+        return DANGLING_COMMENT_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = 7
+        result = asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {
+                            "summary": "scoped",
+                            "description": SCOPED_COMMENT_SOURCE,
+                        },
+                        {
+                            "summary": "bare",
+                            "description": DANGLING_COMMENT_SOURCE,
+                        },
+                    ]
+                },
+            )
+        )
+
+    text = _text(result)
+    assert "1/2 succeeded, 1 failed" in text
+    assert "dangling_comment_ref" in text
 
 
 _TWO_PRIOR_COMMENTS_CHANGELOG = [
@@ -1308,6 +1427,80 @@ class TestTicketCommentWriteGateLive:
         assert history[-1][3] == "the original comment", (
             "the gate returned an error but the write still landed"
         )
+
+    def test_comment_scoped_to_another_ticket_is_allowed(self, ticket):
+        """Ticket #108's live allow row. The seeded ticket becomes the
+        TARGET, given comments 1-3; a second, fresh ticket is the one
+        written, so `comment:3` does not exist on it, and its own next
+        comment number is 2, not 3. Before #108 this description update
+        was refused with `dangling_comment_ref` alone, while Trac
+        resolved the link to comment 3 of the target."""
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_update as handle_update,
+        )
+
+        client, target_id = ticket
+        client.update_ticket(target_id, "the second comment")
+        client.update_ticket(target_id, "the third comment")
+        writer_id = client.create_ticket(
+            "Ticket108WriteGateLive",
+            "Seeded for the ticket 108 live gate row.",
+        )
+        try:
+            body = (
+                "Seeded for the ticket 108 live gate row. See "
+                f"comment:3:ticket:{target_id} for context."
+            )
+            result = asyncio.run(
+                handle_update(
+                    client,
+                    {
+                        "ticket_id": writer_id,
+                        "description": body,
+                        "base_ts": self._base_ts(client, writer_id),
+                    },
+                )
+            )
+
+            assert not result.isError, _text(result)
+            assert (
+                client.get_ticket(writer_id)[3]["description"] == body
+            )
+        finally:
+            try:
+                client.delete_ticket(writer_id)
+            except Exception:
+                pass
+
+    def test_ticket_create_with_a_bare_comment_ref_is_refused(self):
+        """Ticket #108's second half, live: a new ticket has no
+        comments, so `ticket_create` now refuses a bare `comment:N`
+        rather than letting in a description no update can re-save."""
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "summary": "Ticket108WriteGateLive",
+                    "description": (
+                        "Seeded for the ticket 108 live gate row. See "
+                        "comment:3 for context."
+                    ),
+                },
+            )
+        )
+
+        if not result.isError:
+            # Don't leave the wrongly-created ticket behind.
+            created = re.search(r"#(\d+)", _text(result))
+            if created:
+                client.delete_ticket(int(created.group(1)))
+        assert result.isError, _text(result)
+        assert "dangling_comment_ref" in _text(result)
 
 
 # ---------------------------------------------------------------------
