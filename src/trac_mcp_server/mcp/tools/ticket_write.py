@@ -97,7 +97,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only adds new ones.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -337,10 +337,9 @@ async def _handle_update(
     comment = args.get("comment", "")
 
     # Reply-to: prepend Trac's standard "Replying to [comment:N author]:"
-    # quote block before the new comment. Trac's XML-RPC API on this host
-    # has no ticket.editComment/deleteComment methods (verified via
-    # system.listMethods) -- existing comments can only be edited/deleted
-    # via the Trac web UI, so this tool only ever adds new comments.
+    # quote block before the new comment. This tool only ever adds new
+    # comments; correcting or removing one is ticket_comment_edit/delete
+    # (the tracrpc_comment plugin, see ticket_comment.py).
     reply_to = args.get("reply_to")
     if reply_to is not None:
         if not comment:
@@ -480,8 +479,8 @@ async def _handle_update(
     # prepended by reply_to. `args["comment"]` is what this author
     # actually wrote, and that is what is checked: refusing a reply
     # because the comment being QUOTED contains a broken link would
-    # charge an author for text they did not write and cannot edit --
-    # this host has no comment edit at all (#38). Ruling 4 says block on
+    # charge an author for text they did not write and did not choose to
+    # keep -- a quoted comment is not theirs to edit. Ruling 4 says block on
     # everything in the submitted content; the quoted block is not
     # content this write is submitting, it is content it is repeating.
     refusal, gate_lines = await gate_or_refuse(

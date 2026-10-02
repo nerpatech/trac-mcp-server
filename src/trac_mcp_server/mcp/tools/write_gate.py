@@ -2,9 +2,10 @@
 
 ``convert_preview`` is a pre-write check nobody has to call, and
 ``ticket_render_check``/``wiki_render_check`` are post-write checks that
-report after the broken link is published -- and on this host a ticket
-comment cannot be edited afterwards (ticket #38), so the correction
-becomes a second comment. Measured over one day of writing on the
+report after the broken link is published -- and a ticket comment can be
+corrected afterwards only through ``ticket_comment_edit`` (needs the
+``tracrpc_comment`` plugin), so an agent that does not know that posts a
+second comment. Measured over one day of writing on the
 auto_pm store, that is not a theoretical gap: auto_pm:#89 records six
 different link forms for one job, most of them wrong, all written by an
 agent that had the checking tools available.

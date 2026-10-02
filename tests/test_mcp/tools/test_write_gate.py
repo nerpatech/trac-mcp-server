@@ -721,8 +721,8 @@ def test_every_write_path_allows_correct_content(name, call):
 def test_reply_to_does_not_charge_the_author_for_the_quoted_comment():
     """A reply quotes an earlier comment verbatim. Refusing the reply
     because that OLDER comment carries a broken link would charge an
-    author for text they did not write and cannot edit -- this host has
-    no comment edit at all (#38).
+    author for text they did not write and did not choose to keep -- a
+    quoted comment is not theirs to edit.
 
     So the gate checks the author's own comment, not the assembled
     body. The quoted text here is broken; the reply is not.
