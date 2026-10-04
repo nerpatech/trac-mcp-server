@@ -36,15 +36,18 @@ CONSTRAINTS=constraints/deploy.txt
 UNITS=(trac-mcp-server-http.service)
 PORTS=(8080)
 
+# Host first, so kpoxa is pointed at its own procedure wherever its clone is.
+# systemctl's stderr stays visible: "Failed to connect to bus" (no user
+# session, e.g. under sudo -u) is a different problem from a missing unit.
+if ! systemctl --user cat "${UNITS[@]}" >/dev/null; then
+    echo "ERROR: cannot read systemd user unit ${UNITS[*]} on this host." >&2
+    echo "deploy.sh is debian's procedure; kpoxa's rc.d deploy is on the" >&2
+    echo "Projects/trac-mcp-server card in the auto_pm store." >&2
+    exit 1
+fi
 if [ "$(pwd -P)" != "$(cd "$DEPLOY_CLONE" 2>/dev/null && pwd -P)" ]; then
     echo "ERROR: deploy.sh runs only from the deploy clone, $DEPLOY_CLONE;" >&2
     echo "this is $(pwd -P)." >&2
-    exit 1
-fi
-if ! systemctl --user cat "${UNITS[@]}" >/dev/null 2>&1; then
-    echo "ERROR: no systemd user unit ${UNITS[*]} on this host." >&2
-    echo "deploy.sh is debian's procedure; kpoxa's rc.d deploy is on the" >&2
-    echo "Projects/trac-mcp-server card in the auto_pm store." >&2
     exit 1
 fi
 

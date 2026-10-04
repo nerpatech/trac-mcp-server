@@ -4,11 +4,14 @@
 # It is a `pip freeze` of the shared daemon's deploy venv, minus the package
 # itself, and it also pins the build-only extras deploy.sh needs (pyinstaller
 # and friends) and the dev tools. A pin for a package an install does not pull
-# in is ignored, so one file serves every deploy site and platform.
+# in is ignored, so the Linux-only extras are harmless on kpoxa (FreeBSD).
+# Not pinned here: a dependency that only another platform or Python version
+# pulls in (add it when a site needs it), and the build backend, which pip's
+# build isolation installs from [build-system] in pyproject.toml.
 #
 # To change a pin: edit it here, land it through a PR like any code change,
-# then redeploy. tests/test_deploy_pins.py fails if a runtime dependency in
-# pyproject.toml has no pin here.
+# then redeploy. tests/test_deploy_pins.py fails if a runtime dependency,
+# direct or transitive, has no pin here or a pin its specifier rejects.
 altgraph==0.17.5
 annotated-doc==0.0.4
 annotated-types==0.7.0
