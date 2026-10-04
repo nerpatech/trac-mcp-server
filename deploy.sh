@@ -1,9 +1,13 @@
 #!/bin/bash
 # One-action deploy for the shared trac-http daemon AND the trac-convert CLI.
 #
-# Run this FROM the deploy clone (~/srv/trac-mcp-server-live), not from a
-# working checkout -- it refuses to run anywhere deploy-constraints.txt is
-# absent, which the working checkout deliberately does not carry.
+# Run this FROM debian's deploy clone (~/srv/trac-mcp-server-live), not from
+# a working checkout -- it refuses to run from any other directory, and on a
+# host without the systemd user unit (kpoxa's rc.d deploy has its own short
+# procedure on the auto_pm store's Projects/trac-mcp-server card). The pins it
+# installs against, constraints/deploy.txt, are tracked, so every clone has
+# them; they are deliberately NOT what marks a clone as the deploy clone
+# (Trac #109).
 #
 # Pulls master, reinstalls trac-mcp-server into this clone's own (non-
 # editable) venv, restarts the daemon unit, health-checks it, then rebuilds
@@ -26,16 +30,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [ ! -f deploy-constraints.txt ]; then
-    echo "ERROR: deploy-constraints.txt not found in $(pwd)." >&2
-    echo "This script runs from the deploy clone (~/srv/trac-mcp-server-live)," >&2
-    echo "which carries deploy-constraints.txt; a working checkout does not." >&2
-    exit 1
-fi
-
+DEPLOY_CLONE="${HOME}/srv/trac-mcp-server-live"
 BIN_DIR="${HOME}/.local/bin"
+CONSTRAINTS=constraints/deploy.txt
 UNITS=(trac-mcp-server-http.service)
 PORTS=(8080)
+
+if [ "$(pwd -P)" != "$(cd "$DEPLOY_CLONE" 2>/dev/null && pwd -P)" ]; then
+    echo "ERROR: deploy.sh runs only from the deploy clone, $DEPLOY_CLONE;" >&2
+    echo "this is $(pwd -P)." >&2
+    exit 1
+fi
+if ! systemctl --user cat "${UNITS[@]}" >/dev/null 2>&1; then
+    echo "ERROR: no systemd user unit ${UNITS[*]} on this host." >&2
+    echo "deploy.sh is debian's procedure; kpoxa's rc.d deploy is on the" >&2
+    echo "Projects/trac-mcp-server card in the auto_pm store." >&2
+    exit 1
+fi
 
 echo "=== 1/5: pull master ==="
 git fetch origin master
@@ -46,7 +57,7 @@ echo "Deploying commit: $COMMIT"
 
 echo ""
 echo "=== 2/5: reinstall trac-mcp-server (daemon) ==="
-.venv/bin/pip install -q -c deploy-constraints.txt .
+.venv/bin/pip install -q -c "$CONSTRAINTS" .
 
 echo ""
 echo "=== 3/5: restart daemon unit ==="
@@ -75,8 +86,8 @@ echo "=== 5/5: rebuild + install trac-convert from $COMMIT ==="
 # deploy clone is designed to avoid. Pre-installing here means build.sh's
 # check finds PyInstaller already present and never reaches that branch.
 if ! .venv/bin/python -c "import PyInstaller" 2>/dev/null; then
-    echo "Installing pyinstaller (pinned in deploy-constraints.txt)..."
-    .venv/bin/pip install -q -c deploy-constraints.txt pyinstaller
+    echo "Installing pyinstaller (pinned in $CONSTRAINTS)..."
+    .venv/bin/pip install -q -c "$CONSTRAINTS" pyinstaller
 fi
 # Delegate to build.sh (not a re-implementation) so the hidden-import list
 # and PyInstaller flags have exactly one source of truth. It builds both
