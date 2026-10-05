@@ -1128,7 +1128,7 @@ Each update object:
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Target wiki page name |
 | `content` | string | One of | - | The document text, in place of `file_path` |
-| `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection |
+| `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection. With neither `filename` nor `format`, inline content is stored as TracWiki, verbatim |
 | `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
@@ -1176,6 +1176,7 @@ Each update object:
 
 **Implementation Notes:**
 - Exactly one of `content` and `file_path`; both is a `validation_error`
+- Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
 - Creates new page if it doesn't exist, updates with optimistic locking if it does
@@ -1200,14 +1201,14 @@ Each update object:
 
 ## wiki_file_pull
 
-**Description:** Pull a Trac wiki page, converted to the requested format. Without `file_path` the text comes back in `structuredContent.content`; a `file_path` is on the **server's** filesystem and is refused unless `file_access` is `local`. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
+**Description:** Pull a Trac wiki page, converted to the requested format. Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to pull |
-| `file_path` | string | No | - | Absolute output path on the **server's** filesystem; omit it to get the text inline |
+| `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` or `tracwiki` |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
 

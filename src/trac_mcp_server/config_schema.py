@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 if TYPE_CHECKING:
     from .config import Config
@@ -165,6 +165,19 @@ class ServerConfig(BaseModel):
             "or base64 attachment bytes) when no output path is given"
         ),
     )
+
+    @field_validator("file_access", mode="before")
+    @classmethod
+    def _file_access_from_yaml_bool(cls, value: Any) -> Any:
+        """YAML 1.1 reads an unquoted ``off``/``on`` as a boolean, so
+        ``file_access: off`` arrives here as ``False``. Map it back rather
+        than refusing to start on the documented spelling."""
+        if value is False:
+            return "off"
+        if value is True:
+            return "local"
+        return value
+
     identities: dict[str, Any] = Field(
         default_factory=dict,
         description=(

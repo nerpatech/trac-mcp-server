@@ -181,12 +181,29 @@ class TestInlineText:
         assert result.isError is not True
         assert client.put_wiki_page.call_args.args[1] == body
 
-    async def test_push_without_filename_uses_heuristic(self):
-        result, _ = await _call(
-            "wiki_file_push",
-            {"page_name": "P", "content": "= Title =\n'''bold'''\n"},
+    async def test_push_without_filename_is_tracwiki_verbatim(self):
+        """No filename and format=auto: no content re-detect (#69/#92,
+        HonorExplicitFormatHints). Markdown-looking text is stored as
+        written, exactly like every other inline write."""
+        body = "# Not a heading here\n\nSome **text**.\n"
+        result, client = await _call(
+            "wiki_file_push", {"page_name": "P", "content": body}
         )
         assert result.structuredContent["source_format"] == "tracwiki"
+        assert result.structuredContent["converted"] is False
+        assert client.put_wiki_page.call_args.args[1] == body
+
+    async def test_push_without_filename_honours_explicit_format(self):
+        result, client = await _call(
+            "wiki_file_push",
+            {
+                "page_name": "P",
+                "content": "# T\n",
+                "format": "markdown",
+            },
+        )
+        assert result.structuredContent["source_format"] == "markdown"
+        assert "= T =" in client.put_wiki_page.call_args.args[1]
 
     async def test_push_both_forms_refused(self, tmp_path):
         f = tmp_path / "a.md"
@@ -297,7 +314,7 @@ class TestInlineCap:
             "wiki_attachment_get", {"page_name": "P", "filename": "a"}
         )
         assert result.isError is True
-        assert "inline limit of 4 bytes" in result.content[0].text
+        assert "limit of 4 bytes" in result.content[0].text
 
     async def test_pull_over_cap_refused(self):
         set_file_access("off", 4)
@@ -361,3 +378,73 @@ async def test_main_sets_file_access_while_serving(mode):
     assert seen == {"mode": mode, "cap": 77}
     # And it is put back to the fail-closed default on the way out.
     assert get_file_access() == "off"
+
+
+# ---------------------------------------------------------------------------
+# local mode keeps the old contract: an output path is required
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name,args,key", _OUTPUT_CASES)
+async def test_local_mode_requires_output_path_and_never_inlines(
+    name, args, key
+):
+    """file_access local is the stdio mode, where the caller is a model:
+    a forgotten output path must fail as before #111, not silently put
+    the bytes into the transcript."""
+    set_file_access("local")
+    result, client = await _call(name, args)
+    assert result.isError is True
+    assert f"{key} is required" in result.content[0].text
+    assert client.method_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Input side: the cap applies, and wrapped base64 is still base64
+# ---------------------------------------------------------------------------
+
+
+async def test_inline_content_over_cap_refused():
+    set_file_access("off", 8)
+    result, client = await _call(
+        "wiki_file_push", {"page_name": "P", "content": "x" * 9}
+    )
+    assert result.isError is True
+    assert "limit of 8 bytes" in result.content[0].text
+    client.put_wiki_page.assert_not_called()
+
+
+async def test_inline_base64_over_cap_refused():
+    set_file_access("off", 8)
+    result, client = await _call(
+        "ticket_attachment_put",
+        {
+            "ticket_id": 1,
+            "filename": "a",
+            "content_base64": base64.b64encode(b"y" * 9).decode(),
+        },
+    )
+    assert result.isError is True
+    assert "limit of 8 bytes" in result.content[0].text
+    client.put_ticket_attachment.assert_not_called()
+
+
+async def test_line_wrapped_base64_accepted():
+    data = bytes(range(256))
+    flat = base64.b64encode(data).decode()
+    wrapped = "\n".join(
+        flat[i : i + 76] for i in range(0, len(flat), 76)
+    )
+    client = _make_client()
+    client.put_wiki_attachment.return_value = "P/a"
+    result, _ = await _call(
+        "wiki_attachment_put",
+        {
+            "page_name": "P",
+            "filename": "a",
+            "content_base64": wrapped + "\n",
+        },
+        client,
+    )
+    assert result.isError is not True, result.content[0].text
+    assert client.put_wiki_attachment.call_args.args[3].data == data

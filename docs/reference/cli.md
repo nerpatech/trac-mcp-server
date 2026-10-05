@@ -167,7 +167,7 @@ trac-mcp attach-get (--ticket N | --page PAGE) NAME FILE
 trac-mcp detect-format FILE        # runs locally, no server call
 ```
 
-`FILE` may be `-` for stdin or stdout. Global options go before the subcommand: `trac-mcp --instance /bcs wiki-push ...`.
+`FILE` may be `-` for stdin or stdout. From stdin `wiki-push` has no filename to detect a format from, so the text is stored as TracWiki unless you pass `--format markdown`. Global options go before the subcommand: `trac-mcp --instance /bcs wiki-push ...`.
 
 ### Connecting
 
@@ -178,7 +178,7 @@ trac-mcp detect-format FILE        # runs locally, no server call
 | `--token-env NAME` | Environment variable holding the bearer token |
 | `--instance PATH` | Trac instance, e.g. `/auto_pm` (default: the server's) |
 
-Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working directory up: that entry's `url` and its `Authorization: Bearer ...` header, with `${VAR}` and `${VAR:-default}` expanded from the environment exactly as Claude Code expands them. Run from a project directory, it therefore connects as the same identity the project's MCP session uses, with no extra setup. Failing both, it reads `TRAC_MCP_URL` and `TRAC_MCP_AUTH_TOKEN`.
+Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working directory up: that entry's `url` and its `Authorization: Bearer ...` header, with `${VAR}` and `${VAR:-default}` expanded from the environment exactly as Claude Code expands them. Run from a project directory, it therefore connects as the same identity the project's MCP session uses, with no extra setup. Failing both, it reads `TRAC_MCP_URL` and `TRAC_MCP_AUTH_TOKEN`. A variable named with `--token-env` must be set; if the default `TRAC_MCP_AUTH_TOKEN` is unset, `trac-mcp` says that it is sending no token. An HTTP failure is reported by status, e.g. `HTTP 401 Unauthorized -- the bearer token was missing or rejected`.
 
 ### Exit Codes
 

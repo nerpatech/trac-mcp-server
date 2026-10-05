@@ -29,9 +29,8 @@ from ...file_handler import detect_file_format
 from .errors import build_error_response
 from .file_io import (
     check_output_path,
-    inline_too_large,
+    deliver_output,
     read_text_input,
-    write_output,
 )
 from .registry import ToolSpec
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
@@ -76,7 +75,8 @@ WIKI_FILE_TOOLS = [
                     "description": (
                         "With content: the source file's name (e.g. "
                         "notes.md), used only for extension-based "
-                        "format detection."
+                        "format detection. With neither filename nor "
+                        "format, inline content is stored as TracWiki."
                     ),
                 },
                 "file_path": {
@@ -115,10 +115,11 @@ WIKI_FILE_TOOLS = [
         name="wiki_file_pull",
         description=(
             "Pull a Trac wiki page, converted to the requested format. "
-            "Without file_path the text comes back in the result's "
-            "structuredContent.content; a file_path is a path on the "
-            "SERVER's filesystem and is refused unless the server's "
-            "file_access is 'local'. To save a page on your own machine, "
+            "Where the server's file_access is 'off' (the http default) "
+            "the text comes back in structuredContent.content and a "
+            "file_path is refused; where it is 'local', file_path (a path "
+            "on the server's own filesystem) is required. To save a page "
+            "on your own machine, "
             "run the trac-mcp CLI there: `trac-mcp wiki-pull PAGE FILE`."
         ),
         annotations=types.ToolAnnotations(
@@ -138,7 +139,8 @@ WIKI_FILE_TOOLS = [
                     "type": "string",
                     "description": (
                         "Absolute output path on the SERVER's "
-                        "filesystem. Omit it to get the text inline."
+                        "filesystem: required where file_access is "
+                        "'local', refused where it is 'off'."
                     ),
                 },
                 "format": {
@@ -264,8 +266,16 @@ async def _handle_push(
         content = _strip_yaml_frontmatter(content)
 
     # Detect format
-    if fmt == "auto":
-        source_format = _detect(name, content)
+    if fmt == "auto" and name is None:
+        # Inline text with no filename has nothing to go on but its own
+        # content, and a content re-detect is what #69/#92 removed from
+        # every inline write: a Markdown document quoting TracWiki (or the
+        # reverse) inverts it. So it is TracWiki, stored verbatim, like
+        # every other inline write -- unless the caller says otherwise
+        # with format= or a filename (ticket #111).
+        source_format = "tracwiki"
+    elif fmt == "auto":
+        source_format = detect_file_format(name, content)
     else:
         source_format = fmt
 
@@ -501,20 +511,18 @@ async def _handle_pull(
         "version": actual_version,
         "converted": converted,
     }
+    delivered = await deliver_output(
+        args, "file_path", encoded, text=output_content
+    )
+    if isinstance(delivered, types.CallToolResult):
+        return delivered
+    structured.update(delivered)
     if file_path is not None:
-        structured.update(
-            await write_output(args, "file_path", encoded)
-        )
         text = (
             f"Pulled wiki page '{page_name}' (version {actual_version}) "
             f"to {file_path} ({len(encoded)} bytes, format={fmt})"
         )
     else:
-        too_large = inline_too_large(len(encoded), _PULL_HINT)
-        if too_large is not None:
-            return too_large
-        structured["content"] = output_content
-        structured["bytes"] = len(encoded)
         text = (
             f"Pulled wiki page '{page_name}' (version {actual_version}, "
             f"{len(encoded)} bytes, format={fmt}); the text is in "

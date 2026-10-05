@@ -7,9 +7,9 @@ named a file both sides could see. Over the http transport it does not:
 the path resolves on the SERVER, where the caller's file does not exist,
 and where nothing confines it to anything but what this process's uid
 can read or write. So each of those tools also takes its bytes inline
-(``content`` / ``content_base64``) and, given no output path, returns
-them inline; and the path forms are refused unless the operator set
-``file_access: local``.
+(``content`` / ``content_base64``) and, with ``file_access: off``, returns
+them inline; the path forms are refused unless the operator set
+``file_access: local``, where the output paths stay required as before.
 
 ``file_access`` defaults by transport (see
 ``config_bootstrap.bootstrap_server_config``): ``local`` on stdio, ``off``
@@ -26,6 +26,7 @@ this transport, so they never enter a transcript either way.
 
 import base64
 import binascii
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -125,9 +126,13 @@ async def read_text_input(
             read_file_with_encoding, resolved
         )
         return text, encoding, resolved, str(file_path)
+    content = args["content"]
+    too_large = _over_cap(len(content.encode("utf-8")), "content")
+    if too_large is not None:
+        return too_large
     filename = args.get("filename")
     name = Path(filename) if filename else None
-    return args["content"], "utf-8", name, "inline content"
+    return content, "utf-8", name, "inline content"
 
 
 async def read_binary_input(
@@ -150,8 +155,11 @@ async def read_binary_input(
         resolved = await run_sync(validate_file_path, file_path)
         data = await run_sync(resolved.read_bytes)
         return data, resolved.name, str(file_path)
+    # Line-wrapped base64 (GNU `base64` wraps at 76 columns) is still
+    # base64; strip whitespace, then decode strictly.
+    encoded = re.sub(r"\s+", "", args["content_base64"])
     try:
-        data = base64.b64decode(args["content_base64"], validate=True)
+        data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError):
         return build_error_response(
             "validation_error",
@@ -164,65 +172,91 @@ async def read_binary_input(
             "filename is required with content_base64",
             "Provide the attachment filename to store.",
         )
+    too_large = _over_cap(len(data), "content_base64")
+    if too_large is not None:
+        return too_large
     return data, None, "inline content"
 
 
 async def check_output_path(
     args: dict[str, Any], path_key: str, cli_hint: str
 ) -> types.CallToolResult | None:
-    """Check an output path before any Trac call is made: refuse it when
-    file_access is off, and otherwise validate it (absolute, parent
-    exists), raising ValueError, so a bad path never costs a fetch."""
-    if args.get(path_key) is None:
-        return None
+    """Check an output path before any Trac call is made.
+
+    With file_access off a path is refused, and its absence means "return
+    the bytes inline". With file_access local the path is REQUIRED, as it
+    was before ticket #111: that mode is the stdio one, where the caller
+    is a model and the path form exists precisely to keep the bytes out of
+    its transcript, so a forgotten path must not silently inline them. A
+    given path is validated here (absolute, parent exists; ValueError
+    otherwise) so a bad one never costs a fetch.
+    """
     if _file_access != "local":
-        return _path_refused(path_key, cli_hint)
+        if args.get(path_key) is not None:
+            return _path_refused(path_key, cli_hint)
+        return None
+    if args.get(path_key) is None:
+        return build_error_response(
+            "validation_error",
+            f"{path_key} is required",
+            f"Provide {path_key} parameter.",
+        )
     await run_sync(validate_output_path, args[path_key])
     return None
 
 
-async def write_output(
-    args: dict[str, Any], path_key: str, payload: bytes
-) -> dict[str, Any]:
-    """Write ``payload`` to the output path. Call only after
-    :func:`check_output_path` passed and the path is present."""
-    resolved = await run_sync(validate_output_path, args[path_key])
-    await run_sync(resolved.write_bytes, payload)
+async def deliver_output(
+    args: dict[str, Any],
+    path_key: str,
+    payload: bytes,
+    *,
+    text: str | None = None,
+) -> dict[str, Any] | types.CallToolResult:
+    """Deliver a file tool's result, after :func:`check_output_path` passed.
+
+    With a path (file_access local): write ``payload`` there and return
+    ``{path_key, bytes_written}``. Without (file_access off): return it
+    inline as ``{content, bytes}`` when ``text`` is given, else as
+    ``{content_base64, bytes}`` -- or a refusal over max_inline_bytes.
+    """
+    if args.get(path_key) is not None:
+        resolved = await run_sync(validate_output_path, args[path_key])
+        await run_sync(resolved.write_bytes, payload)
+        return {
+            path_key: str(args[path_key]),
+            "bytes_written": len(payload),
+        }
+    too_large = _over_cap(len(payload), "result")
+    if too_large is not None:
+        return too_large
+    if text is not None:
+        return {"content": text, "bytes": len(payload)}
     return {
-        path_key: str(args[path_key]),
-        "bytes_written": len(payload),
+        "content_base64": base64.b64encode(payload).decode("ascii"),
+        "bytes": len(payload),
     }
 
 
-def inline_too_large(
-    size: int, cli_hint: str
-) -> types.CallToolResult | None:
-    """Refuse an inline result over the server's max_inline_bytes."""
+def _over_cap(size: int, what: str) -> types.CallToolResult | None:
+    """Refuse an inline payload, either direction, over max_inline_bytes."""
     if size <= _max_inline_bytes:
         return None
     return build_error_response(
         "validation_error",
-        f"Payload is {size} bytes, over this server's inline limit of "
+        f"Inline {what} is {size} bytes, over this server's limit of "
         f"{_max_inline_bytes} bytes (max_inline_bytes)",
-        f"Ask the operator to raise max_inline_bytes, or fetch it another "
-        f"way; the trac-mcp CLI ({cli_hint}) is bound by the same limit.",
+        "Ask the operator to raise max_inline_bytes; the trac-mcp CLI "
+        "moves its bytes inline too, so it is bound by the same limit.",
     )
-
-
-def encode_base64(payload: bytes) -> str:
-    """Standard base64 text for an inline binary result."""
-    return base64.b64encode(payload).decode("ascii")
 
 
 __all__ = [
     "DEFAULT_MAX_INLINE_BYTES",
     "check_output_path",
-    "encode_base64",
+    "deliver_output",
     "get_file_access",
     "get_max_inline_bytes",
-    "inline_too_large",
     "read_binary_input",
     "read_text_input",
     "set_file_access",
-    "write_output",
 ]

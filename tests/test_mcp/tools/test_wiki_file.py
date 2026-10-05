@@ -688,24 +688,16 @@ class TestPull:
         assert "page_name is required" in result.content[0].text
 
     async def test_pull_missing_file_path(self):
-        """No file_path: the converted text comes back inline (ticket
-        #111)."""
+        """Missing file_path returns validation error."""
         client = _make_client()
-        client.get_wiki_page.return_value = "= Title =\n'''bold'''\n"
-        client.get_wiki_page_info.return_value = {"version": 3}
         result = await _registry.call_tool(
             "wiki_file_pull",
-            {"page_name": "TestPage", "format": "tracwiki"},
+            {"page_name": "TestPage"},
             client,
         )
         assert isinstance(result, types.CallToolResult)
-        assert result.isError is not True
-        assert (
-            result.structuredContent["content"]
-            == "= Title =\n'''bold'''\n"
-        )
-        assert result.structuredContent["version"] == 3
-        assert "file_path" not in result.structuredContent
+        assert result.isError is True
+        assert "file_path is required" in result.content[0].text
 
     async def test_pull_invalid_output_path(self):
         """Invalid output path (parent doesn't exist) returns validation error."""

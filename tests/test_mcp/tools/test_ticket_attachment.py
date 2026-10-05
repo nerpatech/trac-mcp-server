@@ -338,19 +338,14 @@ class TestGet:
         assert "filename is required" in result.content[0].text
 
     async def test_get_missing_output_path(self):
-        """No output_path: the bytes come back inline, base64 (ticket
-        #111)."""
         client = _make_client()
-        client.get_ticket_attachment.return_value = b"\x00\x01abc"
         result = await handle_ticket_attachment_tool(
             "ticket_attachment_get",
             {"ticket_id": 1, "filename": "x"},
             client,
         )
-        assert result.isError is not True
-        assert result.structuredContent["content_base64"] == "AAFhYmM="
-        assert result.structuredContent["bytes"] == 5
-        assert "output_path" not in result.structuredContent
+        assert result.isError is True
+        assert "output_path is required" in result.content[0].text
 
     async def test_get_invalid_output_path(self):
         """Output path with nonexistent parent dir is rejected."""

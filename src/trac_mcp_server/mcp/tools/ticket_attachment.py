@@ -31,10 +31,8 @@ from .attachment_common import coerce_attachment_payload
 from .errors import build_error_response
 from .file_io import (
     check_output_path,
-    encode_base64,
-    inline_too_large,
+    deliver_output,
     read_binary_input,
-    write_output,
 )
 from .registry import ToolSpec
 
@@ -110,10 +108,12 @@ TICKET_ATTACHMENT_TOOLS = [
     types.Tool(
         name="ticket_attachment_get",
         description=(
-            "Download a ticket attachment. Without output_path the "
-            "bytes come back base64 in structuredContent.content_base64; "
-            "an output_path is on the SERVER's filesystem and is refused "
-            "unless the server's file_access is 'local'. To save one on "
+            "Download a ticket attachment. Where the server's "
+            "file_access is 'off' (the http default) the bytes come back "
+            "base64 in structuredContent.content_base64 and an "
+            "output_path is refused; where it is 'local', output_path (a "
+            "path on the server's own filesystem) is required. To save "
+            "one on "
             "your own machine, run the trac-mcp CLI there: "
             "`trac-mcp attach-get --ticket N NAME FILE`."
         ),
@@ -140,8 +140,9 @@ TICKET_ATTACHMENT_TOOLS = [
                     "description": (
                         "Absolute path on the SERVER's filesystem; the "
                         "parent directory must already exist. Refused "
-                        "unless the server's file_access is 'local'. "
-                        "Omit it to get the bytes inline."
+                        "unless the server's file_access is 'local', and "
+                        "required there. Where file_access is 'off', omit "
+                        "it to get the bytes inline."
                     ),
                 },
             },
@@ -309,22 +310,16 @@ async def _handle_get(
         "ticket_id": ticket_id,
         "filename": filename,
     }
+    delivered = await deliver_output(args, "output_path", payload)
+    if isinstance(delivered, types.CallToolResult):
+        return delivered
+    structured.update(delivered)
     if output_path is not None:
-        structured.update(
-            await write_output(args, "output_path", payload)
-        )
         text = (
             f"Downloaded attachment '{filename}' from ticket #{ticket_id} "
             f"to {output_path} ({len(payload)} bytes)"
         )
     else:
-        too_large = inline_too_large(
-            len(payload), "trac-mcp attach-get --ticket N NAME FILE"
-        )
-        if too_large is not None:
-            return too_large
-        structured["content_base64"] = encode_base64(payload)
-        structured["bytes"] = len(payload)
         text = (
             f"Fetched attachment '{filename}' from ticket #{ticket_id} "
             f"({len(payload)} bytes); the bytes are base64 in "

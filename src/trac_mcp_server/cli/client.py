@@ -102,14 +102,35 @@ def _bearer(header: str) -> str:
     return token
 
 
+def _token_from_env(
+    args: argparse.Namespace, environ: Mapping[str, str]
+) -> str | None:
+    """The bearer token from ``--token-env`` or the default variable.
+
+    A variable the caller NAMED with ``--token-env`` must be set: sending
+    no Authorization header instead would surface only as a 401 that
+    never says the token was missing. The default variable may be unset
+    (an unauthenticated loopback server is legitimate); :func:`main` then
+    says that no token was sent.
+    """
+    if args.token_env:
+        token = environ.get(args.token_env)
+        if not token:
+            raise CliError(
+                f"environment variable {args.token_env} is not set",
+                EXIT_CONNECT_ERROR,
+            )
+        return token
+    return environ.get(DEFAULT_TOKEN_ENV) or None
+
+
 def resolve_endpoint(
     args: argparse.Namespace, cwd: Path, environ: Mapping[str, str]
 ) -> tuple[str, str | None, str]:
     """Return ``(url, token, where)``; ``where`` says which source won,
     for error messages. The token is never part of ``where``."""
     if args.url:
-        token_env = args.token_env or DEFAULT_TOKEN_ENV
-        return args.url, environ.get(token_env) or None, "--url"
+        return args.url, _token_from_env(args, environ), "--url"
 
     mcp_json = find_mcp_json(cwd)
     if mcp_json is not None:
@@ -131,7 +152,7 @@ def resolve_endpoint(
                 )
             url = expand_vars(entry["url"], environ)
             if args.token_env:
-                token = environ.get(args.token_env) or None
+                token = _token_from_env(args, environ)
             else:
                 header = (entry.get("headers") or {}).get(
                     "Authorization"
@@ -150,8 +171,7 @@ def resolve_endpoint(
 
     url = environ.get("TRAC_MCP_URL")
     if url:
-        token_env = args.token_env or DEFAULT_TOKEN_ENV
-        return url, environ.get(token_env) or None, "TRAC_MCP_URL"
+        return url, _token_from_env(args, environ), "TRAC_MCP_URL"
 
     raise CliError(
         "no server to connect to: pass --url, run from a project whose "
@@ -241,6 +261,30 @@ def _write_bytes(path: str, data: bytes) -> None:
     p.write_bytes(data)
 
 
+def _check_output_dir(path: str) -> None:
+    """Fail on a missing output directory BEFORE downloading anything."""
+    if path != "-" and not Path(path).parent.is_dir():
+        raise CliError(
+            f"output directory does not exist: {Path(path).parent}",
+            EXIT_USAGE_ERROR,
+        )
+
+
+def _payload(result, key: str):
+    """The inline payload of a successful result, or a clear error when
+    the server sent none (one older than Trac #111, or a proxy that
+    strips structuredContent) -- not a KeyError reported as a transport
+    failure."""
+    value = (result.structuredContent or {}).get(key)
+    if value is None:
+        raise CliError(
+            f"the server's result carries no {key}; it may predate the "
+            "inline file tools (trac-mcp-server Trac #111)",
+            EXIT_TOOL_ERROR,
+        )
+    return value
+
+
 def _say(path_is_stdout: bool, message: str) -> None:
     """Summaries go to stdout, unless stdout is carrying the data."""
     print(message, file=sys.stderr if path_is_stdout else sys.stdout)
@@ -297,6 +341,7 @@ async def _run(
         return _report(result)
 
     if cmd == "wiki-pull":
+        _check_output_dir(args.file)
         arguments = {"page_name": args.page, "format": args.format}
         if args.page_version is not None:
             arguments["version"] = args.page_version
@@ -309,7 +354,7 @@ async def _run(
         if result.isError:
             return _report(result)
         sc = result.structuredContent or {}
-        data = sc["content"].encode("utf-8")
+        data = _payload(result, "content").encode("utf-8")
         _write_bytes(args.file, data)
         _say(
             args.file == "-",
@@ -350,6 +395,7 @@ async def _run(
         return _report(result)
 
     if cmd == "attach-get":
+        _check_output_dir(args.file)
         realm, arguments = _attach_target(args)
         arguments["filename"] = args.name
         result = await call_tool(
@@ -360,8 +406,7 @@ async def _run(
         )
         if result.isError:
             return _report(result)
-        sc = result.structuredContent or {}
-        data = base64.b64decode(sc["content_base64"])
+        data = base64.b64decode(_payload(result, "content_base64"))
         _write_bytes(args.file, data)
         _say(
             args.file == "-",
@@ -513,6 +558,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _root_cause(exc: BaseException) -> BaseException:
+    """The SDK's transport runs in anyio task groups, so a 401 or a
+    refused connection arrives wrapped in ExceptionGroups. Unwrap to the
+    first leaf -- the exception that actually says what went wrong."""
+    # Duck-typed: BaseExceptionGroup is builtin only from 3.11, and this
+    # package supports 3.10 (where anyio raises the backport's class).
+    while getattr(exc, "exceptions", None):
+        exc = exc.exceptions[0]
+    return exc
+
+
+def _describe(exc: BaseException) -> str:
+    import httpx
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        hint = {
+            401: " -- the bearer token was missing or rejected",
+            403: " -- the server or a proxy refused this client",
+            404: " -- wrong URL path? (the endpoint is usually /mcp)",
+        }.get(status, "")
+        return f"HTTP {status} {exc.response.reason_phrase}{hint}"
+    if isinstance(exc, httpx.ConnectError):
+        return f"cannot connect ({exc})"
+    return f"{type(exc).__name__}: {exc}"
+
+
 def main(
     argv: list[str] | None = None,
     cwd: Path | None = None,
@@ -527,14 +599,20 @@ def main(
             cwd or Path.cwd(),
             os.environ if environ is None else environ,
         )
+        if token is None:
+            print(
+                f"trac-mcp: no bearer token sent ({DEFAULT_TOKEN_ENV} is "
+                "unset)",
+                file=sys.stderr,
+            )
         try:
             return asyncio.run(_run(args, url, token))
-        except CliError:
-            raise
         except Exception as e:  # transport, HTTP status, protocol
+            cause = _root_cause(e)
+            if isinstance(cause, CliError):
+                raise cause from None
             raise CliError(
-                f"call to {url} (from {where}) failed: "
-                f"{type(e).__name__}: {e}",
+                f"call to {url} (from {where}) failed: {_describe(cause)}",
                 EXIT_CONNECT_ERROR,
             ) from None
     except CliError as e:

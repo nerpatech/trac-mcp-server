@@ -538,3 +538,29 @@ def test_max_inline_bytes_invalid_rejected(monkeypatch, raw):
     monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
     with pytest.raises(ValueError):
         _bootstrap_server()
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("file_access: off", "off"),
+        ("file_access: on", "local"),
+        ('file_access: "off"', "off"),
+        ("file_access: local", "local"),
+    ],
+)
+def test_file_access_survives_real_yaml_parsing(
+    monkeypatch, line, expected
+):
+    """Through the real loader, not a dict: YAML 1.1 reads a bare off/on
+    as a boolean, and the documented `file_access: off` must still start
+    the server (review finding on #111)."""
+    import yaml
+
+    from trac_mcp_server.config_loader import ConfigLoader
+
+    _clear_server_env(monkeypatch)
+    server = yaml.load(
+        f"transport: http\n{line}\n", Loader=ConfigLoader
+    )
+    assert _bootstrap_server(yaml_server=server).file_access == expected

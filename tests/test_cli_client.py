@@ -312,7 +312,13 @@ class TestRealSubstrate:
             rc = _cli(url, "wiki-push", "P", str(src), token="wrong")
         assert rc == cli.EXIT_CONNECT_ERROR
         assert trac.pages == {}
-        assert "wrong" not in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "wrong" not in err
+        # The real cause, not "ExceptionGroup: unhandled errors in a
+        # TaskGroup" (review finding on #111).
+        assert "HTTP 401" in err
+        assert "token" in err
+        assert "ExceptionGroup" not in err
 
     def test_tool_error_is_reported_with_exit_1(self, tmp_path, capsys):
         trac = FakeTrac()
@@ -485,3 +491,86 @@ def test_live_cli_roundtrip_through_real_server(tmp_path):
                     {"page_name": page, "instance": "/trac_test"},
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# Failures the CLI must name precisely, before any network call where it can
+# ---------------------------------------------------------------------------
+
+
+def _no_network(monkeypatch):
+    async def _boom(*a, **k):
+        raise AssertionError("call_tool must not run")
+
+    monkeypatch.setattr(cli, "call_tool", _boom)
+
+
+def test_named_token_env_unset_fails_before_connecting(
+    tmp_path, monkeypatch, capsys
+):
+    _no_network(monkeypatch)
+    f = tmp_path / "a.wiki"
+    f.write_text("x")
+    rc = cli.main(
+        [
+            "--url",
+            "http://x/mcp",
+            "--token-env",
+            "NOPE",
+            "wiki-push",
+            "P",
+            str(f),
+        ],
+        cwd=tmp_path,
+        environ={},
+    )
+    assert rc == cli.EXIT_CONNECT_ERROR
+    assert "NOPE is not set" in capsys.readouterr().err
+
+
+def test_missing_output_dir_fails_before_downloading(
+    tmp_path, monkeypatch, capsys
+):
+    _no_network(monkeypatch)
+    rc = cli.main(
+        [
+            "--url",
+            "http://x/mcp",
+            "attach-get",
+            "--ticket",
+            "1",
+            "a.bin",
+            str(tmp_path / "missing" / "a.bin"),
+        ],
+        cwd=tmp_path,
+        environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+    )
+    assert rc == cli.EXIT_USAGE_ERROR
+    assert "output directory does not exist" in capsys.readouterr().err
+
+
+def test_result_without_payload_is_a_tool_error(
+    tmp_path, monkeypatch, capsys
+):
+    async def _old_server(url, token, name, arguments):
+        return SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(text="Pulled ...")],
+            structuredContent=None,
+        )
+
+    monkeypatch.setattr(cli, "call_tool", _old_server)
+    rc = cli.main(
+        [
+            "--url",
+            "http://x/mcp",
+            "wiki-pull",
+            "P",
+            str(tmp_path / "p.md"),
+        ],
+        cwd=tmp_path,
+        environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+    )
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "carries no content" in capsys.readouterr().err
+    assert not (tmp_path / "p.md").exists()
