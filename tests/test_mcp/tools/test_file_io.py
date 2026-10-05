@@ -182,7 +182,7 @@ class TestInlineText:
         assert client.put_wiki_page.call_args.args[1] == body
 
     async def test_push_without_filename_is_tracwiki_verbatim(self):
-        """No filename and format=auto: no content re-detect (#69/#92,
+        """No filename and format=auto: no content re-detect (#62/#69,
         HonorExplicitFormatHints). Markdown-looking text is stored as
         written, exactly like every other inline write."""
         body = "# Not a heading here\n\nSome **text**.\n"

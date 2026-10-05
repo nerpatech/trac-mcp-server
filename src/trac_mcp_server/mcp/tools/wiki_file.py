@@ -268,7 +268,7 @@ async def _handle_push(
     # Detect format
     if fmt == "auto" and name is None:
         # Inline text with no filename has nothing to go on but its own
-        # content, and a content re-detect is what #69/#92 removed from
+        # content, and a content re-detect is what #62/#69 removed from
         # every inline write: a Markdown document quoting TracWiki (or the
         # reverse) inverts it. So it is TracWiki, stored verbatim, like
         # every other inline write -- unless the caller says otherwise
