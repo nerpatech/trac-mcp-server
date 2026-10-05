@@ -34,6 +34,8 @@ Same precedence as the rest of the server's config: CLI flag > env var (`TRAC_MC
 | Allow unauthenticated non-loopback bind | `--allow-unauthenticated` | -- | `allow_unauthenticated` | `false` |
 | Extra allowed `Host` headers | -- | -- | `allowed_hosts` | `[]` |
 | Extra allowed `Origin` headers | -- | -- | `allowed_origins` | `[]` |
+| File tools may use server paths | `--file-access {local,off}` | `TRAC_MCP_FILE_ACCESS` | `file_access` | `off` for http, `local` for stdio |
+| Largest inline file-tool result | -- | `TRAC_MCP_MAX_INLINE_BYTES` | `max_inline_bytes` | `5242880` (5 MiB) |
 
 ```yaml
 # .trac_mcp/config.yaml
@@ -46,6 +48,8 @@ server:
   allow_unauthenticated: false
   allowed_hosts: []
   allowed_origins: []
+  file_access: "off"      # quoted: YAML reads a bare off as false (also accepted)
+  max_inline_bytes: 5242880
 ```
 
 **There is deliberately no `--auth-token` CLI flag.** Command-line arguments are visible to every user on the host via the process list; the token must come from `TRAC_MCP_AUTH_TOKEN` or the YAML `server:` section instead.
@@ -101,6 +105,16 @@ Identities alone (no static token) still gate every request, so they satisfy the
 **Loaded once at startup; changing identities needs a restart.** Unlike `TRAC_INSTANCES` (which reloads on an mtime change), there is no live-reload here.
 
 **A deployment using only `TRAC_MCP_AUTH_TOKEN` -- no `TRAC_IDENTITIES` at all -- behaves exactly as it did before this ticket.** Nothing about the single-identity path changes.
+
+## File Access (`file_access`)
+
+Seven tools move files: `wiki_file_push`, `wiki_file_pull`, `wiki_file_detect_format`, and the ticket and wiki `*_attachment_put`/`*_attachment_get` pairs. Each takes its bytes inline (`content`, or `content_base64` for attachments, line-wrapped or not), and where `file_access` is `off` returns them inline. Each also accepts a `file_path`/`output_path` -- but that path is resolved on **the server's** filesystem, which over http is not the caller's: a caller's path does not exist there, and nothing confines a path to anything narrower than what the server process can read or write.
+
+So over http those path arguments are refused by default (`file_access: off`), with a `permission_denied` error naming the alternative. Set `file_access: local` only where every bearer-token holder may read and write the server process's files -- in practice, a server that runs on its callers' own machine. stdio defaults to `local`, since a stdio server always does. With `local`, the output tools keep their original contract -- `file_path`/`output_path` is required -- so a stdio model that forgets the path gets an error, not an attachment's bytes in its transcript.
+
+To move a file from the caller's machine, run the [`trac-mcp` CLI](cli.md#trac-mcp) there. It reads and writes the local file and calls the same tools over this transport with the inline forms, so the bytes never pass through a model's transcript and the call keeps the caller's identity, Markdown conversion and the link gate.
+
+An inline payload larger than `max_inline_bytes`, in either direction, is refused rather than truncated. A reverse proxy in front of the server has its own request-size limit (nginx's `client_max_body_size` defaults to 1 MB), which caps what `wiki_file_push` and `*_attachment_put` can send inline -- raise it alongside `max_inline_bytes`.
 
 ## Bind Safety
 

@@ -25,6 +25,9 @@ from trac_mcp_server.mcp.tools.wiki_attachment import (
     WIKI_ATTACHMENT_SPECS,
 )
 
+# These tests exercise the server-side path forms (ticket #111).
+pytestmark = pytest.mark.usefixtures("local_file_access")
+
 _REGISTRY = ToolRegistry(WIKI_ATTACHMENT_SPECS)
 
 
@@ -233,7 +236,8 @@ class TestPut:
             client,
         )
         assert result.isError is True
-        assert "file_path is required" in result.content[0].text
+        assert "content_base64 is required" in result.content[0].text
+        client.put_wiki_attachment.assert_not_called()
 
     async def test_put_relative_path_rejected(self):
         """validate_file_path rejects non-absolute paths."""

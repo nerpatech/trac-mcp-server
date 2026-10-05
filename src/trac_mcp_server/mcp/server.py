@@ -46,6 +46,7 @@ from .tools import (
     build_error_response,
     load_permissions_file,
 )
+from .tools.file_io import set_file_access
 from .tools.instance_echo import annotate
 from .tools.instances import set_instance_registry
 from .tools.registry import (
@@ -326,7 +327,7 @@ async def main(config_overrides: dict | None = None):
     Args:
         config_overrides: Optional dict with config values to override (url,
             username, password, insecure, log_file, transport, host, port,
-            path, allow_unauthenticated)
+            path, allow_unauthenticated, file_access)
     """
     # Extract log file override if provided
     log_file = (
@@ -395,6 +396,17 @@ async def main(config_overrides: dict | None = None):
         )
 
     set_registry(registry)
+    # bootstrap_server_config() always resolves file_access (by transport
+    # when unset); the `or` only satisfies the Optional field type.
+    set_file_access(
+        server_config.file_access or "off",
+        server_config.max_inline_bytes,
+    )
+    logger.info(
+        "file_access=%s, max_inline_bytes=%d",
+        server_config.file_access,
+        server_config.max_inline_bytes,
+    )
 
     # Use lifespan manager for startup validation with config overrides.
     # NOTE: We call set_instances() directly here rather than in the lifespan
@@ -417,6 +429,7 @@ async def main(config_overrides: dict | None = None):
             set_instances(None)
             set_instance_registry(None)
             set_registry(None)
+            set_file_access("off")
 
 
 async def _run_stdio() -> None:
@@ -527,6 +540,14 @@ must not be piped manually. This does not apply to --transport http.
         "Prefer setting TRAC_MCP_AUTH_TOKEN instead.",
     )
     parser.add_argument(
+        "--file-access",
+        choices=["local", "off"],
+        help="Whether the file tools may read and write this process's "
+        "filesystem through file_path/output_path arguments (default: "
+        "local for stdio, off for http; also settable via "
+        "TRAC_MCP_FILE_ACCESS or config.yaml server.file_access)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"trac-mcp-server version {__version__}",
@@ -563,6 +584,8 @@ def run() -> None:
         config_overrides["path"] = args.path
     if args.allow_unauthenticated:
         config_overrides["allow_unauthenticated"] = True
+    if args.file_access:
+        config_overrides["file_access"] = args.file_access
 
     # Log config overrides to stderr (before stdio transport starts)
     if config_overrides:

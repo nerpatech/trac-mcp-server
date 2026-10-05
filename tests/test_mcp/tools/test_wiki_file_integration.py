@@ -13,9 +13,13 @@ import xmlrpc.client
 from unittest.mock import MagicMock
 
 import mcp.types as types
+import pytest
 
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.wiki_file import WIKI_FILE_SPECS
+
+# These tests exercise the server-side path forms (ticket #111).
+pytestmark = pytest.mark.usefixtures("local_file_access")
 
 _registry = ToolRegistry(WIKI_FILE_SPECS)
 

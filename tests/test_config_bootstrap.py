@@ -261,6 +261,8 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_PORT",
         "TRAC_MCP_PATH",
         "TRAC_MCP_AUTH_TOKEN",
+        "TRAC_MCP_FILE_ACCESS",
+        "TRAC_MCP_MAX_INLINE_BYTES",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -452,3 +454,113 @@ def test_http_non_loopback_no_token_raises(monkeypatch):
             bootstrap_server_config(
                 {"transport": "http", "host": "0.0.0.0"}
             )
+
+
+# ---------------------------------------------------------------------------
+# file_access / max_inline_bytes (ticket #111)
+# ---------------------------------------------------------------------------
+
+
+def _bootstrap_server(overrides=None, yaml_server=None):
+    files = ["/fake/config.yaml"] if yaml_server else []
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=files,
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value={"server": yaml_server or {}},
+        ),
+    ):
+        return bootstrap_server_config(overrides)
+
+
+@pytest.mark.parametrize(
+    "transport,expected", [("stdio", "local"), ("http", "off")]
+)
+def test_file_access_defaults_by_transport(
+    monkeypatch, transport, expected
+):
+    """An http server does not share its caller's filesystem, so path
+    arguments default off there; stdio runs on the caller's machine."""
+    _clear_server_env(monkeypatch)
+    config = _bootstrap_server({"transport": transport})
+    assert config.file_access == expected
+    assert config.max_inline_bytes == 5 * 1024 * 1024
+
+
+def test_file_access_env_overrides_transport_default(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_FILE_ACCESS", "local")
+    assert (
+        _bootstrap_server({"transport": "http"}).file_access == "local"
+    )
+
+
+def test_file_access_cli_beats_env(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_FILE_ACCESS", "local")
+    config = _bootstrap_server(
+        {"transport": "stdio", "file_access": "off"}
+    )
+    assert config.file_access == "off"
+
+
+def test_file_access_yaml_fallback(monkeypatch):
+    _clear_server_env(monkeypatch)
+    config = _bootstrap_server(
+        yaml_server={"transport": "http", "file_access": "local"}
+    )
+    assert config.file_access == "local"
+
+
+def test_file_access_invalid_value_rejected(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_FILE_ACCESS", "on")
+    with pytest.raises(ValueError, match="file_access"):
+        _bootstrap_server({"transport": "http"})
+
+
+def test_max_inline_bytes_from_env_and_yaml(monkeypatch):
+    _clear_server_env(monkeypatch)
+    config = _bootstrap_server(yaml_server={"max_inline_bytes": 1000})
+    assert config.max_inline_bytes == 1000
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", "2000")
+    config = _bootstrap_server(yaml_server={"max_inline_bytes": 1000})
+    assert config.max_inline_bytes == 2000
+
+
+@pytest.mark.parametrize("raw", ["lots", "0", "-5"])
+def test_max_inline_bytes_invalid_rejected(monkeypatch, raw):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
+    with pytest.raises(ValueError):
+        _bootstrap_server()
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("file_access: off", "off"),
+        ("file_access: on", "local"),
+        ('file_access: "off"', "off"),
+        ("file_access: local", "local"),
+    ],
+)
+def test_file_access_survives_real_yaml_parsing(
+    monkeypatch, line, expected
+):
+    """Through the real loader, not a dict: YAML 1.1 reads a bare off/on
+    as a boolean, and the documented `file_access: off` must still start
+    the server (review finding on #111)."""
+    import yaml
+
+    from trac_mcp_server.config_loader import ConfigLoader
+
+    _clear_server_env(monkeypatch)
+    server = yaml.load(
+        f"transport: http\n{line}\n", Loader=ConfigLoader
+    )
+    assert _bootstrap_server(yaml_server=server).file_access == expected

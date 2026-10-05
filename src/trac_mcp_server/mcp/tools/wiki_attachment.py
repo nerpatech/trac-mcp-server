@@ -4,12 +4,16 @@ This module exposes file-based MCP tools that wrap Trac's
 ``wiki.putAttachmentEx`` / ``getAttachment`` / ``listAttachments`` /
 ``deleteAttachment`` XML-RPC methods.
 
-The tool I/O is intentionally path-based (not inline base64): MCP clients
-serialize tool arguments and results into the conversation transcript, so
-inlining binary payloads would re-tokenize each attachment into the
-model's context. Tools accept/return absolute filesystem paths, the file
-content never enters the model context — only the Trac server, the MCP
-server process, and the local filesystem ever touch it.
+The tool I/O was path-based (not inline base64) so that attachment bytes
+never entered the conversation transcript: MCP clients serialize tool
+arguments and results into it, so inlining binary payloads re-tokenizes
+each attachment into the model's context. That only works while the
+server shares its caller's filesystem. Over http it does not, so these
+tools also take and return the bytes as base64 (ticket #111), and the
+path forms are refused unless the server's ``file_access`` is ``local``.
+The inline forms are meant for the ``trac-mcp`` CLI, which reads and
+writes the caller's own files, so the bytes still stay out of a
+transcript -- see ``file_io``.
 
 This mirrors the ``ticket_attachment.py`` precedent. Note that the
 underlying wiki XML-RPC API uses *paths* of the form
@@ -27,9 +31,13 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
-from ...file_handler import validate_file_path, validate_output_path
 from .attachment_common import coerce_attachment_payload
 from .errors import build_error_response
+from .file_io import (
+    check_output_path,
+    deliver_output,
+    read_binary_input,
+)
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -54,10 +62,12 @@ WIKI_ATTACHMENT_TOOLS = [
     types.Tool(
         name="wiki_attachment_put",
         description=(
-            "Upload a local file as an attachment to a Trac wiki page. "
-            "The file is read from the server's filesystem and sent as "
-            "raw bytes via XML-RPC; its contents are NOT inlined into "
-            "the tool arguments or the conversation transcript. "
+            "Upload an attachment to a Trac wiki page, as "
+            "content_base64 (or, only where this server's file_access is "
+            "'local', a file_path on the SERVER's filesystem). To attach "
+            "a file from your own machine without putting its bytes in "
+            "the transcript, run the trac-mcp CLI there: "
+            "`trac-mcp attach-put --page PAGE FILE`. "
             "Internally calls wiki.putAttachmentEx with a "
             "'page_name/filename' path. "
             "Target wiki page must exist (use `wiki_create` or "
@@ -83,12 +93,24 @@ WIKI_ATTACHMENT_TOOLS = [
                     "type": "string",
                     "description": (
                         "Attachment filename stored on the page. "
-                        "Defaults to the basename of file_path."
+                        "Defaults to the basename of file_path; "
+                        "required with content_base64."
+                    ),
+                },
+                "content_base64": {
+                    "type": "string",
+                    "description": (
+                        "The attachment bytes, standard base64, in place "
+                        "of file_path. Requires filename."
                     ),
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to local file to upload",
+                    "description": (
+                        "Absolute path on the SERVER's filesystem. "
+                        "Refused unless the server's file_access is "
+                        "'local' (it is 'off' over http)."
+                    ),
                 },
                 "description": {
                     "type": "string",
@@ -107,16 +129,19 @@ WIKI_ATTACHMENT_TOOLS = [
                     "default": False,
                 },
             },
-            "required": ["page_name", "file_path"],
+            "required": ["page_name"],
         },
     ),
     types.Tool(
         name="wiki_attachment_get",
         description=(
-            "Download a wiki attachment to a local file. Bytes are "
-            "written directly to output_path; the attachment content is "
-            "NOT inlined into the tool result or the conversation "
-            "transcript. Internally calls wiki.getAttachment with a "
+            "Download a wiki attachment. Where the server's file_access "
+            "is 'off' (the http default) the bytes come back base64 in "
+            "structuredContent.content_base64 and an output_path is "
+            "refused; where it is 'local', output_path (a path on the "
+            "server's own filesystem) is required. To save one on "
+            "your own machine, run `trac-mcp attach-get --page PAGE NAME "
+            "FILE` there. Internally calls wiki.getAttachment with a "
             "'page_name/filename' path."
         ),
         annotations=types.ToolAnnotations(
@@ -139,12 +164,15 @@ WIKI_ATTACHMENT_TOOLS = [
                 "output_path": {
                     "type": "string",
                     "description": (
-                        "Absolute path for the downloaded file. The "
-                        "parent directory must already exist."
+                        "Absolute path on the SERVER's filesystem; the "
+                        "parent directory must already exist. Refused "
+                        "unless the server's file_access is 'local', and "
+                        "required there. Where file_access is 'off', omit "
+                        "it to get the bytes inline."
                     ),
                 },
             },
-            "required": ["page_name", "filename", "output_path"],
+            "required": ["page_name", "filename"],
         },
     ),
     types.Tool(
@@ -211,7 +239,6 @@ async def _handle_put(
     ``xmlrpc.client.Binary``, and uploads via ``wiki.putAttachmentEx``.
     """
     page_name = args.get("page_name")
-    file_path = args.get("file_path")
 
     if not page_name:
         return build_error_response(
@@ -219,22 +246,18 @@ async def _handle_put(
             "page_name is required",
             "Provide page_name parameter.",
         )
-    if not file_path:
-        return build_error_response(
-            "validation_error",
-            "file_path is required",
-            "Provide file_path parameter.",
-        )
-
     description = args.get("description", "")
     replace = bool(args.get("replace", False))
 
-    # Validate path and read raw bytes
-    resolved = await run_sync(validate_file_path, file_path)
-    data = await run_sync(resolved.read_bytes)
+    source = await read_binary_input(
+        args, "trac-mcp attach-put --page PAGE FILE"
+    )
+    if isinstance(source, types.CallToolResult):
+        return source
+    data, default_name, source_label = source
     binary = xmlrpc.client.Binary(data)
 
-    filename = args.get("filename") or resolved.name
+    filename = args.get("filename") or default_name
 
     stored_raw = await run_sync(
         client.put_wiki_attachment,
@@ -268,7 +291,8 @@ async def _handle_put(
         "attached_filename": stored_name,
         "renamed_on_collision": renamed_on_collision,
         "page_path": stored_path,
-        "file_path": str(file_path),
+        "file_path": args.get("file_path"),
+        "source": source_label,
         "bytes_uploaded": bytes_uploaded,
         "replace": replace,
         "description": description,
@@ -305,36 +329,37 @@ async def _handle_get(
             "filename is required",
             "Provide filename parameter.",
         )
-    if not output_path:
-        return build_error_response(
-            "validation_error",
-            "output_path is required",
-            "Provide output_path parameter.",
-        )
-
-    # Validate output path (absolute, parent dir exists)
-    resolved = await run_sync(validate_output_path, output_path)
+    refusal = await check_output_path(
+        args, "output_path", "trac-mcp attach-get --page PAGE NAME FILE"
+    )
+    if refusal is not None:
+        return refusal
 
     page_path = _build_page_path(page_name, filename)
     data = await run_sync(client.get_wiki_attachment, page_path)
 
     payload = coerce_attachment_payload(data)
 
-    await run_sync(resolved.write_bytes, payload)
-    bytes_written = len(payload)
-
-    text = (
-        f"Downloaded attachment '{filename}' from wiki page "
-        f"'{page_name}' to {output_path} ({bytes_written} bytes)"
-    )
-
-    structured = {
+    structured: dict[str, Any] = {
         "page_name": page_name,
         "filename": filename,
         "page_path": page_path,
-        "output_path": str(output_path),
-        "bytes_written": bytes_written,
     }
+    delivered = await deliver_output(args, "output_path", payload)
+    if isinstance(delivered, types.CallToolResult):
+        return delivered
+    structured.update(delivered)
+    if output_path is not None:
+        text = (
+            f"Downloaded attachment '{filename}' from wiki page '{page_name}' "
+            f"to {output_path} ({len(payload)} bytes)"
+        )
+    else:
+        text = (
+            f"Fetched attachment '{filename}' from wiki page '{page_name}' "
+            f"({len(payload)} bytes); the bytes are base64 in "
+            "structuredContent.content_base64"
+        )
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],

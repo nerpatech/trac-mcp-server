@@ -2,11 +2,16 @@
 
 This module defines MCP tools for file-based wiki operations: push local files
 to Trac wiki pages, pull wiki pages to local files, and detect file formats.
+
+Each tool takes its text either inline (``content``) or, only where the
+server's ``file_access`` is ``local``, as a path on the server's own
+filesystem -- see ``file_io`` (ticket #111).
 """
 
 import logging
 import re
 import xmlrpc.client
+from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -14,19 +19,19 @@ import mcp.types as types
 from ...converters.common import (
     auto_convert,
     describe_indentation_loss,
+    detect_format_heuristic,
     find_code_block_indentation_loss,
 )
 from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
-from ...file_handler import (
-    detect_file_format,
-    read_file_with_encoding,
-    validate_file_path,
-    validate_output_path,
-    write_file,
-)
+from ...file_handler import detect_file_format
 from .errors import build_error_response
+from .file_io import (
+    check_output_path,
+    deliver_output,
+    read_text_input,
+)
 from .registry import ToolSpec
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
@@ -38,13 +43,16 @@ WIKI_FILE_TOOLS = [
     types.Tool(
         name="wiki_file_push",
         description=(
-            "Push a local file to a Trac wiki page. Reads the "
-            "file, auto-detects format (Markdown/TracWiki), "
-            "converts if needed, and creates or updates the wiki "
-            "page. Refuses the push when converting would strip a "
-            "code block's indentation and store syntactically "
-            'invalid content -- pass format="tracwiki" to push '
-            "the file verbatim instead."
+            "Push a document to a Trac wiki page. Takes the text as "
+            "content (or, only where this server's file_access is "
+            "'local', a file_path on the SERVER's filesystem), "
+            "auto-detects format (Markdown/TracWiki), converts if "
+            "needed, and creates or updates the wiki page. To push a "
+            "file from your own machine, run the trac-mcp CLI there: "
+            "`trac-mcp wiki-push PAGE FILE`. Refuses the push when "
+            "converting would strip a code block's indentation and "
+            "store syntactically invalid content -- pass "
+            'format="tracwiki" to push the text verbatim instead.'
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -55,9 +63,29 @@ WIKI_FILE_TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
+                "content": {
+                    "type": "string",
+                    "description": (
+                        "The document text to push, in place of "
+                        "file_path."
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "With content: the source file's name (e.g. "
+                        "notes.md), used only for extension-based "
+                        "format detection. With neither filename nor "
+                        "format, inline content is stored as TracWiki."
+                    ),
+                },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to local file",
+                    "description": (
+                        "Absolute path on the SERVER's filesystem. "
+                        "Refused unless the server's file_access is "
+                        "'local' (it is 'off' over http)."
+                    ),
                 },
                 "page_name": {
                     "type": "string",
@@ -80,12 +108,20 @@ WIKI_FILE_TOOLS = [
                     "description": "Strip YAML frontmatter from .md files before pushing",
                 },
             },
-            "required": ["file_path", "page_name"],
+            "required": ["page_name"],
         },
     ),
     types.Tool(
         name="wiki_file_pull",
-        description="Pull a Trac wiki page to a local file. Fetches page content, converts to the requested format, and writes to the specified path.",
+        description=(
+            "Pull a Trac wiki page, converted to the requested format. "
+            "Where the server's file_access is 'off' (the http default) "
+            "the text comes back in structuredContent.content and a "
+            "file_path is refused; where it is 'local', file_path (a path "
+            "on the server's own filesystem) is required. To save a page "
+            "on your own machine, "
+            "run the trac-mcp CLI there: `trac-mcp wiki-pull PAGE FILE`."
+        ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=True,
@@ -101,7 +137,11 @@ WIKI_FILE_TOOLS = [
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path for output file",
+                    "description": (
+                        "Absolute output path on the SERVER's "
+                        "filesystem: required where file_access is "
+                        "'local', refused where it is 'off'."
+                    ),
                 },
                 "format": {
                     "type": "string",
@@ -115,12 +155,20 @@ WIKI_FILE_TOOLS = [
                     "description": "Specific page version to pull",
                 },
             },
-            "required": ["page_name", "file_path"],
+            "required": ["page_name"],
         },
     ),
     types.Tool(
         name="wiki_file_detect_format",
-        description="Detect the format of a local file (Markdown or TracWiki). Uses file extension first, then content-based heuristic detection.",
+        description=(
+            "Detect whether text is Markdown or TracWiki. Uses the file "
+            "extension first, then content-based heuristic detection. "
+            "Takes content (plus an optional filename for the extension), "
+            "or a file_path on the SERVER's filesystem where its "
+            "file_access is 'local'. For a file on your own machine, "
+            "`trac-mcp detect-format FILE` runs the same detection "
+            "locally."
+        ),
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -130,12 +178,27 @@ WIKI_FILE_TOOLS = [
         inputSchema={
             "type": "object",
             "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Text to analyze, in place of file_path",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "With content: the source file's name, used for "
+                        "extension-based detection"
+                    ),
+                },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to file to analyze",
+                    "description": (
+                        "Absolute path on the SERVER's filesystem. "
+                        "Refused unless the server's file_access is "
+                        "'local'."
+                    ),
                 },
             },
-            "required": ["file_path"],
+            "required": [],
         },
     ),
 ]
@@ -158,24 +221,30 @@ def _strip_yaml_frontmatter(content: str) -> str:
     return content
 
 
+_PUSH_HINT = "trac-mcp wiki-push PAGE FILE"
+_PULL_HINT = "trac-mcp wiki-pull PAGE FILE"
+_DETECT_HINT = "trac-mcp detect-format FILE"
+
+
+def _detect(name: Path | None, content: str) -> str:
+    """Extension first when there is a name to go on, else the heuristic."""
+    if name is not None:
+        return detect_file_format(name, content)
+    return detect_format_heuristic(content)
+
+
 async def _handle_push(
     client: TracClient, args: dict[str, Any]
 ) -> types.CallToolResult:
     """Handle wiki_file_push.
 
-    Reads a local file, optionally strips YAML frontmatter, detects or uses
-    the specified format, converts to TracWiki if needed, and creates or
-    updates the target wiki page with optimistic locking.
+    Takes the text inline or from a server-side file (``file_io``),
+    optionally strips YAML frontmatter, detects or uses the specified
+    format, converts to TracWiki if needed, and creates or updates the
+    target wiki page with optimistic locking.
     """
-    file_path = args.get("file_path")
     page_name = args.get("page_name")
 
-    if not file_path:
-        return build_error_response(
-            "validation_error",
-            "file_path is required",
-            "Provide file_path parameter.",
-        )
     if not page_name:
         return build_error_response(
             "validation_error",
@@ -187,19 +256,26 @@ async def _handle_push(
     fmt = args.get("format", "auto")
     strip_fm = args.get("strip_frontmatter", True)
 
-    # Read file
-    resolved = await run_sync(validate_file_path, file_path)
-    content, encoding = await run_sync(
-        read_file_with_encoding, resolved
-    )
+    source = await read_text_input(args, _PUSH_HINT)
+    if isinstance(source, types.CallToolResult):
+        return source
+    content, encoding, name, source_label = source
 
     # Strip frontmatter
     if strip_fm:
         content = _strip_yaml_frontmatter(content)
 
     # Detect format
-    if fmt == "auto":
-        source_format = detect_file_format(resolved, content)
+    if fmt == "auto" and name is None:
+        # Inline text with no filename has nothing to go on but its own
+        # content, and a content re-detect is what #62/#69 removed from
+        # every inline write: a Markdown document quoting TracWiki (or the
+        # reverse) inverts it. So it is TracWiki, stored verbatim, like
+        # every other inline write -- unless the caller says otherwise
+        # with format= or a filename (ticket #111).
+        source_format = "tracwiki"
+    elif fmt == "auto":
+        source_format = detect_file_format(name, content)
     else:
         source_format = fmt
 
@@ -355,7 +431,8 @@ async def _handle_push(
         "version": new_version,
         "source_format": source_format,
         "converted": converted,
-        "file_path": str(file_path),
+        "file_path": args.get("file_path"),
+        "source": source_label,
         "warnings": warnings,
     }
 
@@ -373,7 +450,8 @@ async def _handle_pull(
     """Handle wiki_file_pull.
 
     Fetches a wiki page from Trac, optionally converts from TracWiki to
-    Markdown, and writes the result to a local file.
+    Markdown, and returns the text inline or, where file_access is
+    ``local``, writes it to a server-side file.
     """
     page_name = args.get("page_name")
     file_path = args.get("file_path")
@@ -384,18 +462,12 @@ async def _handle_pull(
             "page_name is required",
             "Provide page_name parameter.",
         )
-    if not file_path:
-        return build_error_response(
-            "validation_error",
-            "file_path is required",
-            "Provide file_path parameter.",
-        )
+    refusal = await check_output_path(args, "file_path", _PULL_HINT)
+    if refusal is not None:
+        return refusal
 
     fmt = args.get("format", "markdown")
     version = args.get("version")
-
-    # Validate output path (parent directory must exist)
-    resolved = await run_sync(validate_output_path, file_path)
 
     # Fetch page from Trac (client already provided)
 
@@ -432,23 +504,30 @@ async def _handle_pull(
         # tracwiki — pass through unchanged
         output_content = content
 
-    # Write file
-    bytes_written = await run_sync(write_file, resolved, output_content)
-
-    # Build response
-    text = (
-        f"Pulled wiki page '{page_name}' (version {actual_version}) "
-        f"to {file_path} ({bytes_written} bytes, format={fmt})"
-    )
-
-    structured = {
+    encoded = output_content.encode("utf-8")
+    structured: dict[str, Any] = {
         "page_name": page_name,
-        "file_path": str(file_path),
         "format": fmt,
         "version": actual_version,
-        "bytes_written": bytes_written,
         "converted": converted,
     }
+    delivered = await deliver_output(
+        args, "file_path", encoded, text=output_content
+    )
+    if isinstance(delivered, types.CallToolResult):
+        return delivered
+    structured.update(delivered)
+    if file_path is not None:
+        text = (
+            f"Pulled wiki page '{page_name}' (version {actual_version}) "
+            f"to {file_path} ({len(encoded)} bytes, format={fmt})"
+        )
+    else:
+        text = (
+            f"Pulled wiki page '{page_name}' (version {actual_version}, "
+            f"{len(encoded)} bytes, format={fmt}); the text is in "
+            "structuredContent.content"
+        )
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],
@@ -461,27 +540,26 @@ async def _handle_detect_format(
 ) -> types.CallToolResult:
     """Handle wiki_file_detect_format.
 
-    Reads the file, detects encoding and format, returns metadata.
+    Resolves the text (``file_io``), detects encoding and format, returns
+    metadata.
     """
     file_path = args.get("file_path")
-    if not file_path:
-        return build_error_response(
-            "validation_error",
-            "file_path is required",
-            "Provide file_path parameter.",
-        )
+    source = await read_text_input(args, _DETECT_HINT)
+    if isinstance(source, types.CallToolResult):
+        return source
+    content, encoding, name, source_label = source
 
-    resolved = await run_sync(validate_file_path, file_path)
-    content, encoding = await run_sync(
-        read_file_with_encoding, resolved
-    )
-    fmt = detect_file_format(resolved, content)
-    size_bytes = resolved.stat().st_size
+    fmt = _detect(name, content)
+    if file_path is not None and name is not None:
+        size_bytes = name.stat().st_size
+    else:
+        size_bytes = len(content.encode("utf-8"))
 
-    text = f"File: {file_path}\nFormat: {fmt}\nEncoding: {encoding}\nSize: {size_bytes} bytes"
+    text = f"File: {source_label}\nFormat: {fmt}\nEncoding: {encoding}\nSize: {size_bytes} bytes"
 
     structured = {
-        "file_path": str(file_path),
+        "file_path": file_path,
+        "source": source_label,
         "format": fmt,
         "encoding": encoding,
         "size_bytes": size_bytes,

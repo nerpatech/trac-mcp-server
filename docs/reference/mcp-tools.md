@@ -1120,14 +1120,16 @@ Each update object:
 
 ## wiki_file_push
 
-**Description:** Push a local file to a Trac wiki page. Reads the file, auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page.
+**Description:** Push a document to a Trac wiki page. Takes the text inline as `content`, or -- only where the server's `file_access` is `local` -- as a `file_path` on the **server's** filesystem; auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page. To push a file from your own machine, use the [`trac-mcp` CLI](cli.md#trac-mcp) there: `trac-mcp wiki-push PAGE FILE`.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `file_path` | string | **Yes** | - | Absolute path to local file |
 | `page_name` | string | **Yes** | - | Target wiki page name |
+| `content` | string | One of | - | The document text, in place of `file_path` |
+| `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection. With neither `filename` nor `format`, inline content is stored as TracWiki, verbatim |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
 | `strip_frontmatter` | boolean | No | `true` | Strip YAML frontmatter from .md files before pushing |
@@ -1148,7 +1150,8 @@ Each update object:
   "version": 1,
   "source_format": "markdown",
   "converted": true,
-  "file_path": "/path/to/file.md",
+  "file_path": null,
+  "source": "inline content",
   "warnings": []
 }
 ```
@@ -1159,19 +1162,21 @@ Each update object:
   ```json
   {
     "type": "text",
-    "text": "Error (validation_error): file_path is required\n\nAction: Provide file_path parameter."
+    "text": "Error (validation_error): content is required\n\nAction: Provide content (or file_path, only where the server's file_access is 'local')."
   }
   ```
 
-- **validation_error:** File not found
+- **permission_denied:** a `file_path` while the server's `file_access` is `off` (the default over http, ticket #111)
   ```json
   {
     "type": "text",
-    "text": "Error (validation_error): File not found: /path/to/missing.md\n\nAction: Check parameter values and retry."
+    "text": "Error (permission_denied): file_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp wiki-push PAGE FILE), or pass the bytes inline instead of a path."
   }
   ```
 
 **Implementation Notes:**
+- Exactly one of `content` and `file_path`; both is a `validation_error`
+- Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
 - Creates new page if it doesn't exist, updates with optimistic locking if it does
@@ -1182,8 +1187,9 @@ Each update object:
 {
   "name": "wiki_file_push",
   "arguments": {
-    "file_path": "/home/user/docs/design.md",
     "page_name": "Docs/Design",
+    "content": "# Design\n\nThe text of the document...",
+    "filename": "design.md",
     "comment": "Push design doc to wiki",
     "format": "auto",
     "strip_frontmatter": true
@@ -1195,14 +1201,14 @@ Each update object:
 
 ## wiki_file_pull
 
-**Description:** Pull a Trac wiki page to a local file. Fetches page content, converts to the requested format, and writes to the specified path.
+**Description:** Pull a Trac wiki page, converted to the requested format. Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to pull |
-| `file_path` | string | **Yes** | - | Absolute path for output file |
+| `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` or `tracwiki` |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
 
@@ -1210,7 +1216,7 @@ Each update object:
 ```json
 {
   "type": "text",
-  "text": "Pulled wiki page 'Docs/Design' (version 3) to /home/user/docs/design.md (4521 bytes, format=markdown)"
+  "text": "Pulled wiki page 'Docs/Design' (version 3, 4521 bytes, format=markdown); the text is in structuredContent.content"
 }
 ```
 
@@ -1218,13 +1224,15 @@ Each update object:
 ```json
 {
   "page_name": "Docs/Design",
-  "file_path": "/home/user/docs/design.md",
   "format": "markdown",
   "version": 3,
-  "bytes_written": 4521,
-  "converted": true
+  "converted": true,
+  "content": "# Design\n...",
+  "bytes": 4521
 }
 ```
+
+With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
 
 **Error Responses:**
 
@@ -1246,7 +1254,8 @@ Each update object:
 
 **Implementation Notes:**
 - Converts TracWiki to Markdown by default; use `format: "tracwiki"` to get raw content
-- Parent directory of `file_path` must exist
+- An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`
+- Parent directory of `file_path` must exist, and is checked before Trac is called
 - Fetches page info separately for version metadata
 
 **Example Call:**
@@ -1255,7 +1264,6 @@ Each update object:
   "name": "wiki_file_pull",
   "arguments": {
     "page_name": "Docs/Design",
-    "file_path": "/home/user/docs/design.md",
     "format": "markdown"
   }
 }
@@ -1265,13 +1273,15 @@ Each update object:
 
 ## wiki_file_detect_format
 
-**Description:** Detect the format of a local file (Markdown or TracWiki). Uses file extension first, then content-based heuristic detection.
+**Description:** Detect whether text is Markdown or TracWiki. Uses the file extension first, then content-based heuristic detection. Takes `content` (plus an optional `filename`), or a `file_path` on the **server's** filesystem where `file_access` is `local`. For a file on your own machine, `trac-mcp detect-format FILE` runs the same detection locally.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `file_path` | string | **Yes** | - | Absolute path to file to analyze |
+| `content` | string | One of | - | Text to analyze |
+| `filename` | string | No | - | With `content`: the source file's name, for extension-based detection |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 
 **Success Response:**
 ```json
@@ -1284,7 +1294,8 @@ Each update object:
 **Structured JSON Output:**
 ```json
 {
-  "file_path": "/home/user/docs/design.md",
+  "file_path": null,
+  "source": "inline content",
   "format": "markdown",
   "encoding": "utf-8",
   "size_bytes": 4521
@@ -1312,7 +1323,8 @@ Each update object:
 {
   "name": "wiki_file_detect_format",
   "arguments": {
-    "file_path": "/home/user/docs/design.md"
+    "content": "# Design\n\nSome text.",
+    "filename": "design.md"
   }
 }
 ```
