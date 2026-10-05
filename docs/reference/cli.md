@@ -27,6 +27,7 @@ trac-mcp-server --transport http --port 8080   # streamable HTTP instead of stdi
 | `--port PORT` | `8080` | Bind port for `--transport http` |
 | `--path PATH` | `/mcp` | URL path the MCP endpoint is mounted at, for `--transport http` |
 | `--allow-unauthenticated` | `false` | Allow `--transport http` to bind a non-loopback host without an auth token. Dangerous -- exposes Trac credentials to the network. Prefer `TRAC_MCP_AUTH_TOKEN`. |
+| `--file-access {local,off}` | `off` for http, `local` for stdio | Whether the file tools may read and write this process's filesystem through `file_path`/`output_path` (see [HTTP Transport](http-transport.md#file-access-file_access)) |
 | `--version` | -- | Show version and exit |
 
 There is no `--auth-token` flag: it would leak the secret into the process list. Set it via `TRAC_MCP_AUTH_TOKEN` or `config.yaml`'s `server.auth_token`. See [HTTP Transport](http-transport.md) for the full auth and bind-safety rules.
@@ -139,11 +140,62 @@ On failure, `trac-convert` exits with code `4` and writes a classified error mes
 ### Installation
 
 ```bash
-pip install .          # installs BOTH trac-mcp-server and trac-convert
-pipx install .         # alternative: isolated environment, both binaries available
+pip install .          # installs trac-mcp-server, trac-convert and trac-mcp
+pipx install .         # alternative: isolated environment, all three available
 ```
 
-Both entry points are registered in `pyproject.toml` under `[project.scripts]`.
+All three entry points are registered in `pyproject.toml` under `[project.scripts]`.
+
+---
+
+## trac-mcp
+
+`trac-mcp` moves files between **your** machine and a `trac-mcp-server` reached over HTTP. The server's file tools cannot see your filesystem when the server runs elsewhere, and over http they refuse paths by default ([File Access](http-transport.md#file-access-file_access)). `trac-mcp` reads and writes the local file itself and calls the same tools with their inline forms, so:
+
+- the bytes never pass through a model's transcript -- an agent runs it as a shell command;
+- the write keeps everything the server does: the caller's Trac identity, Markdown conversion, the indentation guard and the link gate.
+
+Unlike `trac-convert --to-wiki`, which talks XML-RPC to Trac directly with local Trac credentials, `trac-mcp` needs only the MCP endpoint and a bearer token.
+
+### Usage
+
+```bash
+trac-mcp wiki-push PAGE FILE [--format auto|markdown|tracwiki] [--comment TEXT] [--keep-frontmatter]
+trac-mcp wiki-pull PAGE FILE [--format markdown|tracwiki] [--page-version N]
+trac-mcp attach-put (--ticket N | --page PAGE) FILE [--filename NAME] [--description TEXT] [--replace]
+trac-mcp attach-get (--ticket N | --page PAGE) NAME FILE
+trac-mcp detect-format FILE        # runs locally, no server call
+```
+
+`FILE` may be `-` for stdin or stdout. Global options go before the subcommand: `trac-mcp --instance /bcs wiki-push ...`.
+
+### Connecting
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | MCP endpoint, e.g. `http://192.0.2.10:8091/mcp` |
+| `--server NAME` | `.mcp.json` entry to use (default `trac-http`) |
+| `--token-env NAME` | Environment variable holding the bearer token |
+| `--instance PATH` | Trac instance, e.g. `/auto_pm` (default: the server's) |
+
+Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working directory up: that entry's `url` and its `Authorization: Bearer ...` header, with `${VAR}` and `${VAR:-default}` expanded from the environment exactly as Claude Code expands them. Run from a project directory, it therefore connects as the same identity the project's MCP session uses, with no extra setup. Failing both, it reads `TRAC_MCP_URL` and `TRAC_MCP_AUTH_TOKEN`.
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | The server answered with an error (the message is printed to stderr) |
+| 2 | Usage error, or a local file problem |
+| 3 | No endpoint, a missing token variable, or a transport/HTTP failure (e.g. 401) |
+
+### Installation
+
+Installed with the package, next to `trac-mcp-server` and `trac-convert`:
+
+```bash
+pip install .          # or: pipx install .
+```
 
 ---
 

@@ -133,6 +133,19 @@ Auth setup: use an existing `.trac_mcp/config.yml` (the same file `trac-mcp-serv
 
 Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
 
+## File Transfer CLI
+
+When the server runs on another machine (the HTTP transport), its file tools cannot see your files, and over HTTP they refuse server-side paths by default. `trac-mcp` runs on your machine and moves the bytes through the server for you, keeping your identity and the server's conversion and link checks:
+
+```bash
+trac-mcp wiki-push Docs/Design design.md          # Markdown is converted on the way in
+trac-mcp wiki-pull Docs/Design design.md
+trac-mcp attach-put --ticket 42 trace.bin
+trac-mcp attach-get --page Docs/Design diagram.png diagram.png
+```
+
+It connects with the nearest `.mcp.json` entry (or `--url`). See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
+
 ## Available Tools (43)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
