@@ -4,12 +4,16 @@ import xmlrpc.client
 from unittest.mock import MagicMock, patch
 
 import mcp.types as types
+import pytest
 
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.wiki_file import (
     WIKI_FILE_SPECS,
     _strip_yaml_frontmatter,
 )
+
+# These tests exercise the server-side path forms (ticket #111).
+pytestmark = pytest.mark.usefixtures("local_file_access")
 
 _registry = ToolRegistry(WIKI_FILE_SPECS)
 
@@ -100,7 +104,7 @@ class TestDetectFormat:
         )
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
-        assert "file_path is required" in result.content[0].text
+        assert "content is required" in result.content[0].text
 
     async def test_nonexistent_file(self, tmp_path):
         client = MagicMock()
@@ -335,9 +339,7 @@ class TestPush:
         call_args = client.put_wiki_page.call_args
         assert call_args[0][3] is None  # version argument
 
-    @patch(
-        "trac_mcp_server.mcp.tools.wiki_file.read_file_with_encoding"
-    )
+    @patch("trac_mcp_server.mcp.tools.file_io.read_file_with_encoding")
     async def test_push_warns_on_non_utf8_detected_encoding(
         self, mock_read, tmp_path
     ):
@@ -403,7 +405,8 @@ class TestPush:
         )
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
-        assert "file_path is required" in result.content[0].text
+        assert "content is required" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
 
     async def test_push_missing_page_name(self, tmp_path):
         md_file = tmp_path / "page.md"
@@ -685,16 +688,24 @@ class TestPull:
         assert "page_name is required" in result.content[0].text
 
     async def test_pull_missing_file_path(self):
-        """Missing file_path returns validation error."""
+        """No file_path: the converted text comes back inline (ticket
+        #111)."""
         client = _make_client()
+        client.get_wiki_page.return_value = "= Title =\n'''bold'''\n"
+        client.get_wiki_page_info.return_value = {"version": 3}
         result = await _registry.call_tool(
             "wiki_file_pull",
-            {"page_name": "TestPage"},
+            {"page_name": "TestPage", "format": "tracwiki"},
             client,
         )
         assert isinstance(result, types.CallToolResult)
-        assert result.isError is True
-        assert "file_path is required" in result.content[0].text
+        assert result.isError is not True
+        assert (
+            result.structuredContent["content"]
+            == "= Title =\n'''bold'''\n"
+        )
+        assert result.structuredContent["version"] == 3
+        assert "file_path" not in result.structuredContent
 
     async def test_pull_invalid_output_path(self):
         """Invalid output path (parent doesn't exist) returns validation error."""

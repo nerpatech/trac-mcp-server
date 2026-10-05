@@ -4,12 +4,16 @@ This module exposes file-based MCP tools that wrap Trac's
 ``ticket.putAttachment`` / ``getAttachment`` / ``listAttachments`` /
 ``deleteAttachment`` XML-RPC methods.
 
-The tool I/O is intentionally path-based (not inline base64): MCP clients
-serialize tool arguments and results into the conversation transcript, so
-inlining binary payloads would re-tokenize each attachment into the
-model's context. Tools accept/return absolute filesystem paths, the file
-content never enters the model context — only the Trac server, the MCP
-server process, and the local filesystem ever touch it.
+The tool I/O was path-based (not inline base64) so that attachment bytes
+never entered the conversation transcript: MCP clients serialize tool
+arguments and results into it, so inlining binary payloads re-tokenizes
+each attachment into the model's context. That only works while the
+server shares its caller's filesystem. Over http it does not, so these
+tools also take and return the bytes as base64 (ticket #111), and the
+path forms are refused unless the server's ``file_access`` is ``local``.
+The inline forms are meant for the ``trac-mcp`` CLI, which reads and
+writes the caller's own files, so the bytes still stay out of a
+transcript -- see ``file_io``.
 
 This mirrors the ``wiki_file.py`` precedent (``wiki_file_push`` /
 ``wiki_file_pull`` also use ``file_path``).
@@ -23,9 +27,15 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
-from ...file_handler import validate_file_path, validate_output_path
 from .attachment_common import coerce_attachment_payload
 from .errors import build_error_response
+from .file_io import (
+    check_output_path,
+    encode_base64,
+    inline_too_large,
+    read_binary_input,
+    write_output,
+)
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -36,10 +46,12 @@ TICKET_ATTACHMENT_TOOLS = [
     types.Tool(
         name="ticket_attachment_put",
         description=(
-            "Upload a local file as an attachment to a Trac ticket. The "
-            "file is read from the server's filesystem and sent as raw "
-            "bytes via XML-RPC; its contents are NOT inlined into the "
-            "tool arguments or the conversation transcript."
+            "Upload an attachment to a Trac ticket, as content_base64 "
+            "(or, only where this server's file_access is 'local', a "
+            "file_path on the SERVER's filesystem). To attach a file "
+            "from your own machine without putting its bytes in the "
+            "transcript, run the trac-mcp CLI there: "
+            "`trac-mcp attach-put --ticket N FILE`."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -55,15 +67,27 @@ TICKET_ATTACHMENT_TOOLS = [
                     "description": "Ticket number to attach to",
                     "minimum": 1,
                 },
+                "content_base64": {
+                    "type": "string",
+                    "description": (
+                        "The attachment bytes, standard base64, in place "
+                        "of file_path. Requires filename."
+                    ),
+                },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to local file to upload",
+                    "description": (
+                        "Absolute path on the SERVER's filesystem. "
+                        "Refused unless the server's file_access is "
+                        "'local' (it is 'off' over http)."
+                    ),
                 },
                 "filename": {
                     "type": "string",
                     "description": (
                         "Attachment filename stored on the ticket. "
-                        "Defaults to the basename of file_path."
+                        "Defaults to the basename of file_path; "
+                        "required with content_base64."
                     ),
                 },
                 "description": {
@@ -80,16 +104,18 @@ TICKET_ATTACHMENT_TOOLS = [
                     "default": False,
                 },
             },
-            "required": ["ticket_id", "file_path"],
+            "required": ["ticket_id"],
         },
     ),
     types.Tool(
         name="ticket_attachment_get",
         description=(
-            "Download a ticket attachment to a local file. Bytes are "
-            "written directly to output_path; the attachment content is "
-            "NOT inlined into the tool result or the conversation "
-            "transcript."
+            "Download a ticket attachment. Without output_path the "
+            "bytes come back base64 in structuredContent.content_base64; "
+            "an output_path is on the SERVER's filesystem and is refused "
+            "unless the server's file_access is 'local'. To save one on "
+            "your own machine, run the trac-mcp CLI there: "
+            "`trac-mcp attach-get --ticket N NAME FILE`."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -112,12 +138,14 @@ TICKET_ATTACHMENT_TOOLS = [
                 "output_path": {
                     "type": "string",
                     "description": (
-                        "Absolute path for the downloaded file. The "
-                        "parent directory must already exist."
+                        "Absolute path on the SERVER's filesystem; the "
+                        "parent directory must already exist. Refused "
+                        "unless the server's file_access is 'local'. "
+                        "Omit it to get the bytes inline."
                     ),
                 },
             },
-            "required": ["ticket_id", "filename", "output_path"],
+            "required": ["ticket_id", "filename"],
         },
     ),
     types.Tool(
@@ -181,7 +209,6 @@ async def _handle_put(
     ``xmlrpc.client.Binary``, and uploads via ``ticket.putAttachment``.
     """
     ticket_id = args.get("ticket_id")
-    file_path = args.get("file_path")
 
     if not ticket_id:
         return build_error_response(
@@ -189,22 +216,18 @@ async def _handle_put(
             "ticket_id is required",
             "Provide ticket_id parameter.",
         )
-    if not file_path:
-        return build_error_response(
-            "validation_error",
-            "file_path is required",
-            "Provide file_path parameter.",
-        )
-
     description = args.get("description", "")
     replace = bool(args.get("replace", False))
 
-    # Validate path and read raw bytes
-    resolved = await run_sync(validate_file_path, file_path)
-    data = await run_sync(resolved.read_bytes)
+    source = await read_binary_input(
+        args, "trac-mcp attach-put --ticket N FILE"
+    )
+    if isinstance(source, types.CallToolResult):
+        return source
+    data, default_name, source_label = source
     binary = xmlrpc.client.Binary(data)
 
-    filename = args.get("filename") or resolved.name
+    filename = args.get("filename") or default_name
 
     stored = await run_sync(
         client.put_ticket_attachment,
@@ -232,7 +255,8 @@ async def _handle_put(
         "requested_filename": filename,
         "attached_filename": stored_name,
         "renamed_on_collision": renamed_on_collision,
-        "file_path": str(file_path),
+        "file_path": args.get("file_path"),
+        "source": source_label,
         "bytes_uploaded": bytes_uploaded,
         "replace": replace,
         "description": description,
@@ -269,15 +293,11 @@ async def _handle_get(
             "filename is required",
             "Provide filename parameter.",
         )
-    if not output_path:
-        return build_error_response(
-            "validation_error",
-            "output_path is required",
-            "Provide output_path parameter.",
-        )
-
-    # Validate output path (absolute, parent dir exists)
-    resolved = await run_sync(validate_output_path, output_path)
+    refusal = await check_output_path(
+        args, "output_path", "trac-mcp attach-get --ticket N NAME FILE"
+    )
+    if refusal is not None:
+        return refusal
 
     data = await run_sync(
         client.get_ticket_attachment, ticket_id, filename
@@ -285,20 +305,31 @@ async def _handle_get(
 
     payload = coerce_attachment_payload(data)
 
-    await run_sync(resolved.write_bytes, payload)
-    bytes_written = len(payload)
-
-    text = (
-        f"Downloaded attachment '{filename}' from ticket #{ticket_id} "
-        f"to {output_path} ({bytes_written} bytes)"
-    )
-
-    structured = {
+    structured: dict[str, Any] = {
         "ticket_id": ticket_id,
         "filename": filename,
-        "output_path": str(output_path),
-        "bytes_written": bytes_written,
     }
+    if output_path is not None:
+        structured.update(
+            await write_output(args, "output_path", payload)
+        )
+        text = (
+            f"Downloaded attachment '{filename}' from ticket #{ticket_id} "
+            f"to {output_path} ({len(payload)} bytes)"
+        )
+    else:
+        too_large = inline_too_large(
+            len(payload), "trac-mcp attach-get --ticket N NAME FILE"
+        )
+        if too_large is not None:
+            return too_large
+        structured["content_base64"] = encode_base64(payload)
+        structured["bytes"] = len(payload)
+        text = (
+            f"Fetched attachment '{filename}' from ticket #{ticket_id} "
+            f"({len(payload)} bytes); the bytes are base64 in "
+            "structuredContent.content_base64"
+        )
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],

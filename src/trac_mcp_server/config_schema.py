@@ -147,6 +147,24 @@ class ServerConfig(BaseModel):
         default_factory=list,
         description="Extra Origin header values to accept for DNS-rebinding protection",
     )
+    file_access: Literal["local", "off"] | None = Field(
+        default=None,
+        description=(
+            "Whether the path-taking tools (wiki_file_*, *_attachment_put/"
+            "get) may read and write THIS process's filesystem (ticket "
+            "#111). None resolves by transport at bootstrap: 'local' for "
+            "stdio, where the server shares the caller's filesystem, "
+            "'off' for http, where it does not."
+        ),
+    )
+    max_inline_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Largest payload a file tool returns inline (pulled page text "
+            "or base64 attachment bytes) when no output path is given"
+        ),
+    )
     identities: dict[str, Any] = Field(
         default_factory=dict,
         description=(

@@ -115,7 +115,7 @@ def bootstrap_server_config(
     CLI > env var (``TRAC_MCP_*``) > YAML ``server:`` section > default.
 
     Accepted ``cli_overrides`` keys: ``transport``, ``host``, ``port``,
-    ``path``, ``allow_unauthenticated``. ``auth_token`` is intentionally
+    ``path``, ``allow_unauthenticated``, ``file_access``. ``auth_token`` is intentionally
     not accepted here -- it must come from ``TRAC_MCP_AUTH_TOKEN`` or the
     YAML ``server:`` section, never a CLI flag, so it never appears in the
     process list. ``identities`` (ticket #102) is likewise never a CLI
@@ -131,7 +131,8 @@ def bootstrap_server_config(
 
     Raises:
         ValueError: If a numeric override is out of range, ``transport``
-            is neither ``stdio`` nor ``http``, or an unauthenticated http
+            is neither ``stdio`` nor ``http``, ``file_access`` is neither
+            ``local`` nor ``off``, or an unauthenticated http
             transport would bind a non-loopback host.
     """
     load_dotenv()
@@ -201,6 +202,35 @@ def bootstrap_server_config(
     allowed_hosts = list(yaml_server.get("allowed_hosts", []))
     allowed_origins = list(yaml_server.get("allowed_origins", []))
 
+    # Ticket #111: an http server does not share its caller's filesystem,
+    # so a path argument names a file on the wrong machine -- and, unless
+    # something confines it, any file this process can read or write.
+    # Default it off there; stdio runs on the caller's own machine.
+    file_access = (
+        overrides.get("file_access")
+        or os.getenv("TRAC_MCP_FILE_ACCESS")
+        or yaml_server.get("file_access")
+        or ("local" if transport == "stdio" else "off")
+    )
+    if file_access not in ("local", "off"):
+        raise ValueError(
+            f"Invalid file_access '{file_access}': must be 'local' or 'off'"
+        )
+
+    inline_raw = os.getenv("TRAC_MCP_MAX_INLINE_BYTES")
+    if inline_raw is not None:
+        try:
+            max_inline_bytes = int(inline_raw)
+        except ValueError:
+            raise ValueError(
+                f"Invalid TRAC_MCP_MAX_INLINE_BYTES '{inline_raw}': "
+                "must be a positive number of bytes"
+            ) from None
+    else:
+        max_inline_bytes = int(
+            yaml_server.get("max_inline_bytes", 5 * 1024 * 1024)
+        )
+
     # Ticket #102: loaded once here, env-var only (see docstring) -- never
     # merged with yaml_server, so an identities file can't be declared in
     # config.yaml only to be silently ignored at runtime.
@@ -215,6 +245,8 @@ def bootstrap_server_config(
         allow_unauthenticated=allow_unauthenticated,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
+        file_access=file_access,
+        max_inline_bytes=max_inline_bytes,
         identities=identities,
     )
 

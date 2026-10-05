@@ -18,6 +18,9 @@ from trac_mcp_server.mcp.tools.ticket_attachment import (
     TICKET_ATTACHMENT_SPECS,
 )
 
+# These tests exercise the server-side path forms (ticket #111).
+pytestmark = pytest.mark.usefixtures("local_file_access")
+
 _REGISTRY = ToolRegistry(TICKET_ATTACHMENT_SPECS)
 
 
@@ -201,12 +204,15 @@ class TestPut:
         assert "ticket_id is required" in result.content[0].text
 
     async def test_put_missing_file_path(self):
+        """Neither file_path nor content_base64: the inline form is the
+        one asked for (ticket #111)."""
         client = _make_client()
         result = await handle_ticket_attachment_tool(
             "ticket_attachment_put", {"ticket_id": 1}, client
         )
         assert result.isError is True
-        assert "file_path is required" in result.content[0].text
+        assert "content_base64 is required" in result.content[0].text
+        client.put_ticket_attachment.assert_not_called()
 
     async def test_put_relative_path_rejected(self):
         """validate_file_path rejects non-absolute paths."""
@@ -332,14 +338,19 @@ class TestGet:
         assert "filename is required" in result.content[0].text
 
     async def test_get_missing_output_path(self):
+        """No output_path: the bytes come back inline, base64 (ticket
+        #111)."""
         client = _make_client()
+        client.get_ticket_attachment.return_value = b"\x00\x01abc"
         result = await handle_ticket_attachment_tool(
             "ticket_attachment_get",
             {"ticket_id": 1, "filename": "x"},
             client,
         )
-        assert result.isError is True
-        assert "output_path is required" in result.content[0].text
+        assert result.isError is not True
+        assert result.structuredContent["content_base64"] == "AAFhYmM="
+        assert result.structuredContent["bytes"] == 5
+        assert "output_path" not in result.structuredContent
 
     async def test_get_invalid_output_path(self):
         """Output path with nonexistent parent dir is rejected."""

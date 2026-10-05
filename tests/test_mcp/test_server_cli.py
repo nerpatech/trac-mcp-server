@@ -148,3 +148,29 @@ def test_server_version_matches_project_version():
     StreamableHTTPSessionManager's create_initialization_options() falls
     back to reporting the mcp SDK version instead of the project version."""
     assert server.version == __version__
+
+
+# ---------------------------------------------------------------------------
+# --file-access (ticket #111)
+# ---------------------------------------------------------------------------
+
+
+def test_file_access_flag_defaults_to_none():
+    """Unset, it falls through to env / YAML / the transport default."""
+    assert build_parser().parse_args([]).file_access is None
+
+
+def test_file_access_flag_accepts_local_and_off():
+    parser = build_parser()
+    assert (
+        parser.parse_args(["--file-access", "local"]).file_access
+        == "local"
+    )
+    assert (
+        parser.parse_args(["--file-access", "off"]).file_access == "off"
+    )
+
+
+def test_file_access_flag_rejects_unknown_value(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--file-access", "on"])

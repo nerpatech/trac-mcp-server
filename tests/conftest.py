@@ -108,3 +108,20 @@ def mock_xml_response():
         return mock_response
 
     return _create_response
+
+
+@pytest.fixture
+def local_file_access():
+    """Let the file tools use server-side paths for this test (ticket #111).
+
+    The module default is ``off`` so a server wired up without ``main()``
+    fails closed. Tests that exercise the ``file_path``/``output_path``
+    forms opt in explicitly with this fixture rather than through an
+    autouse one, so a test that silently depends on server paths cannot
+    exist.
+    """
+    from trac_mcp_server.mcp.tools.file_io import set_file_access
+
+    set_file_access("local")
+    yield
+    set_file_access("off")
