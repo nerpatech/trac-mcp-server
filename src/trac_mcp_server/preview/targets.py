@@ -60,6 +60,9 @@ is invisible to the probing account, which would read as missing.
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin, urlsplit
+
+import requests
 
 from ..core.client import TracClient
 
@@ -138,6 +141,15 @@ ERROR = "error"
 # the probe cap.
 NOT_ALLOWED_REASON = "instance_not_allowed"
 
+# Ticket #110. Under an allowlist, redirects are followed by hand so each
+# hop is checked before it is requested. Trac's own dispatcher needs one
+# (`/intertrac/wiki%3AX` -> `/wiki/X`); five is generous.
+_MAX_SCOPED_REDIRECTS = 5
+
+
+class _OutOfScope(Exception):
+    """A scoped fetch would have left the caller's allowlist."""
+
 
 def is_probeable_wiki_href(href: str | None) -> bool:
     """Whether ``href`` is an InterTrac wiki-dispatcher link this module
@@ -211,6 +223,73 @@ def dispatcher_base(href: str) -> str | None:
     return href[:index]
 
 
+def _sent_location(url: str) -> str:
+    """``scheme://host/path`` of the request ``requests`` would SEND for
+    ``url``, trailing slash stripped -- query and fragment dropped.
+
+    The URL as sent, not as written, is what a scope check has to judge:
+    ``requests`` resolves dot segments while preparing, so
+    ``/trac_test/intertrac/x/../../../auto_pm/...`` is fetched from
+    ``/auto_pm`` (measured on requests 2.32.5 / urllib3 2.6.3, ticket
+    #110).
+    """
+    sent = urlsplit(requests.Request("GET", url).prepare().url)
+    return f"{sent.scheme}://{sent.netloc}{sent.path}".rstrip("/")
+
+
+def in_scope(url: str, allowed: frozenset[str]) -> bool:
+    """Whether a request for ``url`` stays inside ``allowed`` (ticket
+    #110): its sent location is an allowed instance URL or below one.
+    A URL ``requests`` cannot prepare is out of scope."""
+    try:
+        where = _sent_location(url)
+        bases = {_sent_location(base) for base in allowed}
+    except Exception:
+        return False
+    return any(where == b or where.startswith(b + "/") for b in bases)
+
+
+def _get(
+    client: TracClient,
+    url: str,
+    timeout: float,
+    allowed: frozenset[str] | None,
+):
+    """``GET url`` on the client's session, kept inside ``allowed``.
+
+    Unrestricted (``allowed is None``): exactly the request this module
+    always made. Scoped: every hop, the first included, is checked with
+    :func:`in_scope` BEFORE it is requested, and redirects are followed
+    by hand. An allowed instance's dispatcher redirects a nested
+    InterTrac target onward -- measured live, ``/trac_test/intertrac/
+    auto_pm%3Awiki%3AIndex`` answers 302 to ``/auto_pm/...`` -- and
+    ``requests`` would follow that with the caller's credentials.
+
+    Raises:
+        _OutOfScope: A hop would leave ``allowed``. Nothing was sent to it.
+    """
+    session = client.session
+    if allowed is None:
+        return session.get(url, timeout=timeout, allow_redirects=True)
+    for _ in range(_MAX_SCOPED_REDIRECTS + 1):
+        if not in_scope(url, allowed):
+            raise _OutOfScope(url)
+        response = session.get(
+            url, timeout=timeout, allow_redirects=False
+        )
+        location = (
+            response.headers.get("Location")
+            if 300 <= response.status_code < 400
+            else None
+        )
+        if not location:
+            return response
+        url = urljoin(response.url or url, location)
+    # Still redirecting: hand back the last 3xx, which classifies as a
+    # probe that learned nothing.
+    return response
+
+
 def _control_url(href: str) -> str | None:
     """The liveness-control URL for the instance ``href`` dispatches on.
 
@@ -223,7 +302,12 @@ def _control_url(href: str) -> str | None:
     return None if base is None else base + _CONTROL_TARGET
 
 
-def _probe_one(client: TracClient, href: str, timeout: float) -> dict:
+def _probe_one(
+    client: TracClient,
+    href: str,
+    timeout: float,
+    allowed: frozenset[str] | None = None,
+) -> dict:
     """Fetch and classify one dispatcher href.
 
     ``client.session`` is read HERE, inside the worker, and that is
@@ -235,11 +319,19 @@ def _probe_one(client: TracClient, href: str, timeout: float) -> dict:
     A ticket-realm result carrying ``needs_control`` is PROVISIONAL: the
     caller must confirm the instance answered a control before that
     ``MISSING`` may be believed. See the module docstring.
+
+    Under an allowlist, an href whose redirect chain would leave it comes
+    back ``SKIPPED`` with :data:`NOT_ALLOWED_REASON`, like one refused
+    up front (ticket #110).
     """
     try:
-        response = client.session.get(
-            href, timeout=timeout, allow_redirects=True
-        )
+        response = _get(client, href, timeout, allowed)
+    except _OutOfScope:
+        return {
+            "status": SKIPPED,
+            "resolved_url": None,
+            "reason": NOT_ALLOWED_REASON,
+        }
     except Exception:
         return {"status": ERROR, "resolved_url": None}
 
@@ -283,13 +375,18 @@ def _classify_ticket(response) -> dict:
 
 
 def _instance_answers(
-    client: TracClient, control_url: str, timeout: float
+    client: TracClient,
+    control_url: str,
+    timeout: float,
+    allowed: frozenset[str] | None = None,
 ) -> bool:
-    """Whether the instance answers its wiki-realm control with 200."""
+    """Whether the instance answers its wiki-realm control with 200.
+
+    A control that would leave the allowlist counts as no answer, so the
+    candidate degrades to unchecked rather than being called missing.
+    """
     try:
-        response = client.session.get(
-            control_url, timeout=timeout, allow_redirects=True
-        )
+        response = _get(client, control_url, timeout, allowed)
     except Exception:
         return False
     return response.status_code == 200
@@ -300,6 +397,7 @@ def _confirm_provisional(
     probed: dict[str, dict],
     timeout: float,
     concurrency: int,
+    allowed: frozenset[str] | None = None,
 ) -> None:
     """Resolve every provisional ``MISSING`` against its instance control.
 
@@ -339,7 +437,7 @@ def _confirm_provisional(
                     controls,
                     pool.map(
                         lambda url: _instance_answers(
-                            client, url, timeout
+                            client, url, timeout, allowed
                         ),
                         controls,
                     ),
@@ -388,8 +486,10 @@ def probe_targets(
         caller has nothing to report for them). A ``SKIPPED`` href whose
         instance is outside ``client.config.allowed_instances`` also
         carries ``"reason": "instance_not_allowed"`` (ticket #110): it
-        was never fetched and did not count against ``cap``. ``resolved_url`` is the
-        URL the dispatcher actually redirected to (``response.url`` after
+        was never fetched -- or, if its redirect chain left the allowlist,
+        that hop was never requested -- and a refusal up front did not
+        count against ``cap``. ``resolved_url`` is the URL the
+        dispatcher actually redirected to (``response.url`` after
         following redirects) when a fetch happened, else None -- this is
         what lets a caller report the real target of an ``/intertrac/
         %23N``-shaped dispatcher link instead of the dispatcher href
@@ -418,12 +518,10 @@ def probe_targets(
             continue
         seen.add(href)
         unique.append(href)
-        # The base is the instance the fetch would authenticate against;
-        # a foreign host is simply not on the list, so is refused too.
-        base = dispatcher_base(href)
-        if allowed is not None and (
-            base is None or base.rstrip("/") not in allowed
-        ):
+        # Judged where the request would actually go, not on the href as
+        # written; a foreign host is simply not on the list, so is
+        # refused too. Redirect hops are checked again in `_get`.
+        if allowed is not None and not in_scope(href, allowed):
             refused.add(href)
 
     # Filtered BEFORE the cap, so refused hrefs never use up its slots.
@@ -434,13 +532,15 @@ def probe_targets(
             max_workers=max(1, min(concurrency, len(to_probe)))
         ) as pool:
             futures = {
-                pool.submit(_probe_one, client, href, timeout): href
+                pool.submit(
+                    _probe_one, client, href, timeout, allowed
+                ): href
                 for href in to_probe
             }
             for future in as_completed(futures):
                 probed[futures[future]] = future.result()
 
-    _confirm_provisional(client, probed, timeout, concurrency)
+    _confirm_provisional(client, probed, timeout, concurrency, allowed)
 
     return {
         href: (

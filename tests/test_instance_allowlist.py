@@ -485,6 +485,65 @@ class TestProbeAllowlist:
         )
         assert result[ALLOWED_HREF]["status"] == "exists"
 
+    def test_dot_segments_are_judged_where_the_request_goes(self):
+        """``requests`` resolves dot segments before sending, so this
+        href's written base (``/trac_test``) is not where it is fetched
+        (``/auto_pm``). Measured on requests 2.32.5 / urllib3 2.6.3."""
+        href = (
+            f"{TRAC_TEST}/intertrac/x/../../../auto_pm"
+            "/intertrac/wiki%3AIndex"
+        )
+        client = _probe_client(frozenset({TRAC_TEST}))
+        result = probe_targets(client, [href])
+        assert result[href]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == []
+
+    def test_redirect_out_of_scope_is_not_followed(self):
+        """An allowed instance's dispatcher redirects a nested InterTrac
+        target onward: measured live, ``/trac_test/intertrac/
+        auto_pm%3Awiki%3AIndex`` answers 302 to ``/auto_pm/intertrac/
+        wiki%3AIndex``. The query string makes the href probeable."""
+        href = (
+            f"{TRAC_TEST}/intertrac/auto_pm%3Awiki%3AIndex"
+            "?/intertrac/wiki%3A"
+        )
+        client = _probe_client(frozenset({TRAC_TEST}))
+        client.session.get.return_value = MagicMock(
+            status_code=302,
+            headers={"Location": f"{AUTO_PM}/intertrac/wiki%3AIndex"},
+            url=href,
+        )
+        result = probe_targets(client, [href])
+        assert result[href] == {
+            "status": SKIPPED,
+            "resolved_url": None,
+            "reason": "instance_not_allowed",
+        }
+        assert _fetched(client) == [href]
+
+    def test_redirect_within_scope_is_followed(self):
+        page = f"{TRAC_TEST}/wiki/WikiStart"
+        responses = {
+            ALLOWED_HREF: MagicMock(
+                status_code=302,
+                headers={"Location": page},
+                url=ALLOWED_HREF,
+            ),
+            page: MagicMock(
+                status_code=200, text=EXISTING_PAGE_STUB, url=page
+            ),
+        }
+        client = _probe_client(frozenset({TRAC_TEST}))
+        client.session.get.side_effect = lambda url, **kw: responses[
+            url
+        ]
+        result = probe_targets(client, [ALLOWED_HREF])
+        assert result[ALLOWED_HREF] == {
+            "status": "exists",
+            "resolved_url": page,
+        }
+        assert _fetched(client) == [ALLOWED_HREF, page]
+
     def test_no_allowlist_probes_everything(self):
         client = _probe_client(None)
         probe_targets(client, [ALLOWED_HREF, REFUSED_HREF])
