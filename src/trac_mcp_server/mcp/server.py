@@ -27,6 +27,7 @@ from ..config_bootstrap import bootstrap_server_config
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
+    InstanceNotAllowedError,
     InstanceRegistry,
     UnknownInstanceError,
     load_declared_instances,
@@ -237,15 +238,24 @@ async def handle_read_resource(uri: Url) -> str:
                 instance, identity=_caller_identity()
             )
         except ValueError as e:
-            error_type = (
-                "unknown_instance"
-                if isinstance(e, UnknownInstanceError)
-                else "validation_error"
-            )
+            error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
         return await handle_read_wiki_resource(uri, client)
 
     raise ValueError(f"Unknown resource type: {uri.host}")
+
+
+def _instance_error_type(error: ValueError) -> str:
+    """Error type for a ``ValueError`` out of instance resolution.
+
+    Ticket #110 added ``instance_not_allowed`` beside ``unknown_instance``;
+    both dispatch sites (tool calls and resource reads) map through here.
+    """
+    if isinstance(error, InstanceNotAllowedError):
+        return "instance_not_allowed"
+    if isinstance(error, UnknownInstanceError):
+        return "unknown_instance"
+    return "validation_error"
 
 
 def _instance_from_query(query: str | None) -> str | None:
@@ -278,18 +288,27 @@ async def handle_call_tool(
     """
     args = dict(arguments or {})
     instance = args.pop("instance", None)
+    client: TracClient | None
     try:
         client = get_instances().get_client(
             instance, identity=_caller_identity()
         )
+    except InstanceNotAllowedError as e:
+        # Ticket #110: a caller scoped away from the DEFAULT instance must
+        # still be able to ask what it may reach -- the refusal below tells
+        # it to do exactly that. list_instances reads the registry, not
+        # the client, so it runs with none; every other tool, and an
+        # explicit out-of-scope `instance`, is still refused.
+        if name != "list_instances" or instance is not None:
+            return build_error_response(
+                _instance_error_type(e),
+                str(e),
+                "Call list_instances to see what is reachable.",
+            )
+        client = None
     except ValueError as e:
-        error_type = (
-            "unknown_instance"
-            if isinstance(e, UnknownInstanceError)
-            else "validation_error"
-        )
         return build_error_response(
-            error_type,
+            _instance_error_type(e),
             str(e),
             "Call list_instances to see what is reachable.",
         )
@@ -301,7 +320,11 @@ async def handle_call_tool(
     explicit = instance is not None
 
     try:
-        result = await get_registry().call_tool(name, args, client)
+        result = await get_registry().call_tool(
+            name,
+            args,
+            client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+        )
     except ValueError as e:
         # Unknown or filtered-out tool name
         result = build_error_response(

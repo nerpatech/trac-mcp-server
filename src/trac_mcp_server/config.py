@@ -14,6 +14,9 @@ Environment variables:
     TRAC_MAX_PARALLEL_REQUESTS: Max parallel XML-RPC requests (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
+    TRAC_ALLOWED_INSTANCES: Comma-separated instances the default identity may
+        reach, each a ``/path`` on the TRAC_URL host or an absolute http(s) URL
+        (optional, default: unrestricted; ticket #110)
 """
 
 import ipaddress
@@ -45,6 +48,12 @@ class Config:
     # cheaper than a revert and a redeploy. Default on: this exists to
     # be switched off in an emergency, not to be opted into.
     write_gate: bool = True
+    # Ticket #110: the instances this Config's caller may reach, as
+    # absolute URLs with no trailing slash. None = unrestricted. Carried on
+    # every Config ``InstanceRegistry.resolve()`` returns so the probes in
+    # preview/targets.py, which see only the client, can enforce the same
+    # scope as the resolve() choke point.
+    allowed_instances: frozenset[str] | None = None
 
 
 def validate_config(config: Config) -> None:
@@ -87,6 +96,82 @@ def validate_config(config: Config) -> None:
         logger.warning(
             "WARNING: SSL verification disabled (insecure=True). Use only for development."
         )
+
+
+def parse_allowed_instances(
+    raw: object, source: str
+) -> tuple[str, ...]:
+    """Parse one instance allowlist as configured (ticket #110).
+
+    The single parser for both sources -- ``TRAC_ALLOWED_INSTANCES`` and
+    an identity's ``instances:`` key -- so the two cannot drift. ``raw``
+    is a comma-separated string (all an env var, or a ``${VAR}``
+    interpolation, can be) or a list.
+
+    Args:
+        raw: The configured value. ``None`` is the caller's business
+            (it means unrestricted) and is not accepted here.
+        source: Names the setting in error messages, e.g.
+            ``"TRAC_ALLOWED_INSTANCES"``.
+
+    Returns:
+        The stripped, non-empty entries, in order.
+
+    Raises:
+        ValueError: ``raw`` is neither a string nor a list (a YAML
+            mapping must not be read as its keys); it has no non-empty
+            entries -- an empty list is a misconfiguration, never "deny
+            everything"; or an entry is neither a ``/path`` nor an
+            absolute http(s) URL.
+    """
+    if isinstance(raw, str):
+        items: list = raw.split(",")
+    elif isinstance(raw, list | tuple):
+        items = list(raw)
+    else:
+        raise ValueError(
+            f"{source} must be a list or a comma-separated string of "
+            f"instances, not {type(raw).__name__}."
+        )
+    entries = tuple(
+        s for s in (str(item).strip() for item in items) if s
+    )
+    if not entries:
+        raise ValueError(
+            f"{source} is set but lists no instances. Leave it unset "
+            "for an unrestricted caller, or list the instances it may "
+            "reach (/path or absolute URL)."
+        )
+    for entry in entries:
+        if not entry.startswith(("/", "http://", "https://")):
+            raise ValueError(
+                f"{source} has instance '{entry}': must be a /path on "
+                "the default host or an absolute http(s) URL."
+            )
+    return entries
+
+
+def normalize_allowed_instances(
+    entries: "list[str] | tuple[str, ...]", base_url: str
+) -> frozenset[str]:
+    """Turn parsed allowlist entries into absolute URLs with no trailing
+    slash (ticket #110).
+
+    A ``/path`` entry means that path on ``base_url``'s host; an
+    ``http(s)://`` entry is kept as written. Nothing else is
+    normalised -- no dot-segment resolution, no lowercasing of the path --
+    because the allowlist is compared exactly: a non-canonical spelling
+    must be refused, never rewritten into an allowed one. ``entries``
+    must come from :func:`parse_allowed_instances`, which validated them.
+    """
+    parsed = urlparse(base_url.strip())
+    host_root = f"{parsed.scheme}://{parsed.netloc}"
+    return frozenset(
+        (host_root + entry if entry.startswith("/") else entry).rstrip(
+            "/"
+        )
+        for entry in entries
+    )
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -342,6 +427,17 @@ def load_config(
     else:
         final_write_gate = True
 
+    # Ticket #110: env only, no YAML key. Unset is unrestricted; set but
+    # empty is an error, never "deny all" -- an empty list that silently
+    # locked everything out (or, worse, was read as "no list") is a
+    # misconfiguration the operator must hear about at startup.
+    allowed_raw = os.getenv("TRAC_ALLOWED_INSTANCES")
+    allowed_entries = (
+        parse_allowed_instances(allowed_raw, "TRAC_ALLOWED_INSTANCES")
+        if allowed_raw is not None
+        else None
+    )
+
     config = Config(
         trac_url=trac_url,
         username=trac_username,
@@ -355,5 +451,19 @@ def load_config(
     )
 
     validate_config(config)
+
+    if allowed_entries is not None:
+        config.allowed_instances = normalize_allowed_instances(
+            allowed_entries, config.trac_url
+        )
+        # Fail closed at startup: a default instance outside its own
+        # allowlist would refuse every default-instance call.
+        if config.trac_url not in config.allowed_instances:
+            raise ValueError(
+                f"Default instance {config.trac_url} is not in "
+                "TRAC_ALLOWED_INSTANCES "
+                f"({', '.join(sorted(config.allowed_instances))}). Add it "
+                "to the list, or point TRAC_URL at an allowed instance."
+            )
 
     return config

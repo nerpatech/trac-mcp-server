@@ -11,7 +11,11 @@ import mcp.types as types
 
 from ...core.client import TracClient
 from ...detection.web_scraper import scrape_project_index
-from ...instances import InstanceRegistry, caller_identity
+from ...instances import (
+    InstanceNotAllowedError,
+    InstanceRegistry,
+    caller_identity,
+)
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -145,33 +149,59 @@ async def _handle_list_instances(
         )
 
     discover = args.get("discover", True)
+    identity = caller_identity()
     configured = registry.describe()
+
+    # Ticket #110: a scoped caller sees only what it may reach, and the
+    # output never names an instance outside that scope. `None` = no scope.
+    allowed = registry.allowed_urls(identity)
+    if allowed is not None:
+        configured = [
+            e for e in configured if e["url"].rstrip("/") in allowed
+        ]
+
     # Gap 5 (ticket #102 review): the discovery scrape below authenticates
     # as the caller's own identity, not whichever identity happened to
     # start this process -- describe() itself stays identity-agnostic
     # (it never includes credentials, only URLs and names).
-    default_config = registry.resolve(None, caller_identity())
+    try:
+        default_config = registry.resolve(None, identity)
+    except InstanceNotAllowedError:
+        # The default instance is outside this caller's scope. Report it
+        # as unavailable rather than failing the whole listing, and skip
+        # discovery: it needs the default host and the caller's creds.
+        default_config = None
 
     structured: dict = {
         "configured": configured,
-        "default": default_config.trac_url,
+        "default": default_config.trac_url if default_config else None,
     }
+    if allowed is not None:
+        structured["allowed"] = sorted(allowed)
 
     lines = [
-        f"Default instance: {default_config.trac_url}",
-        "",
-        "Configured:",
+        f"Default instance: {default_config.trac_url}"
+        if default_config
+        else "Default instance: unavailable to this caller",
     ]
+    if allowed is not None:
+        lines.extend(["", "Allowed:"])
+        lines.extend(f"  {url}" for url in sorted(allowed))
+    lines.extend(["", "Configured:"])
     for entry in configured:
         marker = " (default)" if entry["is_default"] else ""
         lines.append(f"  {entry['name']}: {entry['url']}{marker}")
 
-    if discover:
+    if discover and default_config is not None:
         host_root = _host_root(default_config.trac_url)
         discovered = scrape_project_index(
             host_root,
             (default_config.username, default_config.password),
         )
+        if allowed is not None:
+            discovered = [
+                e for e in discovered if e["url"].rstrip("/") in allowed
+            ]
         if discovered:
             configured_urls = {
                 entry["url"].rstrip("/") for entry in configured

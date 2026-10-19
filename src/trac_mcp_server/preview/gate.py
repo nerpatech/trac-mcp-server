@@ -127,6 +127,10 @@ BLOCKING_CODES = frozenset(
 #:   author can do nothing about it; blocking would stop every write on
 #:   the store while a remote instance is down.
 #: * `target_check_disabled` -- nobody asked for the check.
+#: * `target_check_not_allowed` -- ticket #110: the caller's instance scope
+#:   is the operator's deliberate configuration and the author cannot act
+#:   on it; blocking would refuse every write on an allowed instance that
+#:   links to a disallowed one.
 ADVISORY_CODES = frozenset(
     {
         "bare_ticket_ref",
@@ -137,6 +141,7 @@ ADVISORY_CODES = frozenset(
         "conversion_warning",
         "target_check_failed",
         "target_check_disabled",
+        "target_check_not_allowed",
     }
 )
 
