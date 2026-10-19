@@ -60,7 +60,7 @@ is invisible to the probing account, which would read as missing.
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import requests
 
@@ -232,20 +232,67 @@ def _sent_location(url: str) -> str:
     ``/trac_test/intertrac/x/../../../auto_pm/...`` is fetched from
     ``/auto_pm`` (measured on requests 2.32.5 / urllib3 2.6.3, ticket
     #110).
+
+    Raises:
+        ValueError: The sent path still holds a dot segment, literal or
+            percent-encoded. ``%2e%2e`` survives preparation as a literal
+            ``..``, and the server resolves it: measured live,
+            ``/trac_test/%2e%2e/auto_pm/intertrac/wiki%3AIndex`` answers
+            302 into ``/auto_pm``. No legitimate Trac href has one, so
+            fail closed rather than model the server's resolution.
     """
     sent = urlsplit(requests.Request("GET", url).prepare().url)
+    if any(seg in (".", "..") for seg in unquote(sent.path).split("/")):
+        raise ValueError(f"Dot segment in {url!r}")
     return f"{sent.scheme}://{sent.netloc}{sent.path}".rstrip("/")
 
 
-def in_scope(url: str, allowed: frozenset[str]) -> bool:
-    """Whether a request for ``url`` stays inside ``allowed`` (ticket
-    #110): its sent location is an allowed instance URL or below one.
-    A URL ``requests`` cannot prepare is out of scope."""
+def scope_bases(
+    allowed: frozenset[str], own_url: str
+) -> frozenset[str]:
+    """The probe scope for a client at ``own_url`` (ticket #110): the
+    allowed instance URLs on that client's OWN host, each as
+    :func:`_sent_location` gives it, prepared once per probe run.
+
+    Same host only, because the probe session carries this client's
+    credentials. An allowed URL on another host is a declared instance
+    with its own credentials (#102 gap 3), and probing it -- or
+    following a redirect to it -- would hand this caller's password to
+    a host it was never configured for. ``requests`` strips auth on a
+    cross-host redirect it follows itself; the hand-followed hops in
+    :func:`_get` would not.
+    """
+    own = urlsplit(_sent_location(own_url))
+    bases: set[str] = set()
+    for base in allowed:
+        try:
+            prepared = _sent_location(base)
+        except Exception:
+            continue
+        where = urlsplit(prepared)
+        if (where.scheme, where.netloc) == (own.scheme, own.netloc):
+            bases.add(prepared)
+    return frozenset(bases)
+
+
+def in_scope(url: str, bases: frozenset[str]) -> bool:
+    """Whether a request for ``url`` stays inside ``bases`` (from
+    :func:`scope_bases`; ticket #110).
+
+    A dispatcher URL (``.../intertrac/...``) must belong to an allowed
+    instance EXACTLY -- the same exact match ``resolve()`` applies, so
+    a host-root entry allows a Trac at the root, not every instance
+    below it. Anything else (a redirect hop such as ``/trac_test/wiki/
+    X``) must be an allowed instance URL or below one. A URL that cannot
+    be prepared, or that holds a dot segment, is out of scope.
+    """
     try:
         where = _sent_location(url)
-        bases = {_sent_location(base) for base in allowed}
     except Exception:
         return False
+    base = dispatcher_base(where)
+    if base is not None:
+        return base in bases
     return any(where == b or where.startswith(b + "/") for b in bases)
 
 
@@ -253,11 +300,12 @@ def _get(
     client: TracClient,
     url: str,
     timeout: float,
-    allowed: frozenset[str] | None,
+    scope: frozenset[str] | None,
 ):
-    """``GET url`` on the client's session, kept inside ``allowed``.
+    """``GET url`` on the client's session, kept inside ``scope`` (from
+    :func:`scope_bases`).
 
-    Unrestricted (``allowed is None``): exactly the request this module
+    Unrestricted (``scope is None``): exactly the request this module
     always made. Scoped: every hop, the first included, is checked with
     :func:`in_scope` BEFORE it is requested, and redirects are followed
     by hand. An allowed instance's dispatcher redirects a nested
@@ -266,13 +314,13 @@ def _get(
     ``requests`` would follow that with the caller's credentials.
 
     Raises:
-        _OutOfScope: A hop would leave ``allowed``. Nothing was sent to it.
+        _OutOfScope: A hop would leave ``scope``. Nothing was sent to it.
     """
     session = client.session
-    if allowed is None:
+    if scope is None:
         return session.get(url, timeout=timeout, allow_redirects=True)
     for _ in range(_MAX_SCOPED_REDIRECTS + 1):
-        if not in_scope(url, allowed):
+        if not in_scope(url, scope):
             raise _OutOfScope(url)
         response = session.get(
             url, timeout=timeout, allow_redirects=False
@@ -306,7 +354,7 @@ def _probe_one(
     client: TracClient,
     href: str,
     timeout: float,
-    allowed: frozenset[str] | None = None,
+    scope: frozenset[str] | None = None,
 ) -> dict:
     """Fetch and classify one dispatcher href.
 
@@ -325,7 +373,7 @@ def _probe_one(
     up front (ticket #110).
     """
     try:
-        response = _get(client, href, timeout, allowed)
+        response = _get(client, href, timeout, scope)
     except _OutOfScope:
         return {
             "status": SKIPPED,
@@ -378,7 +426,7 @@ def _instance_answers(
     client: TracClient,
     control_url: str,
     timeout: float,
-    allowed: frozenset[str] | None = None,
+    scope: frozenset[str] | None = None,
 ) -> bool:
     """Whether the instance answers its wiki-realm control with 200.
 
@@ -386,7 +434,7 @@ def _instance_answers(
     candidate degrades to unchecked rather than being called missing.
     """
     try:
-        response = _get(client, control_url, timeout, allowed)
+        response = _get(client, control_url, timeout, scope)
     except Exception:
         return False
     return response.status_code == 200
@@ -397,7 +445,7 @@ def _confirm_provisional(
     probed: dict[str, dict],
     timeout: float,
     concurrency: int,
-    allowed: frozenset[str] | None = None,
+    scope: frozenset[str] | None = None,
 ) -> None:
     """Resolve every provisional ``MISSING`` against its instance control.
 
@@ -437,7 +485,7 @@ def _confirm_provisional(
                     controls,
                     pool.map(
                         lambda url: _instance_answers(
-                            client, url, timeout, allowed
+                            client, url, timeout, scope
                         ),
                         controls,
                     ),
@@ -507,8 +555,12 @@ def probe_targets(
     allowed = getattr(
         getattr(client, "config", None), "allowed_instances", None
     )
-    if not isinstance(allowed, frozenset):
-        allowed = None
+    # Prepared once per run, and confined to this client's own host.
+    scope = (
+        scope_bases(allowed, client.config.trac_url)
+        if isinstance(allowed, frozenset)
+        else None
+    )
 
     unique: list[str] = []
     refused: set[str] = set()
@@ -519,9 +571,9 @@ def probe_targets(
         seen.add(href)
         unique.append(href)
         # Judged where the request would actually go, not on the href as
-        # written; a foreign host is simply not on the list, so is
-        # refused too. Redirect hops are checked again in `_get`.
-        if allowed is not None and not in_scope(href, allowed):
+        # written; another host is never in scope. Redirect hops are
+        # checked again in `_get`.
+        if scope is not None and not in_scope(href, scope):
             refused.add(href)
 
     # Filtered BEFORE the cap, so refused hrefs never use up its slots.
@@ -533,14 +585,14 @@ def probe_targets(
         ) as pool:
             futures = {
                 pool.submit(
-                    _probe_one, client, href, timeout, allowed
+                    _probe_one, client, href, timeout, scope
                 ): href
                 for href in to_probe
             }
             for future in as_completed(futures):
                 probed[futures[future]] = future.result()
 
-    _confirm_provisional(client, probed, timeout, concurrency, allowed)
+    _confirm_provisional(client, probed, timeout, concurrency, scope)
 
     return {
         href: (

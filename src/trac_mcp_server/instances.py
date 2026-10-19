@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import Config, normalize_allowed_instances, validate_config
+from .config import (
+    Config,
+    normalize_allowed_instances,
+    parse_allowed_instances,
+    validate_config,
+)
 from .config_loader import (
     discover_config_files,
     load_hierarchical_config,
@@ -224,33 +229,16 @@ def load_identities() -> dict[str, Identity]:
 def _parse_identity_instances(
     name: str, entry: dict
 ) -> tuple[str, ...] | None:
-    """The ``instances`` key of one identities entry (ticket #110).
-
-    None when absent (unrestricted). A list or a comma-separated string
-    otherwise; present but with no non-empty entries is an error, never
-    "deny everything".
-    """
+    """The ``instances`` key of one identities entry (ticket #110):
+    None when absent (unrestricted), else parsed by the same
+    :func:`~trac_mcp_server.config.parse_allowed_instances` that reads
+    ``TRAC_ALLOWED_INSTANCES``."""
     raw = entry.get("instances")
     if raw is None:
         return None
-    items = raw.split(",") if isinstance(raw, str) else list(raw)
-    entries = tuple(
-        s for s in (str(item).strip() for item in items) if s
+    return parse_allowed_instances(
+        raw, f"Identity '{name}' in TRAC_IDENTITIES: 'instances'"
     )
-    if not entries:
-        raise ValueError(
-            f"Identity '{name}' in TRAC_IDENTITIES has an empty "
-            "'instances' list. Omit the key for an unrestricted "
-            "identity, or list the instances it may reach."
-        )
-    for item in entries:
-        if not item.startswith(("/", "http://", "https://")):
-            raise ValueError(
-                f"Identity '{name}' in TRAC_IDENTITIES has instance "
-                f"'{item}': must be a /path on the default host or an "
-                "absolute http(s) URL."
-            )
-    return entries
 
 
 def caller_identity() -> "Identity | None":

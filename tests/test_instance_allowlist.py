@@ -159,6 +159,19 @@ class TestIdentityInstancesKey:
                 tmp_path, monkeypatch, "    instances: [trac_test]\n"
             )
 
+    @pytest.mark.parametrize(
+        "body",
+        ["    instances: {/trac_test: true}\n", "    instances: 1\n"],
+        ids=["mapping", "scalar"],
+    )
+    def test_neither_list_nor_string_is_a_value_error(
+        self, tmp_path, monkeypatch, body
+    ):
+        """A mapping must not be read as its keys, and a scalar must be
+        the documented startup error, not a TypeError (review, #110)."""
+        with pytest.raises(ValueError, match="cloud"):
+            self._load(tmp_path, monkeypatch, body)
+
 
 class TestTracAllowedInstances:
     @pytest.fixture(autouse=True)
@@ -544,6 +557,93 @@ class TestProbeAllowlist:
         }
         assert _fetched(client) == [ALLOWED_HREF, page]
 
+    @pytest.mark.parametrize(
+        "href",
+        [
+            f"{TRAC_TEST}/%2e%2e/auto_pm/intertrac/wiki%3AIndex",
+            f"{TRAC_TEST}/%2E%2E/auto_pm/intertrac/wiki%3AIndex",
+            f"{TRAC_TEST}/%2e/intertrac/wiki%3AIndex",
+        ],
+        ids=["encoded-lower", "encoded-upper", "encoded-single"],
+    )
+    def test_any_dot_segment_is_out_of_scope(self, href):
+        """``%2e%2e`` survives request preparation as a literal ``..``,
+        and the live server resolves it: measured, ``/trac_test/%2e%2e/
+        auto_pm/intertrac/wiki%3AIndex`` answers 302 into ``/auto_pm``
+        (review finding 1, #110). Fail closed on any dot segment."""
+        client = _probe_client(frozenset({TRAC_TEST}))
+        result = probe_targets(client, [href])
+        assert result[href]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == []
+
+    def test_redirect_to_an_encoded_dot_segment_is_not_followed(self):
+        client = _probe_client(frozenset({TRAC_TEST}))
+        client.session.get.return_value = MagicMock(
+            status_code=302,
+            headers={
+                "Location": f"{TRAC_TEST}/%2e%2e/auto_pm/wiki/Index"
+            },
+            url=ALLOWED_HREF,
+        )
+        result = probe_targets(client, [ALLOWED_HREF])
+        assert result[ALLOWED_HREF]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == [ALLOWED_HREF]
+
+    def test_allowed_other_host_is_not_probed_with_this_clients_session(
+        self,
+    ):
+        """An allowed URL on another host belongs to a declared instance
+        with its own credentials (#102 gap 3). The probe session carries
+        THIS client's credentials, so it stays on this client's host
+        (review finding 3, #110)."""
+        other = "https://other.example/x"
+        href = f"{other}/intertrac/wiki%3AY"
+        client = _probe_client(frozenset({TRAC_TEST, other}))
+        result = probe_targets(client, [href])
+        assert result[href]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == []
+
+    def test_redirect_to_another_allowed_host_is_not_followed(self):
+        other = "https://other.example/x"
+        client = _probe_client(frozenset({TRAC_TEST, other}))
+        client.session.get.return_value = MagicMock(
+            status_code=302,
+            headers={"Location": f"{other}/wiki/Y"},
+            url=ALLOWED_HREF,
+        )
+        result = probe_targets(client, [ALLOWED_HREF])
+        assert result[ALLOWED_HREF]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == [ALLOWED_HREF]
+
+    def test_a_dispatcher_must_be_an_allowed_instance_exactly(self):
+        """resolve() matches exactly, so the probe must too: a host-root
+        entry allows a Trac AT the root, not every instance below it
+        (review finding 5, #110)."""
+        client = _probe_client(frozenset({HOST}))
+        client.config = _config(
+            trac_url=HOST, allowed_instances=frozenset({HOST})
+        )
+        result = probe_targets(client, [REFUSED_HREF])
+        assert result[REFUSED_HREF]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == []
+
+    def test_redirect_to_another_instances_dispatcher_is_not_followed(
+        self,
+    ):
+        client = _probe_client(frozenset({HOST}))
+        client.config = _config(
+            trac_url=HOST, allowed_instances=frozenset({HOST})
+        )
+        href = f"{HOST}/intertrac/wiki%3AWikiStart"
+        client.session.get.return_value = MagicMock(
+            status_code=302,
+            headers={"Location": REFUSED_HREF},
+            url=href,
+        )
+        result = probe_targets(client, [href])
+        assert result[href]["reason"] == "instance_not_allowed"
+        assert _fetched(client) == [href]
+
     def test_no_allowlist_probes_everything(self):
         client = _probe_client(None)
         probe_targets(client, [ALLOWED_HREF, REFUSED_HREF])
@@ -679,3 +779,47 @@ class TestListInstances:
             "apm",
         }
         assert len(structured["discovered"]) == 2
+
+
+def test_list_instances_answers_a_caller_scoped_away_from_the_default():
+    """Through dispatch, not the handler: ``handle_call_tool`` resolves
+    the default instance before any tool runs, so a caller whose scope
+    leaves the default out was refused -- and told to call the very tool
+    that refused it (review finding 2, #110)."""
+    registry = InstanceRegistry(_config(trac_url=AUTO_PM), {})
+    server_module.set_instances(registry)
+    set_instance_registry(registry)
+    server_module.set_registry(ToolRegistry(INSTANCE_SPECS))
+    try:
+        with (
+            patch.object(
+                server_module, "_caller_identity", return_value=CLOUD
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.instances.caller_identity",
+                return_value=CLOUD,
+            ),
+            patch("trac_mcp_server.instances.TracClient") as client_cls,
+        ):
+            result = asyncio.run(
+                handle_call_tool("list_instances", {"discover": False})
+            )
+    finally:
+        server_module.set_registry(None)
+        server_module.set_instances(None)
+        set_instance_registry(None)
+    assert not result.isError, result.content[0].text
+    assert result.structuredContent["allowed"] == [TRAC_TEST]
+    assert result.structuredContent["default"] is None
+    client_cls.assert_not_called()
+
+
+def test_list_instances_exemption_is_only_for_list_instances():
+    """Recall gate: any other tool is still refused on the default."""
+    registry = InstanceRegistry(_config(trac_url=AUTO_PM), {})
+    result, client_cls, call_tool = _dispatch(
+        "wiki_get", {"page_name": "Index"}, registry, CLOUD
+    )
+    assert "instance_not_allowed" in result.content[0].text
+    call_tool.assert_not_called()
+    client_cls.assert_not_called()

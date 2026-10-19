@@ -288,10 +288,24 @@ async def handle_call_tool(
     """
     args = dict(arguments or {})
     instance = args.pop("instance", None)
+    client: TracClient | None
     try:
         client = get_instances().get_client(
             instance, identity=_caller_identity()
         )
+    except InstanceNotAllowedError as e:
+        # Ticket #110: a caller scoped away from the DEFAULT instance must
+        # still be able to ask what it may reach -- the refusal below tells
+        # it to do exactly that. list_instances reads the registry, not
+        # the client, so it runs with none; every other tool, and an
+        # explicit out-of-scope `instance`, is still refused.
+        if name != "list_instances" or instance is not None:
+            return build_error_response(
+                _instance_error_type(e),
+                str(e),
+                "Call list_instances to see what is reachable.",
+            )
+        client = None
     except ValueError as e:
         return build_error_response(
             _instance_error_type(e),
@@ -306,7 +320,11 @@ async def handle_call_tool(
     explicit = instance is not None
 
     try:
-        result = await get_registry().call_tool(name, args, client)
+        result = await get_registry().call_tool(
+            name,
+            args,
+            client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+        )
     except ValueError as e:
         # Unknown or filtered-out tool name
         result = build_error_response(
