@@ -27,6 +27,7 @@ from ..config_bootstrap import bootstrap_server_config
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
+    InstanceNotAllowedError,
     InstanceRegistry,
     UnknownInstanceError,
     load_declared_instances,
@@ -237,15 +238,24 @@ async def handle_read_resource(uri: Url) -> str:
                 instance, identity=_caller_identity()
             )
         except ValueError as e:
-            error_type = (
-                "unknown_instance"
-                if isinstance(e, UnknownInstanceError)
-                else "validation_error"
-            )
+            error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
         return await handle_read_wiki_resource(uri, client)
 
     raise ValueError(f"Unknown resource type: {uri.host}")
+
+
+def _instance_error_type(error: ValueError) -> str:
+    """Error type for a ``ValueError`` out of instance resolution.
+
+    Ticket #110 added ``instance_not_allowed`` beside ``unknown_instance``;
+    both dispatch sites (tool calls and resource reads) map through here.
+    """
+    if isinstance(error, InstanceNotAllowedError):
+        return "instance_not_allowed"
+    if isinstance(error, UnknownInstanceError):
+        return "unknown_instance"
+    return "validation_error"
 
 
 def _instance_from_query(query: str | None) -> str | None:
@@ -283,13 +293,8 @@ async def handle_call_tool(
             instance, identity=_caller_identity()
         )
     except ValueError as e:
-        error_type = (
-            "unknown_instance"
-            if isinstance(e, UnknownInstanceError)
-            else "validation_error"
-        )
         return build_error_response(
-            error_type,
+            _instance_error_type(e),
             str(e),
             "Call list_instances to see what is reachable.",
         )

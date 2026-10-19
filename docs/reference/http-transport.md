@@ -83,6 +83,8 @@ identities:
     token: ${ALICE_MCP_TOKEN}
     username: ${ALICE_TRAC_USER}
     password: ${ALICE_TRAC_PASSWORD}
+    instances:              # optional: scope this identity (ticket #110)
+      - /trac_test
   bob:
     token: ${BOB_MCP_TOKEN}
     username: ${BOB_TRAC_USER}
@@ -101,6 +103,17 @@ Validation, at startup:
 - `TRAC_IDENTITIES` together with `allow_unauthenticated` and no `TRAC_MCP_AUTH_TOKEN` is an error -- declaring identities and then opting the endpoint out of authentication is contradictory, since no caller could ever present a token to be resolved as one of them.
 
 Identities alone (no static token) still gate every request, so they satisfy the same bind-safety rule `TRAC_MCP_AUTH_TOKEN` does: a non-loopback bind is allowed once `TRAC_IDENTITIES` is configured, without also requiring a static token.
+
+### Restricting an identity to some instances (ticket #110)
+
+An identity's reach is otherwise whatever its Trac user's permissions allow. Two paths make plain HTTP requests with the caller's credentials that the per-user `XML_RPC` permission does not gate (`ticket_render_check`'s page fetch, and the cross-instance link-target probes), so the server enforces a scope itself.
+
+- `instances:` on an identity entry -- a YAML list, or a comma-separated string (what `${VAR}` interpolation yields) -- scopes that identity. Each entry is a `/path` on the default instance's host or an absolute `http(s)://` URL. Absent means unrestricted.
+- `TRAC_ALLOWED_INSTANCES` (comma-separated, same entry forms) scopes the *default* credentials, i.e. a caller with no identity. An identity without `instances:` is unrestricted and is not bound by it.
+
+The check is an exact match on the *resolved* instance URL (trailing slash ignored), so a declared instance name or full URL cannot route around it, and a non-canonical spelling such as `/trac_test/../auto_pm` is refused, not normalised. A refused call returns the `instance_not_allowed` error before any client is created. `list_instances` shows a scoped caller only its allowed instances (plus an `allowed` field). A cross-instance link target outside the scope is not fetched and is reported as the advisory `target_check_not_allowed`, which does not block a write.
+
+Startup errors: an empty `instances:` list or an empty `TRAC_ALLOWED_INSTANCES` (never read as "deny all"), an entry that is neither a `/path` nor an http(s) URL, and a `TRAC_URL` that is not on its own `TRAC_ALLOWED_INSTANCES`.
 
 **Loaded once at startup; changing identities needs a restart.** Unlike `TRAC_INSTANCES` (which reloads on an mtime change), there is no live-reload here.
 

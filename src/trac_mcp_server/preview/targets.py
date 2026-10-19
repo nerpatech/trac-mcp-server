@@ -133,6 +133,11 @@ MISSING = "missing"
 SKIPPED = "skipped"
 ERROR = "error"
 
+# Ticket #110. The `reason` on a SKIPPED outcome for an href whose
+# instance is outside the caller's allowlist; a SKIPPED with no reason is
+# the probe cap.
+NOT_ALLOWED_REASON = "instance_not_allowed"
+
 
 def is_probeable_wiki_href(href: str | None) -> bool:
     """Whether ``href`` is an InterTrac wiki-dispatcher link this module
@@ -378,9 +383,12 @@ def probe_targets(
 
     Returns:
         ``{href: {"status": EXISTS | MISSING | SKIPPED | ERROR,
-        "resolved_url": str | None}}`` for every unique probeable href in
-        ``hrefs`` (non-probeable hrefs are simply omitted, since the
-        caller has nothing to report for them). ``resolved_url`` is the
+        "resolved_url": str | None}}`` for every unique probeable href
+        in ``hrefs`` (non-probeable hrefs are simply omitted, since the
+        caller has nothing to report for them). A ``SKIPPED`` href whose
+        instance is outside ``client.config.allowed_instances`` also
+        carries ``"reason": "instance_not_allowed"`` (ticket #110): it
+        was never fetched and did not count against ``cap``. ``resolved_url`` is the
         URL the dispatcher actually redirected to (``response.url`` after
         following redirects) when a fetch happened, else None -- this is
         what lets a caller report the real target of an ``/intertrac/
@@ -393,15 +401,33 @@ def probe_targets(
         whose output order varies run to run would make every diff of a
         warnings list unreadable.
     """
+    # Ticket #110. A bare MagicMock client (many tests) has a MagicMock
+    # `allowed_instances`, and a hand-rolled one may have no `config` at
+    # all, so only a real frozenset counts as a scope.
+    allowed = getattr(
+        getattr(client, "config", None), "allowed_instances", None
+    )
+    if not isinstance(allowed, frozenset):
+        allowed = None
+
     unique: list[str] = []
+    refused: set[str] = set()
     seen: set[str] = set()
     for href in hrefs:
         if not is_probeable_href(href) or href in seen:
             continue
         seen.add(href)
         unique.append(href)
+        # The base is the instance the fetch would authenticate against;
+        # a foreign host is simply not on the list, so is refused too.
+        base = dispatcher_base(href)
+        if allowed is not None and (
+            base is None or base.rstrip("/") not in allowed
+        ):
+            refused.add(href)
 
-    to_probe = unique[:cap]
+    # Filtered BEFORE the cap, so refused hrefs never use up its slots.
+    to_probe = [h for h in unique if h not in refused][:cap]
     probed: dict[str, dict] = {}
     if to_probe:
         with ThreadPoolExecutor(
@@ -417,8 +443,16 @@ def probe_targets(
     _confirm_provisional(client, probed, timeout, concurrency)
 
     return {
-        href: probed.get(
-            href, {"status": SKIPPED, "resolved_url": None}
+        href: (
+            {
+                "status": SKIPPED,
+                "resolved_url": None,
+                "reason": NOT_ALLOWED_REASON,
+            }
+            if href in refused
+            else probed.get(
+                href, {"status": SKIPPED, "resolved_url": None}
+            )
         )
         for href in unique
     }

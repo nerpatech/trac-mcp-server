@@ -7,6 +7,11 @@ addressing of any project on the *same host* as the default instance.
 
 Ad-hoc cross-host addressing is intentionally rejected -- it would let an
 agent-supplied hostname receive the operator's configured credentials.
+
+Ticket #110: a caller may additionally be scoped to an allowlist of
+instances (``instances:`` on a ``TRAC_IDENTITIES`` entry, or
+``TRAC_ALLOWED_INSTANCES`` for the default identity), enforced on the
+*resolved* URL in :meth:`InstanceRegistry.resolve`.
 """
 
 import os
@@ -15,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import Config, validate_config
+from .config import Config, normalize_allowed_instances, validate_config
 from .config_loader import (
     discover_config_files,
     load_hierarchical_config,
@@ -48,10 +53,25 @@ class Identity:
     name: str
     username: str
     password: str
+    # Ticket #110: the instances this identity may reach, as written in the
+    # file (each a ``/path`` on the default host or an absolute URL).
+    # None = unrestricted; an empty tuple is never constructed, since
+    # load_identities() rejects an empty list.
+    instances: tuple[str, ...] | None = None
 
 
 class UnknownInstanceError(ValueError):
     """Raised when an ``instance`` argument cannot be resolved to a Config."""
+
+
+class InstanceNotAllowedError(ValueError):
+    """Raised when a resolved instance is outside the caller's allowlist.
+
+    Ticket #110. Distinct from :class:`UnknownInstanceError`: the instance
+    exists (or may), the caller is simply not scoped to it. Subclasses
+    ``ValueError`` so the existing dispatch sites' ``except ValueError``
+    catches it; they map it to the ``instance_not_allowed`` error type.
+    """
 
 
 def _host_root(url: str) -> str:
@@ -129,6 +149,13 @@ def load_identities() -> dict[str, Identity]:
             token: ${ALICE_MCP_TOKEN}
             username: ${ALICE_TRAC_USER}
             password: ${ALICE_TRAC_PASSWORD}
+            instances:            # optional (ticket #110)
+              - /trac_test
+              - https://trac.example.org/other
+
+    ``instances`` scopes the identity to those instances (a list, or a
+    comma-separated string such as ``${VAR}`` interpolation yields); absent
+    means unrestricted, present-but-empty is an error.
 
     ``${VAR}`` interpolation and the bare ``{name: {...}}`` shape are the
     same machinery ``TRAC_INSTANCES`` uses
@@ -146,8 +173,10 @@ def load_identities() -> dict[str, Identity]:
         this ticket.
 
     Raises:
-        ValueError: An entry is missing a token/username/password, or two
-            entries claim the same token.
+        ValueError: An entry is missing a token/username/password, two
+            entries claim the same token, or an ``instances`` list is
+            empty or holds an entry that is neither a ``/path`` nor an
+            http(s) URL.
     """
     env_path = os.environ.get("TRAC_IDENTITIES")
     if not env_path:
@@ -183,10 +212,45 @@ def load_identities() -> dict[str, Identity]:
                 "be unique."
             )
         result[token] = Identity(
-            name=name, username=username, password=password
+            name=name,
+            username=username,
+            password=password,
+            instances=_parse_identity_instances(name, entry),
         )
 
     return result
+
+
+def _parse_identity_instances(
+    name: str, entry: dict
+) -> tuple[str, ...] | None:
+    """The ``instances`` key of one identities entry (ticket #110).
+
+    None when absent (unrestricted). A list or a comma-separated string
+    otherwise; present but with no non-empty entries is an error, never
+    "deny everything".
+    """
+    raw = entry.get("instances")
+    if raw is None:
+        return None
+    items = raw.split(",") if isinstance(raw, str) else list(raw)
+    entries = tuple(
+        s for s in (str(item).strip() for item in items) if s
+    )
+    if not entries:
+        raise ValueError(
+            f"Identity '{name}' in TRAC_IDENTITIES has an empty "
+            "'instances' list. Omit the key for an unrestricted "
+            "identity, or list the instances it may reach."
+        )
+    for item in entries:
+        if not item.startswith(("/", "http://", "https://")):
+            raise ValueError(
+                f"Identity '{name}' in TRAC_IDENTITIES has instance "
+                f"'{item}': must be a /path on the default host or an "
+                "absolute http(s) URL."
+            )
+    return entries
 
 
 def caller_identity() -> "Identity | None":
@@ -257,8 +321,11 @@ class InstanceRegistry:
     ):
         self._default = default_config
         self._declared = declared
-        # Keyed by (url, username, password) -- see get_client() (#102).
-        self._clients: dict[tuple[str, str, str], TracClient] = {}
+        # Keyed by (url, username, password, allowlist) -- see
+        # get_client() (#102, #110).
+        self._clients: dict[
+            tuple[str, str, str, frozenset[str] | None], TracClient
+        ] = {}
         self._lock = threading.Lock()
         self._sources = _instance_source_paths()
         self._mtimes = self._snapshot_mtimes()
@@ -280,9 +347,75 @@ class InstanceRegistry:
     def _configured_names(self) -> str:
         return ", ".join(["default"] + sorted(self._declared))
 
+    def allowed_urls(
+        self, identity: Identity | None = None
+    ) -> frozenset[str] | None:
+        """The caller's instance allowlist as absolute URLs, or None.
+
+        Ticket #110. An identity with ``instances:`` is scoped to those;
+        an identity without is unrestricted and NOT bound by
+        ``TRAC_ALLOWED_INSTANCES``, which scopes the default credentials
+        only. With no identity, the default Config's own list applies.
+        """
+        if identity is None:
+            return self._default.allowed_instances
+        if identity.instances is None:
+            return None
+        return normalize_allowed_instances(
+            identity.instances, self._default.trac_url
+        )
+
+    def _display_instance(self, url: str) -> str:
+        """``/path`` for a same-host URL, the full URL otherwise."""
+        if _same_host(url, self._default.trac_url):
+            return urlparse(url).path or "/"
+        return url
+
+    def _enforce_allowlist(
+        self,
+        name: str | None,
+        config: Config,
+        allowed: frozenset[str] | None,
+    ) -> Config:
+        """Refuse ``config`` unless its resolved URL is in ``allowed``.
+
+        Ticket #110: the one place the allowlist is checked, on the
+        RESOLVED url after every branch of ``resolve()`` -- so neither a
+        declared name nor a full URL routes around it. Exact match.
+        """
+        if allowed is not None and config.trac_url not in allowed:
+            shown = ", ".join(
+                sorted(self._display_instance(u) for u in allowed)
+            )
+            raise InstanceNotAllowedError(
+                f"Instance '{name if name is not None else 'default'}' "
+                f"(resolved to {config.trac_url}) is not in this "
+                f"caller's allowed instances: {shown}. Call "
+                "list_instances to see what is reachable."
+            )
+        return config
+
     def resolve(
         self, name: str | None, identity: Identity | None = None
     ) -> Config:
+        allowed = self.allowed_urls(identity)
+        return self._enforce_allowlist(
+            name,
+            self._resolve_unenforced(name, identity, allowed),
+            allowed,
+        )
+
+    def _resolve_unenforced(
+        self,
+        name: str | None,
+        identity: Identity | None,
+        allowed: frozenset[str] | None,
+    ) -> Config:
+        """Resolve ``name`` to a Config without the allowlist check.
+
+        Private: ``describe()`` classifies links against every configured
+        instance and must not be scoped by (or raise on) a caller's list.
+        """
         self._reload_if_changed()
 
         if name is None or name == "default":
@@ -296,6 +429,7 @@ class InstanceRegistry:
                 self._default.trac_url,
                 identity.username,
                 identity.password,
+                allowed=allowed,
             )
 
         spec = self._declared.get(name)
@@ -303,12 +437,13 @@ class InstanceRegistry:
             return self._synthesize(
                 *self._declared_credentials(spec, identity),
                 spec.insecure,
+                allowed=allowed,
             )
 
         if name.startswith("/"):
             url = _host_root(self._default.trac_url) + name
             return self._synthesize(
-                *self._adhoc_credentials(url, identity)
+                *self._adhoc_credentials(url, identity), allowed=allowed
             )
 
         if name.startswith(("http://", "https://")):
@@ -321,7 +456,8 @@ class InstanceRegistry:
                     f"Configured instances: {self._configured_names()}"
                 )
             return self._synthesize(
-                *self._adhoc_credentials(name, identity)
+                *self._adhoc_credentials(name, identity),
+                allowed=allowed,
             )
 
         raise UnknownInstanceError(
@@ -368,6 +504,7 @@ class InstanceRegistry:
         username: str | None = None,
         password: str | None = None,
         insecure: bool | None = None,
+        allowed: frozenset[str] | None = None,
     ) -> Config:
         if not url.startswith(("http://", "https://")):
             url = _host_root(self._default.trac_url) + (
@@ -386,6 +523,9 @@ class InstanceRegistry:
             max_parallel_requests=self._default.max_parallel_requests,
             max_batch_size=self._default.max_batch_size,
             rpc_timeout=self._default.rpc_timeout,
+            # Ticket #110: the caller's scope rides on the Config so the
+            # probes, which see only the client, enforce it too.
+            allowed_instances=allowed,
         )
         validate_config(config)
         return config
@@ -394,15 +534,23 @@ class InstanceRegistry:
         self, name: str | None, identity: Identity | None = None
     ) -> TracClient:
         """Return a TracClient for ``name``/``identity``, caching by
-        resolved (url, username, password).
+        resolved (url, username, password, allowlist).
 
         The cache key includes the password, not just the URL and
         username (ticket #102): two identities sharing a username but not
         a password would otherwise have the second reuse the first's
-        already-authenticated client.
+        already-authenticated client. It includes the allowlist too
+        (ticket #110): the client's Config carries the scope its probes
+        enforce, so two callers with the same credentials but different
+        scopes must not share one.
         """
         config = self.resolve(name, identity)
-        key = (config.trac_url, config.username, config.password)
+        key = (
+            config.trac_url,
+            config.username,
+            config.password,
+            config.allowed_instances,
+        )
         with self._lock:
             client = self._clients.get(key)
             if client is None:
@@ -420,12 +568,19 @@ class InstanceRegistry:
             self._default.trac_url,
             self._default.username,
             self._default.password,
+            self._default.allowed_instances,
         )
         with self._lock:
             self._clients[key] = client
 
     def describe(self) -> list[dict]:
-        """Describe configured instances. Never includes passwords."""
+        """Describe configured instances. Never includes passwords.
+
+        Unscoped on purpose (ticket #110): ``local_intertrac_bases()``
+        uses it to classify links, which needs every configured instance
+        whatever the caller may reach. Hence the unenforced resolve --
+        a ``TRAC_ALLOWED_INSTANCES`` list must not make this raise.
+        """
         result = [
             {
                 "name": "default",
@@ -439,7 +594,9 @@ class InstanceRegistry:
             result.append(
                 {
                     "name": name,
-                    "url": self.resolve(name).trac_url,
+                    "url": self._resolve_unenforced(
+                        name, None, None
+                    ).trac_url,
                     "is_default": False,
                     "credentials": "explicit"
                     if spec.username

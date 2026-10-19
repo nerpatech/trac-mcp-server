@@ -14,6 +14,9 @@ Environment variables:
     TRAC_MAX_PARALLEL_REQUESTS: Max parallel XML-RPC requests (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
+    TRAC_ALLOWED_INSTANCES: Comma-separated instances the default identity may
+        reach, each a ``/path`` on the TRAC_URL host or an absolute http(s) URL
+        (optional, default: unrestricted; ticket #110)
 """
 
 import ipaddress
@@ -45,6 +48,12 @@ class Config:
     # cheaper than a revert and a redeploy. Default on: this exists to
     # be switched off in an emergency, not to be opted into.
     write_gate: bool = True
+    # Ticket #110: the instances this Config's caller may reach, as
+    # absolute URLs with no trailing slash. None = unrestricted. Carried on
+    # every Config ``InstanceRegistry.resolve()`` returns so the probes in
+    # preview/targets.py, which see only the client, can enforce the same
+    # scope as the resolve() choke point.
+    allowed_instances: frozenset[str] | None = None
 
 
 def validate_config(config: Config) -> None:
@@ -87,6 +96,36 @@ def validate_config(config: Config) -> None:
         logger.warning(
             "WARNING: SSL verification disabled (insecure=True). Use only for development."
         )
+
+
+def normalize_allowed_instances(
+    entries: "list[str] | tuple[str, ...]", base_url: str
+) -> frozenset[str]:
+    """Turn allowlist entries into absolute URLs with no trailing slash.
+
+    Ticket #110. A ``/path`` entry means that path on ``base_url``'s host;
+    an ``http(s)://`` entry is kept as written. Nothing else is
+    normalised -- no dot-segment resolution, no lowercasing of the path --
+    because the allowlist is compared exactly: a non-canonical spelling
+    must be refused, never rewritten into an allowed one.
+
+    Raises:
+        ValueError: An entry is neither a ``/path`` nor an http(s) URL.
+    """
+    parsed = urlparse(base_url.strip())
+    host_root = f"{parsed.scheme}://{parsed.netloc}"
+    result: set[str] = set()
+    for raw in entries:
+        entry = raw.strip()
+        if entry.startswith("/"):
+            entry = host_root + entry
+        elif not entry.startswith(("http://", "https://")):
+            raise ValueError(
+                f"Invalid allowed instance '{entry}': must be a /path on "
+                "the default host or an absolute http(s) URL."
+            )
+        result.add(entry.rstrip("/"))
+    return frozenset(result)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -342,6 +381,23 @@ def load_config(
     else:
         final_write_gate = True
 
+    # Ticket #110: env only, no YAML key. Unset is unrestricted; set but
+    # empty is an error, never "deny all" -- an empty list that silently
+    # locked everything out (or, worse, was read as "no list") is a
+    # misconfiguration the operator must hear about at startup.
+    allowed_raw = os.getenv("TRAC_ALLOWED_INSTANCES")
+    allowed_entries: list[str] | None = None
+    if allowed_raw is not None:
+        allowed_entries = [
+            e.strip() for e in allowed_raw.split(",") if e.strip()
+        ]
+        if not allowed_entries:
+            raise ValueError(
+                "TRAC_ALLOWED_INSTANCES is set but has no entries. Unset "
+                "it for an unrestricted default identity, or list the "
+                "instances it may reach (comma-separated /path or URL)."
+            )
+
     config = Config(
         trac_url=trac_url,
         username=trac_username,
@@ -355,5 +411,19 @@ def load_config(
     )
 
     validate_config(config)
+
+    if allowed_entries is not None:
+        config.allowed_instances = normalize_allowed_instances(
+            allowed_entries, config.trac_url
+        )
+        # Fail closed at startup: a default instance outside its own
+        # allowlist would refuse every default-instance call.
+        if config.trac_url not in config.allowed_instances:
+            raise ValueError(
+                f"Default instance {config.trac_url} is not in "
+                "TRAC_ALLOWED_INSTANCES "
+                f"({', '.join(sorted(config.allowed_instances))}). Add it "
+                "to the list, or point TRAC_URL at an allowed instance."
+            )
 
     return config

@@ -21,6 +21,7 @@ from .facts import PreviewFacts
 from .targets import (
     ERROR,
     MISSING,
+    NOT_ALLOWED_REASON,
     SKIPPED,
     dispatcher_base,
     is_missing_realm_href,
@@ -1264,10 +1265,10 @@ def _check_target_probes(
     not be confirmed reachable arrives as ERROR -- uncertainty, never a
     broken link.
 
-    **Three codes, one per reason, since ticket #83.** They used to be
-    one ``target_check_skipped``, and the three want different answers
-    from ticket #64's blocking gate, so no single severity is right for
-    the merged code:
+    **Four codes, one per reason** (three since ticket #83, the fourth
+    from ticket #110). They used to be one ``target_check_skipped``, and
+    they want different answers from ticket #64's blocking gate, so no
+    single severity is right for the merged code:
 
     ``target_check_disabled``
         The caller passed ``check_targets=false``. Nobody asked for this
@@ -1282,6 +1283,13 @@ def _check_target_probes(
         its job, the author can do nothing about it, and blocking here
         would stop all writes while a remote instance is down and charge
         the author for an outage they did not cause. Stays advisory.
+    ``target_check_not_allowed``
+        The target is on an instance the caller's allowlist does not
+        cover (ticket #110), so it was deliberately never fetched. The
+        scope is the operator's configuration and the author cannot act
+        on it, and blocking would refuse every write on an allowed
+        instance (e.g. ``/trac_test``) that links to a disallowed one.
+        Stays advisory.
     """
     probeable_hrefs: list[str] = [
         a.href
@@ -1306,6 +1314,7 @@ def _check_target_probes(
         return warnings
 
     capped: list[str] = []
+    not_allowed: list[str] = []
     failed: list[str] = []
     for anchor in facts.anchors:
         if not anchor.href or not is_probeable_href(anchor.href):
@@ -1332,7 +1341,12 @@ def _check_target_probes(
                 )
             )
         elif status == SKIPPED:
-            capped.append(anchor.href)
+            # A skip with a reason is not the cap (ticket #110): a plain
+            # SKIPPED stays `target_check_capped`.
+            if outcome.get("reason") == NOT_ALLOWED_REASON:
+                not_allowed.append(anchor.href)
+            else:
+                capped.append(anchor.href)
         elif status == ERROR or status is None:
             # `None` is "no result at all" for a target that was
             # supposed to be probed -- the checker's problem, like a
@@ -1359,6 +1373,18 @@ def _check_target_probes(
                 "necessarily clean. Raise target_cap, or split the "
                 "document.",
                 {"hrefs": sorted(set(capped))},
+            )
+        )
+
+    if not_allowed:
+        warnings.append(
+            _warning(
+                "target_check_not_allowed",
+                "info",
+                f"{len(set(not_allowed))} cross-instance target(s) on "
+                "instances this caller may not reach, not checked -- "
+                "not verified, not necessarily clean.",
+                {"hrefs": sorted(set(not_allowed))},
             )
         )
 

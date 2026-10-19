@@ -88,6 +88,7 @@ trac-mcp-server supports three configuration sources: CLI flags, environment var
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
+| `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
 
 Transport/bind settings (`TRAC_MCP_TRANSPORT`, `TRAC_MCP_HOST`, `TRAC_MCP_PORT`, `TRAC_MCP_AUTH_TOKEN`, ...) are covered separately -- see [HTTP Deployment](#http-deployment) below and [HTTP Transport Reference](reference/http-transport.md).
 
