@@ -13,6 +13,7 @@ itself recorded (Rules/testing/RealSubstrateNotMocks).
 
 import asyncio
 import os
+import re
 import uuid
 import xmlrpc.client
 
@@ -129,7 +130,9 @@ class TestVersionOne:
         assert out["from_version"] is None
         assert out["to_version"] == 1
         assert (out["added"], out["removed"]) == (3, 0)
-        assert out["diff"].startswith(f"--- {PAGE} (empty)\n+++ {PAGE}@v1\n")
+        assert out["diff"].startswith(
+            f"--- {PAGE} (empty)\n+++ {PAGE}@v1\n"
+        )
         assert [r["version"] for r in out["revisions"]] == [1]
 
     def test_single_version_page_defaults_to_the_empty_page(self):
@@ -156,7 +159,9 @@ class TestFromAuthor:
         assert (out["added"], out["removed"]) == (2, 1)
 
     def test_resolution_is_bounded_by_to_version(self):
-        out = _ok(_diff(self.VERSIONS, from_author="agent_rpc", to_version=3))
+        out = _ok(
+            _diff(self.VERSIONS, from_author="agent_rpc", to_version=3)
+        )
         assert (out["from_version"], out["to_version"]) == (2, 3)
 
     def test_author_wrote_to_version_itself_means_nothing_since(self):
@@ -175,13 +180,17 @@ class TestFromAuthor:
 
     def test_author_only_after_to_version_is_an_error(self):
         text = _error_text(
-            _diff(self.VERSIONS, from_author="nerpa_admin", to_version=2)
+            _diff(
+                self.VERSIONS, from_author="nerpa_admin", to_version=2
+            )
         )
         assert "nerpa_admin" in text
 
     def test_from_author_and_from_version_are_exclusive(self):
         text = _error_text(
-            _diff(self.VERSIONS, from_author="agent_rpc", from_version=1)
+            _diff(
+                self.VERSIONS, from_author="agent_rpc", from_version=1
+            )
         )
         assert "from_version" in text and "from_author" in text
 
@@ -203,9 +212,12 @@ class TestIdentical:
         assert out["hunks"] == 0
         # The range still lists what happened in between.
         assert [r["version"] for r in out["revisions"]] == [2, 3]
-        assert "identical" in _diff(
-            versions, from_version=1, to_version=3
-        ).content[0].text.lower()
+        assert (
+            "identical"
+            in _diff(versions, from_version=1, to_version=3)
+            .content[0]
+            .text.lower()
+        )
 
 
 class TestErrors:
@@ -286,8 +298,16 @@ class TestTruncation:
         assert out["hunks"] == 200
         assert 0 < out["hunks_shown"] < 200
         assert len(out["diff"]) <= 2000
-        assert out["diff"].count("\n@@ ") + 1 == out["hunks_shown"]
+        assert out["diff"].count("\n@@ ") == out["hunks_shown"]
         # Counts describe the whole diff, not the part returned.
+        assert (out["added"], out["removed"]) == (200, 200)
+
+    def test_repeated_lines_do_not_merge_separate_edits(self):
+        # difflib.unified_diff's autojunk treats a line making up 1% of a
+        # 200+ line page as junk; here that merged every edit into one
+        # hunk. It must also stay fast (autojunk=False alone took 33 s).
+        out = _ok(_diff(self._many_hunks(200)))
+        assert out["hunks"] == 200
         assert (out["added"], out["removed"]) == (200, 200)
 
     def test_untruncated_reports_every_hunk(self):
@@ -307,6 +327,110 @@ class TestTruncation:
         assert out["diff"].endswith("\n")
 
 
+def _keepends(text):
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+
+
+def _apply(from_text, diff):
+    """Apply a unified diff to ``from_text``; the inverse the diff promises."""
+    old = _keepends(from_text)
+    lines = _keepends(diff)[2:]
+    out, pos, idx = [], 0, 0
+    while idx < len(lines):
+        header = lines[idx].split()[1][1:].split(",")
+        start = int(header[0])
+        # An empty range names the line BEFORE it, as in GNU diff.
+        if len(header) == 2 and int(header[1]) == 0:
+            start += 1
+        out.extend(old[pos : start - 1])
+        pos = start - 1
+        idx += 1
+        while idx < len(lines) and not lines[idx].startswith("@@ "):
+            tag, content = lines[idx][:1], lines[idx][1:]
+            idx += 1
+            if idx < len(lines) and lines[idx].startswith("\\"):
+                content = content[:-1]
+                idx += 1
+            if tag in (" ", "-"):
+                assert old[pos] == content, (old[pos], content)
+                pos += 1
+            if tag in (" ", "+"):
+                out.append(content)
+    out.extend(old[pos:])
+    return "".join(out)
+
+
+class TestRoundTrip:
+    """The diff applied to the start body must give the end body back.
+
+    Pins correctness independent of any one expected diff: an off-by-one
+    in the matcher's blocks or a hunk range shows up as a mismatch here.
+    """
+
+    CASES = [
+        ("", "a\nb\n"),
+        ("a\nb\n", ""),
+        ("a\nb\nc\n", "a\nc\n"),
+        ("a\nb\nc\n", "x\na\nb\nc\ny\n"),
+        ("\n\n\na\n\n\nb\n\n\n", "\n\na\n\n\n\nB\n\n\nc\n"),
+        ("a\nb", "a\nb\n"),
+        (
+            "|| x || y ||\n" * 50,
+            "|| x || y ||\n" * 20 + "new\n" + "|| x || y ||\n" * 31,
+        ),
+    ]
+
+    @pytest.mark.parametrize("before,after", CASES)
+    def test_fixed_cases(self, before, after):
+        self._check(before, after)
+
+    def test_random_edits(self):
+        import random
+
+        rng = random.Random(119)
+        vocab = ["", "", "|| a ||", "text", "== H ==", " * item", "x"]
+        for _ in range(200):
+            before = [
+                rng.choice(vocab) for _ in range(rng.randint(0, 40))
+            ]
+            after = list(before)
+            for _ in range(rng.randint(0, 8)):
+                op = rng.random()
+                pos = rng.randint(0, len(after))
+                if op < 0.4:
+                    after.insert(pos, rng.choice(vocab))
+                elif after and op < 0.8:
+                    del after[min(pos, len(after) - 1)]
+                elif after:
+                    after[min(pos, len(after) - 1)] = rng.choice(vocab)
+            self._check(
+                "\n".join(before) + "\n", "\n".join(after) + "\n"
+            )
+
+    def test_edit_cap_fallback_is_still_a_correct_diff(
+        self, monkeypatch
+    ):
+        from trac_mcp_server.mcp.tools import wiki_read
+
+        monkeypatch.setattr(wiki_read, "_MYERS_MAX_EDITS", 2)
+        before = (
+            "keep\n" + "".join(f"a{i}\n" for i in range(10)) + "end\n"
+        )
+        after = (
+            "keep\n" + "".join(f"b{i}\n" for i in range(10)) + "end\n"
+        )
+        out = self._check(before, after)
+        assert (out["added"], out["removed"]) == (10, 10)
+
+    @staticmethod
+    def _check(before, after):
+        versions = [(before, "x", "v1"), (after, "x", "v2")]
+        out = _ok(_diff(versions, context=1))
+        if before != after:
+            assert _apply(before, out["diff"]) == after
+        return out
+
+
 class TestToolDefinition:
     def test_registered_read_only_with_wiki_view(self):
         tool = next(t for t in WIKI_TOOLS if t.name == "wiki_diff")
@@ -321,7 +445,9 @@ class TestToolDefinition:
             "max_chars",
         ):
             assert name in tool.inputSchema["properties"]
-        spec = next(s for s in WIKI_READ_SPECS if s.tool.name == "wiki_diff")
+        spec = next(
+            s for s in WIKI_READ_SPECS if s.tool.name == "wiki_diff"
+        )
         assert spec.permissions == frozenset({"WIKI_VIEW"})
         assert spec.handler is _handle_diff
 
@@ -365,28 +491,40 @@ class TestWikiDiffLive:
         )
 
         page = f"Scratch/Ticket119WikiDiff{uuid.uuid4().hex[:8]}"
-        v1 = "Ticket 119 live diff scratch.\n\nfirst line\nsecond line\n"
+        v1 = (
+            "Ticket 119 live diff scratch.\n\nfirst line\nsecond line\n"
+        )
         v2 = v1.replace("second line", "second line, edited")
         v3 = v2 + "third line\n"
         client_a.put_wiki_page(page, v1, "v1 by A")
         try:
-            client_b.put_wiki_page(page, v2, "B asks: is this wording right?")
+            client_b.put_wiki_page(
+                page, v2, "B asks: is this wording right?"
+            )
             client_b.put_wiki_page(page, v3, "B adds a line")
 
             def diff(**args):
                 return _ok(
                     asyncio.run(
-                        _handle_diff(client_a, {"page_name": page, **args})
+                        _handle_diff(
+                            client_a, {"page_name": page, **args}
+                        )
                     )
                 )
 
             latest = diff()
-            assert (latest["from_version"], latest["to_version"]) == (2, 3)
+            assert (latest["from_version"], latest["to_version"]) == (
+                2,
+                3,
+            )
             assert (latest["added"], latest["removed"]) == (1, 0)
             assert latest["revisions"][0]["author"] == user_b
 
             since_a = diff(from_author=user_a)
-            assert (since_a["from_version"], since_a["to_version"]) == (1, 3)
+            assert (since_a["from_version"], since_a["to_version"]) == (
+                1,
+                3,
+            )
             assert [
                 (r["version"], r["author"], r["comment"])
                 for r in since_a["revisions"]
@@ -394,7 +532,10 @@ class TestWikiDiffLive:
                 (2, user_b, "B asks: is this wording right?"),
                 (3, user_b, "B adds a line"),
             ]
-            assert "-second line\n+second line, edited\n" in since_a["diff"]
+            assert (
+                "-second line\n+second line, edited\n"
+                in since_a["diff"]
+            )
             assert since_a["line_endings_normalized"] is False
 
             first = diff(to_version=1)

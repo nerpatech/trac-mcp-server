@@ -7,6 +7,7 @@ automatic Markdown conversion, and structured error responses.
 
 import asyncio
 import base64
+import difflib
 import json
 import time
 import xmlrpc.client
@@ -19,6 +20,9 @@ from ...core.client import TracClient
 from .errors import build_error_response, format_timestamp
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
+
+# wiki_diff's default cap on the returned diff text (ticket #119).
+_DIFF_MAX_CHARS = 50000
 
 # Tool definitions for list_tools()
 WIKI_READ_TOOLS = [
@@ -131,6 +135,65 @@ WIKI_READ_TOOLS = [
                     "type": "integer",
                     "description": "Maximum revisions to return, newest first. Omit for all revisions.",
                     "minimum": 1,
+                },
+            },
+            "required": ["page_name"],
+        },
+    ),
+    types.Tool(
+        name="wiki_diff",
+        description=(
+            "Unified diff between two versions of a wiki page, computed on "
+            "the stored TracWiki, together with the revisions in the range "
+            "(version, author, time, change comment), oldest first. The "
+            "start is from_version (default: the version before "
+            "to_version; the empty page when to_version is 1) or "
+            "from_author: the newest version by that author at or before "
+            "to_version, i.e. everything since that author's last write "
+            "(identical=true when the author wrote to_version itself). "
+            "Returns the resolved versions, identical, added/removed line "
+            "counts and the hunk count; a diff longer than max_chars is "
+            "cut at a hunk boundary and flagged truncated, with the counts "
+            "still covering the whole diff."
+        ),
+        annotations=types.ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "page_name": {
+                    "type": "string",
+                    "description": "Wiki page name to diff (required)",
+                },
+                "to_version": {
+                    "type": "integer",
+                    "description": "End version (default: latest)",
+                    "minimum": 1,
+                },
+                "from_version": {
+                    "type": "integer",
+                    "description": "Start version, lower than to_version (default: to_version - 1). Not together with from_author.",
+                    "minimum": 1,
+                },
+                "from_author": {
+                    "type": "string",
+                    "description": "Start at the newest version by this Trac username at or before to_version. An error if that author has none -- never a fall-back to version 1. Not together with from_version.",
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Unchanged lines around each change (default: 3)",
+                    "default": 3,
+                    "minimum": 0,
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": f"Maximum length of the returned diff (default: {_DIFF_MAX_CHARS})",
+                    "default": _DIFF_MAX_CHARS,
+                    "minimum": 1000,
                 },
             },
             "required": ["page_name"],
@@ -541,6 +604,424 @@ async def _handle_get_history(
     )
 
 
+def _diff_lines(text: str) -> list[str]:
+    """Split on ``\\n`` only, keeping the newline.
+
+    Not ``str.splitlines()``: that also splits on ``\\x0c``, ``\\u2028``
+    and friends, and would report changes on lines the stored text does
+    not have.
+    """
+    lines = [line + "\n" for line in text.split("\n")]
+    lines[-1] = lines[-1][:-1]
+    return lines if lines[-1] else lines[:-1]
+
+
+def _hunk_range(start: int, stop: int) -> str:
+    """A unified-diff hunk range, as ``difflib._format_range_unified``."""
+    length = stop - start
+    if length == 1:
+        return str(start + 1)
+    return f"{start + 1 if length else start},{length}"
+
+
+# Past this many inserted+deleted lines, _MyersMatcher stops searching for
+# a minimal diff and replaces everything between the common prefix and
+# suffix: still a correct diff, and its trace stays O(cap^2).
+_MYERS_MAX_EDITS = 2000
+
+
+class _MyersMatcher(difflib.SequenceMatcher):
+    """``SequenceMatcher`` whose matching blocks come from Myers' O(ND)
+    diff, the algorithm behind git's default.
+
+    ``difflib.unified_diff`` hard-codes ``autojunk=True``, which on a
+    200-line page treats any line making up 1% of it -- the blank line, a
+    table rule -- as junk, and merged 200 separate edits into one hunk.
+    ``autojunk=False`` fixes that but is quadratic in a repeated line's
+    count: 33 s for a 2,200-line page of 200 edits. Myers' cost grows
+    with the number of edits instead. Overriding ``get_matching_blocks``
+    keeps difflib's own ``get_opcodes``/``get_grouped_opcodes``.
+    """
+
+    def get_matching_blocks(self):
+        a, b = self.a, self.b
+        prefix = 0
+        while (
+            prefix < len(a)
+            and prefix < len(b)
+            and a[prefix] == b[prefix]
+        ):
+            prefix += 1
+        suffix = 0
+        while (
+            suffix < len(a) - prefix
+            and suffix < len(b) - prefix
+            and a[-1 - suffix] == b[-1 - suffix]
+        ):
+            suffix += 1
+        x, y = a[prefix : len(a) - suffix], b[prefix : len(b) - suffix]
+
+        blocks = [difflib.Match(0, 0, prefix)] if prefix else []
+        for i, j in self._myers_pairs(x, y):
+            last = blocks[-1] if blocks else None
+            if (
+                last is not None
+                and last.a + last.size == prefix + i
+                and last.b + last.size == prefix + j
+            ):
+                blocks[-1] = last._replace(size=last.size + 1)
+            else:
+                blocks.append(difflib.Match(prefix + i, prefix + j, 1))
+        if suffix:
+            last = blocks[-1] if blocks else None
+            start_a, start_b = len(a) - suffix, len(b) - suffix
+            if (
+                last is not None
+                and last.a + last.size == start_a
+                and last.b + last.size == start_b
+            ):
+                blocks[-1] = last._replace(size=last.size + suffix)
+            else:
+                blocks.append(difflib.Match(start_a, start_b, suffix))
+        blocks.append(difflib.Match(len(a), len(b), 0))
+        return blocks
+
+    @staticmethod
+    def _myers_pairs(
+        x: list[str], y: list[str]
+    ) -> list[tuple[int, int]]:
+        """Matched (i, j) line pairs of a shortest edit script, in order."""
+        n, m = len(x), len(y)
+        if not n or not m:
+            return []
+        offset = n + m + 1
+        v = [0] * (2 * offset + 1)
+        # trace[d] holds v[-d..d+1] as it stood before step d.
+        trace: list[list[int]] = []
+        for d in range(min(n + m, _MYERS_MAX_EDITS) + 1):
+            trace.append(v[offset - d : offset + d + 2])
+            for k in range(-d, d + 1, 2):
+                if k == -d or (
+                    k != d and v[offset + k - 1] < v[offset + k + 1]
+                ):
+                    i = v[offset + k + 1]
+                else:
+                    i = v[offset + k - 1] + 1
+                j = i - k
+                while i < n and j < m and x[i] == y[j]:
+                    i += 1
+                    j += 1
+                v[offset + k] = i
+                if i >= n and j >= m:
+                    return _MyersMatcher._backtrack(trace, n, m)
+        return []
+
+    @staticmethod
+    def _backtrack(
+        trace: list[list[int]], n: int, m: int
+    ) -> list[tuple[int, int]]:
+        pairs = []
+        i, j = n, m
+        for d in range(len(trace) - 1, -1, -1):
+            row = trace[d]
+
+            def at(k: int, row=row, d=d) -> int:
+                return row[k + d]
+
+            k = i - j
+            if k == -d or (k != d and at(k - 1) < at(k + 1)):
+                prev_k = k + 1
+            else:
+                prev_k = k - 1
+            prev_i = at(prev_k)
+            prev_j = prev_i - prev_k
+            while i > prev_i and j > prev_j:
+                i -= 1
+                j -= 1
+                pairs.append((i, j))
+            if d:
+                i, j = prev_i, prev_j
+        pairs.reverse()
+        return pairs
+
+
+def _unified_hunks(
+    from_text: str, to_text: str, n: int
+) -> list[list[str]]:
+    """Unified diff hunks, every line newline-terminated, with git's
+    marker after a last line that has none."""
+    a, b = _diff_lines(from_text), _diff_lines(to_text)
+    matcher = _MyersMatcher(None, a, b, autojunk=False)
+    hunks = []
+    for group in matcher.get_grouped_opcodes(n):
+        first, last = group[0], group[-1]
+        hunk = [
+            f"@@ -{_hunk_range(first[1], last[2])} "
+            f"+{_hunk_range(first[3], last[4])} @@\n"
+        ]
+        for tag, i1, i2, j1, j2 in group:
+            if tag == "equal":
+                hunk.extend(" " + line for line in a[i1:i2])
+                continue
+            if tag in ("replace", "delete"):
+                hunk.extend("-" + line for line in a[i1:i2])
+            if tag in ("replace", "insert"):
+                hunk.extend("+" + line for line in b[j1:j2])
+        hunks.append(
+            [
+                part
+                for line in hunk
+                for part in (
+                    [line]
+                    if line.endswith("\n")
+                    else [line + "\n", "\\ No newline at end of file\n"]
+                )
+            ]
+        )
+    return hunks
+
+
+def _cap_diff(
+    header: list[str], hunks: list[list[str]], max_chars: int
+) -> tuple[str, int]:
+    """Join a diff, cut to ``max_chars`` at a hunk boundary.
+
+    Returns (text, hunks_shown). A first hunk that alone exceeds the cap
+    is cut at a line boundary instead, so a one-hunk diff is never
+    returned empty.
+    """
+    if not hunks:
+        return "", 0
+    shown = list(header)
+    size = sum(map(len, shown))
+    hunks_shown = 0
+    for hunk in hunks:
+        hunk_size = sum(map(len, hunk))
+        if size + hunk_size > max_chars:
+            if hunks_shown == 0:
+                for line in hunk:
+                    if size + len(line) > max_chars:
+                        break
+                    shown.append(line)
+                    size += len(line)
+                hunks_shown = 1
+            break
+        shown.extend(hunk)
+        size += hunk_size
+        hunks_shown += 1
+    return "".join(shown), hunks_shown
+
+
+async def _handle_diff(
+    client: TracClient, args: dict
+) -> types.CallToolResult:
+    """Handle wiki_diff (ticket #119).
+
+    Two body fetches and one metadata fetch per version in the range, all
+    server-side, so only the diff and the change comments reach the
+    caller -- not two full bodies.
+    """
+    page_name = args.get("page_name")
+    if not page_name:
+        return build_error_response(
+            "validation_error",
+            "page_name is required",
+            "Provide page_name parameter.",
+        )
+
+    from_version = args.get("from_version")
+    from_author = args.get("from_author")
+    to_version = args.get("to_version")
+    context = args.get("context", 3)
+    max_chars = args.get("max_chars", _DIFF_MAX_CHARS)
+
+    if from_version is not None and from_author is not None:
+        return build_error_response(
+            "validation_error",
+            "from_version and from_author are mutually exclusive",
+            "Pass one start: from_version=N or from_author='username'.",
+        )
+    if from_author is not None and not from_author:
+        return build_error_response(
+            "validation_error",
+            "from_author must be a non-empty Trac username",
+            "Pass the username whose last write starts the range, or omit from_author.",
+        )
+
+    infos: dict[int, dict] = {}
+
+    async def info_at(version: int) -> dict:
+        if version not in infos:
+            info = await run_sync_limited(
+                client.get_wiki_page_info, page_name, version
+            )
+            # getPageInfoVersion answers a missing version with 0, not a
+            # fault (probed 2026-10-25).
+            infos[version] = info if isinstance(info, dict) else {}
+        return infos[version]
+
+    try:
+        latest_info = await run_sync_limited(
+            client.get_wiki_page_info, page_name
+        )
+        if not isinstance(latest_info, dict):
+            # Same answer for a missing page: 0, where getPage faults.
+            from .errors import translate_xmlrpc_error
+
+            return translate_xmlrpc_error(
+                xmlrpc.client.Fault(
+                    404, f'Wiki page "{page_name}" does not exist'
+                ),
+                "wiki",
+                page_name,
+            )
+        latest = latest_info.get("version", 1)
+
+        if to_version is None:
+            to_version = latest
+        elif to_version > latest:
+            return build_error_response(
+                "not_found",
+                f'Wiki page "{page_name}" has no version {to_version} (latest is {latest})',
+                "Omit to_version for the latest, or list versions with wiki_get_history.",
+            )
+
+        if from_author is not None:
+            for version in range(to_version, 0, -1):
+                if (await info_at(version)).get(
+                    "author"
+                ) == from_author:
+                    from_version = version
+                    break
+            else:
+                return build_error_response(
+                    "not_found",
+                    f'Wiki page "{page_name}" has no version by {from_author!r} at or before version {to_version}',
+                    "Check the author with wiki_get_history, or pass from_version instead.",
+                )
+        elif from_version is None:
+            from_version = to_version - 1 if to_version > 1 else None
+        elif from_version >= to_version:
+            return build_error_response(
+                "validation_error",
+                f"from_version ({from_version}) must be lower than to_version ({to_version})",
+                "Pass a from_version below to_version, or omit it for the version before.",
+            )
+
+        to_text = await run_sync_limited(
+            client.get_wiki_page, page_name, to_version
+        )
+        if from_version is None:
+            from_text = ""
+        elif from_version == to_version:
+            from_text = to_text
+        else:
+            from_text = await run_sync_limited(
+                client.get_wiki_page, page_name, from_version
+            )
+        range_start = 1 if from_version is None else from_version + 1
+        revision_infos = await asyncio.gather(
+            *(info_at(v) for v in range(range_start, to_version + 1))
+        )
+    except xmlrpc.client.Fault as err:
+        from .errors import translate_xmlrpc_error
+
+        return translate_xmlrpc_error(err, "wiki", page_name)
+
+    revisions = [
+        {
+            "version": v,
+            "author": info.get("author", "unknown"),
+            "lastModified": format_timestamp(
+                info.get("lastModified", "")
+            ),
+            "comment": info.get("comment", "") or "",
+        }
+        for v, info in zip(
+            range(range_start, to_version + 1),
+            revision_infos,
+            strict=True,
+        )
+    ]
+
+    # The Trac GUI may post CRLF where XML-RPC writes LF; diffing raw would
+    # mark every line of a GUI-saved version as changed.
+    line_endings_normalized = "\r\n" in from_text or "\r\n" in to_text
+    from_label = (
+        f"{page_name} (empty)"
+        if from_version is None
+        else f"{page_name}@v{from_version}"
+    )
+    hunk_lines = _unified_hunks(
+        from_text.replace("\r\n", "\n"),
+        to_text.replace("\r\n", "\n"),
+        context,
+    )
+    header = [f"--- {from_label}\n", f"+++ {page_name}@v{to_version}\n"]
+    body = [line for hunk in hunk_lines for line in hunk[1:]]
+    added = sum(1 for line in body if line.startswith("+"))
+    removed = sum(1 for line in body if line.startswith("-"))
+    hunks = len(hunk_lines)
+    diff_text, hunks_shown = _cap_diff(header, hunk_lines, max_chars)
+    full_size = sum(map(len, header)) + sum(
+        len(line) for hunk in hunk_lines for line in hunk
+    )
+    truncated = bool(hunk_lines) and len(diff_text) < full_size
+    identical = from_text == to_text
+
+    from_str = "empty" if from_version is None else f"v{from_version}"
+    response_lines = [
+        f"# {page_name} diff: {from_str} -> v{to_version}"
+    ]
+    if identical:
+        response_lines.append("Identical: no change in this range.")
+    elif not hunk_lines:
+        response_lines.append(
+            "The bodies differ only in line endings (CRLF vs LF)."
+        )
+    else:
+        response_lines.append(
+            f"+{added} -{removed} lines in {hunks} hunk(s)"
+        )
+    if revisions:
+        response_lines.append("Revisions (oldest first):")
+        for rev in revisions:
+            comment_str = rev["comment"] or "(no comment)"
+            response_lines.append(
+                f"- v{rev['version']} by {rev['author']} at {rev['lastModified']}: {comment_str}"
+            )
+    response_lines.extend(["----", ""])
+    text = "\n".join(response_lines) + diff_text
+    if truncated:
+        text += (
+            f"\n[truncated: {hunks_shown} of {hunks} hunk(s) shown; "
+            "raise max_chars or narrow the range]\n"
+        )
+
+    structured = {
+        "page_name": page_name,
+        "from_version": from_version,
+        "to_version": to_version,
+        "latest_version": latest,
+        "identical": identical,
+        "added": added,
+        "removed": removed,
+        "hunks": hunks,
+        "hunks_shown": hunks_shown,
+        "truncated": truncated,
+        "line_endings_normalized": line_endings_normalized,
+        "diff": diff_text,
+        "revisions": revisions,
+    }
+    if from_author is not None:
+        structured["from_author"] = from_author
+
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        structuredContent=structured,
+    )
+
+
 # ToolSpec list for registry-based dispatch
 WIKI_READ_SPECS: list[ToolSpec] = [
     ToolSpec(
@@ -562,5 +1043,10 @@ WIKI_READ_SPECS: list[ToolSpec] = [
         tool=WIKI_READ_TOOLS[3],
         permissions=frozenset({"WIKI_VIEW"}),
         handler=_handle_get_history,
+    ),
+    ToolSpec(
+        tool=WIKI_READ_TOOLS[4],
+        permissions=frozenset({"WIKI_VIEW"}),
+        handler=_handle_diff,
     ),
 ]
