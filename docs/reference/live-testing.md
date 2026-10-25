@@ -89,7 +89,7 @@ Tests run in a deliberate order that manages resource dependencies:
 | 1 | Connectivity | `ping` |
 | 1b | System tools | `get_server_time` |
 | 2a | Ticket reads | `ticket_search`, `ticket_get`, `ticket_changelog`, `ticket_actions`, `ticket_fields` |
-| 2b | Wiki reads | `wiki_get`, `wiki_get_history`, `wiki_search`, `wiki_recent_changes` |
+| 2b | Wiki reads | `wiki_get`, `wiki_get_history`, `wiki_diff`, `wiki_search`, `wiki_recent_changes` |
 | 2c | Milestone reads | `milestone_list`, `milestone_get` |
 | 3a | Ticket writes | `ticket_create`, `ticket_update` |
 | 3b | Wiki writes | `wiki_create`, `wiki_update` |
