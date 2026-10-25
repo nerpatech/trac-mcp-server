@@ -28,15 +28,22 @@ PAGE = "Scratch/DiffPage"
 class FakeWikiClient:
     """One page; ``versions[i]`` is version ``i + 1`` as (text, author, comment)."""
 
-    def __init__(self, versions, page=PAGE):
+    def __init__(self, versions, page=PAGE, info_faults=()):
+        # A None entry is a deleted version (Trac can remove a range).
         self.versions = versions
         self.page = page
+        self.info_faults = set(info_faults)
+        self.info_calls = []
 
     def _version(self, version):
         return len(self.versions) if version is None else version
 
     def _exists(self, name, v):
-        return name == self.page and 1 <= v <= len(self.versions)
+        return (
+            name == self.page
+            and 1 <= v <= len(self.versions)
+            and self.versions[v - 1] is not None
+        )
 
     def get_wiki_page(self, name, version=None):
         v = self._version(version)
@@ -49,6 +56,11 @@ class FakeWikiClient:
 
     def get_wiki_page_info(self, name, version=None):
         v = self._version(version)
+        self.info_calls.append(version)
+        if version in self.info_faults:
+            raise xmlrpc.client.Fault(
+                403, "WIKI_VIEW privileges required"
+            )
         if not self._exists(name, v):
             return 0
         _text, author, comment = self.versions[v - 1]
@@ -61,9 +73,10 @@ class FakeWikiClient:
         }
 
 
-def _diff(versions, **args):
+def _diff(versions, client=None, **args):
     args.setdefault("page_name", PAGE)
-    return asyncio.run(_handle_diff(FakeWikiClient(versions), args))
+    client = client or FakeWikiClient(versions)
+    return asyncio.run(_handle_diff(client, args))
 
 
 def _ok(result):
@@ -325,6 +338,122 @@ class TestTruncation:
         assert out["hunks"] == out["hunks_shown"] == 1
         assert 0 < len(out["diff"]) <= 1000
         assert out["diff"].endswith("\n")
+        # The cut hunk's header counts exactly the lines it kept.
+        header, *body = out["diff"].split("\n")[2:-1]
+        counts = header.split()[1:3]
+        old = int(counts[0].split(",")[1])
+        new = int(counts[1].split(",")[1])
+        assert old == sum(1 for line in body if line[:1] in " -")
+        assert new == sum(1 for line in body if line[:1] in " +")
+        assert old + new > 0
+
+    def test_a_first_line_longer_than_the_cap_shows_no_hunk(self):
+        versions = [
+            ("x" * 2000 + "\n", "x", "v1"),
+            ("y" * 2000 + "\n", "x", "v2"),
+        ]
+        out = _ok(_diff(versions, max_chars=1000))
+        assert out["truncated"] is True
+        assert (out["hunks"], out["hunks_shown"]) == (1, 0)
+        assert "@@" not in out["diff"]
+        assert (out["added"], out["removed"]) == (1, 1)
+
+    def test_no_newline_marker_stays_with_its_line(self):
+        before = "".join(f"old {i}\n" for i in range(60)) + "tail"
+        after = "".join(f"new {i}\n" for i in range(60)) + "TAIL"
+        for cap in range(1000, 1400, 7):
+            diff = _ok(
+                _diff(
+                    [(before, "x", "v1"), (after, "x", "v2")],
+                    max_chars=cap,
+                )
+            )["diff"]
+            lines = diff.split("\n")
+            for idx, line in enumerate(lines):
+                if line.startswith("\\"):
+                    assert lines[idx - 1][:1] in "+-", (
+                        cap,
+                        lines[idx - 1],
+                    )
+
+
+class TestDeletedVersionsAndFaults:
+    VERSIONS = [
+        ("one\n", "agent_rpc", "v1"),
+        ("one\ntwo\n", "nerpa_admin", "v2"),
+        None,  # v3 deleted
+        ("one\ntwo\nfour\n", "nerpa_admin", "v4"),
+    ]
+
+    def test_default_start_skips_a_deleted_version(self):
+        out = _ok(_diff(self.VERSIONS))
+        assert (out["from_version"], out["to_version"]) == (2, 4)
+        assert [r["version"] for r in out["revisions"]] == [4]
+
+    def test_range_over_a_gap_lists_only_existing_versions(self):
+        out = _ok(_diff(self.VERSIONS, from_version=1))
+        assert [r["version"] for r in out["revisions"]] == [2, 4]
+        assert all(r["author"] != "unknown" for r in out["revisions"])
+
+    def test_explicit_deleted_version_names_the_version(self):
+        text = _error_text(_diff(self.VERSIONS, from_version=3))
+        assert "not_found" in text and "at version 3" in text
+
+    def test_a_faulting_revision_is_skipped_not_fatal(self):
+        client = FakeWikiClient(
+            self.VERSIONS[:2] + [self.VERSIONS[3]] * 2, info_faults={3}
+        )
+        out = _ok(_diff(None, client=client, from_version=1))
+        assert [r["version"] for r in out["revisions"]] == [2, 4]
+
+    def test_history_skips_a_deleted_version(self):
+        from trac_mcp_server.mcp.tools.wiki_read import (
+            _handle_get_history,
+        )
+
+        result = asyncio.run(
+            _handle_get_history(
+                FakeWikiClient(self.VERSIONS), {"page_name": PAGE}
+            )
+        )
+        assert not result.isError, result.content[0].text
+        assert [
+            r["version"] for r in result.structuredContent["revisions"]
+        ] == [4, 2, 1]
+
+
+class TestFromAuthorWindows:
+    def test_match_beyond_the_first_window(self):
+        versions = [
+            ("base\n", "agent_rpc", "v1"),
+            ("base\nx\n", "agent_rpc", "v2"),
+        ]
+        versions += [
+            (f"base\nx\n{i}\n", "nerpa_admin", f"v{i}")
+            for i in range(3, 41)
+        ]
+        client = FakeWikiClient(versions)
+        out = _ok(_diff(None, client=client, from_author="agent_rpc"))
+        assert (out["from_version"], out["to_version"]) == (2, 40)
+        assert len(out["revisions"]) == 38
+
+
+class TestMinimal:
+    def test_minimal_by_default(self):
+        assert _ok(_diff(THREE))["minimal"] is True
+
+    def test_edit_cap_is_reported(self, monkeypatch):
+        from trac_mcp_server.mcp.tools import wiki_read
+
+        monkeypatch.setattr(wiki_read, "_MYERS_MAX_EDITS", 2)
+        versions = [
+            ("a\nkeep\nb\nkeep\nc\n", "x", "v1"),
+            ("A\nkeep\nB\nkeep\nC\n", "x", "v2"),
+        ]
+        result = _diff(versions)
+        out = _ok(result)
+        assert out["minimal"] is False
+        assert "Not minimal" in result.content[0].text
 
 
 def _keepends(text):
