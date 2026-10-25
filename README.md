@@ -147,7 +147,7 @@ trac-mcp attach-get --page Docs/Design diagram.png diagram.png
 
 It connects with the nearest `.mcp.json` entry (or `--url`). See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
-## Available Tools (43)
+## Available Tools (44)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 
@@ -184,7 +184,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | `ticket_enum_list` | List enum values for a given enum type |
 | `ticket_enum_delete` | Delete an enum value (requires TICKET_ADMIN) |
 
-### Wiki (7)
+### Wiki (8)
 | Tool | Description |
 |------|-------------|
 | `wiki_get` | Get wiki page content as stored (TracWiki, byte-for-byte) |
@@ -194,6 +194,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | `wiki_delete` | Delete wiki pages |
 | `wiki_recent_changes` | List recent wiki changes |
 | `wiki_get_history` | Get version history for a wiki page |
+| `wiki_diff` | Unified diff between two versions of a wiki page, with the change comments in between |
 
 ### Wiki Files (3)
 | Tool | Description |

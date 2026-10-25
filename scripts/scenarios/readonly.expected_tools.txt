@@ -13,6 +13,7 @@ ticket_get
 ticket_search
 wiki_attachment_get
 wiki_attachment_list
+wiki_diff
 wiki_file_detect_format
 wiki_file_pull
 wiki_get
