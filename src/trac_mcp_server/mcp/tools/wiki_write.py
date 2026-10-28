@@ -2,7 +2,8 @@
 
 This module implements wiki write operations: create, update, and delete.
 All tools use async handlers with run_sync() to bridge synchronous TracClient calls,
-automatic Markdown conversion, and structured error responses.
+and structured error responses. Content is TracWiki and is stored
+byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
 import logging
@@ -10,11 +11,12 @@ import xmlrpc.client
 
 import mcp.types as types
 
-from ...converters.common import auto_convert
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_create",
-        description="Create new wiki page from Markdown input. Fails if page exists (use wiki_update instead).",
+        description="Create a new wiki page. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Fails if the page exists (use wiki_update instead).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -39,8 +41,9 @@ WIKI_WRITE_TOOLS = [
                 },
                 "content": {
                     "type": "string",
-                    "description": "Page content in Markdown format (required)",
+                    "description": "Page content (required). TracWiki, stored verbatim.",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "comment": {
                     "type": "string",
                     "description": "Change comment (optional)",
@@ -51,7 +54,7 @@ WIKI_WRITE_TOOLS = [
     ),
     types.Tool(
         name="wiki_update",
-        description="Update existing wiki page with optimistic locking. Requires version for conflict detection.",
+        description="Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -67,13 +70,14 @@ WIKI_WRITE_TOOLS = [
                 },
                 "content": {
                     "type": "string",
-                    "description": "Page content in Markdown format (required)",
+                    "description": "Page content (required). TracWiki, stored verbatim.",
                 },
                 "version": {
                     "type": "integer",
                     "description": "Current page version for optimistic locking (required)",
                     "minimum": 1,
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "comment": {
                     "type": "string",
                     "description": "Change comment (optional)",
@@ -127,16 +131,14 @@ async def _handle_create(
 
     comment = args.get("comment", "")
 
-    # Convert content using auto_convert with server capability detection
-    conversion = await auto_convert(
-        content, client.config, target_format="tracwiki"
-    )
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
 
-    # Log warnings for agent visibility
-    if conversion.warnings:
-        logger.warning(
-            f"Conversion warnings: {', '.join(conversion.warnings)}"
-        )
+    # The author's bytes are the bytes that land. No converter, so no
+    # detection either -- ticket #47's misclassification of marker-poor
+    # Markdown cannot arise on this path any more (ticket #69).
+    wiki_content = content
 
     # Check if page already exists
     # Note: get_wiki_page raises exceptions for non-existent pages,
@@ -159,9 +161,23 @@ async def _handle_create(
             # Different error - re-raise
             raise
 
+    # The link gate (ticket #64) AFTER the existence check: that check
+    # is one call the handler makes anyway, while the gate costs a
+    # render plus probes. A create aimed at a page that already exists
+    # was never going to land, and "already_exists" is the error its
+    # caller can act on.
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {"content": wiki_content},
+        args,
+        recheck_with="wiki_render_check",
+    )
+    if refusal is not None:
+        return refusal
+
     # Create the page (version=None creates new page)
     result = await run_sync(
-        client.put_wiki_page, page_name, conversion.text, comment, None
+        client.put_wiki_page, page_name, wiki_content, comment, None
     )
 
     # Extract version from result
@@ -171,13 +187,7 @@ async def _handle_create(
     response_lines = [
         f"Created wiki page '{page_name}' (version {new_version})"
     ]
-
-    # Add warnings if any
-    if conversion.warnings:
-        response_lines.append("")
-        response_lines.append("Conversion warnings:")
-        for warning in conversion.warnings:
-            response_lines.append(f"- {warning}")
+    response_lines.extend(gate_lines)
 
     return types.CallToolResult(
         content=[
@@ -217,23 +227,28 @@ async def _handle_update(
 
     comment = args.get("comment", "")
 
-    # Convert content using auto_convert with server capability detection
-    conversion = await auto_convert(
-        content, client.config, target_format="tracwiki"
-    )
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
 
-    # Log warnings for agent visibility
-    if conversion.warnings:
-        logger.warning(
-            f"Conversion warnings: {', '.join(conversion.warnings)}"
-        )
+    # Stored as written -- see the matching comment in _handle_create.
+    wiki_content = content
+
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {"content": wiki_content},
+        args,
+        recheck_with="wiki_render_check",
+    )
+    if refusal is not None:
+        return refusal
 
     # Update the page with version check
     try:
         result = await run_sync(
             client.put_wiki_page,
             page_name,
-            conversion.text,
+            wiki_content,
             comment,
             version,
         )
@@ -272,13 +287,7 @@ async def _handle_update(
     response_lines = [
         f"Updated wiki page '{page_name}' to version {new_version}"
     ]
-
-    # Add warnings if any
-    if conversion.warnings:
-        response_lines.append("")
-        response_lines.append("Conversion warnings:")
-        for warning in conversion.warnings:
-            response_lines.append(f"- {warning}")
+    response_lines.extend(gate_lines)
 
     return types.CallToolResult(
         content=[

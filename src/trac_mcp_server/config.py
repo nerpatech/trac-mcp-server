@@ -18,6 +18,9 @@ Environment variables:
         (optional). When set, TRAC_USERNAME/TRAC_PASSWORD are not required --
         this deployment mode never uses a shared service-account identity;
         see mcp/oidc.py and docs/reference/http-transport.md.
+    TRAC_ALLOWED_INSTANCES: Comma-separated instances the default identity may
+        reach, each a ``/path`` on the TRAC_URL host or an absolute http(s) URL
+        (optional, default: unrestricted; ticket #110)
 """
 
 import ipaddress
@@ -53,6 +56,18 @@ class Config:
     bearer_token: str | None = None
     rpc_url_override: str | None = None
     oidc_only: bool = False
+    # Ticket #64 ruling 5. The write-time link gate can refuse writes,
+    # and it runs on a daemon every project on this host writes
+    # through, so a gate misbehaving in production needs an answer
+    # cheaper than a revert and a redeploy. Default on: this exists to
+    # be switched off in an emergency, not to be opted into.
+    write_gate: bool = True
+    # Ticket #110: the instances this Config's caller may reach, as
+    # absolute URLs with no trailing slash. None = unrestricted. Carried on
+    # every Config ``InstanceRegistry.resolve()`` returns so the probes in
+    # preview/targets.py, which see only the client, can enforce the same
+    # scope as the resolve() choke point.
+    allowed_instances: frozenset[str] | None = None
 
 
 def validate_config(config: Config) -> None:
@@ -101,6 +116,82 @@ def validate_config(config: Config) -> None:
         )
 
 
+def parse_allowed_instances(
+    raw: object, source: str
+) -> tuple[str, ...]:
+    """Parse one instance allowlist as configured (ticket #110).
+
+    The single parser for both sources -- ``TRAC_ALLOWED_INSTANCES`` and
+    an identity's ``instances:`` key -- so the two cannot drift. ``raw``
+    is a comma-separated string (all an env var, or a ``${VAR}``
+    interpolation, can be) or a list.
+
+    Args:
+        raw: The configured value. ``None`` is the caller's business
+            (it means unrestricted) and is not accepted here.
+        source: Names the setting in error messages, e.g.
+            ``"TRAC_ALLOWED_INSTANCES"``.
+
+    Returns:
+        The stripped, non-empty entries, in order.
+
+    Raises:
+        ValueError: ``raw`` is neither a string nor a list (a YAML
+            mapping must not be read as its keys); it has no non-empty
+            entries -- an empty list is a misconfiguration, never "deny
+            everything"; or an entry is neither a ``/path`` nor an
+            absolute http(s) URL.
+    """
+    if isinstance(raw, str):
+        items: list = raw.split(",")
+    elif isinstance(raw, list | tuple):
+        items = list(raw)
+    else:
+        raise ValueError(
+            f"{source} must be a list or a comma-separated string of "
+            f"instances, not {type(raw).__name__}."
+        )
+    entries = tuple(
+        s for s in (str(item).strip() for item in items) if s
+    )
+    if not entries:
+        raise ValueError(
+            f"{source} is set but lists no instances. Leave it unset "
+            "for an unrestricted caller, or list the instances it may "
+            "reach (/path or absolute URL)."
+        )
+    for entry in entries:
+        if not entry.startswith(("/", "http://", "https://")):
+            raise ValueError(
+                f"{source} has instance '{entry}': must be a /path on "
+                "the default host or an absolute http(s) URL."
+            )
+    return entries
+
+
+def normalize_allowed_instances(
+    entries: "list[str] | tuple[str, ...]", base_url: str
+) -> frozenset[str]:
+    """Turn parsed allowlist entries into absolute URLs with no trailing
+    slash (ticket #110).
+
+    A ``/path`` entry means that path on ``base_url``'s host; an
+    ``http(s)://`` entry is kept as written. Nothing else is
+    normalised -- no dot-segment resolution, no lowercasing of the path --
+    because the allowlist is compared exactly: a non-canonical spelling
+    must be refused, never rewritten into an allowed one. ``entries``
+    must come from :func:`parse_allowed_instances`, which validated them.
+    """
+    parsed = urlparse(base_url.strip())
+    host_root = f"{parsed.scheme}://{parsed.netloc}"
+    return frozenset(
+        (host_root + entry if entry.startswith("/") else entry).rstrip(
+            "/"
+        )
+        for entry in entries
+    )
+
+
 def _is_loopback_host(host: str) -> bool:
     """Return True if ``host`` only ever resolves to the local machine."""
     if host == "localhost":
@@ -125,13 +216,55 @@ def validate_server_config(server_config: "ServerConfig") -> None:
     always-losing static-token comparison against a per-user token no
     caller could ever satisfy.
 
+    Also validates ``server_config.identities`` (ticket #102) against the
+    rest of the server config -- checks that need the auth_token and
+    transport together, so they belong here rather than in
+    ``instances.load_identities()``, which only sees the identities file
+    in isolation.
+
     Args:
         server_config: ServerConfig instance to validate.
 
     Raises:
-        ValueError: If auth_token and oidc_rpc_url are both set, or if an
-            unauthenticated http transport would bind a non-loopback host.
+        ValueError: If auth_token or identities are combined with
+            oidc_rpc_url, if an unauthenticated http transport would bind
+            a non-loopback host, or an identities config is invalid (see
+            below).
     """
+    if server_config.identities:
+        if server_config.transport != "http":
+            raise ValueError(
+                "TRAC_IDENTITIES is set but transport is "
+                f"'{server_config.transport}'. Per-caller identity "
+                "resolution reads a bearer token off each HTTP request; "
+                "stdio has no per-request signal to read one from, so an "
+                "identities file there could never be honoured. Use "
+                "--transport http, or drop TRAC_IDENTITIES."
+            )
+        if (
+            server_config.auth_token
+            and server_config.auth_token in server_config.identities
+        ):
+            raise ValueError(
+                "An identity token in TRAC_IDENTITIES collides with "
+                "TRAC_MCP_AUTH_TOKEN. Every token must be distinct, or a "
+                "caller presenting the shared value would be ambiguous "
+                "between the static token and that identity."
+            )
+        if (
+            server_config.allow_unauthenticated
+            and not server_config.auth_token
+        ):
+            raise ValueError(
+                "TRAC_IDENTITIES is set together with "
+                "allow_unauthenticated and no TRAC_MCP_AUTH_TOKEN. "
+                "Declaring per-caller identities and then opting the "
+                "endpoint out of authentication is contradictory: no "
+                "caller could ever present a token for one of them to "
+                "be resolved. Set TRAC_MCP_AUTH_TOKEN, or drop "
+                "allow_unauthenticated/TRAC_IDENTITIES."
+            )
+
     if server_config.transport != "http":
         return
 
@@ -144,10 +277,23 @@ def validate_server_config(server_config: "ServerConfig") -> None:
             "Remove one of the two."
         )
 
+    if server_config.identities and server_config.oidc_rpc_url:
+        raise ValueError(
+            "TRAC_IDENTITIES and TRAC_MCP_OIDC_RPC_URL cannot both be "
+            "set: both resolve the caller from the same Authorization "
+            "header, one as a static identity token, the other as the "
+            "caller's own OIDC access token. Remove one of the two."
+        )
+
+    # Identities alone (no static auth_token) still gate every request --
+    # BearerAuthMiddleware is open only when there is neither a token nor
+    # any identities (ticket #102) -- so they count as authentication for
+    # bind safety exactly like auth_token does.
     if (
         server_config.auth_token
         or server_config.oidc_rpc_url
         or server_config.allow_unauthenticated
+        or server_config.identities
     ):
         return
 
@@ -337,6 +483,34 @@ def load_config(
     else:
         final_rpc_timeout = 60
 
+    # Off only on an explicit falsey value, so a typo'd or empty
+    # TRAC_WRITE_GATE leaves the gate ON. A kill switch that fails open
+    # on a malformed value disables the check exactly when nobody meant
+    # to, and silently.
+    write_gate_raw = os.getenv("TRAC_WRITE_GATE")
+    if write_gate_raw is not None:
+        final_write_gate = write_gate_raw.strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+    elif "write_gate" in fb:
+        final_write_gate = bool(fb["write_gate"])
+    else:
+        final_write_gate = True
+
+    # Ticket #110: env only, no YAML key. Unset is unrestricted; set but
+    # empty is an error, never "deny all" -- an empty list that silently
+    # locked everything out (or, worse, was read as "no list") is a
+    # misconfiguration the operator must hear about at startup.
+    allowed_raw = os.getenv("TRAC_ALLOWED_INSTANCES")
+    allowed_entries = (
+        parse_allowed_instances(allowed_raw, "TRAC_ALLOWED_INSTANCES")
+        if allowed_raw is not None
+        else None
+    )
+
     config = Config(
         trac_url=trac_url,
         username=trac_username,
@@ -347,8 +521,23 @@ def load_config(
         max_batch_size=final_max_batch,
         rpc_timeout=final_rpc_timeout,
         oidc_only=oidc_only,
+        write_gate=final_write_gate,
     )
 
     validate_config(config)
+
+    if allowed_entries is not None:
+        config.allowed_instances = normalize_allowed_instances(
+            allowed_entries, config.trac_url
+        )
+        # Fail closed at startup: a default instance outside its own
+        # allowlist would refuse every default-instance call.
+        if config.trac_url not in config.allowed_instances:
+            raise ValueError(
+                f"Default instance {config.trac_url} is not in "
+                "TRAC_ALLOWED_INSTANCES "
+                f"({', '.join(sorted(config.allowed_instances))}). Add it "
+                "to the list, or point TRAC_URL at an allowed instance."
+            )
 
     return config

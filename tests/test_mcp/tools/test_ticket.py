@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import mcp.types as types
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.converters.common import ConversionResult
 from trac_mcp_server.core.client import TicketCreateTimeout, TracClient
 from trac_mcp_server.mcp.tools import TICKET_TOOLS
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -180,26 +179,18 @@ class TestHandleTicketCreate(unittest.TestCase):
         self.mock_client = MagicMock()
 
     def test_create_success(self):
-        """Create ticket with summary and markdown description."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        """Create ticket with a summary and a TracWiki description."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = 42
-            mock_convert.return_value = (
-                "== Description ==\n\nWith '''markdown'''"
-            )
 
             result = asyncio.run(
                 _handle_create(
                     self.mock_client,
                     {
                         "summary": "Test ticket",
-                        "description": "## Description\n\nWith **markdown**",
+                        "description": "== Description ==\n\nWith '''bold'''",
                     },
                 )
             )
@@ -209,11 +200,6 @@ class TestHandleTicketCreate(unittest.TestCase):
             self.assertIn("Created ticket #42", result.content[0].text)
             self.assertIn("Test ticket", result.content[0].text)
 
-            # Verify markdown_to_tracwiki was called on description
-            mock_convert.assert_called_once_with(
-                "## Description\n\nWith **markdown**"
-            )
-
             # Verify run_sync called with correct args
             mock_run_sync.assert_called_once()
             call_args = mock_run_sync.call_args[0]
@@ -222,24 +208,19 @@ class TestHandleTicketCreate(unittest.TestCase):
             )
             self.assertEqual(call_args[1], "Test ticket")  # summary
             self.assertEqual(
-                call_args[2], "== Description ==\n\nWith '''markdown'''"
-            )  # converted desc
+                call_args[2],
+                "== Description ==\n\nWith '''bold'''",
+            )  # stored as written
             self.assertEqual(
                 call_args[3], "defect"
             )  # default ticket_type
 
     def test_create_minimal(self):
         """Create ticket with summary and minimal description uses default type."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = 1
-            mock_convert.return_value = "Simple description"
 
             result = asyncio.run(
                 _handle_create(
@@ -263,16 +244,10 @@ class TestHandleTicketCreate(unittest.TestCase):
 
     def test_create_with_all_fields(self):
         """Create ticket with all optional fields passed through."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = 99
-            mock_convert.return_value = "Converted description"
 
             result = asyncio.run(
                 _handle_create(
@@ -312,16 +287,10 @@ class TestHandleTicketCreate(unittest.TestCase):
 
     def test_create_with_severity(self):
         """Severity attribute is forwarded to create_ticket (not dropped)."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = 123
-            mock_convert.return_value = "Converted description"
 
             result = asyncio.run(
                 _handle_create(
@@ -424,15 +393,9 @@ class TestHandleTicketCreate(unittest.TestCase):
 
     def test_create_xmlrpc_fault(self):
         """XML-RPC fault during create produces structured error via dispatcher."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
-            mock_convert.return_value = "Converted"
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.side_effect = xmlrpc.client.Fault(
                 500, "Internal server error"
             )
@@ -462,15 +425,9 @@ class TestHandleTicketCreate(unittest.TestCase):
         """When the create timed out but landed, the agent must be told the
         id and told NOT to retry -- the generic 'retry later' advice would
         produce a duplicate ticket."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
-            mock_convert.return_value = "Converted"
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.side_effect = TicketCreateTimeout(
                 "timed out, but the ticket was created anyway as #77.",
                 ticket_id=77,
@@ -494,15 +451,9 @@ class TestHandleTicketCreate(unittest.TestCase):
 
     def test_create_timeout_not_created_says_retry_is_safe(self):
         """When the create timed out and did not land, say so."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
-            mock_convert.return_value = "Converted"
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.side_effect = TicketCreateTimeout(
                 "timed out and no matching ticket was found afterwards.",
                 ticket_id=None,
@@ -524,15 +475,9 @@ class TestHandleTicketCreate(unittest.TestCase):
 
     def test_create_permission_denied(self):
         """Permission denied fault returns permission_denied error."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
-            mock_convert.return_value = "Converted"
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.side_effect = xmlrpc.client.Fault(
                 403, "TICKET_CREATE permission denied"
             )
@@ -569,26 +514,18 @@ class TestHandleTicketUpdate(unittest.TestCase):
         self.mock_client = MagicMock()
 
     def test_update_with_comment(self):
-        """Update ticket with markdown comment converts and includes it."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        """Update ticket with a TracWiki comment stores it as written."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = True
-            mock_convert.return_value = (
-                "=== Update ===\n\nWith '''markdown'''"
-            )
 
             result = asyncio.run(
                 _handle_update(
                     self.mock_client,
                     {
                         "ticket_id": 42,
-                        "comment": "### Update\n\nWith **markdown**",
+                        "comment": "=== Update ===\n\nWith '''bold'''",
                     },
                 )
             )
@@ -598,19 +535,14 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertIn("Updated ticket #42", result.content[0].text)
             self.assertIn("added comment", result.content[0].text)
 
-            # Verify markdown_to_tracwiki was called on comment
-            mock_convert.assert_called_once_with(
-                "### Update\n\nWith **markdown**"
-            )
-
-            # Verify run_sync called with converted comment
+            # Verify run_sync called with the comment as written
             call_args = mock_run_sync.call_args[0]
             self.assertEqual(
                 call_args[0], self.mock_client.update_ticket
             )
             self.assertEqual(call_args[1], 42)
             self.assertEqual(
-                call_args[2], "=== Update ===\n\nWith '''markdown'''"
+                call_args[2], "=== Update ===\n\nWith '''bold'''"
             )
             self.assertEqual(call_args[3], {})  # no attribute changes
 
@@ -646,18 +578,97 @@ class TestHandleTicketUpdate(unittest.TestCase):
                 {"priority": "major", "keywords": "updated"},
             )
 
+    def test_update_forwards_base_ts(self):
+        """base_ts is forwarded to the client call so Trac's optimistic
+        lock actually gets the caller's token (ticket #50)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "priority": "major",
+                        "base_ts": "1788093861682305",
+                    },
+                )
+            )
+
+            call_args = mock_run_sync.call_args[0]
+            self.assertEqual(
+                call_args[0], self.mock_client.update_ticket
+            )
+            self.assertEqual(call_args[-1], "1788093861682305")
+
+    def test_update_omitted_base_ts_forwards_none(self):
+        """Omitting base_ts forwards None, preserving the legacy
+        self-minted-token fallback in TracClient.update_ticket."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {"ticket_id": 42, "priority": "major"},
+                )
+            )
+
+            call_args = mock_run_sync.call_args[0]
+            self.assertIsNone(call_args[-1])
+
+    def test_update_base_ts_conflict_returns_version_conflict(self):
+        """A TicketUpdateConflict from the client becomes a
+        version_conflict error naming what changed, not a bare exception
+        or a silently-accepted write (ticket #50)."""
+        from trac_mcp_server.core.client import TicketUpdateConflict
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = TicketUpdateConflict(
+                "Ticket #42 changed since base_ts=123: comment by operator",
+                ticket_id=42,
+                base_ts="123",
+                changes=[
+                    {
+                        "timestamp": "20260830T12:16:00",
+                        "author": "operator",
+                        "field": "comment",
+                        "oldvalue": "",
+                        "newvalue": "hold off",
+                    }
+                ],
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "status": "accepted",
+                        "base_ts": "123",
+                    },
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("version_conflict", text)
+            self.assertIn("operator", text)
+            self.assertIn("comment", text)
+            self.assertIn("ticket_get(ticket_id=42)", text)
+
     def test_update_comment_and_fields(self):
         """Update ticket with both comment and field changes."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = True
-            mock_convert.return_value = "Converted comment"
 
             result = asyncio.run(
                 _handle_update(
@@ -680,7 +691,7 @@ class TestHandleTicketUpdate(unittest.TestCase):
 
             # Verify both comment and attributes passed
             call_args = mock_run_sync.call_args[0]
-            self.assertEqual(call_args[2], "Converted comment")
+            self.assertEqual(call_args[2], "Adding a note")
             self.assertEqual(
                 call_args[3],
                 {
@@ -855,35 +866,26 @@ class TestHandleTicketUpdate(unittest.TestCase):
             attrs = mock_run_sync.call_args[0][3]
             self.assertEqual(attrs["type"], "enhancement")
 
-    def test_update_description_field_converts_markdown(self):
-        """description kwarg is forwarded after markdown->tracwiki conversion."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+    def test_update_description_field_stored_as_written(self):
+        """description kwarg is forwarded byte-for-byte (ticket #69)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = True
-            mock_convert.return_value = "Converted body"
 
             result = asyncio.run(
                 _handle_update(
                     self.mock_client,
                     {
                         "ticket_id": 13,
-                        "description": "**bold** body in markdown",
+                        "description": "'''bold''' body",
                     },
                 )
             )
 
             self.assertIsInstance(result, types.CallToolResult)
-            mock_convert.assert_called_once_with(
-                "**bold** body in markdown"
-            )
             attrs = mock_run_sync.call_args[0][3]
-            self.assertEqual(attrs["description"], "Converted body")
+            self.assertEqual(attrs["description"], "'''bold''' body")
 
     def test_update_workflow_action(self):
         """action kwarg triggers a Trac workflow transition (e.g. accept)."""
@@ -946,6 +948,13 @@ class TestHandleTicketUpdate(unittest.TestCase):
         that both closes the ticket AND sets the resolution -- not a
         bare `resolution` attribute the workflow action then silently
         overwrites with an empty string (ticket #32).
+
+        ``get_ticket_actions`` is mocked with the real wire shape: each
+        ``input_fields`` entry is a ``[name, default, options]`` list,
+        not a bare field-name string. Ticket #32's remap block assumed
+        the latter, so ``str(field).endswith("resolution")`` was always
+        False and the remap never fired (ticket #49) -- a defect this
+        test's earlier, string-shaped mock could not have caught.
         """
 
         def run_sync_side_effect(func, *args, **kwargs):
@@ -956,7 +965,19 @@ class TestHandleTicketUpdate(unittest.TestCase):
                         "resolve",
                         "resolve",
                         ["closed"],
-                        ["resolve_resolution"],
+                        [
+                            [
+                                "action_resolve_resolve_resolution",
+                                "fixed",
+                                [
+                                    "fixed",
+                                    "invalid",
+                                    "wontfix",
+                                    "duplicate",
+                                    "worksforme",
+                                ],
+                            ]
+                        ],
                     ],
                 ]
             return True
@@ -1009,6 +1030,46 @@ class TestHandleTicketUpdate(unittest.TestCase):
 
             attrs = mock_run_sync.call_args[0][3]
             self.assertEqual(attrs, {"resolution": "wontfix"})
+
+    def test_update_resolve_action_no_matching_field_warns(self):
+        """If no action input field ends in 'resolution', the bare
+        `resolution` attribute is still sent (unchanged behavior) but
+        the tool result carries a warning rather than reporting quiet
+        success -- ticket #49's "do not fail silently" suggestion.
+        """
+
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_actions:
+                return [
+                    ["resolve", "resolve", ["closed"], []],
+                ]
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 24,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                    },
+                )
+            )
+
+            update_call = next(
+                c
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            )
+            attrs = update_call.args[3]
+            self.assertEqual(attrs["resolution"], "fixed")
+            text = result.content[0].text
+            self.assertIn("WARNING", text)
 
     def test_update_explicit_action_resolution_field_wins(self):
         """An explicit action_resolve_resolve_resolution still wins over
@@ -1091,16 +1152,10 @@ class TestHandleTicketUpdate(unittest.TestCase):
                 ]
             return True
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_write.markdown_to_tracwiki"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.side_effect = run_sync_side_effect
-            mock_convert.return_value = "New reply text"
 
             result = asyncio.run(
                 _handle_update(
@@ -1631,8 +1686,48 @@ class TestHandleTicketGet:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    @staticmethod
+    def _client():
+        """A TracClient mock with a Config, which ticket_get reads for the
+        ticket's web URL."""
+        client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
+        return client
+
+    @staticmethod
+    def _dispatch(client, ticket_data, changelog=()):
+        """run_sync side effect routing on the function being called.
+
+        ticket_get makes two calls now (ticket_get #60), so a bare
+        return_value would hand the ticket payload to the changelog
+        fetch as well.
+        """
+
+        def side_effect(func, *args, **kwargs):
+            if func is client.get_ticket_changelog:
+                return list(changelog)
+            return ticket_data
+
+        return side_effect
+
+    @staticmethod
+    def _comment(number, author, body, minute=0):
+        """One changelog comment row, shaped as Trac returns it."""
+        return [
+            datetime(2026, 1, 20, 10, minute, 0),
+            author,
+            "comment",
+            number,
+            body,
+            1,
+        ]
+
     def test_get_success(self):
-        """Get ticket returns full details with Markdown-converted description."""
+        """Get ticket returns full details with the stored description."""
         client = MagicMock(spec=TracClient)
         client.config = Config(
             trac_url="https://trac.example.com",
@@ -1642,34 +1737,26 @@ class TestHandleTicketGet:
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
-            mock_run_sync.return_value = [
-                42,
-                created,
-                modified,
-                {
-                    "summary": "Fix login bug",
-                    "description": "= Problem =\nLogin fails",
-                    "status": "new",
-                    "owner": "alice",
-                    "type": "defect",
-                    "priority": "high",
-                    "component": "auth",
-                    "milestone": "v2.0",
-                },
-            ]
-            mock_convert.return_value = ConversionResult(
-                text="# Problem\nLogin fails",
-                source_format="tracwiki",
-                target_format="markdown",
-                converted=True,
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [
+                    42,
+                    created,
+                    modified,
+                    {
+                        "summary": "Fix login bug",
+                        "description": "= Problem =\nLogin fails",
+                        "status": "new",
+                        "owner": "alice",
+                        "type": "defect",
+                        "priority": "high",
+                        "component": "auth",
+                        "milestone": "v2.0",
+                    },
+                ],
             )
 
             result = self._run(_handle_get(client, {"ticket_id": 42}))
@@ -1678,7 +1765,7 @@ class TestHandleTicketGet:
             text = result.content[0].text
             assert "Ticket #42" in text
             assert "Fix login bug" in text
-            assert "# Problem" in text  # converted description
+            assert "= Problem =" in text  # stored, not converted
             assert "new" in text
             assert "alice" in text
             assert "https://trac.example.com/ticket/42" in text
@@ -1692,8 +1779,10 @@ class TestHandleTicketGet:
                 == "https://trac.example.com/ticket/42"
             )
 
-    def test_get_raw_mode(self):
-        """Raw mode returns TracWiki description without conversion."""
+    def test_get_exposes_change_token(self):
+        """ticket_get surfaces _ts as the change token callers pass back
+        to ticket_update's base_ts (ticket #50) -- without this, there is
+        no way for a caller to obtain a token to lock against."""
         client = MagicMock(spec=TracClient)
         client.config = Config(
             trac_url="https://trac.example.com",
@@ -1706,34 +1795,64 @@ class TestHandleTicketGet:
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
         ) as mock_run_sync:
-            mock_run_sync.return_value = [
-                1,
-                created,
-                modified,
-                {
-                    "summary": "Raw test",
-                    "description": "= TracWiki heading =",
-                    "status": "new",
-                    "owner": "bob",
-                    "type": "task",
-                    "priority": "normal",
-                    "component": "core",
-                    "milestone": "",
-                },
-            ]
-
-            result = self._run(
-                _handle_get(client, {"ticket_id": 1, "raw": True})
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [
+                    42,
+                    created,
+                    modified,
+                    {
+                        "summary": "Fix login bug",
+                        "description": "text",
+                        "status": "new",
+                        "_ts": "1788093861682305",
+                    },
+                ],
             )
+
+            result = self._run(_handle_get(client, {"ticket_id": 42}))
+
+            assert result.structuredContent["_ts"] == "1788093861682305"
+            assert "1788093861682305" in result.content[0].text
+
+    def test_get_returns_stored_tracwiki(self):
+        """The description comes back as stored, with no `raw` argument
+        to ask for it -- the Markdown read path is gone (ticket #69)."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        modified = datetime(2026, 1, 15, 14, 30, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [
+                    1,
+                    created,
+                    modified,
+                    {
+                        "summary": "Raw test",
+                        "description": "= TracWiki heading =",
+                        "status": "new",
+                        "owner": "bob",
+                        "type": "task",
+                        "priority": "normal",
+                        "component": "core",
+                        "milestone": "",
+                    },
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 1}))
 
             assert isinstance(result, types.CallToolResult)
             text = result.content[0].text
-            assert "(TracWiki)" in text
             assert "= TracWiki heading =" in text
 
     def test_get_missing_ticket_id(self):
         """Missing ticket_id returns validation error."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         result = self._run(_handle_get(client, {}))
 
@@ -1744,7 +1863,7 @@ class TestHandleTicketGet:
 
     def test_get_not_found(self):
         """Ticket not found returns structured error via dispatcher."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
@@ -1764,6 +1883,344 @@ class TestHandleTicketGet:
             assert result.isError is True
             assert "Error (not_found)" in result.content[0].text
 
+    # --- comments in ticket_get (ticket #60) ---
+
+    def _ticket(self, created, modified, description="Body."):
+        return [
+            7,
+            created,
+            modified,
+            {
+                "summary": "A ticket with a thread",
+                "description": description,
+                "status": "new",
+                "owner": "agent_rpc",
+            },
+        ]
+
+    def test_get_returns_comments_by_default(self):
+        """One ticket_get is the whole ticket: comments come back with
+        no flag set, which is the point of ticket #60 -- the operator's
+        answer in a comment must not be invisible to a default read."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        modified = datetime(2026, 1, 15, 14, 30, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                self._ticket(created, modified),
+                [
+                    self._comment("1", "alice", "First note."),
+                    self._comment("2", "operator", "Yes, use the cap."),
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            text = result.content[0].text
+            assert "## Comments (2 total)" in text
+            assert "comment:2 -- operator" in text
+            assert "Yes, use the cap." in text
+            structured = result.structuredContent
+            assert structured["comment_count"] == 2
+            assert structured["comments_included"] is True
+            assert structured["comments_truncated"] is False
+            assert [c["number"] for c in structured["comments"]] == [
+                "1",
+                "2",
+            ]
+            assert structured["comments"][1]["author"] == "operator"
+
+    def test_get_comment_numbers_come_from_changelog_oldvalue(self):
+        """The number reported is the changelog entry's oldvalue -- the
+        same key ticket_render_check's `comment` parameter is keyed on,
+        so it is usable without guessing. Numbering skips field-only
+        entries, so it is not the comment's ordinal position."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                self._ticket(created, created),
+                [
+                    [created, "alice", "status", "new", "assigned", 1],
+                    self._comment("4", "alice", "Fourth."),
+                    [created, "bob", "priority", "major", "minor", 1],
+                    self._comment("6", "bob", "Sixth."),
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            numbers = [
+                c["number"]
+                for c in result.structuredContent["comments"]
+            ]
+            assert numbers == ["4", "6"]
+
+    def test_get_drops_field_only_changelog_entries(self):
+        """Field changes never reach the response, so a description edit
+        does not drag two full copies of the description along with it
+        (the cost that ruled out proxying ticket_changelog wholesale)."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        big = "x" * 5000
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                self._ticket(created, created, description="short"),
+                [
+                    [created, "alice", "description", big, big, 1],
+                    self._comment("1", "bob", "Tiny."),
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            assert result.structuredContent["comment_count"] == 1
+            assert big not in result.content[0].text
+            assert "Tiny." in result.content[0].text
+
+    def test_get_include_comments_false_skips_the_fetch(self):
+        """The documented opt-out makes no changelog call at all, and
+        says plainly that the response is not the whole ticket."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        calls = []
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+
+            def side_effect(func, *args, **kwargs):
+                calls.append(func)
+                return self._ticket(created, created)
+
+            mock_run_sync.side_effect = side_effect
+
+            result = self._run(
+                _handle_get(
+                    client,
+                    {"ticket_id": 7, "include_comments": False},
+                )
+            )
+
+            assert client.get_ticket_changelog not in calls
+            assert "include_comments=false" in result.content[0].text
+            structured = result.structuredContent
+            assert structured["comments_included"] is False
+            assert "comments" not in structured
+
+    def test_get_returns_stored_comment_bodies(self):
+        """Comment bodies come back as stored, like the description --
+        they reach the response by a different route (the changelog), so
+        a fix applied only to the description would pass a
+        description-only test (ticket #69)."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                self._ticket(created, created, description="plain"),
+                [self._comment("1", "alice", "= Heading =\n\n * item")],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            body = result.structuredContent["comments"][0]["body"]
+            assert body == "= Heading =\n\n * item"
+
+    def test_get_cap_fires_loudly_on_a_long_thread(self):
+        """Seeded-defect check for the cap itself: a thread ABOVE the cap
+        must produce a visible truncation notice and an exact total. A
+        silent cut would recreate ticket #60 in miniature."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        changelog = [
+            self._comment(str(n), "alice", f"Comment {n}.", minute=n)
+            for n in range(1, 13)
+        ]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), changelog
+            )
+
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 4})
+            )
+
+            text = result.content[0].text
+            assert "12 total, 4 shown, 8 omitted" in text
+            assert "8 comment(s) omitted from the middle" in text
+            assert "comment:3 through comment:10" in text
+            assert "NOT the full comment history" in text
+            structured = result.structuredContent
+            assert structured["comment_count"] == 12
+            assert structured["comments_shown"] == 4
+            assert structured["comments_truncated"] is True
+            assert structured["omitted_comment_numbers"] == [
+                str(n) for n in range(3, 11)
+            ]
+
+    def test_get_cap_keeps_head_and_tail(self):
+        """Head+tail retention: a long thread usually has its scope set
+        in the earliest comments and corrected in the latest."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        changelog = [
+            self._comment(str(n), "alice", f"Comment {n}.", minute=n)
+            for n in range(1, 13)
+        ]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), changelog
+            )
+
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 5})
+            )
+
+            kept = [
+                c["number"]
+                for c in result.structuredContent["comments"]
+            ]
+            assert kept == ["1", "2", "3", "11", "12"]
+
+    def test_get_cap_of_one_still_shows_the_notice(self):
+        """max_comments=1 leaves no tail half; the omitted-middle notice
+        must still be emitted rather than silently dropped."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        changelog = [
+            self._comment(str(n), "alice", f"Comment {n}.", minute=n)
+            for n in range(1, 4)
+        ]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), changelog
+            )
+
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 1})
+            )
+
+            text = result.content[0].text
+            assert "2 comment(s) omitted" in text
+            assert result.structuredContent["comment_count"] == 3
+
+    def test_get_thread_at_the_cap_is_not_truncated(self):
+        """Exactly at the cap: everything shown, no notice."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        changelog = [
+            self._comment(str(n), "alice", f"Comment {n}.", minute=n)
+            for n in range(1, 5)
+        ]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), changelog
+            )
+
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 4})
+            )
+
+            assert "omitted" not in result.content[0].text
+            assert (
+                result.structuredContent["comments_truncated"] is False
+            )
+
+    def test_get_comment_without_a_number_says_so(self):
+        """An entry carrying no comment number reports that, rather than
+        inventing an ordinal that ticket_render_check would reject."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                self._ticket(created, created),
+                [self._comment("", "alice", "Numberless.")],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            assert "number unavailable" in result.content[0].text
+            assert (
+                result.structuredContent["comments"][0]["number"]
+                is None
+            )
+
+    def test_get_reports_a_failed_comment_fetch(self):
+        """A changelog failure degrades loudly: the ticket still comes
+        back, but the response says the comments are missing."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+
+            def side_effect(func, *args, **kwargs):
+                if func is client.get_ticket_changelog:
+                    raise xmlrpc.client.Fault(1, "changelog exploded")
+                return self._ticket(created, created)
+
+            mock_run_sync.side_effect = side_effect
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            text = result.content[0].text
+            assert "A ticket with a thread" in text
+            assert "Comments could not be fetched" in text
+            structured = result.structuredContent
+            assert structured["comments_included"] is False
+            assert "changelog exploded" in structured["comments_error"]
+
+    def test_get_ticket_without_comments(self):
+        """A ticket with no comments says so explicitly."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), []
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            assert "## Comments" in result.content[0].text
+            assert "(none)" in result.content[0].text
+            assert result.structuredContent["comment_count"] == 0
+
 
 class TestHandleTicketChangelog:
     """Tests for _handle_changelog handler."""
@@ -1776,24 +2233,13 @@ class TestHandleTicketChangelog:
         client = MagicMock(spec=TracClient)
         ts = datetime(2026, 1, 20, 10, 0, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = [
                 [ts, "alice", "status", "new", "assigned", 1],
                 [ts, "bob", "comment", "", "Fixed the bug", 1],
             ]
-            mock_convert.return_value = ConversionResult(
-                text="Fixed the bug",
-                source_format="tracwiki",
-                target_format="markdown",
-                converted=True,
-            )
 
             result = self._run(
                 _handle_changelog(client, {"ticket_id": 5})
@@ -1810,33 +2256,26 @@ class TestHandleTicketChangelog:
             assert "comment" in text
             assert "Fixed the bug" in text
 
-    def test_changelog_raw_mode(self):
-        """Raw mode skips Markdown conversion for comment content."""
+    def test_changelog_returns_stored_tracwiki(self):
+        """Comment content comes back as stored, with no `raw` argument
+        to ask for it (ticket #69)."""
         client = MagicMock(spec=TracClient)
         ts = datetime(2026, 1, 20, 10, 0, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = [
                 [ts, "alice", "comment", "", "= Wiki heading =", 1],
             ]
 
             result = self._run(
-                _handle_changelog(client, {"ticket_id": 5, "raw": True})
+                _handle_changelog(client, {"ticket_id": 5})
             )
 
             assert isinstance(result, types.CallToolResult)
             text = result.content[0].text
-            assert "(TracWiki format)" in text
             assert "= Wiki heading =" in text
-            # tracwiki_to_markdown should NOT have been called
-            mock_convert.assert_not_called()
 
     def test_changelog_empty(self):
         """Empty changelog returns appropriate message."""
@@ -1895,24 +2334,13 @@ class TestHandleTicketChangelog:
         client = MagicMock(spec=TracClient)
         ts = datetime(2026, 2, 15, 14, 30, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = [
                 [ts, "alice", "status", "new", "assigned", 1],
                 [ts, "bob", "comment", "", "Fixed it", 1],
             ]
-            mock_convert.return_value = ConversionResult(
-                text="Fixed it",
-                source_format="tracwiki",
-                target_format="markdown",
-                converted=True,
-            )
 
             result = self._run(
                 _handle_changelog(client, {"ticket_id": 5})
@@ -1961,19 +2389,17 @@ class TestHandleTicketChangelog:
             assert changelog[1]["oldvalue"] == ""
             assert changelog[1]["newvalue"] == "v2.0"
 
-    def test_changelog_structured_content_comment_converted(self):
-        """Comment entries have newvalue converted to Markdown by default."""
+    def test_changelog_structured_content_comment_stored_as_written(
+        self,
+    ):
+        """structuredContent carries the stored comment bytes, matching
+        the text output rather than diverging from it (ticket #69)."""
         client = MagicMock(spec=TracClient)
         ts = datetime(2026, 3, 5, 12, 0, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = [
                 [
                     ts,
@@ -1984,12 +2410,6 @@ class TestHandleTicketChangelog:
                     1,
                 ],
             ]
-            mock_convert.return_value = ConversionResult(
-                text="# Wiki heading\n\nSome **bold** text",
-                source_format="tracwiki",
-                target_format="markdown",
-                converted=True,
-            )
 
             result = self._run(
                 _handle_changelog(client, {"ticket_id": 3})
@@ -2000,42 +2420,8 @@ class TestHandleTicketChangelog:
             assert changelog[0]["field"] == "comment"
             assert (
                 changelog[0]["newvalue"]
-                == "# Wiki heading\n\nSome **bold** text"
+                == "= Wiki heading =\n\nSome '''bold''' text"
             )
-            mock_convert.assert_called_once()
-
-    def test_changelog_structured_content_comment_raw(self):
-        """Comment entries preserve raw TracWiki when raw=True."""
-        client = MagicMock(spec=TracClient)
-        ts = datetime(2026, 3, 5, 12, 0, 0)
-
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
-            mock_run_sync.return_value = [
-                [
-                    ts,
-                    "bob",
-                    "comment",
-                    "",
-                    "= Wiki heading =",
-                    1,
-                ],
-            ]
-
-            result = self._run(
-                _handle_changelog(client, {"ticket_id": 3, "raw": True})
-            )
-
-            changelog = result.structuredContent["changelog"]
-            assert len(changelog) == 1
-            assert changelog[0]["newvalue"] == "= Wiki heading ="
-            mock_convert.assert_not_called()
 
     def test_changelog_structured_content_empty(self):
         """Empty changelog returns empty array in structuredContent."""
@@ -2080,24 +2466,13 @@ class TestHandleTicketChangelog:
         client = MagicMock(spec=TracClient)
         ts = datetime(2026, 1, 20, 10, 0, 0)
 
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.ticket_read.tracwiki_to_markdown"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
             mock_run_sync.return_value = [
                 [ts, "alice", "status", "new", "assigned", 1],
                 [ts, "bob", "comment", "", "Fixed the bug", 1],
             ]
-            mock_convert.return_value = ConversionResult(
-                text="Fixed the bug",
-                source_format="tracwiki",
-                target_format="markdown",
-                converted=True,
-            )
 
             result = self._run(
                 _handle_changelog(client, {"ticket_id": 5})

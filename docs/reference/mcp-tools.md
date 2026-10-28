@@ -18,6 +18,17 @@ instead of the default one -- see
 [Multiple Instances](configuration.md#multiple-instances). Call
 `list_instances` to discover what's reachable.
 
+**Every result names the instance it reached.** Omitting the argument falls
+back to the server's default instance, which used to be silent: a page or
+ticket that exists on both the intended project and the default one was
+written to the wrong one with no error. Each result now carries `instance`
+(the resolved path, e.g. `/bcs`) and `instance_source` (`explicit` when the
+caller passed the argument, `server_default` when the fallback answered), in
+`structuredContent` when the tool returns it and as a trailing
+`[instance: /bcs (explicit)]` content block either way. Errors are annotated
+too -- that is where it matters most, since "ticket does not exist" and
+"wrong instance" read identically without it.
+
 ---
 
 ## ping
@@ -150,14 +161,30 @@ instead of the default one -- see
 
 ## ticket_get
 
-**Description:** Get full ticket details including summary, description, status, and owner. Use ticket_changelog for history.
+**Description:** Get full ticket details: summary, description, field values and — by default — every comment with its number, author and timestamp, so one call covers the whole ticket. Use ticket_changelog for full field-change history.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to retrieve (minimum: 1) |
-| `raw` | boolean | No | `false` | If true, return description in original TracWiki format without converting to Markdown |
+| `include_comments` | boolean | No | `true` | Return the ticket's comments alongside its fields. Set `false` when you only need field values or the `_ts` change token before a write |
+| `max_comments` | integer | No | `50` | Maximum comment bodies to return (minimum: 1). Ignored when `include_comments` is false |
+
+**Comments.** Comments are read from the ticket's changelog and filtered there: field-only
+changes never reach the response, so a ticket whose description was edited does not drag
+two full copies of that description along with its comments. Each comment carries the
+number Trac itself assigns — the same number `ticket_render_check`'s `comment` parameter
+takes, so it can be used directly instead of guessed. Comment numbering skips field-only
+changelog entries, so it is *not* a comment's ordinal position in the thread.
+
+**Truncation is loud.** A thread longer than `max_comments` keeps its head and its tail and
+drops the middle — a long thread usually has its scope set in the earliest comments and
+corrected in the latest. The response then states how many comments exist, how many are
+shown, and which comment numbers were omitted; `comment_count` is always the exact total,
+never the number shown. If the changelog fetch fails, the ticket still comes back and the
+response says plainly that the comments are missing rather than returning silently
+without them.
 
 **Success Response:**
 ```json
@@ -184,9 +211,25 @@ instead of the default one -- see
   "resolution": "",
   "created": "2025-01-15T10:30:00",
   "modified": "2025-01-20T14:22:00",
-  "description": "Users are experiencing timeout errors..."
+  "description": "Users are experiencing timeout errors...",
+  "comments_included": true,
+  "comments": [
+    {
+      "number": "1",
+      "author": "carol",
+      "timestamp": "2025-01-16 08:12",
+      "body": "Reproduced on staging."
+    }
+  ],
+  "comment_count": 1,
+  "comments_shown": 1,
+  "comments_truncated": false
 }
 ```
+
+When a thread is truncated, `comments_truncated` is `true` and
+`omitted_comment_numbers` lists the dropped comments. When the changelog fetch
+fails, `comments_included` is `false` and `comments_error` carries the reason.
 
 **Error Responses:**
 
@@ -221,14 +264,14 @@ instead of the default one -- see
 
 ## ticket_create
 
-**Description:** Create a new ticket. Accepts Markdown for description (auto-converted to TracWiki).
+**Description:** Create a new ticket. The description is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `summary` | string | **Yes** | - | Ticket title |
-| `description` | string | **Yes** | - | Ticket body in Markdown (will be converted to TracWiki) |
+| `description` | string | **Yes** | - | Ticket body. TracWiki, stored verbatim |
 | `ticket_type` | string | No | `"defect"` | Ticket type: `defect`, `enhancement`, or `task` |
 | `priority` | string | No | - | Priority level (e.g., `blocker`, `critical`, `major`, `minor`, `trivial`) |
 | `severity` | string | No | - | Severity level (e.g., `critical`, `major`, `minor`) |
@@ -283,14 +326,14 @@ instead of the default one -- see
 
 ## ticket_update
 
-**Description:** Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments.
+**Description:** Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. The comment and the description rewrite are TracWiki and are stored byte-for-byte.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
-| `comment` | string | No | - | Comment in Markdown (optional, max 10000 chars) |
+| `comment` | string | No | - | Comment body (optional, max 10000 chars). TracWiki, stored verbatim |
 | `status` | string | No | - | New status |
 | `priority` | string | No | - | New priority |
 | `severity` | string | No | - | New severity |
@@ -399,7 +442,6 @@ instead of the default one -- see
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to get history for (minimum: 1) |
-| `raw` | boolean | No | `false` | If true, return comment content in original TracWiki format without converting to Markdown |
 
 **Success Response:**
 ```json
@@ -530,7 +572,7 @@ instead of the default one -- see
 
 ## ticket_batch_create
 
-**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore.
+**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are TracWiki and are stored byte-for-byte.
 
 **Parameters:**
 
@@ -543,7 +585,7 @@ Each ticket object:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `summary` | string | **Yes** | - | Ticket title |
-| `description` | string | **Yes** | - | Ticket body in Markdown (will be converted to TracWiki) |
+| `description` | string | **Yes** | - | Ticket body. TracWiki, stored verbatim |
 | `ticket_type` | string | No | `"defect"` | Ticket type |
 | `priority` | string | No | - | Priority level |
 | `component` | string | No | - | Component name |
@@ -688,7 +730,7 @@ Each ticket object:
 
 ## ticket_batch_update
 
-**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported.
+**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte.
 
 **Parameters:**
 
@@ -701,7 +743,7 @@ Each update object:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
-| `comment` | string | No | - | Comment in Markdown (will be converted to TracWiki) |
+| `comment` | string | No | - | Comment body. TracWiki, stored verbatim |
 | `status` | string | No | - | New status |
 | `resolution` | string | No | - | Resolution (when closing) |
 | `priority` | string | No | - | New priority |
@@ -786,7 +828,6 @@ Each update object:
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to retrieve |
 | `version` | integer | No | *(latest)* | Specific version to retrieve (minimum: 1) |
-| `raw` | boolean | No | `false` | If true, return original TracWiki format without converting to Markdown |
 
 **Success Response:**
 ```json
@@ -831,7 +872,6 @@ Each update object:
 | `prefix` | string | No | - | Filter to pages starting with this prefix (namespace filter) |
 | `limit` | integer | No | `10` | Maximum results per page (min: 1, max: 50) |
 | `cursor` | string | No | - | Pagination cursor from previous response |
-| `raw` | boolean | No | `false` | If true, return snippets in original TracWiki format without converting to Markdown |
 
 **Success Response:**
 ```json
@@ -857,14 +897,14 @@ Each update object:
 
 ## wiki_create
 
-**Description:** Create new wiki page from Markdown input. Fails if page exists (use wiki_update instead).
+**Description:** Create a new wiki page. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Fails if the page exists (use wiki_update instead).
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to create |
-| `content` | string | **Yes** | - | Page content in Markdown format |
+| `content` | string | **Yes** | - | Page content. TracWiki, stored verbatim |
 | `comment` | string | No | - | Change comment |
 
 **Success Response:**
@@ -917,14 +957,14 @@ Each update object:
 
 ## wiki_update
 
-**Description:** Update existing wiki page with optimistic locking. Requires version for conflict detection.
+**Description:** Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to update |
-| `content` | string | **Yes** | - | Page content in Markdown format |
+| `content` | string | **Yes** | - | Page content. TracWiki, stored verbatim |
 | `version` | integer | **Yes** | - | Current page version for optimistic locking (minimum: 1) |
 | `comment` | string | No | - | Change comment |
 
@@ -1080,14 +1120,16 @@ Each update object:
 
 ## wiki_file_push
 
-**Description:** Push a local file to a Trac wiki page. Reads the file, auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page.
+**Description:** Push a document to a Trac wiki page. Takes the text inline as `content`, or -- only where the server's `file_access` is `local` -- as a `file_path` on the **server's** filesystem; auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page. To push a file from your own machine, use the [`trac-mcp` CLI](cli.md#trac-mcp) there: `trac-mcp wiki-push PAGE FILE`.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `file_path` | string | **Yes** | - | Absolute path to local file |
 | `page_name` | string | **Yes** | - | Target wiki page name |
+| `content` | string | One of | - | The document text, in place of `file_path` |
+| `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection. With neither `filename` nor `format`, inline content is stored as TracWiki, verbatim |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
 | `strip_frontmatter` | boolean | No | `true` | Strip YAML frontmatter from .md files before pushing |
@@ -1108,7 +1150,8 @@ Each update object:
   "version": 1,
   "source_format": "markdown",
   "converted": true,
-  "file_path": "/path/to/file.md",
+  "file_path": null,
+  "source": "inline content",
   "warnings": []
 }
 ```
@@ -1119,19 +1162,21 @@ Each update object:
   ```json
   {
     "type": "text",
-    "text": "Error (validation_error): file_path is required\n\nAction: Provide file_path parameter."
+    "text": "Error (validation_error): content is required\n\nAction: Provide content (or file_path, only where the server's file_access is 'local')."
   }
   ```
 
-- **validation_error:** File not found
+- **permission_denied:** a `file_path` while the server's `file_access` is `off` (the default over http, ticket #111)
   ```json
   {
     "type": "text",
-    "text": "Error (validation_error): File not found: /path/to/missing.md\n\nAction: Check parameter values and retry."
+    "text": "Error (permission_denied): file_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp wiki-push PAGE FILE), or pass the bytes inline instead of a path."
   }
   ```
 
 **Implementation Notes:**
+- Exactly one of `content` and `file_path`; both is a `validation_error`
+- Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
 - Creates new page if it doesn't exist, updates with optimistic locking if it does
@@ -1142,8 +1187,9 @@ Each update object:
 {
   "name": "wiki_file_push",
   "arguments": {
-    "file_path": "/home/user/docs/design.md",
     "page_name": "Docs/Design",
+    "content": "# Design\n\nThe text of the document...",
+    "filename": "design.md",
     "comment": "Push design doc to wiki",
     "format": "auto",
     "strip_frontmatter": true
@@ -1155,14 +1201,14 @@ Each update object:
 
 ## wiki_file_pull
 
-**Description:** Pull a Trac wiki page to a local file. Fetches page content, converts to the requested format, and writes to the specified path.
+**Description:** Pull a Trac wiki page, converted to the requested format. Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to pull |
-| `file_path` | string | **Yes** | - | Absolute path for output file |
+| `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` or `tracwiki` |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
 
@@ -1170,7 +1216,7 @@ Each update object:
 ```json
 {
   "type": "text",
-  "text": "Pulled wiki page 'Docs/Design' (version 3) to /home/user/docs/design.md (4521 bytes, format=markdown)"
+  "text": "Pulled wiki page 'Docs/Design' (version 3, 4521 bytes, format=markdown); the text is in structuredContent.content"
 }
 ```
 
@@ -1178,13 +1224,15 @@ Each update object:
 ```json
 {
   "page_name": "Docs/Design",
-  "file_path": "/home/user/docs/design.md",
   "format": "markdown",
   "version": 3,
-  "bytes_written": 4521,
-  "converted": true
+  "converted": true,
+  "content": "# Design\n...",
+  "bytes": 4521
 }
 ```
+
+With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
 
 **Error Responses:**
 
@@ -1206,7 +1254,8 @@ Each update object:
 
 **Implementation Notes:**
 - Converts TracWiki to Markdown by default; use `format: "tracwiki"` to get raw content
-- Parent directory of `file_path` must exist
+- An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`
+- Parent directory of `file_path` must exist, and is checked before Trac is called
 - Fetches page info separately for version metadata
 
 **Example Call:**
@@ -1215,7 +1264,6 @@ Each update object:
   "name": "wiki_file_pull",
   "arguments": {
     "page_name": "Docs/Design",
-    "file_path": "/home/user/docs/design.md",
     "format": "markdown"
   }
 }
@@ -1225,13 +1273,15 @@ Each update object:
 
 ## wiki_file_detect_format
 
-**Description:** Detect the format of a local file (Markdown or TracWiki). Uses file extension first, then content-based heuristic detection.
+**Description:** Detect whether text is Markdown or TracWiki. Uses the file extension first, then content-based heuristic detection. Takes `content` (plus an optional `filename`), or a `file_path` on the **server's** filesystem where `file_access` is `local`. For a file on your own machine, `trac-mcp detect-format FILE` runs the same detection locally.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `file_path` | string | **Yes** | - | Absolute path to file to analyze |
+| `content` | string | One of | - | Text to analyze |
+| `filename` | string | No | - | With `content`: the source file's name, for extension-based detection |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 
 **Success Response:**
 ```json
@@ -1244,7 +1294,8 @@ Each update object:
 **Structured JSON Output:**
 ```json
 {
-  "file_path": "/home/user/docs/design.md",
+  "file_path": null,
+  "source": "inline content",
   "format": "markdown",
   "encoding": "utf-8",
   "size_bytes": 4521
@@ -1272,7 +1323,8 @@ Each update object:
 {
   "name": "wiki_file_detect_format",
   "arguments": {
-    "file_path": "/home/user/docs/design.md"
+    "content": "# Design\n\nSome text.",
+    "filename": "design.md"
   }
 }
 ```
@@ -1316,7 +1368,6 @@ Each update object:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `name` | string | **Yes** | - | Milestone name |
-| `raw` | boolean | No | `false` | If true, return description in original TracWiki format without converting to Markdown |
 
 **Success Response:**
 ```json
@@ -1552,6 +1603,122 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 {
   "name": "list_instances",
   "arguments": {}
+}
+```
+
+---
+
+## ticket_render_check
+
+**Description:** Fetch a ticket's LIVE rendered page (description, and each comment by default) and return structured facts + warnings, replacing the curl+grep workaround `Rules/trac/RenderVerify` otherwise forces after every ticket write. Every outbound link grouped by realm (ticket/wiki/external) with its resolved target, which wiki links carry Trac's `missing` class (dead target), code block counts, and the same defect checks `convert_preview` runs (escaped link targets, a cross-instance reference stuck in a code span, an unconfigured InterTrac prefix, and -- render-only -- markup that survived as literal text instead of converting). Use this right after any `ticket_update`/`ticket_create` write to verify what Trac actually rendered, not just what was stored.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number to render-check (minimum: 1) |
+| `include_comments` | boolean | No | `true` | Also render-check every comment on the ticket, not just the description |
+| `comment` | integer | No | - | Check only this one comment number instead of every comment (still includes the description); ignored when `include_comments` is false |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
+| `include_html` | boolean | No | `false` | Include each section's rendered HTML in the response (capped at 20KB per section, with `html_truncated` set if cut) -- off by default, since the structured links/warnings are the point of this tool |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "ticket/57: 0 error(s), 1 warning(s) across 2 section(s).\n\n[description] No warnings.\n[comment 1] [warning] unconfigured_intertrac_prefix: 'zzznotaprefix:wiki:SomePage' does not match any configured InterTrac prefix -- it will render as plain text, not a link.\n\nLinks: 1 ticket, 2 wiki, 1 external."
+}
+```
+```json
+{
+  "target": "ticket/57",
+  "sections": [
+    {
+      "kind": "description",
+      "ref": null,
+      "source_paired": true,
+      "links": {
+        "ticket": [],
+        "wiki": [{"href": "http://.../wiki/Index", "resolved_url": null, "text": "Index", "classes": ["wiki"], "title": null, "missing": false}],
+        "external": [{"href": "http://.../intertrac/wiki%3AReference/trac/InterTrac", "resolved_url": "http://.../wiki/Reference/trac/InterTrac", "text": "...", "classes": ["ext-link"], "title": "wiki:Reference/trac/InterTrac in Automated Project Manager", "missing": false}],
+        "other": []
+      },
+      "code_blocks": [{"highlighted": true, "lines": 3}],
+      "warnings": [],
+      "html": null,
+      "html_truncated": false
+    }
+  ],
+  "stats": {
+    "sections": 2,
+    "anchors": 4,
+    "warnings": 1,
+    "errors": 0,
+    "targets_checked": 1,
+    "targets_skipped": 0
+  }
+}
+```
+
+Each anchor's `resolved_url` is populated only for a probed InterTrac wiki-dispatcher href (from `check_targets`'s live probe) -- it's the real page the dispatcher redirects to, not the `/intertrac/wiki%3A...` href itself. `missing: true` marks a link Trac itself rendered with the `missing` class (a dead local wiki target). Realm grouping comes from Trac's own rendered `class` attribute, never from parsing the href.
+
+**Error Responses:**
+
+- **not_found:** Ticket does not exist, or the requested comment number wasn't found
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Ticket #999 not found.\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+- **validation_error:** `ticket_id` missing
+
+**Example Call:**
+```json
+{
+  "name": "ticket_render_check",
+  "arguments": {
+    "ticket_id": 57,
+    "check_targets": true
+  }
+}
+```
+
+---
+
+## wiki_render_check
+
+**Description:** Fetch a wiki page's LIVE rendered HTML and return structured facts + warnings, replacing the curl+grep workaround `Rules/trac/RenderVerify` otherwise forces after every wiki write. Same link inventory, code block counts, and defect checks as `ticket_render_check`. Use this right after any `wiki_update`/`wiki_create` write.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to render-check |
+| `version` | integer | No | - | Specific version to check (defaults to latest) |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render |
+| `include_html` | boolean | No | `false` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut) |
+
+**Success Response:** same shape as `ticket_render_check`, with a single `"kind": "page"` section and `"target": "wiki/<page_name>"`.
+
+**Error Responses:**
+
+- **not_found:** Page does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Wiki page \"DoesNotExist\" does not exist\n\nAction: Use wiki_search to find available pages."
+  }
+  ```
+- **validation_error:** `page_name` missing
+
+**Example Call:**
+```json
+{
+  "name": "wiki_render_check",
+  "arguments": {
+    "page_name": "Rules/trac/RenderVerify"
+  }
 }
 ```
 

@@ -35,6 +35,8 @@ Same precedence as the rest of the server's config: CLI flag > env var (`TRAC_MC
 | Allow unauthenticated non-loopback bind | `--allow-unauthenticated` | -- | `allow_unauthenticated` | `false` |
 | Extra allowed `Host` headers | -- | `TRAC_MCP_ALLOWED_HOSTS` (comma-separated) | `allowed_hosts` | `[]` |
 | Extra allowed `Origin` headers | -- | `TRAC_MCP_ALLOWED_ORIGINS` (comma-separated) | `allowed_origins` | `[]` |
+| File tools may use server paths | `--file-access {local,off}` | `TRAC_MCP_FILE_ACCESS` | `file_access` | `off` for http, `local` for stdio |
+| Largest inline file-tool result | -- | `TRAC_MCP_MAX_INLINE_BYTES` | `max_inline_bytes` | `5242880` (5 MiB) |
 
 ```yaml
 # .trac_mcp/config.yaml
@@ -47,6 +49,8 @@ server:
   allow_unauthenticated: false
   allowed_hosts: []
   allowed_origins: []
+  file_access: "off"      # quoted: YAML reads a bare off as false (also accepted)
+  max_inline_bytes: 5242880
 ```
 
 **There is deliberately no `--auth-token` CLI flag.** Command-line arguments are visible to every user on the host via the process list; the token must come from `TRAC_MCP_AUTH_TOKEN` or the YAML `server:` section instead.
@@ -59,9 +63,72 @@ When `auth_token` is set, every request to the MCP endpoint (not `/healthz`) mus
 Authorization: Bearer <token>
 ```
 
-A missing or incorrect token gets `401 Unauthorized` with a `WWW-Authenticate: Bearer` header. The comparison uses `secrets.compare_digest` (constant-time). When no token is configured, the endpoint is open to anyone who can reach it -- see Bind Safety below for when that's disallowed.
+A missing or incorrect token gets `401 Unauthorized` with a `WWW-Authenticate: Bearer` header. The comparison uses `secrets.compare_digest` (constant-time), checked against *every* configured token -- the static one and every identity's (see below) -- rather than stopping at the first match, so response timing never reveals which token, if any, was presented. When no token and no identities are configured, the endpoint is open to anyone who can reach it -- see Bind Safety below for when that's disallowed.
 
-This is a single static shared secret, not per-user OAuth. The MCP SDK's OAuth machinery (`mcp.server.auth.*`) is a separate, larger feature and is out of scope here.
+This is a single static shared secret, not per-user OAuth. The MCP SDK's OAuth machinery (`mcp.server.auth.*`) is a separate, larger feature and is out of scope here. For per-caller credentials without full OAuth, see Multiple Identities below.
+
+## Multiple Identities (`TRAC_IDENTITIES`)
+
+By default every request that presents a valid token -- the static `TRAC_MCP_AUTH_TOKEN` -- reaches Trac as the single identity `TRAC_USERNAME`/`TRAC_PASSWORD` configured for the whole process. Ticket #102 adds an alternative: a `TRAC_IDENTITIES` file mapping several *distinct* bearer tokens to their own Trac username/password, so one shared daemon can serve several callers under their own Trac identities instead of one process per identity.
+
+```bash
+TRAC_IDENTITIES=/path/to/identities.yml \
+  trac-mcp-server --transport http --host 127.0.0.1 --port 8080
+```
+
+```yaml
+# identities.yml -- YAML or JSON, ${VAR} interpolated from .env just like
+# TRAC_INSTANCES.
+identities:
+  alice:
+    token: ${ALICE_MCP_TOKEN}
+    username: ${ALICE_TRAC_USER}
+    password: ${ALICE_TRAC_PASSWORD}
+    instances:              # optional: scope this identity (ticket #110)
+      - /trac_test
+  bob:
+    token: ${BOB_MCP_TOKEN}
+    username: ${BOB_TRAC_USER}
+    password: ${BOB_TRAC_PASSWORD}
+```
+
+A request whose `Authorization: Bearer <token>` matches one of these resolves as that identity for the rest of that call: the default instance (and any declared/ad-hoc instance that doesn't set its own username/password) is reached using the identity's credentials instead of the process's own `TRAC_USERNAME`/`TRAC_PASSWORD`. The legacy static `TRAC_MCP_AUTH_TOKEN`, if still configured alongside identities, keeps resolving to no identity at all -- a caller using it gets the same behaviour as before this ticket.
+
+**Precedence: a declared instance's own explicit credentials always win over the caller's identity.** If `instances:` (or `TRAC_INSTANCES`) gives an instance its own `username`/`password`, every token holder reaches that instance through those explicit credentials, never their own -- otherwise one identity's password could reach a host a *different* declared instance deliberately points credentials at. Only *inherited* credentials (the default instance itself, a declared instance that leaves username/password unset, or ad-hoc same-host addressing) are replaced by the caller's identity.
+
+Validation, at startup:
+
+- every identity needs a non-empty token, username, and password;
+- every token must be unique, including against `TRAC_MCP_AUTH_TOKEN`;
+- `TRAC_IDENTITIES` on the `stdio` transport is an error -- there is no per-request signal (a bearer header) for stdio to read an identity from;
+- `TRAC_IDENTITIES` together with `allow_unauthenticated` and no `TRAC_MCP_AUTH_TOKEN` is an error -- declaring identities and then opting the endpoint out of authentication is contradictory, since no caller could ever present a token to be resolved as one of them.
+
+Identities alone (no static token) still gate every request, so they satisfy the same bind-safety rule `TRAC_MCP_AUTH_TOKEN` does: a non-loopback bind is allowed once `TRAC_IDENTITIES` is configured, without also requiring a static token.
+
+### Restricting an identity to some instances (ticket #110)
+
+An identity's reach is otherwise whatever its Trac user's permissions allow. Two paths make plain HTTP requests with the caller's credentials that the per-user `XML_RPC` permission does not gate (`ticket_render_check`'s page fetch, and the cross-instance link-target probes), so the server enforces a scope itself.
+
+- `instances:` on an identity entry -- a YAML list, or a comma-separated string (what `${VAR}` interpolation yields) -- scopes that identity. Each entry is a `/path` on the default instance's host or an absolute `http(s)://` URL. Absent means unrestricted.
+- `TRAC_ALLOWED_INSTANCES` (comma-separated, same entry forms) scopes the *default* credentials, i.e. a caller with no identity. An identity without `instances:` is unrestricted and is not bound by it.
+
+The check is an exact match on the *resolved* instance URL (trailing slash ignored), so a declared instance name or full URL cannot route around it, and a non-canonical spelling such as `/trac_test/../auto_pm` is refused, not normalised. A refused call returns the `instance_not_allowed` error before any client is created. `list_instances` shows a scoped caller only its allowed instances (plus an `allowed` field). A cross-instance link target outside the scope is not fetched and is reported as the advisory `target_check_not_allowed`, which does not block a write.
+
+Startup errors: an empty `instances:` list or an empty `TRAC_ALLOWED_INSTANCES` (never read as "deny all"), an entry that is neither a `/path` nor an http(s) URL, and a `TRAC_URL` that is not on its own `TRAC_ALLOWED_INSTANCES`.
+
+**Loaded once at startup; changing identities needs a restart.** Unlike `TRAC_INSTANCES` (which reloads on an mtime change), there is no live-reload here.
+
+**A deployment using only `TRAC_MCP_AUTH_TOKEN` -- no `TRAC_IDENTITIES` at all -- behaves exactly as it did before this ticket.** Nothing about the single-identity path changes.
+
+## File Access (`file_access`)
+
+Seven tools move files: `wiki_file_push`, `wiki_file_pull`, `wiki_file_detect_format`, and the ticket and wiki `*_attachment_put`/`*_attachment_get` pairs. Each takes its bytes inline (`content`, or `content_base64` for attachments, line-wrapped or not), and where `file_access` is `off` returns them inline. Each also accepts a `file_path`/`output_path` -- but that path is resolved on **the server's** filesystem, which over http is not the caller's: a caller's path does not exist there, and nothing confines a path to anything narrower than what the server process can read or write.
+
+So over http those path arguments are refused by default (`file_access: off`), with a `permission_denied` error naming the alternative. Set `file_access: local` only where every bearer-token holder may read and write the server process's files -- in practice, a server that runs on its callers' own machine. stdio defaults to `local`, since a stdio server always does. With `local`, the output tools keep their original contract -- `file_path`/`output_path` is required -- so a stdio model that forgets the path gets an error, not an attachment's bytes in its transcript.
+
+To move a file from the caller's machine, run the [`trac-mcp` CLI](cli.md#trac-mcp) there. It reads and writes the local file and calls the same tools over this transport with the inline forms, so the bytes never pass through a model's transcript and the call keeps the caller's identity, Markdown conversion and the link gate.
+
+An inline payload larger than `max_inline_bytes`, in either direction, is refused rather than truncated. A reverse proxy in front of the server has its own request-size limit (nginx's `client_max_body_size` defaults to 1 MB), which caps what `wiki_file_push` and `*_attachment_put` can send inline -- raise it alongside `max_inline_bytes`.
 
 ## OIDC Per-User Auth
 

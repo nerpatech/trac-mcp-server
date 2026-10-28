@@ -2,7 +2,8 @@
 
 This module implements ticket write operations: create, update, and delete.
 All tools use async handlers with run_sync() to bridge synchronous TracClient calls,
-automatic Markdown conversion, and structured error responses.
+and structured error responses. Content is TracWiki and is stored
+byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
 import xmlrpc.client
@@ -10,12 +11,17 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters import markdown_to_tracwiki
 from ...core.async_utils import run_sync
-from ...core.client import TicketCreateTimeout, TracClient
+from ...core.client import (
+    TicketCreateTimeout,
+    TicketUpdateConflict,
+    TracClient,
+)
 from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
 from .errors import build_error_response
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -24,7 +30,7 @@ def _build_ticket_create_tool() -> types.Tool:
     type_list = TICKET_TYPE_LIST
     return types.Tool(
         name="ticket_create",
-        description="Create a new ticket. Accepts Markdown for description (auto-converted to TracWiki).",
+        description="Create a new ticket. The description is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -40,12 +46,16 @@ def _build_ticket_create_tool() -> types.Tool:
                 },
                 "description": {
                     "type": "string",
-                    "description": "Ticket body in Markdown (will be converted to TracWiki)",
+                    "description": "Ticket body (required). TracWiki, stored verbatim.",
                 },
                 "ticket_type": {
                     "type": "string",
                     "description": f"Ticket type (default: {default_type}). Available types: {type_list}.",
                     "default": default_type,
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Alias for ticket_type (accepted since ticket_update's own field is named 'type').",
                 },
                 "priority": {
                     "type": "string",
@@ -75,6 +85,7 @@ def _build_ticket_create_tool() -> types.Tool:
                     "type": "string",
                     "description": "Keywords/tags",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["summary", "description"],
         },
@@ -86,7 +97,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Uses optimistic locking to prevent conflicts. Accepts Markdown for comments. Set reply_to to quote an earlier comment (Trac's XML-RPC API has no comment edit/delete methods on this host, so existing comments can't be edited or deleted through this tool).",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only adds new ones.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -103,7 +114,7 @@ TICKET_WRITE_TOOLS = [
                 },
                 "comment": {
                     "type": "string",
-                    "description": "Comment in Markdown (optional, max 10000 chars)",
+                    "description": "Comment body (optional, max 10000 chars). TracWiki, stored verbatim.",
                 },
                 "summary": {
                     "type": "string",
@@ -111,7 +122,7 @@ TICKET_WRITE_TOOLS = [
                 },
                 "description": {
                     "type": "string",
-                    "description": "New description in Markdown (replaces ticket body)",
+                    "description": "New description, replacing the ticket body. TracWiki, stored verbatim.",
                 },
                 "type": {
                     "type": "string",
@@ -154,10 +165,28 @@ TICKET_WRITE_TOOLS = [
                     "type": "string",
                     "description": "Keywords/tags",
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
                 "reply_to": {
                     "type": "integer",
                     "description": "Comment number to reply to. Prepends Trac's standard \"Replying to [comment:N author]:\" quote block (quoting that comment's own text) before the new comment. Requires 'comment' to also be provided.",
                     "minimum": 1,
+                },
+                "base_ts": {
+                    "type": "string",
+                    "description": "Change token from a prior ticket_get() call's _ts field (a numeric string -- pass it through as-is, don't parse it as a number). When provided, the update is rejected with a version_conflict error (naming what changed) if the ticket was modified since that token was read. Strongly recommended -- without it, this write silently overwrites any concurrent change.",
+                },
+            },
+            # Action-specific input fields (action_<action>_<action>_<field>,
+            # e.g. action_resolve_resolve_resolution) can't be declared as
+            # static properties -- the field name depends on which action is
+            # chosen. additionalProperties: false only restricts keys not
+            # covered by `properties` OR `patternProperties`, so this lets
+            # every documented dynamic field through without reopening the
+            # door to an actually-unknown key (ticket #99).
+            "patternProperties": {
+                r"^action_[A-Za-z0-9_]+$": {
+                    "type": "string",
+                    "description": "Action-specific input field, named action_<action>_<action>_<field> per the `action` property's own description.",
                 },
             },
             "required": ["ticket_id"],
@@ -207,8 +236,23 @@ async def _handle_create(
             "Provide description parameter.",
         )
 
-    # Convert description from Markdown to TracWiki
-    description_tracwiki = markdown_to_tracwiki(description)
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
+    # Stored as written. There is no conversion step here any more
+    # (#69) -- the author's bytes are the bytes that land.
+    description_tracwiki = description
+
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {"description": description_tracwiki},
+        args,
+        recheck_with="ticket_render_check",
+        new_ticket=True,
+    )
+    if refusal is not None:
+        return refusal
 
     # Build attributes (hardcoded default for standalone server)
     ticket_type = args.get("ticket_type", DEFAULT_TICKET_TYPE)
@@ -263,7 +307,10 @@ async def _handle_create(
         content=[
             types.TextContent(
                 type="text",
-                text=f"Created ticket #{ticket_id}: {summary}",
+                text="\n".join(
+                    [f"Created ticket #{ticket_id}: {summary}"]
+                    + gate_lines
+                ),
             )
         ]
     )
@@ -281,16 +328,19 @@ async def _handle_update(
             "Provide ticket_id parameter.",
         )
 
-    # Convert comment from Markdown to TracWiki if provided
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
+    # The comment and the description rewrite below are both stored as
+    # written (#69). They used to convert at two separate call sites,
+    # which is why they are still worth testing separately.
     comment = args.get("comment", "")
-    if comment:
-        comment = markdown_to_tracwiki(comment)
 
     # Reply-to: prepend Trac's standard "Replying to [comment:N author]:"
-    # quote block before the new comment. Trac's XML-RPC API on this host
-    # has no ticket.editComment/deleteComment methods (verified via
-    # system.listMethods) -- existing comments can only be edited/deleted
-    # via the Trac web UI, so this tool only ever adds new comments.
+    # quote block before the new comment. This tool only ever adds new
+    # comments; correcting or removing one is ticket_comment_edit/delete
+    # (the tracrpc_comment plugin, see ticket_comment.py).
     reply_to = args.get("reply_to")
     if reply_to is not None:
         if not comment:
@@ -347,12 +397,10 @@ async def _handle_update(
         attributes["summary"] = args["summary"]
     if "type" in args:
         attributes["type"] = args["type"]
-    # Description rewrite: convert from Markdown to TracWiki, mirroring
-    # the comment + create-ticket-description handling.
+    # Description rewrite: stored as written, mirroring the comment and
+    # the create-ticket description (#69).
     if "description" in args:
-        attributes["description"] = markdown_to_tracwiki(
-            args["description"]
-        )
+        attributes["description"] = args["description"]
     # Workflow action: trigger a Trac workflow transition (e.g. accept,
     # resolve, reopen). Action-specific input fields follow Trac's
     # ``action_<action>_<action>_<field>`` convention (e.g.
@@ -377,6 +425,7 @@ async def _handle_update(
     # onto whichever field ends in "resolution", so the transition and
     # the resolution land in one call.
     action = args.get("action")
+    resolution_remap_warning = None
     if action and "resolution" in attributes:
         action_prefix = f"action_{action}_"
         already_explicit = any(
@@ -390,22 +439,93 @@ async def _handle_update(
                 )
             except Exception:
                 actions = []
+            remapped = False
             for entry in actions or []:
                 if not isinstance(entry, (list, tuple)) or not entry:
                     continue
                 if entry[0] != action:
                     continue
                 input_fields = entry[3] if len(entry) > 3 else []
+                # Each entry in input_fields is [name, default, options],
+                # not a field name -- read the name out rather than
+                # stringifying the whole list (ticket #49). The name is
+                # already fully qualified (e.g.
+                # "action_resolve_resolve_resolution"), so it is used
+                # as-is rather than re-prefixed.
                 for field in input_fields or []:
-                    if str(field).endswith("resolution"):
-                        attributes[f"action_{action}_{field}"] = (
-                            attributes.pop("resolution")
+                    name = (
+                        field[0]
+                        if isinstance(field, (list, tuple)) and field
+                        else field
+                    )
+                    if str(name).endswith("resolution"):
+                        attributes[str(name)] = attributes.pop(
+                            "resolution"
                         )
+                        remapped = True
                         break
                 break
+            if not remapped and "resolution" in attributes:
+                resolution_remap_warning = (
+                    f"WARNING: could not find an input field for "
+                    f"action '{action}' ending in 'resolution' -- the "
+                    f"plain 'resolution' attribute was sent as-is and "
+                    f"may be silently overwritten by the workflow "
+                    f"action."
+                )
 
-    # Update ticket (client handles optimistic locking)
-    await run_sync(client.update_ticket, ticket_id, comment, attributes)
+    # The link gate (ticket #64), on the author's OWN text.
+    #
+    # `comment` may by now carry a quoted copy of an earlier comment,
+    # prepended by reply_to. `args["comment"]` is what this author
+    # actually wrote, and that is what is checked: refusing a reply
+    # because the comment being QUOTED contains a broken link would
+    # charge an author for text they did not write and did not choose to
+    # keep -- a quoted comment is not theirs to edit. Ruling 4 says block on
+    # everything in the submitted content; the quoted block is not
+    # content this write is submitting, it is content it is repeating.
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {
+            "description": attributes.get("description"),
+            "comment": args.get("comment", ""),
+        },
+        args,
+        recheck_with="ticket_render_check",
+        ticket_id=ticket_id,
+    )
+    if refusal is not None:
+        return refusal
+
+    # Update ticket. base_ts, when supplied, is forwarded verbatim as
+    # Trac's optimistic-lock token -- see TracClient.update_ticket (#50).
+    base_ts = args.get("base_ts")
+    try:
+        await run_sync(
+            client.update_ticket,
+            ticket_id,
+            comment,
+            attributes,
+            False,
+            base_ts,
+        )
+    except TicketUpdateConflict as e:
+        if e.changes:
+            what_changed = "; ".join(
+                f"{c['field']} by {c['author']} at {c['timestamp']}"
+                for c in e.changes
+            )
+        else:
+            what_changed = "unable to determine the exact changes"
+        return build_error_response(
+            "version_conflict",
+            f"Ticket #{ticket_id} was modified since base_ts={base_ts}: "
+            f"{what_changed}",
+            f"Re-read with ticket_get(ticket_id={ticket_id}) and "
+            f"ticket_changelog(ticket_id={ticket_id}) to see the current "
+            f"state, merge your update with it, then retry ticket_update "
+            f"with the fresh base_ts from that ticket_get response.",
+        )
 
     # Build summary of changes
     changes = []
@@ -415,12 +535,17 @@ async def _handle_update(
         changes.append(f"updated {len(attributes)} field(s)")
 
     change_summary = ", ".join(changes) if changes else "no changes"
+    if resolution_remap_warning:
+        change_summary = f"{change_summary}; {resolution_remap_warning}"
 
     return types.CallToolResult(
         content=[
             types.TextContent(
                 type="text",
-                text=f"Updated ticket #{ticket_id} ({change_summary})",
+                text="\n".join(
+                    [f"Updated ticket #{ticket_id} ({change_summary})"]
+                    + gate_lines
+                ),
             )
         ]
     )

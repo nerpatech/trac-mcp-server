@@ -17,9 +17,9 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 if TYPE_CHECKING:
     from .config import Config
@@ -68,6 +68,14 @@ class TracConfig(BaseModel):
         ge=5,
         le=300,
         description="Read timeout in seconds for XML-RPC requests (5-300)",
+    )
+    write_gate: bool = Field(
+        default=True,
+        description=(
+            "Run the link checks on every write and refuse a write "
+            "carrying a broken link (ticket #64). Emergency off switch "
+            "for the shared daemon; leave on."
+        ),
     )
 
     model_config = {"frozen": True}
@@ -165,6 +173,50 @@ class ServerConfig(BaseModel):
     allowed_origins: list[str] = Field(
         default_factory=list,
         description="Extra Origin header values to accept for DNS-rebinding protection",
+    )
+    file_access: Literal["local", "off"] | None = Field(
+        default=None,
+        description=(
+            "Whether the path-taking tools (wiki_file_*, *_attachment_put/"
+            "get) may read and write THIS process's filesystem (ticket "
+            "#111). None resolves by transport at bootstrap: 'local' for "
+            "stdio, where the server shares the caller's filesystem, "
+            "'off' for http, where it does not."
+        ),
+    )
+    max_inline_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        ge=1,
+        description=(
+            "Largest payload a file tool returns inline (pulled page text "
+            "or base64 attachment bytes) when no output path is given"
+        ),
+    )
+
+    @field_validator("file_access", mode="before")
+    @classmethod
+    def _file_access_from_yaml_bool(cls, value: Any) -> Any:
+        """YAML 1.1 reads an unquoted ``off``/``on`` as a boolean, so
+        ``file_access: off`` arrives here as ``False``. Map it back rather
+        than refusing to start on the documented spelling."""
+        if value is False:
+            return "off"
+        if value is True:
+            return "local"
+        return value
+
+    identities: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Bearer token -> instances.Identity, for per-caller Trac "
+            "credential resolution (ticket #102). Values are typed as "
+            "Any rather than instances.Identity to avoid a circular "
+            "import (instances.py already imports from this module); "
+            "load_identities() is the only producer and it always "
+            "returns Identity instances. Loaded once at startup from "
+            "TRAC_IDENTITIES, never from YAML or CLI -- see "
+            "config_bootstrap.bootstrap_server_config()."
+        ),
     )
 
     model_config = {"frozen": True}

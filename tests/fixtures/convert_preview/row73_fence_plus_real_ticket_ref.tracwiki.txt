@@ -1,0 +1,7 @@
+A fenced example beside a real reference:
+
+{{{
+auto_pm:#87's summary
+}}}
+
+and a real one in prose: auto_pm:#87 covers it.

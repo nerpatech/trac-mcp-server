@@ -131,7 +131,7 @@ class ToolRegistry:
         spec = self._specs.get(name)
         if spec is None:
             raise ValueError(f"Unknown tool: {name}")
-        args = arguments or {}
+        args = _normalize_arg_aliases(name, arguments or {})
         try:
             return await spec.handler(client, args)
         except xmlrpc.client.Fault as e:
@@ -154,6 +154,50 @@ class ToolRegistry:
                 str(e),
                 "Contact Trac administrator or retry later.",
             )
+
+
+# Exact tool name -> {alias: canonical}. Checked before any prefix match,
+# for an alias that only applies to one tool in a name-prefix family --
+# e.g. `type` means `ticket_type` on `ticket_create`, but `ticket_update`
+# already uses `type` as its own canonical key, so a `ticket_`-prefix
+# entry would wrongly rewrite `ticket_update` calls too (ticket #97).
+_ARG_ALIASES_EXACT: dict[str, dict[str, str]] = {
+    "ticket_create": {"type": "ticket_type"},
+}
+
+# Prefix -> {alias: canonical}. Applied at dispatch so every handler and
+# error-message helper only ever needs to know the canonical key.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "wiki_": {"page": "page_name"},
+}
+
+
+def _normalize_arg_aliases(name: str, args: dict) -> dict:
+    """Fill in canonical argument keys from known aliases.
+
+    Never overwrites an explicitly supplied canonical value; only fills it
+    in when absent. E.g. a ``wiki_*`` call passing ``page`` instead of the
+    documented ``page_name`` is normalized here, once, so handlers and
+    ``_entity_name_from_args`` keep reading only ``page_name``.
+
+    An exact tool-name match in ``_ARG_ALIASES_EXACT`` takes priority over
+    a prefix match in ``_ARG_ALIASES`` -- the two are deliberately
+    independent so a family-wide prefix alias (``wiki_``) and a one-tool
+    exact alias (``ticket_create``) can coexist without the prefix rule
+    firing on a sibling tool it shouldn't touch (``ticket_update``).
+    """
+    aliases = _ARG_ALIASES_EXACT.get(name)
+    if aliases is None:
+        for prefix, prefix_aliases in _ARG_ALIASES.items():
+            if name.startswith(prefix):
+                aliases = prefix_aliases
+                break
+    if not aliases:
+        return args
+    for alias, canonical in aliases.items():
+        if alias in args and canonical not in args:
+            args = {**args, canonical: args[alias]}
+    return args
 
 
 def _entity_name_from_args(name: str, args: dict) -> str | None:
@@ -205,18 +249,27 @@ def with_instance_param(
         New list of ToolSpec with the same permissions/handler but an
         updated inputSchema.
     """
+    # Every result names the instance it reached, in `instance` /
+    # `instance_source` (ticket #94), so the omitted case is stated rather
+    # than guessed at. Said here because this description is the only place
+    # a caller reads about the argument at all.
+    echoed = (
+        " Omitting it uses the server's default instance; the result says "
+        "which instance answered, as instance/instance_source."
+    )
     if names:
         description = (
             "Optional. Route this call to another configured Trac instance "
             f"instead of the default. Configured instances: {', '.join(names)}. "
             "Any other project on the same Trac host as the default instance "
             "is also reachable ad-hoc via its path, e.g. '/project'."
+            + echoed
         )
     else:
         description = (
             "Optional. Route this call to another project on the same Trac "
             "host as the default instance, addressed by path, e.g. "
-            "'/project'. No named instances are configured."
+            "'/project'. No named instances are configured." + echoed
         )
 
     result = []
@@ -233,6 +286,104 @@ def with_instance_param(
             "description": description,
         }
         schema["properties"] = properties
+        new_tool = spec.tool.model_copy(update={"inputSchema": schema})
+        result.append(
+            ToolSpec(
+                tool=new_tool,
+                permissions=spec.permissions,
+                handler=spec.handler,
+            )
+        )
+    return result
+
+
+def with_page_alias(specs: list[ToolSpec]) -> list[ToolSpec]:
+    """Let a `wiki_*` tool's schema accept `page` as well as `page_name`.
+
+    The MCP SDK validates call arguments against a tool's advertised
+    `inputSchema` *before* dispatch ever reaches `_normalize_arg_aliases`
+    (ticket #97). A schema that lists `page_name` as `required` rejects a
+    `page`-only call before the alias can ever run -- `_ARG_ALIASES`'
+    `wiki_` entry was correct but unreachable. For every `wiki_*` spec
+    whose schema requires `page_name`, adds an optional `page` property
+    and replaces the plain `page_name` requirement with an `anyOf`
+    accepting either key, so an aliased call survives validation.
+
+    Args:
+        specs: Tool specs to augment.
+
+    Returns:
+        New list of ToolSpec with the same permissions/handler but an
+        updated inputSchema.
+    """
+    result = []
+    for spec in specs:
+        schema = spec.tool.inputSchema or {}
+        properties = schema.get("properties") or {}
+        required = schema.get("required") or []
+        if (
+            not spec.tool.name.startswith("wiki_")
+            or "page_name" not in properties
+            or "page_name" not in required
+        ):
+            result.append(spec)
+            continue
+
+        new_properties: dict[str, Any] = dict(properties)
+        new_properties.setdefault(
+            "page",
+            {
+                "type": "string",
+                "description": "Alias for page_name.",
+            },
+        )
+        new_schema: dict[str, Any] = dict(schema)
+        new_schema["properties"] = new_properties
+        new_schema["required"] = [
+            r for r in required if r != "page_name"
+        ]
+        new_schema["anyOf"] = [
+            *(schema.get("anyOf") or []),
+            {"required": ["page_name"]},
+            {"required": ["page"]},
+        ]
+        new_tool = spec.tool.model_copy(
+            update={"inputSchema": new_schema}
+        )
+        result.append(
+            ToolSpec(
+                tool=new_tool,
+                permissions=spec.permissions,
+                handler=spec.handler,
+            )
+        )
+    return result
+
+
+def with_strict_schema(specs: list[ToolSpec]) -> list[ToolSpec]:
+    """Set `additionalProperties: false` on every tool's inputSchema.
+
+    No tool schema in this codebase sets this (ticket #97), so an
+    argument name the schema doesn't define -- e.g. `type` passed to the
+    old `ticket_create`, which only advertised `ticket_type` -- passes
+    jsonschema validation and is silently dropped by the handler instead
+    of erroring. Applied last in the schema post-processing pipeline, so
+    it locks down the final property set rather than a partial one.
+
+    Args:
+        specs: Tool specs to augment.
+
+    Returns:
+        New list of ToolSpec with the same permissions/handler but an
+        updated inputSchema.
+    """
+    result = []
+    for spec in specs:
+        schema: dict[str, Any] = dict(
+            spec.tool.inputSchema
+            or {"type": "object", "properties": {}, "required": []}
+        )
+        schema["additionalProperties"] = False
         new_tool = spec.tool.model_copy(update={"inputSchema": schema})
         result.append(
             ToolSpec(

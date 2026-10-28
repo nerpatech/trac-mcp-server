@@ -10,7 +10,6 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters import tracwiki_to_markdown
 from ...core.async_utils import (
     gather_limited,
     run_sync,
@@ -19,6 +18,12 @@ from ...core.async_utils import (
 from ...core.client import TracClient
 from .errors import build_error_response, format_timestamp
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
+
+# Default cap on comment bodies returned by ticket_get. A thread longer
+# than this keeps its head and tail and reports the omitted middle loudly --
+# a silent truncation would recreate the bug ticket #60 is about.
+DEFAULT_MAX_COMMENTS = 50
 
 # Tool definitions for list_tools()
 TICKET_READ_TOOLS = [
@@ -51,7 +56,7 @@ TICKET_READ_TOOLS = [
     ),
     types.Tool(
         name="ticket_get",
-        description="Get full ticket details including summary, description, status, owner, and web URL. Use ticket_changelog for history. Set raw=true to get description in original TracWiki format without conversion.",
+        description="Get full ticket details: summary, description, field values, web URL, and -- by default -- every comment with its number, author and timestamp, so one call covers the whole ticket. Set include_comments=false when you only need field values or the _ts change token before a write. Response includes a change token (_ts) -- pass it to ticket_update's base_ts to detect if the ticket changes before your write lands. Use ticket_changelog for full field-change history. The description and comment bodies are returned as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -66,10 +71,16 @@ TICKET_READ_TOOLS = [
                     "description": "Ticket number to retrieve",
                     "minimum": 1,
                 },
-                "raw": {
+                "include_comments": {
                     "type": "boolean",
-                    "description": "If true, return description in original TracWiki format without converting to Markdown (default: false)",
-                    "default": False,
+                    "description": "If true (the default), also return the ticket's comments -- number, author, timestamp and body. Set false only when you do not need them, e.g. fetching _ts before a write.",
+                    "default": True,
+                },
+                "max_comments": {
+                    "type": "integer",
+                    "description": "Maximum comment bodies to return (default: 50). A longer thread keeps its oldest and newest comments, drops the middle, and says so explicitly, naming the omitted comment numbers; the reported total is always exact. Ignored when include_comments is false.",
+                    "default": DEFAULT_MAX_COMMENTS,
+                    "minimum": 1,
                 },
             },
             "required": ["ticket_id"],
@@ -77,7 +88,7 @@ TICKET_READ_TOOLS = [
     ),
     types.Tool(
         name="ticket_changelog",
-        description="Get ticket change history. Use this to investigate who changed what and when. Set raw=true to get comment content in original TracWiki format without conversion.",
+        description="Get ticket change history. Use this to investigate who changed what and when. Comment content is returned as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -91,11 +102,6 @@ TICKET_READ_TOOLS = [
                     "type": "integer",
                     "description": "Ticket number to get history for",
                     "minimum": 1,
-                },
-                "raw": {
-                    "type": "boolean",
-                    "description": "If true, return comment content in original TracWiki format without converting to Markdown (default: false)",
-                    "default": False,
                 },
             },
             "required": ["ticket_id"],
@@ -249,6 +255,144 @@ async def _handle_search(
     )
 
 
+def _extract_comments(changelog: list) -> list[dict[str, Any]]:
+    """Pull just the comments out of a raw changelog.
+
+    Field-only changelog entries (a status change, a description edit)
+    are dropped here, before anything is formatted -- so a description
+    edit's two full copies of the description never reach the response.
+
+    Args:
+        changelog: Raw changelog rows, [timestamp, author, field,
+            oldvalue, newvalue, permanent].
+
+    Returns:
+        One dict per comment carrying number, author, timestamp and body,
+        in changelog order. Trac stores a comment's number in the entry's
+        ``oldvalue`` -- the same key ``ticket_render_check``'s ``comment``
+        parameter is keyed on -- so the number reported here is the one
+        that tool accepts. An entry without one yields ``number: None``
+        rather than a fabricated ordinal.
+    """
+    comments: list[dict[str, Any]] = []
+    for entry in changelog:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 5:
+            continue
+        timestamp, author, field, oldvalue, newvalue = entry[:5]
+        if field != "comment" or not newvalue:
+            continue
+
+        body = newvalue
+        number = str(oldvalue).strip() if oldvalue else ""
+        comments.append(
+            {
+                "number": number or None,
+                "author": author,
+                "timestamp": format_timestamp(timestamp),
+                "body": body,
+            }
+        )
+    return comments
+
+
+def _cap_comments(
+    comments: list[dict[str, Any]], max_comments: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split comments into the ones kept and the ones dropped.
+
+    Keeps the head and the tail, drops the middle: a long thread usually
+    has its scope set in the earliest comments and corrected in the
+    latest, and both ends matter to a reader deciding what to do next.
+
+    Args:
+        comments: All comments, in order.
+        max_comments: Maximum number to keep (at least 1).
+
+    Returns:
+        ``(kept, omitted)``. ``omitted`` is empty when the thread fits.
+    """
+    max_comments = max(1, max_comments)
+    if len(comments) <= max_comments:
+        return comments, []
+
+    head = (max_comments + 1) // 2
+    tail = max_comments - head
+    tail_start = len(comments) - tail if tail else len(comments)
+    return (
+        comments[:head] + comments[tail_start:],
+        comments[head:tail_start],
+    )
+
+
+def _comment_ref(comment: dict[str, Any]) -> str:
+    """Render a comment's number as a reference, or flag its absence."""
+    number = comment.get("number")
+    return (
+        f"comment:{number}"
+        if number
+        else "comment (number unavailable)"
+    )
+
+
+def _omitted_notice(omitted: list[dict[str, Any]]) -> str:
+    """Build the loud notice naming the comments that were dropped."""
+    first = _comment_ref(omitted[0])
+    last = _comment_ref(omitted[-1])
+    return (
+        f"*** {len(omitted)} comment(s) omitted from the middle of this "
+        f"thread ({first} through {last}). This response is NOT the full "
+        "comment history -- read the omitted comments with "
+        "ticket_changelog, or raise max_comments. ***"
+    )
+
+
+def _format_comment_section(
+    comments: list[dict[str, Any]],
+    omitted: list[dict[str, Any]],
+    total: int,
+) -> list[str]:
+    """Format the comments block of ticket_get's text response.
+
+    The omitted-middle notice is deliberately loud: a caller who believes
+    they read the ticket, having read half of it, is the failure this
+    whole feature exists to prevent.
+
+    Args:
+        comments: The comments actually being shown, in order.
+        omitted: The dropped middle, empty when nothing was dropped.
+        total: Exact number of comments on the ticket, dropped included.
+
+    Returns:
+        Response lines, starting with a blank separator line.
+    """
+    if not total:
+        return ["", "## Comments", "(none)"]
+
+    heading = f"## Comments ({total} total"
+    if omitted:
+        heading += f", {len(comments)} shown, {len(omitted)} omitted"
+    heading += ")"
+    lines = ["", heading]
+
+    # _cap_comments keeps ceil(max/2) at the head, so the notice belongs
+    # at that index -- or after everything, when the tail half is empty.
+    head_count = (len(comments) + 1) // 2 if omitted else len(comments)
+    for index, comment in enumerate(comments):
+        if omitted and index == head_count:
+            lines.extend(["", _omitted_notice(omitted)])
+        lines.extend(
+            [
+                "",
+                f"### {_comment_ref(comment)} -- {comment['author']}, "
+                f"{comment['timestamp']}",
+                comment["body"],
+            ]
+        )
+    if omitted and head_count >= len(comments):
+        lines.extend(["", _omitted_notice(omitted)])
+    return lines
+
+
 async def _handle_get(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -261,7 +405,12 @@ async def _handle_get(
             "Provide ticket_id parameter.",
         )
 
-    raw = args.get("raw", False)
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
+    include_comments = args.get("include_comments", True)
+    max_comments = args.get("max_comments", DEFAULT_MAX_COMMENTS)
 
     # Get ticket data
     ticket_data = await run_sync(client.get_ticket, ticket_id)
@@ -292,21 +441,38 @@ async def _handle_get(
     keywords = attrs.get("keywords", "")
     cc = attrs.get("cc", "")
     resolution = attrs.get("resolution", "")
+    change_token = attrs.get("_ts")
 
-    # Convert description from TracWiki to Markdown unless raw mode is requested
-    if raw:
-        description_output = description
-    else:
-        conversion_result = tracwiki_to_markdown(description)
-        description_output = conversion_result.text
+    # Returned as stored. Nothing converts on this leg any more, so a
+    # read-edit-write round trip is byte-exact (ticket #69).
+    description_output = description
 
     # Format timestamps
     created_str = format_timestamp(created)
     modified_str = format_timestamp(modified)
     url = _ticket_url(client, ticket_id_resp)
 
+    # Comments live in the changelog, not in the ticket attributes.
+    # Fetching them by default is what makes one ticket_get the whole
+    # ticket; a failure here degrades loudly rather than silently
+    # dropping them (ticket #60).
+    comments: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    comments_error: str | None = None
+    if include_comments:
+        try:
+            changelog = await run_sync(
+                client.get_ticket_changelog, ticket_id
+            )
+        except Exception as exc:  # noqa: BLE001 -- reported, not swallowed
+            comments_error = str(exc)
+        else:
+            comments, omitted = _cap_comments(
+                _extract_comments(changelog or []), max_comments
+            )
+    comment_total = len(comments) + len(omitted)
+
     # Build response
-    format_note = " (TracWiki)" if raw else ""
     response_lines = [
         f"Ticket #{ticket_id_resp}: {summary}",
         f"Status: {status} | Owner: {owner} | Reporter: {reporter} | Type: {ticket_type}",
@@ -315,10 +481,37 @@ async def _handle_get(
         + (f" | Resolution: {resolution}" if resolution else ""),
         f"Created: {created_str} | Modified: {modified_str}",
         f"URL: {url}",
+        f"Change token (base_ts): {change_token}"
+        " -- pass this to ticket_update's base_ts to detect if the "
+        "ticket changes before your write lands.",
         "",
-        f"## Description{format_note}",
+        "## Description",
         description_output,
     ]
+
+    if comments_error is not None:
+        response_lines.extend(
+            [
+                "",
+                "## Comments",
+                "*** Comments could not be fetched, so this is NOT the "
+                f"whole ticket: {comments_error}. Retry, or read them "
+                "with ticket_changelog. ***",
+            ]
+        )
+    elif include_comments:
+        response_lines.extend(
+            _format_comment_section(comments, omitted, comment_total)
+        )
+    else:
+        response_lines.extend(
+            [
+                "",
+                "## Comments",
+                "(not fetched: include_comments=false -- this response "
+                "is field values only, not the whole ticket)",
+            ]
+        )
 
     # Build structured JSON (use json.dumps with default=str for datetime serialization)
     ticket_json = {
@@ -338,7 +531,22 @@ async def _handle_get(
         "created": created_str,
         "modified": modified_str,
         "url": url,
+        "_ts": change_token,
+        "comments_included": include_comments
+        and comments_error is None,
     }
+
+    if comments_error is not None:
+        ticket_json["comments_error"] = comments_error
+    elif include_comments:
+        ticket_json["comments"] = comments
+        ticket_json["comment_count"] = comment_total
+        ticket_json["comments_shown"] = len(comments)
+        ticket_json["comments_truncated"] = bool(omitted)
+        if omitted:
+            ticket_json["omitted_comment_numbers"] = [
+                c["number"] for c in omitted
+            ]
 
     return types.CallToolResult(
         content=[
@@ -362,7 +570,9 @@ async def _handle_changelog(
             "Provide ticket_id parameter.",
         )
 
-    raw = args.get("raw", False)
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
 
     # Get changelog
     changelog = await run_sync(client.get_ticket_changelog, ticket_id)
@@ -392,14 +602,9 @@ async def _handle_changelog(
         timestamp_str = format_timestamp(timestamp)
 
         if field == "comment":
-            # Comment content is in newvalue (TracWiki format)
+            # Comment content is in newvalue, returned as stored (#69)
             if newvalue:
-                # Convert comment content unless raw mode is requested
-                if raw:
-                    comment_text = newvalue
-                else:
-                    conversion_result = tracwiki_to_markdown(newvalue)
-                    comment_text = conversion_result.text
+                comment_text = newvalue
                 # Indent multiline comments for readability
                 comment_lines = comment_text.strip().split("\n")
                 if len(comment_lines) > 1:
@@ -446,10 +651,8 @@ async def _handle_changelog(
             }
         )
 
-    format_note = " (TracWiki format)" if raw else ""
-    response_text = (
-        f"Changelog for ticket #{ticket_id}{format_note}:\n"
-        + "\n".join(entries)
+    response_text = f"Changelog for ticket #{ticket_id}:\n" + "\n".join(
+        entries
     )
 
     return types.CallToolResult(

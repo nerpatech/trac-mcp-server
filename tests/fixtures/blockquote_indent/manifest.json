@@ -1,0 +1,17 @@
+{
+  "_comment": "Rendered HTML captured from the live Trac renderer (convert_preview, format=tracwiki, /trac_test) on 2026-09-03, per Rules/testing/RealSubstrateNotMocks. Ticket #73 section 5 requires the four-space row to be asserted on the rendered HTML and not on bytes alone, because the defect is a change of CONTENT TYPE.",
+  "rows": [
+    {
+      "name": "four_space_indent",
+      "tracwiki": "    Quoted prose with *markup*.",
+      "html": "four_space_indent.html",
+      "note": "What the source means: one blockquote. Markup inside stays live."
+    },
+    {
+      "name": "code_block_corruption",
+      "tracwiki": "{{{\nQuoted prose with *markup*.\n}}}",
+      "html": "code_block_corruption.html",
+      "note": "What the converter stored before this ticket: a literal code block. Monospaced, markup no longer interpreted."
+    }
+  ]
+}

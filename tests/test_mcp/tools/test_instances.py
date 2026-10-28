@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.instances import InstanceRegistry
+from trac_mcp_server.instances import Identity, InstanceRegistry
 from trac_mcp_server.mcp.tools.instances import (
     INSTANCE_SPECS,
     INSTANCE_TOOLS,
@@ -145,6 +145,51 @@ class TestListInstancesHandler(unittest.TestCase):
 
         self.assertEqual(
             result.structuredContent["default"], self.config.trac_url
+        )
+
+    @patch("trac_mcp_server.mcp.tools.instances.caller_identity")
+    @patch("trac_mcp_server.mcp.tools.instances.scrape_project_index")
+    def test_discover_scrapes_with_caller_identity(
+        self, mock_scrape, mock_caller_identity
+    ):
+        """Ticket #102 gap 5: discovery authenticates as the caller's own
+        identity, not whichever identity started this process."""
+        registry = InstanceRegistry(self.config, {})
+        set_instance_registry(registry)
+        mock_caller_identity.return_value = Identity(
+            name="alice", username="alice-trac", password="alice-pw"
+        )
+        mock_scrape.return_value = []
+
+        asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, self.client
+            )
+        )
+
+        mock_scrape.assert_called_once()
+        _host_root, credentials = mock_scrape.call_args[0]
+        self.assertEqual(credentials, ("alice-trac", "alice-pw"))
+
+    @patch("trac_mcp_server.mcp.tools.instances.caller_identity")
+    @patch("trac_mcp_server.mcp.tools.instances.scrape_project_index")
+    def test_discover_scrapes_with_default_credentials_when_no_identity(
+        self, mock_scrape, mock_caller_identity
+    ):
+        registry = InstanceRegistry(self.config, {})
+        set_instance_registry(registry)
+        mock_caller_identity.return_value = None
+        mock_scrape.return_value = []
+
+        asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, self.client
+            )
+        )
+
+        _host_root, credentials = mock_scrape.call_args[0]
+        self.assertEqual(
+            credentials, (self.config.username, self.config.password)
         )
 
 

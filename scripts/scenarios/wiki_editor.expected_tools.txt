@@ -4,6 +4,7 @@ wiki_attachment_get
 wiki_attachment_list
 wiki_attachment_put
 wiki_create
+wiki_diff
 wiki_file_detect_format
 wiki_file_pull
 wiki_file_push

@@ -14,7 +14,6 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.converters import ConversionResult
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
 from trac_mcp_server.mcp.tools.errors import format_timestamp
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -81,14 +80,14 @@ class TestCursorEncoding(unittest.TestCase):
 class TestWikiTools(unittest.TestCase):
     """Test WIKI_TOOLS definitions."""
 
-    def test_eleven_tools_defined(self):
-        """Test WIKI_TOOLS contains exactly 11 tools.
+    def test_twelve_tools_defined(self):
+        """Test WIKI_TOOLS contains exactly 12 tools.
 
-        4 read (wiki_get, wiki_search, wiki_recent_changes,
-        wiki_get_history) + 3 write (create, update, delete) +
+        5 read (wiki_get, wiki_search, wiki_recent_changes,
+        wiki_get_history, wiki_diff) + 3 write (create, update, delete) +
         4 attachment (put, get, list, delete).
         """
-        self.assertEqual(len(WIKI_TOOLS), 11)
+        self.assertEqual(len(WIKI_TOOLS), 12)
 
     def test_tool_names(self):
         """Test tool names are correct."""
@@ -731,15 +730,10 @@ class TestHandleCreate(unittest.TestCase):
         self.mock_client.config = self.mock_config
 
     def test_handle_create_success(self):
-        """Test _handle_create creates page and reports warnings."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        """Test _handle_create creates the page."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up side effect - first call raises not found, second returns success
             call_count = [0]
 
@@ -758,20 +752,6 @@ class TestHandleCreate(unittest.TestCase):
 
             mock_run_sync.side_effect = side_effect_func
 
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= New Page =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[
-                        "Tables detected - TracWiki uses different table syntax. Manual conversion may be needed."
-                    ],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
-
             # Call handler
             result = asyncio.run(
                 _handle_create(
@@ -789,35 +769,17 @@ class TestHandleCreate(unittest.TestCase):
 
             self.assertIn("Created wiki page 'NewPage'", text)
             self.assertIn("version 1", text)
-            self.assertIn("Conversion warnings:", text)
-            self.assertIn("Tables detected", text)
 
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Return page info (page exists)
             mock_run_sync.return_value = {
                 "name": "ExistingPage",
                 "version": 3,
             }
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Existing =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(
@@ -850,32 +812,15 @@ class TestHandleUpdate(unittest.TestCase):
 
     def test_handle_update_success(self):
         """Test _handle_update updates page successfully."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up mocks
             mock_run_sync.return_value = {
                 "name": "TestPage",
                 "version": 6,
                 "author": "alice",
             }
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Updated Page =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(
@@ -901,14 +846,9 @@ class TestHandleUpdate(unittest.TestCase):
 
     def test_handle_update_version_conflict(self):
         """Test _handle_update handles version conflict."""
-        with (
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
-            ) as mock_run_sync,
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.auto_convert"
-            ) as mock_convert,
-        ):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
             # Set up side effect - first call raises conflict, second returns current version
             call_count = [0]
 
@@ -924,18 +864,6 @@ class TestHandleUpdate(unittest.TestCase):
                     return {"name": "TestPage", "version": 7}
 
             mock_run_sync.side_effect = side_effect_func
-
-            # Mock auto_convert as async coroutine
-            async def mock_auto_convert(*args, **kwargs):
-                return ConversionResult(
-                    text="= Updated =",
-                    source_format="markdown",
-                    target_format="tracwiki",
-                    converted=True,
-                    warnings=[],
-                )
-
-            mock_convert.side_effect = mock_auto_convert
 
             # Call handler
             result = asyncio.run(

@@ -415,12 +415,14 @@ class TestResponseFormatting(unittest.TestCase):
         self.assertIn("Page content here", result)
 
     @patch("trac_mcp_server.mcp.resources.wiki.run_sync_limited")
-    def test_tracwiki_content_converted_to_markdown(
+    def test_stored_tracwiki_is_returned_unconverted(
         self, mock_run_sync_limited
     ):
-        """Test TracWiki content is converted to Markdown by default."""
+        """The resource returns stored bytes, with no query parameter
+        needed to ask for them (ticket #69)."""
+        stored = "= Heading =\n'''Bold''' and ''italic''"
         mock_run_sync_limited.side_effect = [
-            "= Heading =\n'''Bold''' and ''italic''",  # TracWiki
+            stored,
             {
                 "author": "admin",
                 "version": 1,
@@ -433,10 +435,22 @@ class TestResponseFormatting(unittest.TestCase):
             handle_read_wiki_resource(uri, self.client)
         )
 
-        # Should be converted to Markdown
-        self.assertIn("# Heading", result)
-        self.assertIn("**Bold**", result)
-        self.assertIn("*italic*", result)
+        self.assertIn(stored, result)
+
+    @patch("trac_mcp_server.mcp.resources.wiki.run_sync_limited")
+    def test_format_markdown_query_param_is_rejected(
+        self, mock_run_sync_limited
+    ):
+        """A stale caller asking for Markdown is told, rather than
+        handed TracWiki while believing otherwise (ticket #69)."""
+        uri = Url("trac://wiki/TestPage?format=markdown")
+        result = asyncio.run(
+            handle_read_wiki_resource(uri, self.client)
+        )
+
+        self.assertIn("validation_error", result)
+        self.assertIn("trac-convert", result)
+        mock_run_sync_limited.assert_not_called()
 
 
 if __name__ == "__main__":

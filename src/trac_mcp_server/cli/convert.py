@@ -27,7 +27,11 @@ from ..converters import (
     detect_format_heuristic,
     tracwiki_to_markdown,
 )
-from ..converters.common import ConversionResult
+from ..converters.common import (
+    ConversionResult,
+    describe_indentation_loss,
+    find_code_block_indentation_loss,
+)
 from ..converters.markdown_to_tracwiki import convert_with_warnings
 from ..core.client import TracClient
 
@@ -532,13 +536,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--unknown-macros",
         dest="unknown_macros",
-        choices=("bracket", "preserve", "drop"),
-        default="bracket",
+        choices=("preserve", "drop"),
+        default="preserve",
         help=(
             "How to render unknown TracWiki macros"
-            " (tracwiki → md only). bracket = [MACRO: Name],"
-            " preserve = leave [[Name]] literal, drop = omit."
-            " Default: bracket."
+            " (tracwiki → md only). preserve = leave [[Name]] literal,"
+            " drop = omit. Default: preserve."
+            " (The 'bracket' mode, which emitted [MACRO: Name], was"
+            " removed in ticket #63 -- 'preserve' round-trips back to"
+            " TracWiki unchanged, which 'bracket' only simulated.)"
         ),
     )
     parser.add_argument(
@@ -649,7 +655,7 @@ def convert_text(
     target_format: str,
     *,
     heading_anchors: bool = False,
-    unknown_macros: str = "bracket",
+    unknown_macros: str = "preserve",
 ) -> ConversionResult:
     """Convert text between Markdown and TracWiki.
 
@@ -682,9 +688,22 @@ def convert_text(
             warnings=[],
         )
     if source == "markdown" and target == "tracwiki":
-        return convert_with_warnings(
+        result = convert_with_warnings(
             text, heading_anchors=heading_anchors
         )
+        # Ticket #68: a TracWiki `{{{ }}}` block in Markdown input has
+        # its body indentation eaten, and nothing else in this pipeline
+        # says so -- the conversion succeeds and the output looks
+        # plausible. Reported here rather than raised: unlike the MCP
+        # write tools, this binary stores nothing, so the caller still
+        # holds the input and a stderr line is enough to act on.
+        result.warnings.extend(
+            describe_indentation_loss(loss)
+            for loss in find_code_block_indentation_loss(
+                text, result.text
+            )
+        )
+        return result
     return tracwiki_to_markdown(text, unknown_macros=unknown_macros)  # type: ignore[arg-type]
 
 

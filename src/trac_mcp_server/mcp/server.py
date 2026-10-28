@@ -27,10 +27,12 @@ from ..config_bootstrap import bootstrap_server_config
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
+    InstanceNotAllowedError,
     InstanceRegistry,
     UnknownInstanceError,
     load_declared_instances,
 )
+from ..instances import caller_identity as _caller_identity
 from ..logger import setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
@@ -46,8 +48,15 @@ from .tools import (
     build_error_response,
     load_permissions_file,
 )
+from .tools.file_io import set_file_access
+from .tools.instance_echo import annotate
 from .tools.instances import set_instance_registry
-from .tools.registry import ToolSpec, with_instance_param
+from .tools.registry import (
+    ToolSpec,
+    with_instance_param,
+    with_page_alias,
+    with_strict_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +74,12 @@ _registry: ToolRegistry | None = None
 # "OIDC per-user mode is not active" -- the normal InstanceRegistry path is
 # used unconditionally in that case, same as before this mode existed.
 _oidc_cache: OidcClientCache | None = None
+# Ticket #102: `_caller_identity` (imported above as an alias for
+# `instances.caller_identity`) is called at the two dispatch sites below
+# to resolve the in-flight HTTP request's bearer-token identity, if any.
+# It depends on the mcp SDK setting `request_context.request` for every
+# message -- see its docstring for the exact mechanism and the note to
+# re-verify this on any `mcp` version bump.
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +233,7 @@ async def _resolve_client(instance: str | None) -> TracClient:
         )
         return _oidc_cache.get_client(extract_bearer_token(auth_header))
 
-    return get_instances().get_client(instance)
+    return get_instances().get_client(instance, identity=_caller_identity())
 
 
 # ---------------------------------------------------------------------------
@@ -272,17 +287,28 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = await _resolve_client(instance)
-        except ValueError as e:
-            error_type = (
-                "unknown_instance"
-                if isinstance(e, UnknownInstanceError)
-                else "validation_error"
+            client = await _resolve_client(
+                instance
             )
+        except ValueError as e:
+            error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
         return await handle_read_wiki_resource(uri, client)
 
     raise ValueError(f"Unknown resource type: {uri.host}")
+
+
+def _instance_error_type(error: ValueError) -> str:
+    """Error type for a ``ValueError`` out of instance resolution.
+
+    Ticket #110 added ``instance_not_allowed`` beside ``unknown_instance``;
+    both dispatch sites (tool calls and resource reads) map through here.
+    """
+    if isinstance(error, InstanceNotAllowedError):
+        return "instance_not_allowed"
+    if isinstance(error, UnknownInstanceError):
+        return "unknown_instance"
+    return "validation_error"
 
 
 def _instance_from_query(query: str | None) -> str | None:
@@ -302,6 +328,10 @@ async def handle_call_tool(
     ever sees an unexpected key, and resolves it against the InstanceRegistry
     to pick which Trac project's client to use.
 
+    Annotates whatever comes back with the instance it actually reached, so
+    the silent fallback to the server's default is visible from the response
+    alone -- see ``tools.instance_echo`` and ticket #94.
+
     Args:
         name: The name of the tool to execute.
         arguments: Tool arguments (optional).
@@ -311,14 +341,23 @@ async def handle_call_tool(
     """
     args = dict(arguments or {})
     instance = args.pop("instance", None)
+    client: TracClient | None
     try:
         client = await _resolve_client(instance)
+    except InstanceNotAllowedError as e:
+        # Ticket #110: a caller scoped away from the DEFAULT instance must
+        # still be able to ask what it may reach -- the refusal below tells
+        # it to do exactly that. list_instances reads the registry, not
+        # the client, so it runs with none; every other tool, and an
+        # explicit out-of-scope `instance`, is still refused.
+        if name != "list_instances" or instance is not None:
+            return build_error_response(
+                _instance_error_type(e),
+                str(e),
+                "Call list_instances to see what is reachable.",
+            )
+        client = None
     except ValueError as e:
-        error_type = (
-            "unknown_instance"
-            if isinstance(e, UnknownInstanceError)
-            else "validation_error"
-        )
         corrective_action = (
             "Set the 'Authorization: Bearer <token>' header to your own "
             "Trac OIDC access token."
@@ -326,20 +365,31 @@ async def handle_call_tool(
             else "Call list_instances to see what is reachable."
         )
         return build_error_response(
-            error_type,
+            _instance_error_type(e),
             str(e),
             corrective_action,
         )
 
+    # Resolution happened above; from here every exit is a call that reached a
+    # real instance, so every exit is annotated with which one (ticket #94).
+    # The unknown_instance branch is not: nothing was reached to report.
+    url = getattr(getattr(client, "config", None), "trac_url", None)
+    explicit = instance is not None
+
     try:
-        return await get_registry().call_tool(name, args, client)
+        result = await get_registry().call_tool(
+            name,
+            args,
+            client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+        )
     except ValueError as e:
         # Unknown or filtered-out tool name
-        return build_error_response(
+        result = build_error_response(
             "unknown_tool",
             str(e),
             "Use list_tools to see available tools.",
         )
+    return annotate(result, url, explicit)
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +407,7 @@ async def main(config_overrides: dict | None = None):
     Args:
         config_overrides: Optional dict with config values to override (url,
             username, password, insecure, log_file, transport, host, port,
-            path, allow_unauthenticated)
+            path, allow_unauthenticated, file_access)
     """
     # Extract log file override if provided
     log_file = (
@@ -406,8 +456,10 @@ async def main(config_overrides: dict | None = None):
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
     declared_names = sorted(load_declared_instances())
-    all_specs = with_instance_param(
-        [PING_SPEC] + ALL_SPECS, declared_names
+    all_specs = with_strict_schema(
+        with_instance_param(
+            with_page_alias([PING_SPEC] + ALL_SPECS), declared_names
+        )
     )
     registry = ToolRegistry(
         all_specs,
@@ -440,6 +492,17 @@ async def main(config_overrides: dict | None = None):
         )
 
     set_registry(registry)
+    # bootstrap_server_config() always resolves file_access (by transport
+    # when unset); the `or` only satisfies the Optional field type.
+    set_file_access(
+        server_config.file_access or "off",
+        server_config.max_inline_bytes,
+    )
+    logger.info(
+        "file_access=%s, max_inline_bytes=%d",
+        server_config.file_access,
+        server_config.max_inline_bytes,
+    )
 
     # Use lifespan manager for startup validation with config overrides.
     # NOTE: We call set_instances() directly here rather than in the lifespan
@@ -475,6 +538,7 @@ async def main(config_overrides: dict | None = None):
             set_instance_registry(None)
             set_registry(None)
             set_oidc_cache(None)
+            set_file_access("off")
 
 
 async def _run_stdio() -> None:
@@ -593,6 +657,14 @@ must not be piped manually. This does not apply to --transport http.
         "--permissions-file.",
     )
     parser.add_argument(
+        "--file-access",
+        choices=["local", "off"],
+        help="Whether the file tools may read and write this process's "
+        "filesystem through file_path/output_path arguments (default: "
+        "local for stdio, off for http; also settable via "
+        "TRAC_MCP_FILE_ACCESS or config.yaml server.file_access)",
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"trac-mcp-server version {__version__}",
@@ -631,6 +703,8 @@ def run() -> None:
         config_overrides["allow_unauthenticated"] = True
     if args.read_only:
         config_overrides["read_only"] = True
+    if args.file_access:
+        config_overrides["file_access"] = args.file_access
 
     # Log config overrides to stderr (before stdio transport starts)
     if config_overrides:

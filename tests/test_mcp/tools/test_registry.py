@@ -20,6 +20,7 @@ from trac_mcp_server.mcp.tools.registry import (
     ToolRegistry,
     ToolSpec,
     load_permissions_file,
+    with_page_alias,
 )
 
 
@@ -214,6 +215,140 @@ class TestToolRegistry(unittest.TestCase):
         )
 
         self.assertEqual(calls[0], {})
+
+    def test_call_tool_normalizes_page_alias(self):
+        """call_tool()'s normalizer fills page_name from page for
+        wiki_* tools, in isolation from the MCP SDK's own jsonschema
+        validation pass. `_make_spec`'s synthetic schema (empty
+        properties/required) accepts anything, so this only proves the
+        normalizer itself works -- it does not prove an aliased call
+        survives the real schema the SDK validates against first; see
+        ``test_wiki_get_page_alias_survives_real_schema_validation``
+        (ticket #97) for that.
+        """
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("wiki_get", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get", {"page": "Index"}, MagicMock()
+            )
+        )
+
+        self.assertEqual(
+            calls[0], {"page": "Index", "page_name": "Index"}
+        )
+
+    def test_wiki_get_page_alias_survives_real_schema_validation(self):
+        """Ticket #97: the MCP SDK validates call arguments against a
+        tool's real advertised inputSchema *before* dispatch ever
+        reaches ``call_tool()``'s normalizer. Reproduce that ordering
+        directly with jsonschema against wiki_get's actual schema,
+        rather than the synthetic empty-schema spec `_make_spec` builds
+        (which accepts anything and so cannot show this failure).
+        """
+        import jsonschema
+
+        plain_spec = next(
+            s for s in ALL_SPECS if s.tool.name == "wiki_get"
+        )
+        # Reproduces the originally-reported bug: page_name is required
+        # and page isn't an accepted property at all, so the real
+        # pre-fix schema rejects a page-only call before the alias
+        # normalizer ever runs.
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(
+                instance={"page": "Index"},
+                schema=plain_spec.tool.inputSchema,
+            )
+
+        # with_page_alias is what server.py applies to every real spec
+        # before building the registry -- confirm the *aliased* schema
+        # both survives validation and the call still normalizes.
+        aliased_spec = next(
+            s
+            for s in with_page_alias(ALL_SPECS)
+            if s.tool.name == "wiki_get"
+        )
+        jsonschema.validate(
+            instance={"page": "Index"},
+            schema=aliased_spec.tool.inputSchema,
+        )
+
+        calls = []
+
+        async def capture_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = ToolSpec(
+            tool=aliased_spec.tool,
+            permissions=aliased_spec.permissions,
+            handler=capture_handler,
+        )
+        registry = ToolRegistry([spec])
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get", {"page": "Index"}, MagicMock()
+            )
+        )
+        self.assertEqual(
+            calls[0], {"page": "Index", "page_name": "Index"}
+        )
+
+    def test_call_tool_alias_does_not_override_canonical(self):
+        """An explicit page_name always wins over the page alias."""
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("wiki_get", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "wiki_get",
+                {"page": "Wrong", "page_name": "Right"},
+                MagicMock(),
+            )
+        )
+
+        self.assertEqual(calls[0]["page_name"], "Right")
+
+    def test_call_tool_alias_not_applied_outside_wiki(self):
+        """The page alias is scoped to wiki_* tools only."""
+        calls = []
+
+        async def mock_handler(client, args):
+            calls.append(args)
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text="ok")]
+            )
+
+        spec = _make_spec("ticket_search", frozenset(), mock_handler)
+        registry = ToolRegistry([spec])
+
+        asyncio.run(
+            registry.call_tool(
+                "ticket_search", {"page": "Index"}, MagicMock()
+            )
+        )
+
+        self.assertNotIn("page_name", calls[0])
 
     def test_call_tool_unknown_raises(self):
         """Calling unknown tool raises ValueError."""
@@ -443,11 +578,24 @@ class TestAllToolsCarryReadOnlyHint(unittest.TestCase):
     def test_read_only_hint_matches_write_tool_naming(self):
         """Sanity-check the hint direction, not just its presence.
 
-        A tool named *_create/_update/_delete must be readOnlyHint=False;
-        every other registered tool must be readOnlyHint=True. Catches an
-        annotation copy-pasted onto the wrong tool.
+        A tool named *_create/_update/_delete/_edit/_reply must be
+        readOnlyHint=False; every other registered tool must be
+        readOnlyHint=True. Catches an annotation copy-pasted onto the wrong
+        tool.
+
+        ``_edit`` and ``_reply`` joined the list with the comment tools
+        (ticket #96). They are write verbs, so extending the convention keeps
+        this a rule about naming; adding those two tools to the exception set
+        below would instead have turned it into a list of things the rule
+        does not apply to.
         """
-        write_suffixes = ("_create", "_update", "_delete")
+        write_suffixes = (
+            "_create",
+            "_update",
+            "_delete",
+            "_edit",
+            "_reply",
+        )
         for spec in [PING_SPEC] + ALL_SPECS:
             name = spec.tool.name
             assert spec.tool.annotations is not None, name

@@ -1,0 +1,1 @@
+Bare RenderVerify short name in prose, where the page is Rules/trac/RenderVerify.

@@ -1,0 +1,1 @@
+An external link labelled with a possessive: [http://example.com/x auto_pm:#87's summary] here.

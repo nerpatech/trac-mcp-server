@@ -12,12 +12,19 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters import markdown_to_tracwiki
 from ...core.async_utils import gather_limited, run_sync_limited
 from ...core.client import TracClient
+from ...preview.targets import DEFAULT_TARGET_CAP
 from .constants import DEFAULT_TICKET_TYPE
 from .errors import build_error_response
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
+from .write_gate import (
+    NEW_TICKET_COMMENT_NUMBERS,
+    TARGET_CAP_SCHEMA,
+    check_write,
+    gate_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +33,7 @@ logger = logging.getLogger(__name__)
 TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_create",
-        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore.",
+        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are TracWiki and are stored byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -54,7 +61,8 @@ TICKET_BATCH_TOOLS = [
                         "required": ["summary", "description"],
                     },
                     "description": "List of ticket objects to create",
-                }
+                },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["tickets"],
         },
@@ -82,7 +90,7 @@ TICKET_BATCH_TOOLS = [
     ),
     types.Tool(
         name="ticket_batch_update",
-        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported.",
+        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -114,7 +122,8 @@ TICKET_BATCH_TOOLS = [
                         "required": ["ticket_id"],
                     },
                     "description": "List of update objects with ticket_id and fields to change",
-                }
+                },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["updates"],
         },
@@ -142,6 +151,10 @@ async def _handle_batch_create(
             "Reduce the number of tickets per request.",
         )
 
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
     async def _create_one(
         index: int, ticket_data: dict
     ) -> dict[str, Any]:
@@ -161,8 +174,31 @@ async def _handle_batch_create(
                 "error": "description is required",
             }
 
+        # The link gate (ticket #64), PER ITEM rather than per call.
+        # A refused item is reported as that item's error and the rest
+        # are still written -- these tools already report per-item
+        # failures, and a batch is not all-or-nothing today. Making one
+        # broken link refuse nineteen good tickets would be a new
+        # behaviour smuggled in under a link check.
+        if gate_enabled(client):
+            outcome = await check_write(
+                client,
+                description,
+                field="description",
+                recheck_with="ticket_render_check",
+                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+                known_comment_numbers=NEW_TICKET_COMMENT_NUMBERS,
+            )
+            if outcome.refused:
+                return {
+                    "index": index,
+                    "summary": summary,
+                    "error": outcome.refusal_text,
+                }
+
         try:
-            description_tracwiki = markdown_to_tracwiki(description)
+            # Stored as written -- no conversion step (#69).
+            description_tracwiki = description
             ticket_type = ticket_data.get(
                 "ticket_type", DEFAULT_TICKET_TYPE
             )
@@ -313,6 +349,10 @@ async def _handle_batch_update(
             "Reduce the number of updates per request.",
         )
 
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
+
     async def _update_one(update_data: dict) -> dict[str, Any]:
         ticket_id = update_data.get("ticket_id")
         if not ticket_id:
@@ -321,10 +361,24 @@ async def _handle_batch_update(
                 "error": "ticket_id is required",
             }
 
+        # Per item, for the reason spelled out in _create_one.
+        if gate_enabled(client):
+            outcome = await check_write(
+                client,
+                update_data.get("comment", ""),
+                field="comment",
+                recheck_with="ticket_render_check",
+                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+            )
+            if outcome.refused:
+                return {
+                    "id": ticket_id,
+                    "error": outcome.refusal_text,
+                }
+
         try:
+            # Stored as written -- no conversion step (#69).
             comment = update_data.get("comment", "")
-            if comment:
-                comment = markdown_to_tracwiki(comment)
 
             attributes: dict[str, Any] = {}
             for field in (

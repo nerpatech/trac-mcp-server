@@ -44,14 +44,16 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
+| `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
 | `TRAC_MCP_TRANSPORT` | No | `stdio` | MCP transport: `stdio` or `http` |
 | `TRAC_MCP_HOST` | No | `127.0.0.1` | Bind host for the `http` transport |
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
 | `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
 | `TRAC_MCP_READ_ONLY` | No | `false` | Expose only read-only tools, regardless of transport -- see [Tool Architecture: Read-Only Filtering](docs/reference/tool-architecture.md#read-only-filtering---read-only) |
+| `TRAC_IDENTITIES` | No | -- | Path to a file mapping per-caller bearer tokens to their own Trac username/password (`http` transport only) |
 
-For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, see [HTTP Transport](docs/reference/http-transport.md).
+For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, including multi-identity auth, see [HTTP Transport](docs/reference/http-transport.md).
 
 ## MCP Client Integration
 
@@ -134,7 +136,20 @@ Auth setup: use an existing `.trac_mcp/config.yml` (the same file `trac-mcp-serv
 
 Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
 
-## Available Tools (43)
+## File Transfer CLI
+
+When the server runs on another machine (the HTTP transport), its file tools cannot see your files, and over HTTP they refuse server-side paths by default. `trac-mcp` runs on your machine and moves the bytes through the server for you, keeping your identity and the server's conversion and link checks:
+
+```bash
+trac-mcp wiki-push Docs/Design design.md          # Markdown is converted on the way in
+trac-mcp wiki-pull Docs/Design design.md
+trac-mcp attach-put --ticket 42 trace.bin
+trac-mcp attach-get --page Docs/Design diagram.png diagram.png
+```
+
+It connects with the nearest `.mcp.json` entry (or `--url`). See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
+
+## Available Tools (44)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 
@@ -171,16 +186,17 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | `ticket_enum_list` | List enum values for a given enum type |
 | `ticket_enum_delete` | Delete an enum value (requires TICKET_ADMIN) |
 
-### Wiki (7)
+### Wiki (8)
 | Tool | Description |
 |------|-------------|
-| `wiki_get` | Get wiki page content (with Markdown conversion) |
+| `wiki_get` | Get wiki page content as stored (TracWiki, byte-for-byte) |
 | `wiki_search` | Search wiki pages |
-| `wiki_create` | Create new wiki pages |
-| `wiki_update` | Update existing wiki pages |
+| `wiki_create` | Create new wiki pages (content stored byte-for-byte) |
+| `wiki_update` | Update existing wiki pages (content stored byte-for-byte) |
 | `wiki_delete` | Delete wiki pages |
 | `wiki_recent_changes` | List recent wiki changes |
 | `wiki_get_history` | Get version history for a wiki page |
+| `wiki_diff` | Unified diff between two versions of a wiki page, with the change comments in between |
 
 ### Wiki Files (3)
 | Tool | Description |
@@ -224,6 +240,26 @@ Every tool below also accepts an optional `instance` argument to route the call 
 pip install -e ".[dev]"
 pytest tests/ -v
 ```
+
+### The two CI halves
+
+```bash
+./ci.sh        # lint + offline tests + dual-binary build. Hermetic:
+               # no credentials, no daemon, no network
+./ci-live.sh   # the same suite with --run-live, against a real Trac
+```
+
+`ci.sh` is what GitHub Actions runs, and it deliberately does **not** pass
+`--run-live`, so every `@pytest.mark.live` test is skipped there. Those tests
+are the only place this project exercises the real Trac substrate, so run
+`ci-live.sh` too before deploying a change to a shared daemon. It needs
+`TRAC_URL`, `TRAC_USERNAME` and `TRAC_PASSWORD` (see `.env.example`), and
+without them it exits non-zero without running pytest — *not run* must not be
+able to look like *passed*.
+
+`ci.sh` runs the offline suite with `TRAC_*` scrubbed from the environment,
+and `.env` is loaded only under `--run-live`. An offline test that needs
+credentials therefore fails locally rather than only on Actions.
 
 ### Project Structure
 

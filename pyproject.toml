@@ -51,6 +51,7 @@ dev = [
 [project.scripts]
 trac-mcp-server = "trac_mcp_server.mcp.server:run"
 trac-convert = "trac_mcp_server.cli.convert:run"
+trac-mcp = "trac_mcp_server.cli.client:run"
 
 [project.urls]
 Homepage = "https://github.com/nerpa-tech/trac-mcp-server"

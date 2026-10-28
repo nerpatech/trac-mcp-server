@@ -10,7 +10,17 @@ from .common import (
 )
 
 # Type alias for the unknown_macros rendering mode.
-UnknownMacros = Literal["bracket", "preserve", "drop"]
+#
+# The "bracket" mode -- emit ``[MACRO: Name]`` -- was removed for ticket
+# #63. It existed only so the reverse converter could re-absorb its own
+# output, and ``markdown_to_tracwiki`` carried a matching
+# ``_MACRO_PLACEHOLDER_RE`` purely to undo it. "preserve" reaches the same
+# round trip without the detour, by leaving ``[[Name]]`` literal for the
+# bracket-stashing pass that already exists on the other side. Measured
+# across 46 KB of real store content: the two modes produced byte-identical
+# Markdown and byte-identical round trips, and no store page emitted a
+# single placeholder.
+UnknownMacros = Literal["preserve", "drop"]
 
 # Known Trac macro names reachable via ``[[Name]]`` / ``[[Name(args)]]``
 # syntax. Anything else shaped like ``[[Word]]`` or ``[[Word|Label]]`` is a
@@ -43,20 +53,249 @@ _KNOWN_MACROS = frozenset(
 )
 
 
+# Info string on the fence tracwiki_to_markdown emits for a construct that has
+# no Markdown equivalent (ticket #63).  Deliberately NOT the bare "tracwiki"
+# that someone documenting TracWiki inside a Markdown file would type: this tag
+# is the signal markdown_to_tracwiki unwraps on, so a collision with a
+# hand-written code sample would inject live markup where a code block was
+# meant -- the exact class of corruption this ticket removes.
+FALLBACK_FENCE_INFO = "tracwiki-unconverted"
+
+# Processor blocks with no Markdown equivalent, emitted verbatim rather than
+# rebuilt best-effort.  "table"/"td"/"th" are table structure Markdown cannot
+# express; "comment" is content Trac drops entirely, which the old fenced-block
+# rendering made *visible* (see Reference/trac/WikiEscapeContexts).
+_FALLBACK_PROCESSOR_RE = re.compile(r"\{\{\{#!(comment|table|td|th)\b")
+
+# The opener of a {{{ }}} block that becomes a Markdown fence: either bare or
+# carrying a single-word ``#!lang`` directive, and in both cases followed
+# immediately by a newline.  A directive with arguments (``{{{#!div class=x``)
+# deliberately does not match -- its body is wiki markup rather than verbatim
+# text, so it is scanned into rather than fenced (see _convert_code_blocks).
+_CODE_BLOCK_OPEN_RE = re.compile(r"\{\{\{(?:#!(\w+))?\n")
+
+# A TracWiki definition-list term line (ticket #71).
+#
+# The grammar was measured against Trac's own renderer rather than inferred --
+# ``convert_preview`` with ``format="tracwiki"``, reading the HTML for a
+# ``<dl class="wiki">`` -- because the previous pattern, ``^(\s*)(.+?)::\s*(.+)$``,
+# claimed any line containing a double colon and rewrote ordinary prose such as
+# "Use std::vector here." as a bold term.  Three rules, each load-bearing:
+#
+# 1. ``[ \t]+`` -- leading whitespace is REQUIRED.  At column zero Trac renders
+#    ``term:: definition`` as a paragraph, so anchoring the term to the start of
+#    the line (as ticket #71 section 4 first proposed) would keep matching
+#    exactly the prose Trac treats as prose.
+# 2. ``(?:(?!::).)+`` -- a tempered dot, so the term cannot span a double colon
+#    and the pair matched is necessarily the FIRST one on the line.  A plain
+#    non-greedy ``.+?`` is not enough: it backtracks past a first pair that
+#    fails the lookahead and matches a later one, which would convert
+#    " std::vector:: a C++ type" that Trac renders as a blockquote.
+# 3. ``(?=[ \t]|$)`` -- the colons must be followed by whitespace or the end of
+#    the line.  This is what excludes ``std::vector`` and ``3::1``.
+#
+# The term itself may contain spaces: " multi word term:: a definition" IS a
+# definition list to Trac, so forbidding whitespace inside it -- section 4's
+# other suggestion -- would have traded a false-positive class for a
+# false-negative one.
+#
+# The definition may be empty (" trailing colons only::"), which the old
+# pattern's ``(.+)$`` required to be non-empty and therefore MISSED: a real
+# definition list drawing neither warning nor conversion.
+_DEFINITION_LIST_RE = re.compile(
+    r"^([ \t]+)((?:(?!::).)+)::(?=[ \t]|$)[ \t]*(.*)$"
+)
+
+# Indentation in TracWiki is a blockquote, and the grammar is RELATIVE
+# (ticket #73).  Measured against Trac's own renderer -- convert_preview with
+# format="tracwiki", reading the HTML -- because the ticket's own section 1
+# had it as absolute, "one <blockquote> per space":
+#
+#   one space / two / three / four / a tab, each standing alone
+#       -> exactly ONE <blockquote> every time
+#   " one" / "  two" / "   three" on consecutive lines
+#       -> THREE nested blockquotes, one per *increase*
+#   "   deep" then "  shallower"     -> two SIBLING depth-1 blockquotes
+#   " one", blank line, "  two"      -> depth 1, then depth 2
+#   a column-zero non-blank line     -> resets to depth 0
+#
+# So it is an indent stack: deeper pushes a level whatever the size of the
+# step, shallower pops, and only column-zero content clears it.  The ladder in
+# the second row is how "one blockquote per space" came to be recorded.
+#
+# The consequence for the fix is that the ticket's own remediation --
+# n spaces -> n ">" markers -- is wrong: a lone four-space quote is ONE
+# blockquote in Trac and would have become four nested ones in Markdown, which
+# is the very "Markdown that means something different from the TracWiki it
+# came from" the ticket forbids.  Underneath sits an impossibility: Markdown
+# blockquote syntax carries depth but not width, so only one indent width per
+# depth can survive byte-for-byte.  Hence the rule in
+# _convert_indented_blocks: convert only what the write leg would reproduce
+# exactly, and send everything else through ticket #63's verbatim fallback.
+
+# Two spaces per nesting level is what markdown_to_tracwiki's block_quote()
+# emits ("> a" -> "  a", "> > b" -> "    b"), so this is the one width per
+# depth that round-trips byte-for-byte.
+_CANONICAL_INDENT_PER_LEVEL = 2
+
+# Trac expands a tab to eight columns when measuring indentation, which is why
+# a tab lands deeper than four spaces in the ladder above.
+_TAB_WIDTH = 8
+
+# Lines whose leading whitespace belongs to some other construct, so the quote
+# scanner must not claim them.  All measured on the live renderer:
+#
+#   " * a", "  * a", "   * a", " - a", " 1. a", " a. x", " iv. x"
+#       -> a bare <ul>/<ol>, NO <blockquote> wrapper, at any indent
+#   "  term:: def"  -> a bare <dl class="wiki">, no blockquote, at any indent
+#   " = H ="        -> <h1>, the indent consumed
+#
+# The list markers are exact rather than generous, because generosity costs
+# recall here: " Hello. World" and " xyz. not roman" are BLOCKQUOTES to Trac,
+# not lettered lists, so "any word followed by a period" would have skipped
+# real quotes.  Trac's alpha marker is a single letter or a roman numeral.
+# " 1)" is not a marker either -- also a blockquote.
+#
+# Split into fragments rather than written out once, because ticket #74 needs
+# the lettered/roman subset ON ITS OWN -- those markers have no Markdown
+# equivalent and take the verbatim fallback, while the bullet and numeric ones
+# convert -- and the ticket's recall gate asks for the two to read from the
+# same place instead of re-deriving the grammar.
+_BULLET_MARKER = r"[*-]"
+_NUMERIC_MARKER = r"\d+\."
+_ALPHA_MARKER = r"(?:[a-zA-Z]|[ivxlcdmIVXLCDM]{2,})\."
+_LIST_MARKER_RE = re.compile(
+    rf"^[ \t]+(?:{_BULLET_MARKER}|{_NUMERIC_MARKER}|{_ALPHA_MARKER})(?=[ \t])"
+)
+
+# The subset of the marker set above that Markdown cannot express at all
+# (ticket #74).  CommonMark's ordered-list marker is digits only, so there is
+# nothing for ``a.`` or ``iv.`` to convert TO: measured, mistune parses
+# " a. first\n b. second" as one paragraph and the same input with "1."/"2."
+# as a list.  Converting to a numbered list is rejected explicitly -- it would
+# renumber a./b./c. as 1./2./3., changing what the page says, and the write leg
+# could not tell the difference on the way back.
+#
+# Indented only, like every other pattern here.  A lettered list at column zero
+# is an <ol class="loweralpha"> to Trac as well and is lost the same way, but
+# its grammar differs (a marker line opens a list mid-paragraph, and a
+# column-zero continuation line ENDS it) -- handled separately below by
+# _ALPHA_LIST_MARKER_COL0_RE and _fallback_column_zero_lists (ticket #89),
+# rather than folded in here, because a run there is bounded by consecutive
+# MARKER lines rather than by consecutive indented ones.
+_ALPHA_LIST_MARKER_RE = re.compile(rf"^[ \t]+{_ALPHA_MARKER}(?=[ \t])")
+_INDENTED_TABLE_RE = re.compile(r"^[ \t]+\|\|")
+_INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
+
+# The column-zero counterpart of _ALPHA_LIST_MARKER_RE (ticket #89), built
+# from the same _ALPHA_MARKER fragment so the marker grammar has one
+# definition read from three places -- indented, column zero, and this
+# module's quote-scanner exclusion list -- instead of three copies free to
+# drift apart.  Trac opens one of these lists at column zero even in the
+# middle of a paragraph (measured against the live renderer: "some prose"
+# then "a. first" renders as a <p> followed by a separate <ol>), so unlike
+# the indented form this pattern is anchored directly on the marker with no
+# leading-whitespace requirement.
+_ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
+
+# A line shape that CommonMark already treats as "interrupting" -- it starts
+# a new sibling block on its own, without needing a blank line, rather than
+# being read as a lazy continuation of the preceding list item's paragraph
+# (ticket #90). Measured against mistune with this project's own plugin set
+# (``plugins=["table"]``, matching ``markdown_to_tracwiki``'s parser):
+# an ATX heading, a blockquote marker, a fenced code block, and a thematic
+# break all interrupt; a GFM table row does NOT (it lazily absorbs exactly
+# like plain prose) and is deliberately left off this list so it still gets
+# the separating blank line. By the point ``_convert_lists`` runs, a
+# TracWiki heading is already "#", and a blockquote line is already "> "
+# (``_convert_indented_blocks`` runs earlier in ``_apply_fallbacks``) or
+# already a fenced fallback placeholder starting with a code fence -- but a
+# TracWiki horizontal rule is still "----", not yet "---"
+# (``_convert_other_elements`` runs after this pass), so the thematic-break
+# check matches Trac's own dash-run syntax directly rather than the
+# Markdown it will eventually become.
+_LAZY_CONTINUATION_INTERRUPT_RE = re.compile(
+    r"^(?:#{1,6}(?:[ \t]|$)|>|```|~~~|-{3,}[ \t]*$)"
+)
+
+
+def _indent_of(line: str) -> str:
+    """Return ``line``'s literal leading whitespace."""
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _indent_width(indent: str) -> int:
+    """Return ``indent``'s width in columns, tabs expanded as Trac does."""
+    return len(indent.expandtabs(_TAB_WIDTH))
+
+
+def _quote_depths(
+    lines: list[str], stack: list[int]
+) -> tuple[list[int], list[int]]:
+    """Return each line's blockquote depth, plus the indent stack after them.
+
+    ``stack`` is carried across calls because a blank line does NOT reset
+    Trac's indentation stack -- only column-zero content does (measured; see
+    the note above).
+    """
+    depths: list[int] = []
+    for line in lines:
+        width = _indent_width(_indent_of(line))
+        while stack and stack[-1] > width:
+            stack.pop()
+        if not stack or width > stack[-1]:
+            stack.append(width)
+        depths.append(len(stack))
+    return depths, stack
+
+
+def _is_canonical_indent(lines: list[str], depths: list[int]) -> bool:
+    """True when the write leg would reproduce these lines byte-for-byte.
+
+    Depth has to be uniform across the run, which was measured rather than
+    assumed: ``> a\\n> > b`` comes back from ``markdown_to_tracwiki`` as
+    ``"  a\\n  \\n    b"`` -- mistune reads the depth change as a nested
+    blockquote whose sibling paragraph contributes a blank line, and that
+    blank line is quoted too.  A depth change *across a blank line* does
+    round-trip exactly (``"  a\\n\\n    b"``), and needs nothing special here
+    because each side is its own run and the stack carries between them.
+    """
+    if len(set(depths)) > 1:
+        return False
+    for line, depth in zip(lines, depths, strict=True):
+        indent = _indent_of(line)
+        if "\t" in indent:
+            return False
+        if len(indent) != _CANONICAL_INDENT_PER_LEVEL * depth:
+            return False
+    return True
+
+
+# _convert_definition_lists was deleted on ticket #63.  It rewrote a
+# definition list as a bold term plus a colon -- a reconstruction the
+# verbatim fallback replaces, and one that did not survive the way back:
+# stored at column zero, "'''term''': definition" is prose to Trac, not a
+# <dl>.  Its continuation-absorbing loop also disagreed with Trac, taking
+# a following line only when the definition was empty AND the line was
+# indented deeper, where Trac absorbs one at the same indent too.
+# _convert_indented_blocks now carries the whole run verbatim, which
+# sidesteps that disagreement rather than having to fix it.
+
+
 class TracWikiParser:
     """Parser for converting TracWiki syntax to Markdown format."""
 
-    def __init__(self, *, unknown_macros: UnknownMacros = "bracket"):
+    def __init__(self, *, unknown_macros: UnknownMacros = "preserve"):
         """Initialize parser with empty warnings list.
 
         Args:
             unknown_macros: Controls how unrecognized ``[[MacroName]]`` tokens
                 are rendered in the Markdown output.
 
-                - ``"bracket"`` (default): emit ``[MACRO: MacroName]`` — makes
-                  the macro visible but non-functional; current behavior.
-                - ``"preserve"``: leave ``[[MacroName]]`` literal in the output
-                  so the TracWiki syntax survives the conversion unchanged.
+                - ``"preserve"`` (default): leave ``[[MacroName]]`` literal
+                  in the output so the TracWiki syntax survives the
+                  conversion unchanged, and the round trip back through
+                  ``markdown_to_tracwiki`` restores it byte-for-byte.
                 - ``"drop"``: silently omit the macro from the output.
 
                 Controlled by the ``--unknown-macros`` CLI flag.  Known macros
@@ -86,7 +325,7 @@ class TracWikiParser:
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
-        text = self._convert_processor_cells(text)
+        text = self._apply_fallbacks(text)
         text = self._convert_code_blocks(text)
         text = self._convert_macros(text)
         text = self._convert_headings(text)
@@ -95,9 +334,16 @@ class TracWikiParser:
         text = self._convert_lists(text)
         text = self._convert_other_elements(text)
         text = self._convert_tables(text)
-        text = self._restore_macro_placeholders(text)
         text = self._restore_link_placeholders(text)
         text = self._restore_code_placeholders(text)
+
+        if "\x00" in text:
+            raise ValueError(
+                "tracwiki_to_markdown: unrestored placeholder sentinel "
+                "(NUL byte) survived to converter output -- a stash/"
+                "restore pass has a bug; failing loudly instead of "
+                "emitting corrupted content (see ticket #51)"
+            )
 
         return ConversionResult(
             text=text,
@@ -117,39 +363,40 @@ class TracWikiParser:
             text,
             re.IGNORECASE,
         ):
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                continue
             if m.group(1).lower() in _KNOWN_MACROS or m.group(2):
-                self.warnings.append(
-                    "Unknown macros detected - preserved as [MACRO: ...] notation (not functional in Markdown)"
-                )
+                # Mode-aware: the two modes are lossy to different degrees,
+                # and the old text named a [MACRO: ...] notation that is no
+                # longer emitted in either of them (ticket #63).
+                if self._unknown_macros == "drop":
+                    self.warnings.append(
+                        "Trac macros detected - omitted from the output entirely (--unknown-macros=drop)"
+                    )
+                else:
+                    self.warnings.append(
+                        "Trac macros detected - left literal as [[Name]] (inert in Markdown renderers, restored unchanged converting back)"
+                    )
                 break
 
-        # Detect definition lists
-        if re.search(r"^\s*.+?::\s*.+$", text, re.MULTILINE):
-            self.warnings.append(
-                "Definition lists detected - converted to bold text (semantic preservation)"
-            )
+        # The definition-list warning used to live here and described the
+        # bold conversion deleted on ticket #63.  _stash_fallback now raises
+        # it where it fires, which also fixed a live false positive this
+        # placement caused: _detect_lossy_elements scans the RAW text with no
+        # shielding, so a "term::" line inside a code block announced a
+        # definition list in quoted source.  That is the over-firing shape
+        # ticket #71 removed, surviving in a second place -- and tickets #57
+        # and #59 are this project's evidence that an over-firing check gets
+        # muted and takes its true positives with it.  Pinned by
+        # TestWarningIsShielded.
 
-        # Detect tables and their features
-        has_regular_tables = re.search(r"\|\|.*\|\|", text)
-        has_processor_tables = re.search(r"\{\{\{#!t[dh]", text)
-
-        if has_regular_tables:
-            # Check for cell spanning (|||| indicates spanning)
-            if re.search(r"\|\|\|\|", text):
-                self.warnings.append(
-                    "Table cell spanning detected - merged into single cell (Markdown limitation)"
-                )
-            # Check for multi-line rows (backslash continuation)
-            if re.search(r"\\\s*\n\s*\|\|", text):
-                self.warnings.append(
-                    "Multi-line table rows detected - joined into single line (Markdown limitation)"
-                )
-
-        # Check for processor-based tables (can exist without regular || tables)
-        if has_processor_tables:
-            self.warnings.append(
-                "Processor-based table cells (#td/#th) detected - converted to plain text (Markdown limitation)"
-            )
+        # Table-feature and processor-cell warnings used to live here and
+        # described a best-effort reconstruction -- "merged into single cell",
+        # "converted to plain text".  Ticket #63 replaced that reconstruction
+        # with a verbatim fallback, so _stash_fallback now raises the warning
+        # at the point it actually fires, naming what it did.  Warning off the
+        # source without consulting what the conversion did is the same defect
+        # the macro warning had before slice (b) of this ticket.
 
         # Detect TracLinks
         if re.search(r"(#\d+|ticket:\d+|wiki:\w+|changeset:\w+)", text):
@@ -157,29 +404,465 @@ class TracWikiParser:
                 "TracLinks detected - preserved as-is (agents can interpret, but not clickable in Markdown renderers)"
             )
 
-    def _convert_processor_cells(self, text: str) -> str:
-        """Convert processor-based table cells BEFORE code blocks.
+    # ------------------------------------------------------------------
+    # Unrepresentable-construct fallback (ticket #63)
+    # ------------------------------------------------------------------
 
-        {{{#!td ... }}} or {{{#!th ... }}} - these are table cells, not code blocks.
-        Convert to regular table cell content with marker for later table processing.
+    @staticmethod
+    def _matching_brace(text: str, start: int) -> int:
+        """Return the index just past the ``}}}`` closing the ``{{{`` at start.
+
+        Depth-counted rather than regex-matched, because ``{{{#!table}}}``
+        legitimately contains ``{{{#!td}}}`` blocks and the lazy ``.*?`` the
+        other passes use stops at the *first* ``}}}``, which is the inner
+        one.  Returns -1 when the block is unterminated.
         """
-
-        def convert_processor_cell(match):
-            cell_type = match.group(1)  # 'td' or 'th'
-            content = match.group(2).strip()
-            # Replace newlines with spaces for single-line cell content
-            content = " ".join(content.split())
-            if cell_type == "th":
-                return f"||={content}=||"
+        depth = 0
+        i = start
+        while i < len(text):
+            if text.startswith("{{{", i):
+                depth += 1
+                i += 3
+            elif text.startswith("}}}", i):
+                depth -= 1
+                i += 3
+                if depth == 0:
+                    return i
             else:
-                return f"||{content}||"
+                i += 1
+        return -1
 
-        return re.sub(
-            r"\{\{\{#!(t[dh])\s*(.*?)\s*\}\}\}",
-            convert_processor_cell,
-            text,
-            flags=re.DOTALL,
+    def _stash_fallback(self, source: str, kind: str) -> str:
+        """Wrap unrepresentable TracWiki verbatim in a fallback fence.
+
+        The body is stashed behind the same \\x00CODE<n>\\x00 placeholder the
+        code-block pass uses, so no later pass rewrites the markup we are
+        deliberately preserving as source text.
+        """
+        self.warnings.append(
+            f"{kind} cannot be represented in Markdown - emitted verbatim "
+            f"in a {FALLBACK_FENCE_INFO} block; markdown_to_tracwiki "
+            f"restores it unchanged"
         )
+        self._code_placeholders.append(source)
+        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
+        fence = self._fence_for(source)
+        return f"{fence}{FALLBACK_FENCE_INFO}\n{placeholder}\n{fence}"
+
+    def _verbatim_mask(self, text: str) -> str:
+        """Return ``text`` with verbatim regions blanked to ``\\x01`` fillers.
+
+        Verbatim means "Trac parses no markup here": the interior of any
+        ``{{{ }}}`` block and of any backtick code span.  Newlines are kept so
+        the mask stays line-aligned with the source and callers can test the
+        mask while emitting the original.
+
+        This exists because the fallback passes run *first* -- before the
+        code-block and code-span stashing that shields everything else -- so
+        they are the one place in the converter that has to do its own
+        shielding.  Without it the fallback fires on a ``{{{#!table}}}`` token
+        quoted inside a code span, reopening tickets #45 and #46, and on a
+        ``{{{#!comment}}}`` nested inside a plain code block, reopening #51.
+        """
+        mask = list(text)
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                if end == -1:
+                    break
+                for j in range(i + 3, min(end - 3, n)):
+                    if mask[j] != "\n":
+                        mask[j] = "\x01"
+                i = end
+            elif text[i] == "`":
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    for k in range(i + 1, j):
+                        mask[k] = "\x01"
+                    i = j + 1
+                else:
+                    i += 1
+            else:
+                i += 1
+        return "".join(mask)
+
+    def _fallback_processor_blocks(self, text: str) -> str:
+        """Emit {{{#!comment}}}, {{{#!table}}}, {{{#!td}}}, {{{#!th}}} verbatim.
+
+        Each has no Markdown equivalent, and each was previously rebuilt
+        best-effort into something else -- a fenced block that *displays*
+        content Trac drops entirely, or a one-column table that reads back as
+        a header cell.  See TestUnrepresentableInventory for the measured
+        before-behaviour.
+
+        Only a block at top level qualifies.  One nested inside another
+        ``{{{ }}}`` block is that block's content, not a construct of its own
+        (ticket #51), and one inside a code span is a quoted token (#46).
+        """
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                if end == -1:
+                    out.append(text[i:])
+                    break
+                m = _FALLBACK_PROCESSOR_RE.match(text, i)
+                if m:
+                    # Coalesce a run of adjacent fallback blocks into ONE
+                    # region.  Emitting a fence each would put the closing
+                    # fence of one against the opening fence of the next --
+                    # ```````` on a single line, which is not a fence pair at
+                    # all -- and would also lose the exact whitespace between
+                    # them.  One region round-trips the whole run verbatim.
+                    names = [m.group(1).lower()]
+                    while True:
+                        j = end
+                        while j < n and text[j] in " \t\n":
+                            j += 1
+                        nxt = _FALLBACK_PROCESSOR_RE.match(text, j)
+                        if not nxt:
+                            break
+                        close = self._matching_brace(text, j)
+                        if close == -1:
+                            break
+                        names.append(nxt.group(1).lower())
+                        end = close
+                    kind = (
+                        "Processor block"
+                        + ("s " if len(names) > 1 else " ")
+                        + ", ".join(
+                            f"#!{x}" for x in dict.fromkeys(names)
+                        )
+                    )
+                    out.append(self._stash_fallback(text[i:end], kind))
+                else:
+                    out.append(text[i:end])
+                i = end
+            elif text[i] == "`":
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    out.append(text[i : j + 1])
+                    i = j + 1
+                else:
+                    out.append(text[i])
+                    i += 1
+            else:
+                out.append(text[i])
+                i += 1
+        return "".join(out)
+
+    def _fallback_tables(self, text: str) -> str:
+        """Emit a table verbatim when it uses a Markdown-inexpressible feature.
+
+        Two features qualify, both measured on ticket #63 as destroying the
+        table on the way back:
+
+        * cell spanning (``||||``) -- the converted row carries fewer cells
+          than its header, mistune rejects it, and the whole table is stored
+          as literal text;
+        * a backslash-continued multi-line row -- the rows are joined into one
+          over-wide row that reads back as a *header* row.
+
+        Detection runs against ``_verbatim_mask`` so a ``||||`` quoted in a
+        code span does not trigger it (ticket #45), while the emitted text is
+        always the original.
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            if not masked[i].lstrip().startswith("||"):
+                out.append(lines[i])
+                i += 1
+                continue
+            start = i
+            while i < len(lines) and masked[i].lstrip().startswith(
+                "||"
+            ):
+                i += 1
+            probe = "\n".join(masked[start:i])
+            spanning = "||||" in probe
+            multiline = any(
+                ln.rstrip().endswith("\\") for ln in masked[start:i]
+            )
+            if spanning or multiline:
+                kind = (
+                    "Table cell spanning"
+                    if spanning
+                    else "Multi-line table row"
+                )
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(lines[start:i]), kind
+                    )
+                )
+            else:
+                out.extend(lines[start:i])
+        return "\n".join(out)
+
+    def _fallback_column_zero_lists(self, text: str) -> str:
+        """Emit a column-zero lettered or roman list verbatim (ticket #89).
+
+        Trac's grammar here is different from the indented form
+        ``_convert_indented_blocks`` handles for the same marker set: a
+        marker line opens a list even mid-paragraph, and the run is the
+        maximal set of *consecutive* marker lines only -- a following
+        column-zero line that is not itself a marker ends the list rather
+        than being absorbed into the last item (measured against Trac's own
+        renderer: ``A. first`` / a continuation line / ``B. second`` comes
+        back as ``<ol>``, ``<p>``, ``<ol start="2">``). So this scans for
+        runs of the marker itself, not runs of indentation, and never
+        touches a line around it -- prose above, below, or between two runs
+        is left exactly as written.
+
+        Runs as its own top-level pass rather than a branch inside
+        ``_convert_indented_blocks``, per the ticket: a column-zero marker
+        line's first character is never whitespace, so the two passes can
+        never contend for the same line regardless of ordering.
+
+        Detection runs against ``_verbatim_mask``, like every other fallback
+        here, so a marker line quoted inside a code block or code span is
+        content, not a construct (tickets #45, #46, #51).
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        index = 0
+        n = len(lines)
+        while index < n:
+            if not _ALPHA_LIST_MARKER_COL0_RE.match(masked[index]):
+                out.append(lines[index])
+                index += 1
+                continue
+            start = index
+            while index < n and _ALPHA_LIST_MARKER_COL0_RE.match(
+                masked[index]
+            ):
+                index += 1
+            out.append(
+                self._stash_fallback(
+                    "\n".join(lines[start:index]),
+                    "Lettered or roman ordered list",
+                )
+            )
+        return "\n".join(out)
+
+    @staticmethod
+    def _line_holds_a_brace(masked_line: str) -> bool:
+        """True for a code-block delimiter line.
+
+        ``_verbatim_mask`` blanks a block's *interior* but not its ``{{{`` and
+        ``}}}`` markers, so stashing a run containing one half would strand
+        the other.  Checked before anything else for that reason.
+        """
+        return "{{{" in masked_line or "}}}" in masked_line
+
+    @staticmethod
+    def _line_is_not_a_quote(masked_line: str) -> bool:
+        """True when this indented line's whitespace belongs elsewhere.
+
+        A run containing any such line is left entirely alone rather than
+        claimed or fallen back: a list, table or heading consumes its own
+        indent, and claiming it would take the construct apart -- a multi-line
+        list item's continuation line being the case that matters most.
+
+        Definition lists were on this list until ticket #63, and lettered or
+        roman ordered lists until ticket #74.  Both are now handled a step
+        earlier, for the same reason: unlike the others they have no Markdown
+        equivalent at all, so leaving them to a later pass leaves them as
+        prose.  This predicate still matches them -- it is asking whether the
+        indent belongs to a construct, which it does -- but by the time it
+        runs they have already been claimed.
+        """
+        return bool(
+            _LIST_MARKER_RE.match(masked_line)
+            or _INDENTED_TABLE_RE.match(masked_line)
+            or _INDENTED_HEADING_RE.match(masked_line)
+        )
+
+    def _convert_indented_blocks(self, text: str) -> str:
+        """Convert an indented quote, or emit it verbatim (ticket #73).
+
+        Runs here rather than in ``_convert_other_elements`` for two reasons:
+        the fallback body has to be stashed before any other pass can rewrite
+        the markup being preserved as source, and the classification is more
+        honest against raw TracWiki than against half-converted Markdown.
+        Being early costs nothing, because the ``> `` lines it emits are
+        ordinary text to every later pass, so a quote's contents still get
+        their formatting, links and macros converted.
+
+        Five outcomes per maximal run of consecutive non-blank indented
+        lines, in order:
+
+        1. **A code-block delimiter** -- left untouched; see
+           ``_line_holds_a_brace``.
+        2. **A definition list** (ticket #63) -- carried verbatim through the
+           fallback.  Markdown has no definition list, and the bold form this
+           replaced did not survive the way back: stored at column zero,
+           ``'''term''': definition`` is *prose* to Trac, not a ``<dl>``.
+           The unit is the run rather than the term line because consecutive
+           terms are one ``<dl>``, and a non-term line following a term is
+           part of the preceding ``<dd>`` even at the same indent -- both
+           measured against Trac's renderer.
+        3. **A lettered or roman ordered list** (ticket #74) -- carried
+           verbatim through the fallback.  `` a. x``/`` iv. x`` are ordered
+           lists to Trac (``<ol class="loweralpha">``/``lowerroman``), and
+           CommonMark's ordered-list marker is digits only, so there is
+           nothing to convert them *to*: before this they fell to step 4 and
+           reached the Markdown as a paragraph, silently.  Renumbering them
+           as ``1./2./3.`` is rejected -- it changes what the page says, and
+           the write leg could not tell the rewrite from an original.
+           A marker at column zero is a sibling defect with a different
+           grammar -- ``_fallback_column_zero_lists`` handles it as its own
+           top-level pass, before this method runs (ticket #89).
+        4. **Not a quote at all** -- the run contains a list item, table row
+           or heading, whose indent those constructs consume.  Left untouched,
+           which is also what keeps a multi-line list item working: its
+           continuation line is indented too, and claiming it would take the
+           item apart.
+        5. **Canonical** -- every line's indent is exactly two spaces per
+           level of its measured depth, so ``> `` markers reproduce it
+           byte-for-byte.  Converted.  Anything else -- one space, three,
+           four, a tab, a mixed run -- goes out verbatim through the same
+           fallback, which restores it unchanged and *warns*.  Before ticket
+           #73, one and three spaces lost the indent silently and four spaces
+           or a tab became a literal ``{{{`` code block.
+
+        Steps 2 and 3 run **before** step 4, which is the operator decision on
+        ticket #63 applied twice: a run holding both a bullet and a definition
+        term is a ``<ul>`` followed by a ``<dl>``, and a run holding a numbered
+        list with a lettered item nested inside it is one ``<ol>`` containing
+        another -- in both cases falling the whole run back is the only option
+        that loses nothing.  Skipping it would let the unrepresentable half
+        degrade to prose now that nothing converts it, and splitting the run at
+        the construct boundary needs a real block parser.  The cost is that a
+        representable list in the same run is carried verbatim too.
+
+        Detection runs against ``_verbatim_mask`` so an indented line quoted
+        inside a code span or block is content, not a quote (tickets #45,
+        #46, #51); the emitted text is always the original.
+        """
+        lines = text.split("\n")
+        masked = self._verbatim_mask(text).split("\n")
+        out: list[str] = []
+        stack: list[int] = []
+        index = 0
+        while index < len(lines):
+            probe = masked[index]
+            if not probe.strip() or not probe[:1].isspace():
+                # Blank lines leave the stack alone; column zero clears it.
+                if probe.strip():
+                    stack = []
+                out.append(lines[index])
+                index += 1
+                continue
+
+            start = index
+            while (
+                index < len(lines)
+                and masked[index].strip()
+                and masked[index][:1].isspace()
+            ):
+                index += 1
+            run = lines[start:index]
+            probes = masked[start:index]
+
+            if any(self._line_holds_a_brace(m) for m in probes):
+                stack = []
+                out.extend(run)
+                continue
+
+            if any(_DEFINITION_LIST_RE.match(m) for m in probes):
+                stack = []
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), "Definition list"
+                    )
+                )
+                continue
+
+            if any(_ALPHA_LIST_MARKER_RE.match(m) for m in probes):
+                stack = []
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), "Lettered or roman ordered list"
+                    )
+                )
+                continue
+
+            if any(self._line_is_not_a_quote(m) for m in probes):
+                stack = []
+                out.extend(run)
+                continue
+
+            depths, stack = _quote_depths(run, stack)
+            if _is_canonical_indent(run, depths):
+                out.extend(
+                    "> " * depth + line[len(_indent_of(line)) :]
+                    for depth, line in zip(depths, run, strict=True)
+                )
+            else:
+                out.append(
+                    self._stash_fallback(
+                        "\n".join(run), self._indent_kind(run)
+                    )
+                )
+        return "\n".join(out)
+
+    @staticmethod
+    def _indent_kind(run: list[str]) -> str:
+        """Name the indent width in the warning, so it says what it saw."""
+        indents = {_indent_of(line) for line in run}
+        if any("\t" in indent for indent in indents):
+            return "Indented block (tab indent)"
+        if len(indents) > 1:
+            return "Indented block (mixed indent widths)"
+        return f"Indented block ({len(indents.pop())}-space indent)"
+
+    def _apply_fallbacks(self, text: str) -> str:
+        """Run every unrepresentable-construct fallback, outermost first."""
+        text = self._fallback_processor_blocks(text)
+        text = self._fallback_tables(text)
+        text = self._fallback_column_zero_lists(text)
+        text = self._convert_indented_blocks(text)
+        return text
+
+    # _convert_processor_cells was deleted on ticket #63.  It rebuilt
+    # {{{#!td}}} / {{{#!th}}} into ||cell|| markup so the table pass could
+    # turn it into a Markdown table -- a reconstruction the verbatim fallback
+    # replaces.  Deleting it also fixed a live defect it carried: it ran
+    # before the code-block stashing, so a processor cell nested inside a
+    # plain code block was rewritten too, destroying quoted source.  See
+    # TestUnrepresentableFallback.test_processor_cell_inside_a_code_block_is_content.
+
+    @staticmethod
+    def _fence_for(content: str) -> str:
+        """Return a backtick fence strictly longer than any backtick run
+        already present in ``content``.
+
+        CommonMark closes a fence on the first line carrying at least as
+        many backticks as the opener, so a 3-backtick fence around a body
+        that itself contains ```` ``` ```` terminates early and the rest
+        of the document is swallowed as raw code (ticket #51).
+
+        On #51 the body that did this was the converter's own doing: a
+        nested {{{ }}} block was matched innermost-first, so the outer
+        block's capture already held the inner one's finished Markdown
+        fence. Ticket #72 removed that -- a nested block is now carried
+        verbatim -- and the remaining source of a backtick run in a body
+        is the ordinary one: a code block quoting Markdown.
+        """
+        longest = 0
+        for m in re.finditer(r"`+", content):
+            longest = max(longest, len(m.group(0)))
+        return "`" * max(3, longest + 1)
 
     def _convert_code_blocks(self, text: str) -> str:
         """Convert code blocks (after processor cells).
@@ -198,32 +881,89 @@ class TracWikiParser:
         rewrote any TracWiki-shaped markup inside -- silently corrupting
         config/log/terminal excerpts that only *resemble* wiki syntax
         (ticket #31).
+
+        The fence itself is sized by _fence_for() rather than fixed at
+        3 backticks, so a backtick run inside the body never collides
+        with the fence enclosing it (ticket #51).
+
+        Each block's extent is established by _matching_brace() -- a
+        depth-counted scan -- rather than by a lazy ``.*?``, which stops
+        at the *first* ``}}}`` and so ends a nested block's outer fence
+        at the INNER close, leaving the outer ``}}}`` outside the fence
+        as body text (ticket #72).  A nested block is content: Trac
+        renders the enclosing block verbatim, so the inner delimiters
+        are literal text and stay inside the fence unchanged.  Same rule
+        _fallback_processor_blocks applies -- only a block at top level
+        is a construct of its own (ticket #51).
         """
 
         def stash(body: str) -> str:
             self._code_placeholders.append(body)
             return f"\x00CODE{len(self._code_placeholders) - 1}\x00"
 
-        # Map TracWiki processor directive to Markdown language (e.g., 'sh' -> 'bash')
-        def convert_code_block_with_lang(match: re.Match[str]) -> str:
-            tracwiki_lang = match.group(1)
-            code = match.group(2)
-            md_lang = tracwiki_to_markdown_lang(tracwiki_lang)
-            return f"```{md_lang}\n{stash(code)}\n```"
+        out: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                m = _CODE_BLOCK_OPEN_RE.match(text, i)
+                # The body runs from the opener's newline to the closing
+                # brace, which Trac requires to start its own line -- so
+                # everything after the body's last newline must be blank.
+                # A block closed mid-line is not one, and is left to the
+                # passes below.  The old regex demanded a bare "\n}}}",
+                # which an INDENTED closer fails; rather than decline, it
+                # went looking for the next "\n}}}" in the document and
+                # swallowed everything up to it (measured on the stock
+                # TracReports page, where the run was ~80 lines).
+                body = (
+                    text[m.end() : end - 3] if (m and end != -1) else ""
+                )
+                nl = body.rfind("\n")
+                if (
+                    m
+                    and end != -1
+                    and nl != -1
+                    and not body[nl + 1 :].strip(" \t")
+                ):
+                    code = body[:nl]
+                    fence = self._fence_for(code)
+                    # Map the processor directive to a Markdown language
+                    # (e.g. 'sh' -> 'bash'); a bare {{{ has none.
+                    info = (
+                        tracwiki_to_markdown_lang(m.group(1))
+                        if m.group(1)
+                        else ""
+                    )
+                    out.append(f"{fence}{info}\n{stash(code)}\n{fence}")
+                    i = end
+                    continue
+                # Not a fenceable block: an unterminated one, or an opener
+                # this pass does not claim ({{{#!div class=x, {{{ inline }}}).
+                # Emit the brace and keep scanning its interior -- a
+                # {{{#!div}}} body is wiki markup, and any real code block
+                # inside it still has to be converted.
+                out.append("{{{")
+                i += 3
+            elif text[i] == "`":
+                # Step over a code span rather than into it, so a {{{ or
+                # }}} quoted inside one cannot shift the brace depth
+                # (tickets #45, #46).  The span's own body is shielded by
+                # the stashing pass below.
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                if j != -1 and (nl == -1 or j < nl):
+                    out.append(text[i : j + 1])
+                    i = j + 1
+                else:
+                    out.append(text[i])
+                    i += 1
+            else:
+                out.append(text[i])
+                i += 1
+        text = "".join(out)
 
-        text = re.sub(
-            r"\{\{\{#!(\w+)\n(.*?)\n\}\}\}",
-            convert_code_block_with_lang,
-            text,
-            flags=re.DOTALL,
-        )
-        # Code block without language
-        text = re.sub(
-            r"\{\{\{\n(.*?)\n\}\}\}",
-            lambda m: f"```\n{stash(m.group(1))}\n```",
-            text,
-            flags=re.DOTALL,
-        )
         # Inline code span: `code`. Not TracWiki syntax on its own (Trac's
         # WikiFormatting doesn't recognize a bare backtick), so it already
         # passes through unchanged -- but its contents are still ordinary
@@ -235,17 +975,60 @@ class TracWikiParser:
         )
         return text
 
+    @staticmethod
+    def _is_backtick_wrapped(text: str, start: int, end: int) -> bool:
+        """True if text[start:end] is directly flanked by a literal
+        backtick on both sides.
+
+        Used to keep a macro/link literal when it is meant to sit inside a
+        code span -- see the note on _convert_macros for why this can't
+        just rely on the code-span stashing in _convert_code_blocks alone.
+        """
+        return (
+            start > 0
+            and text[start - 1] == "`"
+            and end < len(text)
+            and text[end] == "`"
+        )
+
     def _convert_macros(self, text: str) -> str:
         """Convert macros (before links, since they use square brackets).
 
         Images: [[Image(url)]] -> ![](url)
         Line break: [[BR]] -> newline
         Unknown macros: [[MacroName(args)]] -> placeholder for later restoration
+
+        Every conversion below first checks _is_backtick_wrapped and leaves
+        the macro untouched when both flanking characters are literal
+        backticks. This is a belt-and-suspenders backstop to the code-span
+        stashing in _convert_code_blocks (which runs first and normally
+        hides backticked content from this method entirely): that stashing
+        pairs backticks by simple nearest-neighbor matching, so one stray,
+        unrelated unpaired backtick earlier in the text (a typo, a literal
+        apostrophe-like backtick, an unclosed span) can steal one side of a
+        *different*, well-formed `[[BR]]` span's delimiters, leaving the
+        macro's own two flanking backticks literal in the text but no
+        longer recognized as a matched pair -- exactly the failure mode
+        from ticket #43. Since both flanking backticks are still physically
+        adjacent to the macro at this point even when stashing mis-paired,
+        this check catches it independent of whatever happened upstream.
+
+        The check requires backticks on *both* sides, not just one --
+        `[[BR]] legitimately follows a closing backtick belonging to a
+        *different*, preceding code span with no space in between (e.g.
+        `` `substrate:trac`[[BR]] ``, ticket #30), and that must still
+        convert.
         """
+
         # Images
+        def convert_image(m: re.Match[str]) -> str:
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                return m.group(0)
+            return f"![]({m.group(1)})"
+
         text = re.sub(
             r"\[\[Image\(([^)]+)\)\]\]",
-            r"![](\1)",
+            convert_image,
             text,
             flags=re.IGNORECASE,
         )
@@ -261,8 +1044,20 @@ class TracWikiParser:
         # (ticket #30). Consuming any newline (and trailing whitespace)
         # that immediately follows the macro in the source avoids
         # emitting a second one.
+        def convert_br(m: re.Match[str]) -> str:
+            # "[[BR]]" itself is always 6 chars; anything after that in
+            # the match is the consumed trailing whitespace/newline, which
+            # isn't part of the backtick-adjacency check.
+            core_end = m.start() + len("[[BR]]")
+            if self._is_backtick_wrapped(text, m.start(), core_end):
+                return m.group(0)
+            return "  \n"
+
         text = re.sub(
-            r"\[\[BR\]\][ \t]*\r?\n?", "  \n", text, flags=re.IGNORECASE
+            r"\[\[BR\]\][ \t]*\r?\n?",
+            convert_br,
+            text,
+            flags=re.IGNORECASE,
         )
 
         # TracLinks: Keep as-is since Markdown has no equivalent
@@ -282,22 +1077,22 @@ class TracWikiParser:
         # macros (Image, BR) are already handled above and are unaffected by
         # this setting.
         def handle_bracket(m: re.Match[str]) -> str:
+            if self._is_backtick_wrapped(text, m.start(), m.end()):
+                return m.group(0)
             name = m.group(1)
             args = m.group(2) if m.group(2) else ""
             label = m.group(3)
             if args or name.lower() in _KNOWN_MACROS:
                 match self._unknown_macros:
-                    case "bracket":
-                        # Current default: emit a placeholder restored to [MACRO: ...]
-                        return f"\x00MACRO:{name}{args}\x00"
-                    case "preserve":
-                        # Leave the original [[MacroName(args)]] literal unchanged.
-                        return m.group(0)
                     case "drop":
                         # Silently omit the macro from the output.
                         return ""
                     case _:
-                        return ""
+                        # "preserve" (default): leave [[MacroName(args)]]
+                        # literal. markdown_to_tracwiki's _BRACKET_SYNTAX_RE
+                        # stashes and restores it verbatim, so the macro
+                        # survives the round trip unchanged (ticket #63).
+                        return m.group(0)
             # Plain WikiLink: mirror the [text](wiki:Page) shape that
             # single-bracket [wiki:Page text] links already produce, so the
             # round trip back through markdown_to_tracwiki (ticket #17)
@@ -408,7 +1203,14 @@ class TracWikiParser:
         Unordered lists: ' * item' -> '- item'
         Handle nested lists: ' * * item' -> ' - - item'
         Ordered lists are already compatible: ' 1. item' is valid in both
+
+        Runs the blank-line separator (ticket #90) before the marker-
+        character rewrite -- the two passes commute, since indentation
+        (the only thing the separator reads) is untouched by swapping
+        ``*`` for ``-``, but running it first keeps this method's own
+        order matching the order the two defects were found in.
         """
+        text = self._separate_list_from_trailing_paragraph(text)
 
         def convert_list_marker(match):
             leading_space = match.group(1)
@@ -426,48 +1228,116 @@ class TracWikiParser:
         )
         return text
 
-    def _convert_other_elements(self, text: str) -> str:
-        """Convert other elements (horizontal rules, blockquotes, definition lists).
+    def _separate_list_from_trailing_paragraph(self, text: str) -> str:
+        """Insert a blank line where a list ends with nothing marking it
+        (ticket #90).
 
-        Horizontal rule: ---- -> ---
-        Blockquote: two-space indent -> > prefix
-        Definition lists: term:: definition -> **term**: definition
+        A paragraph that follows a TracWiki list with no blank line and no
+        indentation ends the list -- Trac renders it as a separate ``<p>``,
+        not part of the last item (the same fact #75 measured for a
+        flush-left *continuation* line: not deep enough, so the list ends).
+        Passed through unchanged, that paragraph is indistinguishable to
+        CommonMark from a genuine lazy continuation of the last list item,
+        so mistune (and hence ``markdown_to_tracwiki``) absorbs it into the
+        item. Inserting the blank line here reproduces the separation
+        Trac's own renderer already gives it, which is exactly what
+        CommonMark needs to stop reading it as a continuation.
+
+        Runs after ``_convert_code_blocks``, unlike the fallback passes in
+        ``_apply_fallbacks``, so no ``_verbatim_mask`` shielding is needed:
+        every ``{{{ }}}`` block and code span is already a
+        ``\\x00CODE<n>\\x00`` placeholder by this point, and #89's
+        alpha/roman lists are already fenced away the same way -- neither
+        can still contain a marker-shaped line for this pass to misread.
+
+        Mechanism: a stack of marker columns, the same shape as
+        ``_convert_indented_blocks``'s ``_quote_depths`` stack, walked line
+        by line.
+
+        * A blank line passes through untouched and leaves the stack alone
+          -- a loose list survives a blank line, and #52/#53's existing
+          blank-line behavior around lists is unaffected since this pass
+          never removes a blank line, only adds one where none exists.
+        * A line matching ``_LIST_MARKER_RE`` pops every stack entry at or
+          past its own column (closing any list level this marker doesn't
+          nest under, or replacing a same-column sibling item) and pushes
+          its own column. This generalizes to nested lists with no special
+          case: a marker at any depth is just another push.
+        * Any other non-blank line pops every stack entry at or past its
+          own indent width. An empty stack afterward means this line did
+          not stay deeper than *any* currently open list level, so the
+          list has ended. A blank line is inserted first, unless the
+          previously emitted line is already blank OR this line is itself
+          one of CommonMark's list-interrupting shapes (heading, blockquote,
+          code fence, thematic break -- see
+          ``_LAZY_CONTINUATION_INTERRUPT_RE``): those already start a new
+          sibling block on their own, so adding a blank line ahead of them
+          would be a needless, unmeasured stored-byte change rather than a
+          fix for anything. A non-empty stack means the line is a genuine
+          continuation of the remaining (outer) level and is left exactly
+          as it is.
+
+        The pop threshold is strict ("deeper than", not "at least as
+        deep") -- ticket #75's own measured boundary (section 2's
+        two-space continuation under a one-space marker: continues;
+        section 4: "deeper than the marker... does not have to align
+        exactly"), read directly off the marker's column via
+        ``_indent_of``. #75's write-leg re-indentation
+        (``len(prefix) + 1``) is that method's own choice of how deep to
+        put a continuation back on the way OUT; it is not Trac's read-side
+        threshold for what still counts as one, which is the marker's
+        column alone.
         """
-        # Horizontal rule
-        text = re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
+        lines = text.split("\n")
+        out: list[str] = []
+        stack: list[int] = []
+        for line in lines:
+            if not line.strip():
+                out.append(line)
+                continue
+            if _LIST_MARKER_RE.match(line):
+                column = len(_indent_of(line))
+                while stack and stack[-1] >= column:
+                    stack.pop()
+                stack.append(column)
+                out.append(line)
+                continue
+            if stack:
+                column = len(_indent_of(line))
+                while stack and stack[-1] >= column:
+                    stack.pop()
+                if (
+                    not stack
+                    and out
+                    and out[-1].strip()
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(line)
+                ):
+                    out.append("")
+            out.append(line)
+        return "\n".join(out)
 
-        # Blockquote: two-space indent -> > prefix
-        # This is tricky because two-space indent is also used for other things in TracWiki
-        # We'll do a simple conversion for lines that start with exactly two spaces
-        def convert_blockquote(match):
-            lines = match.group(0).split("\n")
-            converted = []
-            for line in lines:
-                if line.startswith("  ") and not line.startswith("   "):
-                    converted.append("> " + line[2:])
-                else:
-                    converted.append(line)
-            return "\n".join(converted)
+    def _convert_other_elements(self, text: str) -> str:
+        """Convert horizontal rules: ``----`` -> ``---``.
 
-        # Apply blockquote conversion to paragraphs (between blank lines)
-        text = re.sub(
-            r"(?:^|\n\n)((?:  [^\n]+\n?)+)",
-            convert_blockquote,
-            text,
-            flags=re.MULTILINE,
-        )
+        The name is now wider than the contents.  Two other elements have
+        left: blockquotes on ticket #73 and definition lists on #63, both to
+        ``_convert_indented_blocks``, which runs before this pass.
 
-        # Definition lists: term:: definition -> **term**: definition
-        # TracWiki uses :: separator, Markdown has no native definition list
-        # Convert to bold term + regular text (semantic preservation)
-        text = re.sub(
-            r"^(\s*)(.+?)::\s*(.+)$",
-            r"\1**\2**: \3",
-            text,
-            flags=re.MULTILINE,
-        )
+        Blockquotes were handled here until ticket #73 and now run in
+        ``_convert_indented_blocks``, before this pass.  The old code
+        recognised *exactly two spaces* and emitted one ``> ``; every other
+        width fell through to the Markdown untouched, where four-space
+        indentation means a code block.  It also had to run after the
+        definition-list pass (ticket #71) to stop it claiming a definition's
+        continuation line -- a constraint that disappeared with that pass,
+        which ticket #63 replaced with the verbatim fallback.
 
-        return text
+        What is left is the horizontal rule, whose pattern is deliberately
+        anchored with no leading whitespace: measured on ticket #73, Trac
+        renders `` ----`` as a blockquote containing the literal text
+        ``----``, not as a rule.
+        """
+        return re.sub(r"^----+\s*$", r"---", text, flags=re.MULTILINE)
 
     def _convert_tables(self, text: str) -> str:
         """Convert tables: TracWiki ||c1||c2|| -> Markdown |c1|c2|.
@@ -661,20 +1531,6 @@ class TracWikiParser:
             case _:
                 return "---"
 
-    def _restore_macro_placeholders(self, text: str) -> str:
-        """Restore macro placeholders.
-
-        Convert \x00MACRO:Name(args)\x00 back to [MACRO: Name(args)].
-
-        The placeholder body is matched as "anything but \x00" rather than
-        "anything but )" -- the latter let a greedy match span past the
-        closing \x00 of one placeholder into the next when a page had
-        several placeholders near each other (e.g. two [[TOC]]-style macros
-        on nearby lines), merging them into one bracket and leaking raw
-        \x00 bytes into the output (ticket #28).
-        """
-        return re.sub(r"\x00MACRO:([^\x00]+)\x00", r"[MACRO: \1]", text)
-
     def _restore_link_placeholders(self, text: str) -> str:
         """Restore WikiLink placeholders stashed by ``_convert_macros``.
 
@@ -694,16 +1550,35 @@ class TracWikiParser:
         Runs last, after every pass that could otherwise mistake a code
         body for TracWiki markup, so the restored text is byte-identical
         to the original source (ticket #31).
+
+        Loops to a fixed point rather than substituting once, because
+        ``re.sub`` scans its input once and would leave a sentinel that
+        another substitution had just exposed sitting in the output.
+
+        That used to happen on every nested ``{{{ }}}`` block: the inner
+        one was stashed first, and the outer block's capture -- still
+        holding the inner placeholder literally -- was stashed as a
+        second, higher-numbered placeholder whose body contained the
+        first one's sentinel bytes (ticket #51). Ticket #72 stashes a
+        nested block once, as part of its enclosing block's body, so no
+        input in the converter suite needs more than one pass any more
+        (measured: max 1 iteration across all 309 converter tests). The
+        loop stays as the guard for a stash path that has not been
+        enumerated; without it such a case leaks a sentinel, which
+        ``parse`` turns into a loud ValueError rather than corruption.
         """
 
         def restore(m: re.Match[str]) -> str:
             return self._code_placeholders[int(m.group(1))]
 
-        return re.sub(r"\x00CODE(\d+)\x00", restore, text)
+        pattern = re.compile(r"\x00CODE(\d+)\x00")
+        while pattern.search(text):
+            text = pattern.sub(restore, text)
+        return text
 
 
 def tracwiki_to_markdown(
-    tracwiki_text: str, *, unknown_macros: UnknownMacros = "bracket"
+    tracwiki_text: str, *, unknown_macros: UnknownMacros = "preserve"
 ) -> ConversionResult:
     """
     Convert TracWiki text to Markdown format.
@@ -714,8 +1589,8 @@ def tracwiki_to_markdown(
     Args:
         tracwiki_text: TracWiki formatted text
         unknown_macros: How to render unrecognized ``[[Macro]]`` tokens.
-            ``"bracket"`` (default) emits ``[MACRO: Name]``,
-            ``"preserve"`` leaves ``[[Name]]`` literal,
+            ``"preserve"`` (default) leaves ``[[Name]]`` literal, so the
+            macro survives a round trip back to TracWiki unchanged;
             ``"drop"`` silently omits the macro.
             Mirrors the ``--unknown-macros`` CLI flag.
 

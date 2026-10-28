@@ -12,11 +12,18 @@ from typing import Any
 
 import mcp.types as types
 
-from ...converters import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
+from .source_format import reject_removed_conversion_args
+from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
+
+#: No render-check tool covers a milestone: `wiki_render_check` and
+#: `ticket_render_check` each fetch their own realm's page, and there is
+#: no `milestone_render_check`. Saying so beats naming a tool that
+#: cannot see this content -- ticket #87.
+_NO_RECHECK_TOOL = None
 
 # Tool definitions for list_tools()
 MILESTONE_TOOLS = [
@@ -37,7 +44,7 @@ MILESTONE_TOOLS = [
     ),
     types.Tool(
         name="milestone_get",
-        description="Get milestone details by name. Returns name, due date, completion date, and description. Requires TICKET_VIEW permission. Set raw=true to get description in original TracWiki format without conversion.",
+        description="Get milestone details by name. Returns name, due date, completion date, and description as stored: TracWiki, byte-for-byte. Requires TICKET_VIEW permission.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -50,11 +57,6 @@ MILESTONE_TOOLS = [
                 "name": {
                     "type": "string",
                     "description": "Milestone name (required)",
-                },
-                "raw": {
-                    "type": "boolean",
-                    "description": "If true, return description in original TracWiki format without converting to Markdown (default: false)",
-                    "default": False,
                 },
             },
             "required": ["name"],
@@ -93,6 +95,7 @@ MILESTONE_TOOLS = [
                         },
                     },
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["name"],
         },
@@ -130,6 +133,7 @@ MILESTONE_TOOLS = [
                         },
                     },
                 },
+                "target_cap": TARGET_CAP_SCHEMA,
             },
             "required": ["name", "attributes"],
         },
@@ -194,7 +198,9 @@ async def _handle_get(
             "Provide name parameter.",
         )
 
-    raw = args.get("raw", False)
+    format_error = reject_removed_conversion_args(args)
+    if format_error is not None:
+        return format_error
 
     # Get milestone data
     milestone_data = await run_sync(client.get_milestone, name)
@@ -205,28 +211,23 @@ async def _handle_get(
     completed = milestone_data.get("completed", 0)
     description = milestone_data.get("description", "")
 
-    # Convert description from TracWiki to Markdown unless raw mode is requested
-    if description:
-        if raw:
-            description_output = description
-        else:
-            conversion_result = tracwiki_to_markdown(description)
-            description_output = conversion_result.text
-    else:
-        description_output = "(No description)"
+    # Returned as stored, matching milestone_create/update, which have
+    # always written verbatim -- that asymmetry was ticket #66.
+    description_output = (
+        description if description else "(No description)"
+    )
 
     # Format dates
     due_str = _format_date(due)
     completed_str = _format_date(completed)
 
     # Build response
-    format_note = " (TracWiki)" if raw else ""
     response_lines = [
         f"Milestone: {milestone_name}",
         f"Due: {due_str}",
         f"Completed: {completed_str}",
         "",
-        f"## Description{format_note}",
+        "## Description",
         description_output,
     ]
 
@@ -262,18 +263,33 @@ async def _handle_create(
             "Provide name parameter.",
         )
 
-    # Build attributes with date conversion
-    attributes = _convert_milestone_attributes(
-        args.get("attributes", {})
+    raw_attributes = args.get("attributes", {})
+
+    # Gated on the description as SUBMITTED, before date conversion:
+    # only `due` and `completed` are rewritten there, and the gate wants
+    # the bytes Trac will store (ticket #87).
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {"description": raw_attributes.get("description")},
+        args,
+        recheck_with=_NO_RECHECK_TOOL,
     )
+    if refusal is not None:
+        return refusal
+
+    # Build attributes with date conversion
+    attributes = _convert_milestone_attributes(raw_attributes)
 
     # Create milestone
     await run_sync(client.create_milestone, name, attributes)
 
+    response_lines = [f"Created milestone: {name}"]
+    response_lines.extend(gate_lines)
+
     return types.CallToolResult(
         content=[
             types.TextContent(
-                type="text", text=f"Created milestone: {name}"
+                type="text", text="\n".join(response_lines)
             )
         ]
     )
@@ -299,6 +315,16 @@ async def _handle_update(
             "Provide attributes parameter with fields to update.",
         )
 
+    # As submitted, for the reason given in _handle_create.
+    refusal, gate_lines = await gate_or_refuse(
+        client,
+        {"description": attributes.get("description")},
+        args,
+        recheck_with=_NO_RECHECK_TOOL,
+    )
+    if refusal is not None:
+        return refusal
+
     # Convert date strings to DateTime
     attributes = _convert_milestone_attributes(attributes)
 
@@ -311,11 +337,13 @@ async def _handle_update(
         f"updated {len(changes)} field(s): {', '.join(changes)}"
     )
 
+    response_lines = [f"Updated milestone '{name}' ({change_summary})"]
+    response_lines.extend(gate_lines)
+
     return types.CallToolResult(
         content=[
             types.TextContent(
-                type="text",
-                text=f"Updated milestone '{name}' ({change_summary})",
+                type="text", text="\n".join(response_lines)
             )
         ]
     )

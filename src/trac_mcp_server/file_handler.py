@@ -80,7 +80,17 @@ def validate_output_path(
 def read_file_with_encoding(path: Path) -> tuple[str, str]:
     """Read a file with automatic encoding detection.
 
-    Reads raw bytes first, then uses charset-normalizer to detect encoding.
+    Tries a strict UTF-8 decode first. A file that decodes cleanly as
+    UTF-8 *is* UTF-8 for our purposes -- there's no reason to let a
+    probabilistic detector overrule a successful strict decode. Only
+    when that fails does this fall back to charset-normalizer, since a
+    guess is only needed once the unambiguous answer has been ruled out.
+
+    Falling straight to charset-normalizer let it override a correct
+    UTF-8 decode with a wrong single-byte-codepage guess on some inputs
+    (ticket #48) -- e.g. a `cp1250` misdetection that silently turned
+    every em dash into a three-character mojibake sequence on write.
+
     Defaults to UTF-8 for empty files or when detection fails.
 
     Args:
@@ -92,6 +102,11 @@ def read_file_with_encoding(path: Path) -> tuple[str, str]:
     raw = path.read_bytes()
     if not raw:
         return ("", "utf-8")
+
+    try:
+        return (raw.decode("utf-8"), "utf-8")
+    except UnicodeDecodeError:
+        pass
 
     result = from_bytes(raw).best()
     if result is None:

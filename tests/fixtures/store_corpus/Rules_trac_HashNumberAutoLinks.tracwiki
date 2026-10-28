@@ -1,0 +1,28 @@
+'''Scope:''' `substrate:trac` [[BR]]
+'''Type:''' hard-rule [[BR]]
+'''Status:''' active [[BR]]
+'''Related:''' [[Rules/trac/DeclareSourceFormat]], [[Rules/trac/RenderVerify]], [[Reference/trac/InterTrac]], [[Rules/trac/ExternalLinks]] [[BR]]
+'''Source:''' ticket #25 comment 2 (operator), 2026-08-22; cross-instance form updated per #35, 2026-08-25
+
+In Trac, bare `#N` is ticket-link syntax. It auto-links to ticket N '''in the instance the content is rendered in''' — always, everywhere, in ticket descriptions, comments, and wiki pages alike. Trac has no way to know you meant something else.
+
+'''Never write bare `#N` unless you mean ticket N in this instance.''' The agent reaches for `#N` habitually for things that are not tickets — enumerated findings, list items, numbered patterns, another project's tickets, !GitHub PR/issue numbers — and every one of those silently becomes a link to an unrelated ticket.
+
+This is not hypothetical: ticket #25 was filed with findings numbered `#1`–`#8` and shipped '''11 spurious auto-links''' to unrelated tickets in this instance, several of them closed tickets on entirely different subjects. A reader following "patterns `#3`, `#6`, `#7`" landed on the version-control workflow ticket, the retrieval-mechanism ticket, and the incident-patterns ticket.
+
+== What to write instead ==
+ * '''Enumerations''' — spell the number: `finding 3`, `pattern 3`, `step 3`. Verified: plain digits do not auto-link.
+ * '''A ticket in another Trac instance''' — link it. Preferred form is the !InterTrac short link, now that [[Reference/trac/InterTrac]] is configured: `trac_mcp_server:#13`. Never bare `#13`, which would link to ''this'' instance's ticket 13.
+   * If the target instance's prefix isn't in the rendering instance's !InterTrac table (see [[Reference/trac/InterTrac]] for what's configured where), the target is an external link — see [[Rules/trac/ExternalLinks]] for the form and the liability it carries. Do not restate the absolute-URL form here; it lived in three places and drifted in two of them.
+   * The server-relative bracketed form (`[//trac_mcp_server/ticket/13 label]`) is '''not''' usable yet: the Markdown→!TracWiki converter mangles it into a dead `wiki:`-prefixed link. Filed upstream as trac_mcp_server ticket 40, still open as of 2026-08-25. It would be the better long-term fallback (no hardcoded host) once fixed.
+   * Plain prose naming the project (`trac_mcp_server ticket 24`) remains an acceptable last resort when a live link isn't warranted, but a link is now preferred over it.
+ * '''!GitHub PRs/issues''' — `PR 29` or a full absolute URL.
+ * '''A literal `#N` you want the reader to see as text''' — backtick it: `#24`. '''Verified empirically''' on [[Rules/trac/RenderVerify]], which contains a backticked `#24` that renders as `<code>#24</code>` and does not link, while two bare refs on that same page do link. Backticking is the confirmed-working escape; Trac's `!` bang-prefix was ''not'' tested through the Markdown→!TracWiki converter, so don't reach for it on the assumption it works. (A ''double''-backtick escape, for showing the literal backtick characters themselves, does not survive this converter — it drops the backticks and lets the number auto-link. Stick to plain single-backtick spans like the one just above.)
+ * '''A ticket in this instance''' — bare `#N` is correct and wanted. That is the one case it is for.
+== Catching it ==
+This is exactly what [[Rules/trac/RenderVerify]] is for: after any ticket or wiki write, fetch the rendered HTML and grep it for `href=".../ticket/`. Every hit should be a ticket you meant to reference. The check is one `curl` and one `grep`, and it catches the whole class:
+
+{{{
+curl -sS --netrc-file PATH http://HOST:8000/PROJECT/ticket/N | grep -o 'href="/PROJECT/ticket/[0-9]*"' | sort | uniq -c
+}}}
+The harder case — a bare `#N` that happens to collide with a ''real'' local ticket, so nothing looks broken — isn't caught by render-diffing alone. `scripts/housekeeping/check_ticket_ref_collisions.py` (auto-pm repo, ticket #33) flags the narrow, deterministic signal for that: a bare `#N` sharing its number with a branch/PR-style token quoted in backticks in the same paragraph.

@@ -1,0 +1,20 @@
+**Scope:** `substrate:trac`   
+**Type:** hard-rule   
+**Status:** active   
+**Related:** [[Rules/trac/FileToolingBugs]], [[Rules/trac/RoundTripBeforePush]]   
+**Source:** ticket #2; curl-auth correction from ticket #17 discussion, 2026-08-18
+
+After handling any Trac content — ticket, wiki page, roadmap — render it with a third-party tool (`curl`) to verify it actually looks right. The Trac MCP server does the create/update; it does not itself confirm the result rendered correctly, and Markdown-to-!TracWiki conversion bugs are common enough that skipping this step routinely lets broken pages ship unnoticed.
+
+Since the 2026-08-17 migration from `tracd` to nginx + uWSGI (`trac_mcp_server` project, ticket 24 — a different Trac project than this one, so don't write it as `#24` here or it auto-links to this project's ticket 24 instead), anonymous `curl` reads against this instance return **401** — only static assets under `/chrome/common/` are unauthenticated. Authenticate with `curl --netrc-file <path>`, never `-u user:pass` on the command line: the password becomes visible via `ps` to any local user for the request's duration, and lands in shell history.
+
+```
+curl -o /dev/null -sS -w '%{http_code}\n' http://HOST:8000/chrome/common/css/trac.css     # 200, no auth
+curl -o /dev/null -sS -w '%{http_code}\n' http://HOST:8000/PROJECT/                       # 401
+curl -o /dev/null -sS -w '%{http_code}\n' --netrc-file PATH http://HOST:8000/PROJECT/     # 200
+```
+Check that headings, tables, code blocks, and intra-wiki links all survived conversion — not just that the HTTP call succeeded.
+
+This check runs *after* the write and asks whether the result looks right. It cannot tell you what the write **destroyed** — a table flattened into literal text renders perfectly well as literal text. When you are replacing the whole body of a page or ticket description that already exists, [[Rules/trac/RoundTripBeforePush]] is the before-the-push complement to this rule, and both apply.
+
+If anything looks wrong, don't work around it in the page source — see [[Rules/trac/FileToolingBugs]].

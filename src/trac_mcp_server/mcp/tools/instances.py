@@ -11,7 +11,11 @@ import mcp.types as types
 
 from ...core.client import TracClient
 from ...detection.web_scraper import scrape_project_index
-from ...instances import InstanceRegistry
+from ...instances import (
+    InstanceNotAllowedError,
+    InstanceRegistry,
+    caller_identity,
+)
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -61,6 +65,68 @@ def set_instance_registry(registry: InstanceRegistry | None) -> None:
     _registry_ref = registry
 
 
+def get_instance_registry() -> InstanceRegistry | None:
+    """The installed InstanceRegistry, or ``None`` before startup wires
+    one in. Ticket #86's other tool modules read it through here rather
+    than through ``server.py`` for the same reason ``_registry_ref``
+    exists at all: a direct ``tools -> server`` import would be
+    circular, since ``server.py`` imports tool specs from this package."""
+    return _registry_ref
+
+
+def local_intertrac_bases() -> frozenset[str]:
+    """InterTrac dispatcher bases -- one per configured instance -- that
+    are ours, for ``preview.checks``'s ``missing_intertrac_realm`` check
+    (ticket #86). One helper rather than three call sites each reading
+    the registry and stripping trailing slashes their own way -- the
+    project's own "not a check re-implemented per handler" rule
+    (``write_gate.py``'s module docstring) applies just as much to the
+    piece that FEEDS a check as to the check itself.
+
+    Empty before the registry is wired in (mirrors ``describe()``'s own
+    None guard in ``_handle_list_instances``) -- the check simply does
+    not fire, which is the status quo this ticket is about, not a new
+    failure mode.
+    """
+    registry = _registry_ref
+    if registry is None:
+        return frozenset()
+    return frozenset(
+        entry["url"].rstrip("/") for entry in registry.describe()
+    )
+
+
+def own_intertrac_prefix(client: TracClient) -> str | None:
+    """The InterTrac prefix OTHER instances would use to reach the one
+    ``client`` is talking to right now, for ``preview.checks``'s
+    ``self_intertrac_prefix`` check (ticket #105).
+
+    Unlike ``local_intertrac_bases``, this is per-``client``, not
+    per-registry: which instance a call is writing to depends on the
+    ``instance`` argument that resolved ``client`` (`Reference/mcp/
+    TracMcpMultiInstance`), and every configured prefix on this host
+    already equals its instance's own URL path segment (confirmed
+    against `Reference/trac/InterTrac`'s list -- `/trac_mcp_server` is
+    prefix ``trac_mcp_server``, etc.), so the path segment IS the
+    prefix rather than merely resembling it.
+
+    ``None`` when ``client.config`` carries no usable ``trac_url`` --
+    a ``Config`` a test constructs by hand, or a bare ``MagicMock``
+    whose auto-created ``trac_url`` attribute is not a string at all
+    (``urlparse`` raises ``TypeError`` on one, not the ``AttributeError``
+    a ``getattr`` default would catch) -- and the check this feeds
+    simply does not fire, the same convention ``local_intertrac_bases``
+    follows when the registry isn't wired in.
+    """
+    trac_url = getattr(client.config, "trac_url", None)
+    if not isinstance(trac_url, str) or not trac_url:
+        return None
+    path = urlparse(trac_url).path.rstrip("/")
+    if not path:
+        return None
+    return path.rsplit("/", 1)[-1] or None
+
+
 def _host_root(url: str) -> str:
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
@@ -83,29 +149,59 @@ async def _handle_list_instances(
         )
 
     discover = args.get("discover", True)
+    identity = caller_identity()
     configured = registry.describe()
-    default_config = registry.resolve(None)
+
+    # Ticket #110: a scoped caller sees only what it may reach, and the
+    # output never names an instance outside that scope. `None` = no scope.
+    allowed = registry.allowed_urls(identity)
+    if allowed is not None:
+        configured = [
+            e for e in configured if e["url"].rstrip("/") in allowed
+        ]
+
+    # Gap 5 (ticket #102 review): the discovery scrape below authenticates
+    # as the caller's own identity, not whichever identity happened to
+    # start this process -- describe() itself stays identity-agnostic
+    # (it never includes credentials, only URLs and names).
+    try:
+        default_config = registry.resolve(None, identity)
+    except InstanceNotAllowedError:
+        # The default instance is outside this caller's scope. Report it
+        # as unavailable rather than failing the whole listing, and skip
+        # discovery: it needs the default host and the caller's creds.
+        default_config = None
 
     structured: dict = {
         "configured": configured,
-        "default": default_config.trac_url,
+        "default": default_config.trac_url if default_config else None,
     }
+    if allowed is not None:
+        structured["allowed"] = sorted(allowed)
 
     lines = [
-        f"Default instance: {default_config.trac_url}",
-        "",
-        "Configured:",
+        f"Default instance: {default_config.trac_url}"
+        if default_config
+        else "Default instance: unavailable to this caller",
     ]
+    if allowed is not None:
+        lines.extend(["", "Allowed:"])
+        lines.extend(f"  {url}" for url in sorted(allowed))
+    lines.extend(["", "Configured:"])
     for entry in configured:
         marker = " (default)" if entry["is_default"] else ""
         lines.append(f"  {entry['name']}: {entry['url']}{marker}")
 
-    if discover:
+    if discover and default_config is not None:
         host_root = _host_root(default_config.trac_url)
         discovered = scrape_project_index(
             host_root,
             (default_config.username, default_config.password),
         )
+        if allowed is not None:
+            discovered = [
+                e for e in discovered if e["url"].rstrip("/") in allowed
+            ]
         if discovered:
             configured_urls = {
                 entry["url"].rstrip("/") for entry in configured

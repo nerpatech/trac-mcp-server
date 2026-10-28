@@ -31,6 +31,12 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 - **Text output unchanged**: All tools continue to return `content` with `type: "text"` as before
 - **Structured JSON is additive**: `structuredContent` is an additional field, not a replacement
 - **No breaking changes**: Clients that only read `content[].text` are unaffected
+- **Instance echo is appended, never merged**: every result gains `instance`
+  and `instance_source` keys in `structuredContent` (when the tool returns
+  one) plus one trailing `[instance: ... ]` text block. `content[0]` is left
+  byte-for-byte alone, so a client parsing the first block -- including
+  `ticket_component_list` and `ticket_enum_list`, whose whole text body is
+  JSON -- is unaffected. A key the tool already set of either name wins.
 
 ## Tools with Structured JSON Output
 
@@ -38,7 +44,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 |------|----------------------|
 | `get_server_time` | `server_time`, `unix_timestamp`, `timezone` |
 | `ticket_search` | `tickets[]`, `total`, `showing` |
-| `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified` |
+| `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified`, `_ts`, `comments_included`, and (unless `include_comments=false`) `comments[]` (each: `number`, `author`, `timestamp`, `body`), `comment_count`, `comments_shown`, `comments_truncated`, optional `omitted_comment_numbers`, optional `comments_error` |
 | `ticket_fields` | `fields[]` (each: `name`, `type`, `label`, `custom`, optional `options`) |
 | `ticket_actions` | `actions[]` (each: `name`, `label`, optional `hints`, `input_fields`) |
 | `ticket_batch_create` | `created[]`, `failed[]`, `total`, `succeeded`, `failed_count` |
@@ -49,6 +55,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 | `wiki_file_push` | `page_name`, `action`, `version`, `source_format`, `converted`, `file_path`, `warnings` |
 | `wiki_file_pull` | `page_name`, `file_path`, `format`, `version`, `bytes_written`, `converted` |
 | `wiki_file_detect_format` | `file_path`, `format`, `encoding`, `size_bytes` |
+| `timeline_search` | `events[]` (each: `kind`, `date`, `author`, `title`, `description`, `url`), `total`, `showing` |
 
 ## Schema Details
 

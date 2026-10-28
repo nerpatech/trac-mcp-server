@@ -547,6 +547,24 @@ class ComprehensiveMCPTester:
         self.report.results.append(result)
         self._log_result(result)
 
+        # wiki_diff - latest against the version before (or the empty
+        # page, when WikiStart has only version 1)
+        _args = {"page_name": "WikiStart"}
+        success, response, raw_result = await self._call_tool(
+            "wiki_diff", _args
+        )
+        result = CheckResult(
+            tool="wiki_diff",
+            test_name="latest_vs_previous",
+            passed=success and "# WikiStart diff:" in response,
+            response=response[:300],
+            notes="Diffed WikiStart's latest version against the one before",
+            call_args=_args,
+            **_extract_raw_fields(raw_result),
+        )
+        self.report.results.append(result)
+        self._log_result(result)
+
         # wiki_search
         _args = {"query": "wiki"}
         success, response, raw_result = await self._call_tool(

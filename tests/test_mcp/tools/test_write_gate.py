@@ -1,0 +1,1674 @@
+"""The write-time link gate, wired into every write path (ticket #64).
+
+`Rules/testing/SeededDefectFirst` is the whole shape of this file: a gate
+that has never been observed refusing is indistinguishable from one that
+always passes, and "the offline suite is green" is exactly what a gate
+wired into nothing looks like. So **every write path gets both halves** --
+a real handler call watched refusing a seeded broken link, and the
+corrected content watched being allowed through to the store.
+
+The seeded defect is a dead local wiki link, and the HTML below is what
+the live daemon actually rendered for it (captured 2026-09-04), not
+hand-written markup that merely resembles it. `missing_local_target` is
+the right seed rather than a more exotic code because it is the one #79
+spent a whole ticket narrowing: if the narrowing ever regresses, this
+file fails loudly on a path that refuses real writes.
+
+One thing worth stating because the ordinary suite hides it: with a bare
+`MagicMock` client the gate cannot render, takes its fail-open path and
+reports the content as UNCHECKED. That is correct behaviour and it is
+asserted here directly -- but it also means the other write-path test
+modules are no longer evidence that the gate does anything, and this one
+is.
+"""
+
+import asyncio
+import re
+import xmlrpc.client
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from trac_mcp_server.mcp.tools.milestone import (
+    _handle_create as _handle_milestone_create,
+)
+from trac_mcp_server.mcp.tools.milestone import (
+    _handle_update as _handle_milestone_update,
+)
+from trac_mcp_server.mcp.tools.ticket_batch import (
+    _handle_batch_create,
+    _handle_batch_update,
+)
+from trac_mcp_server.mcp.tools.ticket_comment import (
+    _handle_edit as _handle_comment_edit,
+)
+from trac_mcp_server.mcp.tools.ticket_comment import (
+    _handle_reply as _handle_comment_reply,
+)
+from trac_mcp_server.mcp.tools.ticket_write import (
+    _handle_create as _handle_ticket_create,
+)
+from trac_mcp_server.mcp.tools.ticket_write import (
+    _handle_update as _handle_ticket_update,
+)
+from trac_mcp_server.mcp.tools.wiki_write import (
+    _handle_create as _handle_wiki_create,
+)
+from trac_mcp_server.mcp.tools.wiki_write import (
+    _handle_update as _handle_wiki_update,
+)
+from trac_mcp_server.mcp.tools.write_gate import (
+    check_write,
+    gate_enabled,
+    gate_or_refuse,
+)
+
+# Captured from the live daemon: `See [[NoSuchPageHereAtAll]] for
+# detail.` Trac marks a dead local target with `class="missing wiki"`,
+# which is the only signal distinguishing it from a live link.
+BROKEN_HTML = (
+    '<p>\nSee <a class="missing wiki" '
+    'href="http://192.168.10.4:8000/trac_mcp_server/wiki/'
+    'NoSuchPageHereAtAll" rel="nofollow">NoSuchPageHereAtAll</a> '
+    "for detail.\n</p>\n"
+)
+BROKEN_SOURCE = "See [[NoSuchPageHereAtAll]] for detail."
+
+CLEAN_HTML = "<p>\nNothing to see here.\n</p>\n"
+CLEAN_SOURCE = "Nothing to see here."
+
+# Ticket #105's four seeds. Each pair, like the one above, is a render
+# `convert_preview` actually produced against /trac_test (captured
+# 2026-09-26), not hand-written markup that merely resembles Trac's
+# output -- `Rules/testing/SeededDefectFirst`.
+
+# `PR #99999` outside a code span always autolinks to this instance's
+# own ticket 99999, whether or not it exists -- Trac renders a dead
+# ticket target with no `href` at all, just the `missing ticket` class.
+PR_NUMBER_HTML = (
+    '<p>\nSee PR <a class="missing ticket">#99999</a> for context.'
+    "\n</p>\n"
+)
+PR_NUMBER_SOURCE = "See PR #99999 for context."
+
+# `bcs:#99999` (a configured prefix) alongside a bare `#99999` in the
+# same document -- the bare form resolves to THIS instance's own
+# ticket 99999, not bcs's.
+SHADOW_HTML = (
+    '<p>\nSee <a class="ext-link" '
+    'href="http://192.168.10.4:8000/bcs/intertrac/%2399999" '
+    'title="#99999 in Backyard Control System (b-node)">'
+    '<span class="icon">​</span>bcs:#99999</a> and also '
+    '<a class="missing ticket">#99999</a> in the same paragraph.'
+    "\n</p>\n"
+)
+SHADOW_SOURCE = "See bcs:#99999 and also #99999 in the same paragraph."
+
+# `auto_pm:#99999` written ON auto_pm, back when self-entries were not
+# yet in `[intertrac]` -- unconfigured renders as plain text, no anchor
+# at all. Hand-built rather than re-captured: the operator has since
+# added self-entries (auto_pm:#155), so this exact shape is no longer
+# producible live on this host -- see `_check_unconfigured_intertrac_
+# prefix`'s docstring on `own_prefix`. The shape itself (an unconfigured
+# prefix renders as bare text) is the same one every other row in this
+# module already exercises for an ordinary typo'd prefix, just applied
+# to the self case.
+SELF_PREFIX_HTML = "<p>\nSee auto_pm:#99999 for the self case.\n</p>\n"
+SELF_PREFIX_SOURCE = "See auto_pm:#99999 for the self case."
+
+# A bare `comment:99` renders as ordinary text always -- Trac has no
+# `missing` class for this realm the way it does for a wiki or ticket
+# target, confirmed live: the render is IDENTICAL whether comment 99
+# exists on the current ticket or not. Only the ticket's own comment
+# numbers, not the HTML, can tell the two apart.
+DANGLING_COMMENT_HTML = "<p>\nSee comment:99 for context.\n</p>\n"
+DANGLING_COMMENT_SOURCE = "See comment:99 for context."
+
+# Ticket #108. `comment:N:ticket:M` is Trac's own form for a comment on
+# ANOTHER ticket, and it resolves -- captured from /trac_test
+# (2026-10-02), where ticket 1 has six comments. The bare pattern used
+# to match the leading `comment:5` and refuse it as dangling on the
+# ticket being written.
+SCOPED_COMMENT_HTML = (
+    '<p>\nSee <a class="closed ticket" '
+    'href="http://192.168.10.4:8000/trac_test/ticket/1#comment:5" '
+    'title="Comment 5 for #1: task: Update CLI reference to document '
+    '--json flag behavior (closed: fixed)">comment:5:ticket:1</a> '
+    "for context.\n</p>\n"
+)
+SCOPED_COMMENT_SOURCE = "See comment:5:ticket:1 for context."
+
+
+def _client(html=CLEAN_HTML):
+    """A client that renders, so the gate can actually run.
+
+    `wiki_to_html` is the one call the gate makes on its own behalf;
+    everything else on this mock belongs to the handler under test.
+    """
+    client = MagicMock()
+    client.config = MagicMock()
+    client.config.write_gate = True
+    client.config.max_batch_size = 500
+    client.config.max_parallel_requests = 5
+    client.wiki_to_html.return_value = html
+    return client
+
+
+def _text(result):
+    return "\n".join(
+        c.text for c in result.content if hasattr(c, "text")
+    )
+
+
+# ---------------------------------------------------------------------
+# The unit: check_write.
+# ---------------------------------------------------------------------
+
+
+def test_check_write_refuses_a_broken_link():
+    outcome = asyncio.run(
+        check_write(
+            _client(BROKEN_HTML),
+            BROKEN_SOURCE,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
+    )
+    assert outcome.refused
+    assert outcome.checked
+    assert "missing_local_target" in outcome.refusal_text
+    assert "Refusing to write content" in outcome.refusal_text
+
+
+def test_check_write_allows_clean_content():
+    outcome = asyncio.run(
+        check_write(
+            _client(),
+            CLEAN_SOURCE,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
+    )
+    assert not outcome.refused
+    assert outcome.checked
+
+
+def test_empty_content_is_not_checked_and_not_a_finding():
+    """A write that carries no text for this field has nothing to
+    check. Distinct from clean content: `checked` is False, so nothing
+    downstream can report it as verified."""
+    outcome = asyncio.run(
+        check_write(
+            _client(),
+            "",
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not outcome.refused
+    assert not outcome.checked
+
+
+def test_a_render_failure_does_not_refuse_but_says_so_loudly():
+    """The gate failing is not the author's fault -- refusing here would
+    stop every write on the store whenever the renderer hiccups. But
+    silence would read as "checked and clean", which is the failure
+    ticket #64 section 3 exists to prevent, so the response must say
+    UNCHECKED in as many words."""
+    client = _client()
+    client.wiki_to_html.side_effect = xmlrpc.client.Fault(1, "boom")
+
+    outcome = asyncio.run(
+        check_write(
+            client,
+            BROKEN_SOURCE,
+            field="description",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not outcome.refused
+    assert not outcome.checked
+    note = "\n".join(outcome.summary_lines())
+    assert "UNCHECKED" in note
+    assert "not verified clean" in note
+    assert "Re-check it with ticket_render_check." in note
+
+
+def test_the_unchecked_note_names_no_tool_when_none_covers_the_field():
+    """Ticket #87. This note used to infer its tool from the field name
+    -- `content` meant wiki, anything else meant ticket -- which was
+    right for all five write paths that existed and wrong for the
+    milestone description this ticket added, where NO render-check tool
+    can see the content.
+
+    Asserted as an absence as well as a presence, because the failure
+    being guarded against is a confidently wrong instruction, not a
+    missing one: naming `ticket_render_check` here sends the author to
+    a tool that will not show them their milestone, on the one path
+    whose entire purpose is to stop an unchecked write reading as a
+    clean one."""
+    client = _client()
+    client.wiki_to_html.side_effect = xmlrpc.client.Fault(1, "boom")
+
+    outcome = asyncio.run(
+        check_write(
+            client,
+            BROKEN_SOURCE,
+            field="description",
+            recheck_with=None,
+        )
+    )
+    note = "\n".join(outcome.summary_lines())
+    assert "UNCHECKED" in note
+    assert "render_check" not in note
+    assert "read the rendered page" in note
+
+
+def test_the_pragma_lets_deliberate_content_through():
+    """Ticket #64 section 6: the #58 opt-out governs blocking too.
+    Scoped to the code it names, never a document-wide mute."""
+    source = (
+        BROKEN_SOURCE + "\npreview-checks: allow missing_local_target\n"
+    )
+    outcome = asyncio.run(
+        check_write(
+            _client(BROKEN_HTML),
+            source,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
+    )
+    assert not outcome.refused, outcome.refusal_text
+
+
+def test_the_pragma_is_scoped_to_the_code_it_names():
+    """Opting out of one code must not mute another. Without this the
+    hatch quietly becomes the document-wide mute #58 refused to
+    build."""
+    source = (
+        BROKEN_SOURCE + "\npreview-checks: allow escaped_link_target\n"
+    )
+    outcome = asyncio.run(
+        check_write(
+            _client(BROKEN_HTML),
+            source,
+            field="content",
+            recheck_with="wiki_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "missing_local_target" in outcome.refusal_text
+
+
+def test_the_kill_switch_turns_the_gate_off():
+    """Ruling 5. Default on; off only for an emergency on the shared
+    daemon."""
+    client = _client(BROKEN_HTML)
+    assert gate_enabled(client)
+
+    client.config.write_gate = False
+    assert not gate_enabled(client)
+
+    refusal, lines = asyncio.run(
+        gate_or_refuse(
+            client,
+            {"content": BROKEN_SOURCE},
+            {},
+            recheck_with="wiki_render_check",
+        )
+    )
+    assert refusal is None and lines == []
+    client.wiki_to_html.assert_not_called()
+
+
+def test_gate_defaults_on_for_a_config_without_the_field():
+    """A Config built before this field existed must keep the gate,
+    not silently lose it."""
+
+    class OldConfig:
+        pass
+
+    client = MagicMock()
+    client.config = OldConfig()
+    assert gate_enabled(client)
+
+
+def test_first_refusal_wins_across_fields():
+    """Each field costs a render round trip, and an author who has to
+    fix the description will re-send the comment with it anyway."""
+    refusal, _ = asyncio.run(
+        gate_or_refuse(
+            _client(BROKEN_HTML),
+            {"description": BROKEN_SOURCE, "comment": BROKEN_SOURCE},
+            {},
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert refusal is not None
+    assert "Refusing to write description" in _text(refusal)
+
+
+# ---------------------------------------------------------------------
+# Ticket #105's four checks, each watched refusing its own seed and
+# allowing clean content through -- SeededDefectFirst applied per check
+# rather than once for the gate as a whole, since each is its own rule
+# with its own failure mode to pin.
+# ---------------------------------------------------------------------
+
+
+def test_pr_number_as_ticket_refuses_and_clean_pr_mention_passes():
+    outcome = asyncio.run(
+        check_write(
+            _client(PR_NUMBER_HTML),
+            PR_NUMBER_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "pr_number_as_ticket" in outcome.refusal_text
+
+    clean = asyncio.run(
+        check_write(
+            _client(CLEAN_HTML),
+            "See PR 100 for context.",
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not clean.refused
+
+
+def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
+    outcome = asyncio.run(
+        check_write(
+            _client(SHADOW_HTML),
+            SHADOW_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "bare_ref_shadows_prefixed" in outcome.refusal_text
+
+    # The other half of #105's own scoping note: a lone bare reference
+    # with no prefixed twin is NOT this check's population. An EXISTING
+    # ticket (no "missing" class), so `missing_local_target` doesn't
+    # also fire and muddy what this assertion is isolating.
+    lone_html = (
+        '<p>\nSee <a class="ticket" '
+        'href="http://192.168.10.4:8000/trac_test/ticket/1" '
+        'title="#1: task: something">#1</a> alone.\n</p>\n'
+    )
+    lone = asyncio.run(
+        check_write(
+            _client(lone_html),
+            "See #1 alone.",
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not lone.refused, lone.refusal_text
+
+
+def test_self_intertrac_prefix_refuses_and_clean_configured_ref_passes():
+    """Ticket #105. Hand-built HTML rather than a fresh live capture --
+    see `SELF_PREFIX_HTML`'s own comment: the operator has since added
+    self-entries to `[intertrac]` (auto_pm:#155), so this exact
+    unconfigured-self shape can no longer be produced live on this
+    host. The shape itself (an unconfigured prefix renders as bare
+    text) is not new; only which prefix counts as "self" is."""
+    client = _client(SELF_PREFIX_HTML)
+    client.config.trac_url = "http://192.168.10.4:8000/auto_pm"
+
+    outcome = asyncio.run(
+        check_write(
+            client,
+            SELF_PREFIX_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "self_intertrac_prefix" in outcome.refusal_text
+
+    clean_client = _client(CLEAN_HTML)
+    clean_client.config.trac_url = "http://192.168.10.4:8000/auto_pm"
+    clean = asyncio.run(
+        check_write(
+            clean_client,
+            CLEAN_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not clean.refused
+
+
+def test_dangling_comment_ref_refuses_and_a_known_number_passes():
+    outcome = asyncio.run(
+        check_write(
+            _client(DANGLING_COMMENT_HTML),
+            DANGLING_COMMENT_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1, 2, 3}),
+        )
+    )
+    assert outcome.refused
+    assert "dangling_comment_ref" in outcome.refusal_text
+
+    clean = asyncio.run(
+        check_write(
+            _client(DANGLING_COMMENT_HTML),
+            DANGLING_COMMENT_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1, 2, 99}),
+        )
+    )
+    assert not clean.refused
+
+
+def test_dangling_comment_ref_does_not_run_without_ticket_context():
+    """`None` (no ticket_id supplied by the caller) means the check
+    cannot run, not that the ticket has no comments -- a wiki or
+    milestone write has no ticket to check against at all."""
+    outcome = asyncio.run(
+        check_write(
+            _client(DANGLING_COMMENT_HTML),
+            DANGLING_COMMENT_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert not outcome.refused
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        SCOPED_COMMENT_SOURCE,
+        # Trac maps `bug` and `issue` to the ticket realm.
+        "See comment:5:bug:1 for context.",
+        "See comment:5:issue:1 for context.",
+        # The bracket form carries the same target.
+        "See [comment:5:ticket:1 the fifth one] for context.",
+        # An absolute URL's fragment is not a TracLinks reference --
+        # shape from auto_pm:#71's description, found by #108's sweep.
+        "See http://192.168.10.4:8000/trac_test/ticket/1#comment:5 too.",
+        "See [http://192.168.10.4:8000/trac_test/ticket/1#comment:5 it].",
+    ],
+)
+def test_comment_scoped_to_another_ticket_is_not_dangling(source):
+    """Ticket #108: comment 5 does not exist on THIS ticket, but the
+    reference names comment 5 of ticket 1, so this check has nothing
+    to say about it."""
+    outcome = asyncio.run(
+        check_write(
+            _client(SCOPED_COMMENT_HTML),
+            source,
+            field="description",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1}),
+        )
+    )
+    assert not outcome.refused, outcome.refusal_text
+
+
+def test_a_bare_ref_beside_a_scoped_one_still_refuses():
+    """Blanking the scoped form must not hide a genuinely dangling bare
+    `comment:N` in the same document -- it is the bare one reported."""
+    outcome = asyncio.run(
+        check_write(
+            _client(SCOPED_COMMENT_HTML),
+            "See comment:5:ticket:1 and comment:9 for context.",
+            field="description",
+            recheck_with="ticket_render_check",
+            known_comment_numbers=frozenset({1}),
+        )
+    )
+    assert outcome.refused
+    assert "'comment:9'" in outcome.refusal_text
+    assert "'comment:5'" not in outcome.refusal_text
+
+
+def test_ticket_create_refuses_a_bare_comment_ref():
+    """Ticket #108's second half: a new ticket has no comments, so a
+    bare `comment:N` in its description is dangling for every N. The
+    create path used to skip the check for want of a ticket id, which
+    let a description in that no update could ever re-save."""
+    result = _ticket_create(
+        _client(DANGLING_COMMENT_HTML), DANGLING_COMMENT_SOURCE
+    )
+    assert result.isError, _text(result)
+    assert "dangling_comment_ref" in _text(result)
+
+
+def test_ticket_create_allows_a_scoped_comment_ref():
+    result = _ticket_create(
+        _client(SCOPED_COMMENT_HTML), SCOPED_COMMENT_SOURCE
+    )
+    assert not result.isError, _text(result)
+
+
+def test_batch_create_refuses_a_bare_comment_ref_per_item():
+    client = _client()
+
+    def render(content):
+        if "comment:5:ticket:1" in content:
+            return SCOPED_COMMENT_HTML
+        return DANGLING_COMMENT_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = 7
+        result = asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {
+                            "summary": "scoped",
+                            "description": SCOPED_COMMENT_SOURCE,
+                        },
+                        {
+                            "summary": "bare",
+                            "description": DANGLING_COMMENT_SOURCE,
+                        },
+                    ]
+                },
+            )
+        )
+
+    text = _text(result)
+    assert "1/2 succeeded, 1 failed" in text
+    assert "dangling_comment_ref" in text
+
+
+_TWO_PRIOR_COMMENTS_CHANGELOG = [
+    ["2026-09-01 00:00:00", "alice", "comment", "1", "hi"],
+    ["2026-09-02 00:00:00", "alice", "comment", "2", "hi"],
+]
+
+
+def test_dangling_comment_ref_wired_into_ticket_update():
+    """The plumbing: gate_or_refuse(ticket_id=...) fetches the
+    changelog and derives known_comment_numbers itself -- a handler
+    only has to pass the ticket_id it already has in scope.
+
+    `get_ticket_changelog` is set directly on the client, not patched
+    via `run_sync` the way `ticket_write.py`'s OWN RPC calls are below
+    -- the changelog fetch happens inside `write_gate.py`, through
+    *its* `run_sync` import, which a patch scoped to
+    `ticket_write.run_sync` does not touch (a separate name bound to
+    the same real function). Real `run_sync` runs a MagicMock-returning
+    callable in a thread just fine, the same way `_client()`'s
+    `wiki_to_html` already relies on elsewhere in this file.
+    """
+    client = _client(DANGLING_COMMENT_HTML)
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_ticket_update(
+                client,
+                {"ticket_id": 1, "comment": DANGLING_COMMENT_SOURCE},
+            )
+        )
+        run_sync.assert_not_called()  # refused before update_ticket
+
+    assert result.isError, _text(result)
+    assert "dangling_comment_ref" in _text(result)
+
+
+def test_dangling_comment_ref_counts_the_comment_being_written():
+    """A comment that references its OWN prospective number is not a
+    defect -- "counting the comment being written" is the ticket's own
+    phrasing. Two prior comment-field entries means the next one this
+    write creates will be number 3."""
+    client = _client("<p>\nSee comment:3 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_ticket_update(
+                client,
+                {
+                    "ticket_id": 1,
+                    "comment": "See comment:3 for context.",
+                },
+            )
+        )
+    assert not result.isError, _text(result)
+
+
+# ---------------------------------------------------------------------
+# The wiring. One refusal and one allow per write path -- the half that
+# proves the gate is actually connected to each handler.
+# ---------------------------------------------------------------------
+
+
+def _wiki_create(client, content):
+    with patch(
+        "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            xmlrpc.client.Fault(404, "Page not found"),
+            {"name": "P", "version": 1},
+        ]
+        return asyncio.run(
+            _handle_wiki_create(
+                client, {"page_name": "P", "content": content}
+            )
+        )
+
+
+def _wiki_update(client, content):
+    with patch(
+        "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = {"name": "P", "version": 2}
+        return asyncio.run(
+            _handle_wiki_update(
+                client,
+                {"page_name": "P", "content": content, "version": 1},
+            )
+        )
+
+
+def _ticket_create(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = 42
+        return asyncio.run(
+            _handle_ticket_create(
+                client, {"summary": "S", "description": description}
+            )
+        )
+
+
+def _ticket_update_comment(client, comment):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_ticket_update(
+                client, {"ticket_id": 1, "comment": comment}
+            )
+        )
+
+
+def _ticket_update_description(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_ticket_update(
+                client, {"ticket_id": 1, "description": description}
+            )
+        )
+
+
+def _ticket_comment_edit(client, comment):
+    # Ticket #104: _handle_edit makes three run_sync calls in order when
+    # nothing refuses -- get_ticket (the base_ts precondition),
+    # get_ticket_comment_history (the previous-text snippet), then
+    # edit_ticket_comment. A refused call stops after the first.
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_comment.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            [1, "created", "modified", {"_ts": "100"}],
+            [],
+            True,
+        ]
+        return asyncio.run(
+            _handle_comment_edit(
+                client,
+                {
+                    "ticket_id": 1,
+                    "cnum": 1,
+                    "comment": comment,
+                    "base_ts": "100",
+                },
+            )
+        )
+
+
+def _ticket_comment_reply(client, comment):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_comment.run_sync"
+    ) as run_sync:
+        run_sync.return_value = 2
+        return asyncio.run(
+            _handle_comment_reply(
+                client, {"ticket_id": 1, "cnum": 1, "comment": comment}
+            )
+        )
+
+
+def _milestone_create(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.milestone.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_milestone_create(
+                client,
+                {
+                    "name": "M",
+                    "attributes": {"description": description},
+                },
+            )
+        )
+
+
+def _milestone_update(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.milestone.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_milestone_update(
+                client,
+                {
+                    "name": "M",
+                    "attributes": {"description": description},
+                },
+            )
+        )
+
+
+WRITE_PATHS = [
+    ("wiki_create", _wiki_create),
+    ("wiki_update", _wiki_update),
+    ("ticket_create", _ticket_create),
+    ("ticket_update.comment", _ticket_update_comment),
+    ("ticket_update.description", _ticket_update_description),
+    # Ticket #87. A milestone description is TracWiki on the same
+    # substrate as the five above, and was outside #64's enumerated
+    # write paths -- deliberately, but that left it the one gap in an
+    # otherwise blocking gate.
+    ("milestone_create", _milestone_create),
+    ("milestone_update", _milestone_update),
+    # Ticket #104. editComment/replyToComment are tracrpc_comment RPCs
+    # with no check of their own, and were the one write surface left
+    # outside #64's gate after #87 closed the milestone gap.
+    ("ticket_comment_edit", _ticket_comment_edit),
+    ("ticket_comment_reply", _ticket_comment_reply),
+]
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_every_write_path_refuses_a_broken_link(name, call):
+    """The seeded defect, watched refusing on each path in turn.
+
+    Parametrised rather than written once against a helper, because
+    what is being tested is precisely that each HANDLER calls the gate
+    -- a shared helper test would pass with the wiring missing from
+    every one of them.
+    """
+    result = call(_client(BROKEN_HTML), BROKEN_SOURCE)
+    assert result.isError, f"{name} did not refuse"
+    assert "missing_local_target" in _text(result)
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_every_write_path_allows_correct_content(name, call):
+    """The other half. A gate that refuses everything passes the test
+    above and is useless; this is what says the refusal was about the
+    content."""
+    result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
+    assert not result.isError, _text(result)
+
+
+def test_reply_to_does_not_charge_the_author_for_the_quoted_comment():
+    """A reply quotes an earlier comment verbatim. Refusing the reply
+    because that OLDER comment carries a broken link would charge an
+    author for text they did not write and did not choose to keep -- a
+    quoted comment is not theirs to edit.
+
+    So the gate checks the author's own comment, not the assembled
+    body. The quoted text here is broken; the reply is not.
+    """
+    client = _client(CLEAN_HTML)
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            # get_ticket_changelog: one earlier comment, with the
+            # dead link in it.
+            [
+                (
+                    "ts",
+                    "alice",
+                    "comment",
+                    "1",
+                    BROKEN_SOURCE,
+                    1,
+                )
+            ],
+            None,
+        ]
+        result = asyncio.run(
+            _handle_ticket_update(
+                client,
+                {
+                    "ticket_id": 1,
+                    "comment": CLEAN_SOURCE,
+                    "reply_to": 1,
+                },
+            )
+        )
+    assert not result.isError, _text(result)
+
+
+# ---------------------------------------------------------------------
+# The batch tools: per item, not per call.
+# ---------------------------------------------------------------------
+
+
+def test_batch_create_refuses_one_item_and_writes_the_rest():
+    """Ticket #64's coverage note: a batch is not all-or-nothing today,
+    and one broken link must not refuse nineteen good tickets. The
+    refused item is reported in that item's own error field, which is
+    how these tools already report per-item failure."""
+    client = _client()
+
+    def render(content):
+        return BROKEN_HTML if "NoSuchPage" in content else CLEAN_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = 7
+        result = asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {
+                            "summary": "good",
+                            "description": CLEAN_SOURCE,
+                        },
+                        {
+                            "summary": "bad",
+                            "description": BROKEN_SOURCE,
+                        },
+                    ]
+                },
+            )
+        )
+
+    text = _text(result)
+    assert "1/2 succeeded, 1 failed" in text
+    assert "missing_local_target" in text
+
+
+def test_batch_update_refuses_one_item_and_writes_the_rest():
+    client = _client()
+
+    def render(content):
+        return BROKEN_HTML if "NoSuchPage" in content else CLEAN_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": 1, "comment": CLEAN_SOURCE},
+                        {"ticket_id": 2, "comment": BROKEN_SOURCE},
+                    ]
+                },
+            )
+        )
+
+    text = _text(result)
+    assert "1/2 succeeded, 1 failed" in text
+    assert "missing_local_target" in text
+
+
+# ---------------------------------------------------------------------
+# Live acceptance (ticket #64 section 8).
+#
+# Everything above runs against a captured render. That is the right
+# default -- deterministic, and the fixture came from the real daemon --
+# but it cannot see the one thing that matters most here: whether a
+# refusal actually PREVENTS a write against real Trac, or merely
+# returns an error while the bytes land anyway.
+#
+# Ticket #81 is this project's standing evidence that the offline half
+# does not catch this class: two defects landed green through ci.sh in
+# one session, one of them a live test asserting a false positive #79
+# had already removed. A blocking write gate is exactly the change
+# where that gap costs the most.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestWriteGateLive:
+    """The gate watched refusing and allowing a REAL write.
+
+    Writes go to the scratch page ticket #84 seeded for exactly this
+    (`TRAC_TEST_WIKI_PAGE`, default `TracConvertLiveTest`), which is
+    reset rather than appended to, so repeated runs cannot accumulate.
+    """
+
+    @staticmethod
+    def _live():
+        import os
+
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        page = os.environ.get(
+            "TRAC_TEST_WIKI_PAGE", "TracConvertLiveTest"
+        )
+        return TracClient(config), page
+
+    def test_a_broken_link_is_refused_and_the_page_is_unchanged(self):
+        """The half that matters: not just that an error came back, but
+        that the store still holds what it held before. An error
+        response over a completed write would be the worst of both."""
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client, page = self._live()
+        info = client.get_wiki_page_info(page)
+        before = client.get_wiki_page(page)
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "page_name": page,
+                    "content": (
+                        "Seeded for the #64 live gate row.\n\n"
+                        + BROKEN_SOURCE
+                    ),
+                    "version": info["version"],
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert client.get_wiki_page(page) == before, (
+            "the gate returned an error but the write still landed"
+        )
+
+    def test_correct_content_is_allowed_through_to_the_store(self):
+        """The other half. Asserted by reading the page back, because
+        a success response is not evidence that anything was stored --
+        the same distinction `Rules/testing/VerificationIsAHandoff`
+        draws."""
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client, page = self._live()
+        info = client.get_wiki_page_info(page)
+        body = (
+            "Seeded for the #64 live gate row. This body is clean: "
+            "it links to trac_mcp_server:#64 and nothing else.\n"
+        )
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "page_name": page,
+                    "content": body,
+                    "version": info["version"],
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        assert client.get_wiki_page(page) == body
+
+
+# ---------------------------------------------------------------------
+# Ticket #87: the milestone half, live.
+#
+# On `/trac_test` rather than the project's own instance, because these
+# rows CREATE and DELETE a real milestone and there is no scratch
+# milestone to reset the way #84 seeded a scratch wiki page. That
+# instance exists for exactly this and carries standing authorisation
+# (auto_pm `Reference/trac/TestingInstance`); cleaning up after is still
+# expected, so every row does.
+#
+# Measured here before these tests were written, and the reason the
+# ticket asked rather than assumed: Trac renders a milestone description
+# through the wiki formatter and marks a dead local target
+# `class="missing wiki"` -- the SAME classes `wiki_to_html` hands the
+# gate. So what the gate refuses is what a reader of the milestone page
+# would actually have seen.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestMilestoneWriteGateLive:
+    """The gate watched refusing and allowing a REAL milestone write."""
+
+    NAME = "Ticket87WriteGateLive"
+
+    @staticmethod
+    def _live():
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config, _ = bootstrap_config()
+        return TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
+        )
+
+    @pytest.fixture(autouse=True)
+    def _scratch(self):
+        """Delete the scratch milestone before AND after each row.
+
+        Before as well as after: a previous run interrupted between
+        create and cleanup would otherwise leave a milestone behind,
+        and its presence would make
+        `test_a_broken_link_is_refused_and_no_milestone_is_created`
+        pass for entirely the wrong reason.
+        """
+        client = self._live()
+        self._remove(client)
+        try:
+            yield
+        finally:
+            self._remove(client)
+
+    @classmethod
+    def _remove(cls, client):
+        try:
+            client.delete_milestone(cls.NAME)
+        except Exception:
+            # Absent is the desired state; not existing is not an error.
+            pass
+
+    def test_a_broken_link_is_refused_and_no_milestone_is_created(self):
+        """Not just that an error came back, but that the store did not
+        gain a milestone anyway -- the case an offline test cannot see,
+        and the one #64's live row exists for."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": BROKEN_SOURCE},
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert self.NAME not in client.get_all_milestones(), (
+            "the gate returned an error but the milestone was created"
+        )
+
+    def test_correct_content_is_allowed_through_to_the_store(self):
+        """The other half: a gate that refuses everything passes the
+        row above and is useless. Asserted by reading the description
+        back, not from the success response."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+        # Deliberately link-free. An earlier draft of this row said it
+        # "links to trac_mcp_server:#87 and nothing else" and the gate
+        # refused it -- correctly: the `trac_mcp_server` InterTrac
+        # prefix is not configured on /trac_test, so that renders as a
+        # bare ticket link resolved against /trac_test, where 87 does
+        # not exist. The allow row has to be clean ON THE INSTANCE IT
+        # WRITES TO, which is not the instance this ticket lives on.
+        body = (
+            "Seeded for the ticket 87 live gate row. Nothing to "
+            "link to.\n"
+        )
+
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": body},
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        stored = client.get_milestone(self.NAME)
+        assert stored["description"] == body
+
+    def test_a_refused_update_leaves_the_old_description_intact(self):
+        """The update path's own half of the "error returned but the
+        bytes landed" question. Distinct from the create row: a create
+        that half-lands leaves a milestone that was not there before,
+        an update that half-lands destroys one that was."""
+        from trac_mcp_server.mcp.tools.milestone import (
+            _handle_update as handle_update,
+        )
+
+        client = self._live()
+        original = (
+            "Seeded for the ticket 87 live gate row. Original body.\n"
+        )
+        client.create_milestone(self.NAME, {"description": original})
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "name": self.NAME,
+                    "attributes": {"description": BROKEN_SOURCE},
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert (
+            client.get_milestone(self.NAME)["description"] == original
+        ), "the gate returned an error but the update still landed"
+
+
+# ---------------------------------------------------------------------
+# Ticket #104: the comment-edit/reply half, live, plus the base_ts
+# precondition that has no offline equivalent -- it depends on Trac's
+# own change-tracking, which a mocked client cannot reproduce.
+#
+# On /trac_test, not this project's own instance, because these rows
+# create and delete a real ticket (Reference/trac/TestingInstance).
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestTicketCommentWriteGateLive:
+    """The gate and the base_ts precondition, watched against a REAL
+    ticket and a REAL comment."""
+
+    @staticmethod
+    def _live():
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config, _ = bootstrap_config()
+        return TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
+        )
+
+    @pytest.fixture
+    def ticket(self):
+        """A scratch ticket with one comment, deleted after the row."""
+        client = self._live()
+        ticket_id = client.create_ticket(
+            "Ticket104WriteGateLive",
+            "Seeded for the ticket 104 live gate rows.",
+        )
+        client.update_ticket(ticket_id, "the original comment")
+        try:
+            yield client, ticket_id
+        finally:
+            try:
+                client.delete_ticket(ticket_id)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _base_ts(client, ticket_id):
+        current = client.get_ticket(ticket_id)
+        return current[3]["_ts"]
+
+    def test_a_broken_link_edit_is_refused_and_the_comment_is_intact(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        base_ts = self._base_ts(client, ticket_id)
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": BROKEN_SOURCE,
+                    "base_ts": base_ts,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == "the original comment", (
+            "the gate returned an error but the edit still landed"
+        )
+
+    def test_a_clean_edit_is_allowed_through_to_the_store(self, ticket):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        base_ts = self._base_ts(client, ticket_id)
+        body = "Seeded for the ticket 104 live gate row. Corrected."
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": body,
+                    "base_ts": base_ts,
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == body
+
+    def test_a_stale_base_ts_is_refused_and_the_comment_is_intact(
+        self, ticket
+    ):
+        """The incident's actual shape: a base_ts read before the
+        ticket changed underneath must not still authorize an edit
+        afterward -- whether that change was a genuine race or, as in
+        #104, evidence this was never the ticket the caller meant to
+        target."""
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_edit as handle_edit,
+        )
+
+        client, ticket_id = ticket
+        stale_base_ts = self._base_ts(client, ticket_id)
+        client.update_ticket(ticket_id, "an unrelated second comment")
+
+        result = asyncio.run(
+            handle_edit(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": "an edit riding a stale base_ts",
+                    "base_ts": stale_base_ts,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "version_conflict" in _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == "the original comment", (
+            "the gate returned an error but the edit still landed"
+        )
+
+    def test_a_broken_link_reply_is_refused_and_posts_no_comment(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_reply as handle_reply,
+        )
+
+        client, ticket_id = ticket
+        before = client.get_ticket_changelog(ticket_id)
+
+        result = asyncio.run(
+            handle_reply(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "cnum": 1,
+                    "comment": BROKEN_SOURCE,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "missing_local_target" in _text(result)
+        assert client.get_ticket_changelog(ticket_id) == before, (
+            "the gate returned an error but a reply was still posted"
+        )
+
+    def test_a_clean_reply_is_allowed_through_to_the_store(
+        self, ticket
+    ):
+        from trac_mcp_server.mcp.tools.ticket_comment import (
+            _handle_reply as handle_reply,
+        )
+
+        client, ticket_id = ticket
+        body = "Seeded for the ticket 104 live gate row. A clean reply."
+
+        result = asyncio.run(
+            handle_reply(
+                client,
+                {"ticket_id": ticket_id, "cnum": 1, "comment": body},
+            )
+        )
+
+        assert not result.isError, _text(result)
+        # Trac numbers the reply after the seeded first comment; read
+        # it back rather than parse the number out of the message.
+        history = client.get_ticket_comment_history(ticket_id, 2)
+        assert history and history[-1][3] == body, _text(result)
+
+    def test_dangling_comment_ref_is_refused_and_the_comment_is_intact(
+        self, ticket
+    ):
+        """Ticket #105's fourth check, on the same scratch ticket #104's
+        fixture already seeds -- one comment posted, so `comment:99`
+        does not exist. (Not `comment:2`: this write's own comment
+        WOULD become number 2, which is the "counts the comment being
+        written" case this check must NOT refuse -- covered by its own
+        offline test instead.)"""
+        client, ticket_id = ticket
+        base_ts = self._base_ts(client, ticket_id)
+
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_update as handle_update,
+        )
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "comment": "See comment:99 for context.",
+                    "base_ts": base_ts,
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "dangling_comment_ref" in _text(result)
+        history = client.get_ticket_comment_history(ticket_id, 1)
+        assert history[-1][3] == "the original comment", (
+            "the gate returned an error but the write still landed"
+        )
+
+    def test_comment_scoped_to_another_ticket_is_allowed(self, ticket):
+        """Ticket #108's live allow row. The seeded ticket becomes the
+        TARGET, given comments 1-3; a second, fresh ticket is the one
+        written, so `comment:3` does not exist on it, and its own next
+        comment number is 2, not 3. Before #108 this description update
+        was refused with `dangling_comment_ref` alone, while Trac
+        resolved the link to comment 3 of the target."""
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_update as handle_update,
+        )
+
+        client, target_id = ticket
+        client.update_ticket(target_id, "the second comment")
+        client.update_ticket(target_id, "the third comment")
+        writer_id = client.create_ticket(
+            "Ticket108WriteGateLive",
+            "Seeded for the ticket 108 live gate row.",
+        )
+        try:
+            body = (
+                "Seeded for the ticket 108 live gate row. See "
+                f"comment:3:ticket:{target_id} for context."
+            )
+            result = asyncio.run(
+                handle_update(
+                    client,
+                    {
+                        "ticket_id": writer_id,
+                        "description": body,
+                        "base_ts": self._base_ts(client, writer_id),
+                    },
+                )
+            )
+
+            assert not result.isError, _text(result)
+            assert (
+                client.get_ticket(writer_id)[3]["description"] == body
+            )
+        finally:
+            try:
+                client.delete_ticket(writer_id)
+            except Exception:
+                pass
+
+    def test_ticket_create_with_a_bare_comment_ref_is_refused(self):
+        """Ticket #108's second half, live: a new ticket has no
+        comments, so `ticket_create` now refuses a bare `comment:N`
+        rather than letting in a description no update can re-save."""
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_create as handle_create,
+        )
+
+        client = self._live()
+        result = asyncio.run(
+            handle_create(
+                client,
+                {
+                    "summary": "Ticket108WriteGateLive",
+                    "description": (
+                        "Seeded for the ticket 108 live gate row. See "
+                        "comment:3 for context."
+                    ),
+                },
+            )
+        )
+
+        if not result.isError:
+            # Don't leave the wrongly-created ticket behind.
+            created = re.search(r"#(\d+)", _text(result))
+            if created:
+                client.delete_ticket(int(created.group(1)))
+        assert result.isError, _text(result)
+        assert "dangling_comment_ref" in _text(result)
+
+
+# ---------------------------------------------------------------------
+# Ticket #105's other three checks, live: no ticket needed, so these
+# reset a scratch WIKI page on /trac_test instead (the #64 pattern),
+# and reuse the fake ticket number 99999 the fixtures above capture
+# rather than depending on real ticket numbers existing on that host.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestTicket105ChecksLive:
+    PAGE = "Ticket105WriteGateLive"
+
+    @staticmethod
+    def _live():
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config, _ = bootstrap_config()
+        return TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
+        )
+
+    @pytest.fixture
+    def page(self):
+        client = self._live()
+        client.put_wiki_page(self.PAGE, "seed", "seed")
+        try:
+            yield client
+        finally:
+            try:
+                client.delete_wiki_page(self.PAGE)
+            except Exception:
+                pass
+
+    def test_pr_number_as_ticket_is_refused_and_the_page_is_unchanged(
+        self, page
+    ):
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client = page
+        info = client.get_wiki_page_info(self.PAGE)
+        before = client.get_wiki_page(self.PAGE)
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "page_name": self.PAGE,
+                    "content": (
+                        "Seeded for the ticket 105 live gate row. "
+                        "See PR #99999 for context."
+                    ),
+                    "version": info["version"],
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "pr_number_as_ticket" in _text(result)
+        assert client.get_wiki_page(self.PAGE) == before
+
+    def test_pr_written_as_a_plain_number_is_allowed(self, page):
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client = page
+        info = client.get_wiki_page_info(self.PAGE)
+        body = (
+            "Seeded for the ticket 105 live gate row. See PR 99999 "
+            "for context."
+        )
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "page_name": self.PAGE,
+                    "content": body,
+                    "version": info["version"],
+                },
+            )
+        )
+
+        assert not result.isError, _text(result)
+        assert client.get_wiki_page(self.PAGE) == body
+
+    def test_bare_ref_shadows_prefixed_is_refused_and_page_unchanged(
+        self, page
+    ):
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client = page
+        info = client.get_wiki_page_info(self.PAGE)
+        before = client.get_wiki_page(self.PAGE)
+
+        result = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "page_name": self.PAGE,
+                    "content": (
+                        "Seeded for the ticket 105 live gate row. See "
+                        "bcs:#99999 and also #99999 in this paragraph."
+                    ),
+                    "version": info["version"],
+                },
+            )
+        )
+
+        assert result.isError, _text(result)
+        assert "bare_ref_shadows_prefixed" in _text(result)
+        assert client.get_wiki_page(self.PAGE) == before
+
+    def test_self_prefix_now_resolves_with_no_false_positive(
+        self, page
+    ):
+        """Ticket #105's `self_intertrac_prefix` cannot be seeded
+        failing live any more -- the operator has since added
+        self-entries to `[intertrac]` (auto_pm:#155), so
+        `trac_test:#N` written ON /trac_test now resolves like any
+        other configured InterTrac reference. This is the regression
+        row that matters instead: neither `self_intertrac_prefix` nor
+        `unconfigured_intertrac_prefix` may fire on it. The failing
+        case is covered offline instead, with hand-built HTML matching
+        the shape this host produced before that change -- see
+        `SELF_PREFIX_HTML`.
+
+        A REAL ticket, not #99999: the write-time gate always live-
+        probes a cross-instance target (ticket #64 ruling 3), and a
+        self-dispatch to a ticket that doesn't exist correctly refuses
+        on `missing_cross_instance_target` -- a different, already-
+        correct check, not a false positive this row is about.
+        """
+        from trac_mcp_server.mcp.tools.wiki_write import (
+            _handle_update as handle_update,
+        )
+
+        client = page
+        ticket_id = client.create_ticket(
+            "Ticket105SelfPrefixLive", "Seeded for the ticket 105 row."
+        )
+        try:
+            info = client.get_wiki_page_info(self.PAGE)
+            body = (
+                f"Seeded for the ticket 105 live gate row. "
+                f"See trac_test:#{ticket_id} here."
+            )
+
+            result = asyncio.run(
+                handle_update(
+                    client,
+                    {
+                        "page_name": self.PAGE,
+                        "content": body,
+                        "version": info["version"],
+                    },
+                )
+            )
+
+            assert not result.isError, _text(result)
+            assert client.get_wiki_page(self.PAGE) == body
+        finally:
+            client.delete_ticket(ticket_id)
