@@ -24,6 +24,7 @@ from .ticket_comment import (
     TICKET_COMMENT_SPECS,
     TICKET_COMMENT_TOOLS,
 )
+from .ticket_list import TICKET_LIST_SPECS, TICKET_LIST_TOOLS
 from .ticket_read import TICKET_READ_SPECS, TICKET_READ_TOOLS
 from .ticket_write import TICKET_WRITE_SPECS, TICKET_WRITE_TOOLS
 from .timeline_read import TIMELINE_SPECS, TIMELINE_TOOLS
@@ -38,6 +39,7 @@ from .wiki_write import WIKI_WRITE_SPECS, WIKI_WRITE_TOOLS
 # Combine ticket tools for backward compatibility
 TICKET_TOOLS = (
     TICKET_READ_TOOLS
+    + TICKET_LIST_TOOLS
     + TICKET_WRITE_TOOLS
     + TICKET_COMMENT_TOOLS
     + TICKET_BATCH_TOOLS
@@ -48,6 +50,7 @@ WIKI_TOOLS = WIKI_READ_TOOLS + WIKI_WRITE_TOOLS + WIKI_ATTACHMENT_TOOLS
 # Combined spec lists (parallel to existing TICKET_TOOLS, WIKI_TOOLS)
 TICKET_SPECS = (
     TICKET_READ_SPECS
+    + TICKET_LIST_SPECS
     + TICKET_WRITE_SPECS
     + TICKET_COMMENT_SPECS
     + TICKET_BATCH_SPECS
@@ -84,6 +87,7 @@ __all__ = [
     "WIKI_SPECS",
     "SYSTEM_SPECS",
     "TICKET_READ_SPECS",
+    "TICKET_LIST_SPECS",
     "TICKET_COMMENT_SPECS",
     "TICKET_WRITE_SPECS",
     "TICKET_BATCH_SPECS",
@@ -101,6 +105,7 @@ __all__ = [
     # Tool lists (backward compat)
     "TICKET_TOOLS",
     "TICKET_READ_TOOLS",
+    "TICKET_LIST_TOOLS",
     "TICKET_COMMENT_TOOLS",
     "TICKET_WRITE_TOOLS",
     "TICKET_BATCH_TOOLS",
