@@ -1414,18 +1414,21 @@ class TestHandleTicketSearch:
                 "summary": "Bug A",
                 "status": "new",
                 "owner": "alice",
+                "url": "https://trac.example.com/ticket/1",
             },
             {
                 "id": 2,
                 "summary": "Bug B",
                 "status": "assigned",
                 "owner": "bob",
+                "url": "https://trac.example.com/ticket/2",
             },
             {
                 "id": 3,
                 "summary": "Bug C",
                 "status": "new",
                 "owner": "charlie",
+                "url": "https://trac.example.com/ticket/3",
             },
         ]
 
@@ -1469,30 +1472,35 @@ class TestHandleTicketSearch:
                 "summary": "T10",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/10",
             },
             {
                 "id": 20,
                 "summary": "T20",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/20",
             },
             {
                 "id": 30,
                 "summary": "T30",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/30",
             },
             {
                 "id": 40,
                 "summary": "T40",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/40",
             },
             {
                 "id": 50,
                 "summary": "T50",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/50",
             },
         ]
 
@@ -1556,12 +1564,14 @@ class TestHandleTicketSearch:
                 "summary": "Feature request",
                 "status": "new",
                 "owner": "dev1",
+                "url": "https://trac.example.com/ticket/7",
             },
             {
                 "id": 8,
                 "summary": "Enhancement",
                 "status": "accepted",
                 "owner": "dev2",
+                "url": "https://trac.example.com/ticket/8",
             },
         ]
 
@@ -1598,6 +1608,11 @@ class TestHandleTicketSearch:
         total=2, showing=1 with no indication a fetch failed.
         """
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
 
         def _get_ticket_side_effect(tid):
             if tid == 15:
@@ -1672,6 +1687,18 @@ class TestHandleTicketGet:
         return asyncio.run(coro)
 
     @staticmethod
+    def _client():
+        """A TracClient mock with a Config, which ticket_get reads for the
+        ticket's web URL."""
+        client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
+        return client
+
+    @staticmethod
     def _dispatch(client, ticket_data, changelog=()):
         """run_sync side effect routing on the function being called.
 
@@ -1702,6 +1729,11 @@ class TestHandleTicketGet:
     def test_get_success(self):
         """Get ticket returns full details with the stored description."""
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -1736,10 +1768,15 @@ class TestHandleTicketGet:
             assert "= Problem =" in text  # stored, not converted
             assert "new" in text
             assert "alice" in text
+            assert "https://trac.example.com/ticket/42" in text
             # Structured content
             assert result.structuredContent["id"] == 42
             assert (
                 result.structuredContent["summary"] == "Fix login bug"
+            )
+            assert (
+                result.structuredContent["url"]
+                == "https://trac.example.com/ticket/42"
             )
 
     def test_get_exposes_change_token(self):
@@ -1747,6 +1784,11 @@ class TestHandleTicketGet:
         to ticket_update's base_ts (ticket #50) -- without this, there is
         no way for a caller to obtain a token to lock against."""
         client = MagicMock(spec=TracClient)
+        client.config = Config(
+            trac_url="https://trac.example.com",
+            username="u",
+            password="p",
+        )
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -1776,7 +1818,7 @@ class TestHandleTicketGet:
     def test_get_returns_stored_tracwiki(self):
         """The description comes back as stored, with no `raw` argument
         to ask for it -- the Markdown read path is gone (ticket #69)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -1810,7 +1852,7 @@ class TestHandleTicketGet:
 
     def test_get_missing_ticket_id(self):
         """Missing ticket_id returns validation error."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         result = self._run(_handle_get(client, {}))
 
@@ -1821,7 +1863,7 @@ class TestHandleTicketGet:
 
     def test_get_not_found(self):
         """Ticket not found returns structured error via dispatcher."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
@@ -1860,7 +1902,7 @@ class TestHandleTicketGet:
         """One ticket_get is the whole ticket: comments come back with
         no flag set, which is the point of ticket #60 -- the operator's
         answer in a comment must not be invisible to a default read."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -1897,7 +1939,7 @@ class TestHandleTicketGet:
         same key ticket_render_check's `comment` parameter is keyed on,
         so it is usable without guessing. Numbering skips field-only
         entries, so it is not the comment's ordinal position."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -1926,7 +1968,7 @@ class TestHandleTicketGet:
         """Field changes never reach the response, so a description edit
         does not drag two full copies of the description along with it
         (the cost that ruled out proxying ticket_changelog wholesale)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         big = "x" * 5000
 
@@ -1951,7 +1993,7 @@ class TestHandleTicketGet:
     def test_get_include_comments_false_skips_the_fetch(self):
         """The documented opt-out makes no changelog call at all, and
         says plainly that the response is not the whole ticket."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         calls = []
 
@@ -1983,7 +2025,7 @@ class TestHandleTicketGet:
         they reach the response by a different route (the changelog), so
         a fix applied only to the description would pass a
         description-only test (ticket #69)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -2004,7 +2046,7 @@ class TestHandleTicketGet:
         """Seeded-defect check for the cap itself: a thread ABOVE the cap
         must produce a visible truncation notice and an exact total. A
         silent cut would recreate ticket #60 in miniature."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -2038,7 +2080,7 @@ class TestHandleTicketGet:
     def test_get_cap_keeps_head_and_tail(self):
         """Head+tail retention: a long thread usually has its scope set
         in the earliest comments and corrected in the latest."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -2065,7 +2107,7 @@ class TestHandleTicketGet:
     def test_get_cap_of_one_still_shows_the_notice(self):
         """max_comments=1 leaves no tail half; the omitted-middle notice
         must still be emitted rather than silently dropped."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -2089,7 +2131,7 @@ class TestHandleTicketGet:
 
     def test_get_thread_at_the_cap_is_not_truncated(self):
         """Exactly at the cap: everything shown, no notice."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -2115,7 +2157,7 @@ class TestHandleTicketGet:
     def test_get_comment_without_a_number_says_so(self):
         """An entry carrying no comment number reports that, rather than
         inventing an ordinal that ticket_render_check would reject."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -2138,7 +2180,7 @@ class TestHandleTicketGet:
     def test_get_reports_a_failed_comment_fetch(self):
         """A changelog failure degrades loudly: the ticket still comes
         back, but the response says the comments are missing."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -2163,7 +2205,7 @@ class TestHandleTicketGet:
 
     def test_get_ticket_without_comments(self):
         """A ticket with no comments says so explicitly."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(

@@ -37,6 +37,7 @@ from ..logger import setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
+from .oidc import OidcClientCache, extract_bearer_token
 from .resources.wiki import (
     handle_list_wiki_resources,
     handle_read_wiki_resource,
@@ -68,6 +69,11 @@ _instances: InstanceRegistry | None = None
 # Global registry instance (initialized in main)
 _registry: ToolRegistry | None = None
 
+# Per-user OIDC client cache (initialized in main() only when the http
+# transport is configured with server_config.oidc_rpc_url). None means
+# "OIDC per-user mode is not active" -- the normal InstanceRegistry path is
+# used unconditionally in that case, same as before this mode existed.
+_oidc_cache: OidcClientCache | None = None
 # Ticket #102: `_caller_identity` (imported above as an alias for
 # `instances.caller_identity`) is called at the two dispatch sites below
 # to resolve the in-flight HTTP request's bearer-token identity, if any.
@@ -183,6 +189,53 @@ def set_registry(registry: ToolRegistry | None) -> None:
     _registry = registry
 
 
+def set_oidc_cache(cache: OidcClientCache | None) -> None:
+    """Set the global OIDC per-user client cache.
+
+    Args:
+        cache: OidcClientCache to set, or None to disable per-user OIDC
+            auth (the default -- see module docstring in mcp/oidc.py).
+    """
+    global _oidc_cache
+    _oidc_cache = cache
+
+
+async def _resolve_client(instance: str | None) -> TracClient:
+    """Resolve the TracClient for the current tool/resource call.
+
+    When OIDC per-user auth is active (``_oidc_cache`` set), this is the
+    *only* path a call can use to reach Trac: it reads the caller's own
+    token from the current request and never touches the InstanceRegistry
+    or any shared identity. Otherwise, behavior is unchanged from before
+    this mode existed: resolve via the InstanceRegistry.
+
+    Raises:
+        ValueError: If ``instance`` is used together with OIDC per-user
+            auth (unsupported -- see module docstring in mcp/oidc.py), or
+            if the caller's Authorization header is missing/malformed.
+            Both are translated into a normal tool-error response by
+            existing callers, exactly like an UnknownInstanceError from
+            the InstanceRegistry path.
+    """
+    if _oidc_cache is not None:
+        if instance not in (None, "default"):
+            raise ValueError(
+                "The 'instance' argument is not supported when OIDC "
+                "per-user authentication is configured -- this deployment "
+                "serves only its single configured Trac endpoint."
+            )
+        try:
+            request = server.request_context.request
+        except LookupError:
+            request = None
+        auth_header = (
+            request.headers.get("authorization") if request else None
+        )
+        return _oidc_cache.get_client(extract_bearer_token(auth_header))
+
+    return get_instances().get_client(instance, identity=_caller_identity())
+
+
 # ---------------------------------------------------------------------------
 # MCP protocol handlers
 # ---------------------------------------------------------------------------
@@ -234,8 +287,8 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = get_instances().get_client(
-                instance, identity=_caller_identity()
+            client = await _resolve_client(
+                instance
             )
         except ValueError as e:
             error_type = _instance_error_type(e)
@@ -290,9 +343,7 @@ async def handle_call_tool(
     instance = args.pop("instance", None)
     client: TracClient | None
     try:
-        client = get_instances().get_client(
-            instance, identity=_caller_identity()
-        )
+        client = await _resolve_client(instance)
     except InstanceNotAllowedError as e:
         # Ticket #110: a caller scoped away from the DEFAULT instance must
         # still be able to ask what it may reach -- the refusal below tells
@@ -307,10 +358,16 @@ async def handle_call_tool(
             )
         client = None
     except ValueError as e:
+        corrective_action = (
+            "Set the 'Authorization: Bearer <token>' header to your own "
+            "Trac OIDC access token."
+            if _oidc_cache is not None
+            else "Call list_instances to see what is reachable."
+        )
         return build_error_response(
             _instance_error_type(e),
             str(e),
-            "Call list_instances to see what is reachable.",
+            corrective_action,
         )
 
     # Resolution happened above; from here every exit is a call that reached a
@@ -404,7 +461,11 @@ async def main(config_overrides: dict | None = None):
             with_page_alias([PING_SPEC] + ALL_SPECS), declared_names
         )
     )
-    registry = ToolRegistry(all_specs, allowed_permissions)
+    registry = ToolRegistry(
+        all_specs,
+        allowed_permissions,
+        read_only=server_config.read_only,
+    )
     logger.info(
         "Registered %d tools (of %d total)",
         registry.tool_count(),
@@ -415,6 +476,18 @@ async def main(config_overrides: dict | None = None):
         print(
             f"Permissions file: {permissions_file} "
             f"({registry.tool_count()} of {len(all_specs)} tools enabled)",
+            file=sys.stderr,
+        )
+
+    if server_config.read_only:
+        logger.info(
+            "Read-only mode active: %d of %d tools exposed.",
+            registry.tool_count(),
+            len(all_specs),
+        )
+        print(
+            f"Read-only mode: {registry.tool_count()} of "
+            f"{len(all_specs)} tools enabled",
             file=sys.stderr,
         )
 
@@ -443,6 +516,18 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
+        oidc_rpc_url = (
+            server_config.oidc_rpc_url
+            if server_config.transport == "http"
+            else None
+        )
+        if oidc_rpc_url:
+            logger.info(
+                "OIDC per-user auth active: requests must carry their own "
+                "'Authorization: Bearer <token>'; no shared identity is "
+                "used for tool calls."
+            )
+            set_oidc_cache(OidcClientCache(ctx["config"], oidc_rpc_url))
         try:
             if server_config.transport == "stdio":
                 await _run_stdio()
@@ -452,6 +537,7 @@ async def main(config_overrides: dict | None = None):
             set_instances(None)
             set_instance_registry(None)
             set_registry(None)
+            set_oidc_cache(None)
             set_file_access("off")
 
 
@@ -563,6 +649,14 @@ must not be piped manually. This does not apply to --transport http.
         "Prefer setting TRAC_MCP_AUTH_TOKEN instead.",
     )
     parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Expose only read-only tools (view/search/list/get), "
+        "regardless of transport. Also settable via TRAC_MCP_READ_ONLY "
+        "env var or config.yaml server.read_only. Combinable with "
+        "--permissions-file.",
+    )
+    parser.add_argument(
         "--file-access",
         choices=["local", "off"],
         help="Whether the file tools may read and write this process's "
@@ -607,6 +701,8 @@ def run() -> None:
         config_overrides["path"] = args.path
     if args.allow_unauthenticated:
         config_overrides["allow_unauthenticated"] = True
+    if args.read_only:
+        config_overrides["read_only"] = True
     if args.file_access:
         config_overrides["file_access"] = args.file_access
 

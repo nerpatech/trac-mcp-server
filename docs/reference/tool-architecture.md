@@ -53,16 +53,19 @@ class ToolSpec:
 
 `src/trac_mcp_server/mcp/tools/registry.py`
 
-Constructed once at startup with all specs and an optional permission filter:
+Constructed once at startup with all specs and two independent, combinable filters:
 
 ```python
 registry = ToolRegistry(all_specs, allowed_permissions=None)  # all tools
 registry = ToolRegistry(all_specs, allowed_permissions=frozenset({"TICKET_VIEW"}))  # filtered
+registry = ToolRegistry(all_specs, read_only=True)  # only readOnlyHint=True tools
 ```
 
-Filtering logic:
-- `allowed_permissions=None` -- include all specs (default, backward compatible)
-- Otherwise, include a spec if its permissions are empty OR a subset of allowed_permissions
+Filtering logic -- a spec is included only if it passes BOTH:
+- **Permissions**: `allowed_permissions=None` includes all specs (default); otherwise a spec passes if its permissions are empty OR a subset of `allowed_permissions` (`--permissions-file`, see below)
+- **Read-only**: `read_only=False` (default) includes all specs; `read_only=True` includes a spec only if its own `Tool.annotations.readOnlyHint` is `True` (`--read-only` / `TRAC_MCP_READ_ONLY`) -- a coarser, permission-agnostic alternative that needs no Trac-side permission enumeration, since it reuses the same `readOnlyHint` every spec already declares (enforced by a regression test, see below)
+
+A tool excluded by either filter isn't just missing from `list_tools()` -- `call_tool()` raises the same "unknown tool" `ValueError` if called by name anyway, so there's no separate code path a filtered-out tool could slip through.
 
 Provides two methods used by the MCP protocol handlers:
 - `list_tools()` -- returns `list[types.Tool]` for the MCP `list_tools` response
@@ -277,6 +280,12 @@ With permissions file containing `TICKET_VIEW`, `WIKI_VIEW`, `MILESTONE_VIEW`:
 **Included (14 tools):** ping, get_server_time, ticket_search, ticket_get, ticket_changelog, ticket_fields, ticket_actions, wiki_get, wiki_search, wiki_recent_changes, wiki_file_pull, wiki_file_detect_format, milestone_list, milestone_get
 
 **Excluded (13 tools):** All create, update, delete, batch, and wiki_file_push tools
+
+## Read-Only Filtering (`--read-only`)
+
+`--read-only` (or `TRAC_MCP_READ_ONLY` / `config.yaml`'s `server.read_only`) produces the same *shape* of result as the permissions-file example above, without needing to enumerate Trac permissions by hand: it includes a tool only if its own `Tool.annotations.readOnlyHint` is `True`. Every registered `ToolSpec` sets this explicitly (checked by `TestAllToolsCarryReadOnlyHint` in `tests/test_mcp/tools/test_registry.py`), so the filter needs no separate maintained list.
+
+It's independent of, and combinable with, `--permissions-file` -- a tool must pass both filters when both are configured. Prefer `--read-only` when the goal is simply "no write access, regardless of which Trac permissions the service account happens to have"; prefer `--permissions-file` when you need finer-grained control (e.g. tickets read-only but wiki read-write) or want the exposed tool list to mirror the service account's actual Trac permissions.
 
 ## Error Handling
 

@@ -44,28 +44,56 @@ class ToolSpec:
     ]
 
 
-class ToolRegistry:
-    """Registry of ToolSpecs with optional permission-based filtering.
+def _is_read_only_tool(spec: ToolSpec) -> bool:
+    """True if a spec's own Tool.annotations declare it read-only.
 
-    If allowed_permissions is None, all specs are included (backward compat).
-    Otherwise, a spec is included only if:
+    Every ToolSpec in this codebase sets readOnlyHint explicitly (True for
+    view/search/list/get, False for create/update/delete) -- reusing that
+    existing, already-accurate signal means read-only mode needs no
+    separate classification to maintain. A tool with no annotations, or an
+    unset/falsy readOnlyHint, is treated as NOT read-only: the safe default
+    when the signal is missing is to exclude, not to accidentally admit a
+    write tool.
+    """
+    annotations = spec.tool.annotations
+    return bool(annotations and annotations.readOnlyHint)
+
+
+class ToolRegistry:
+    """Registry of ToolSpecs with optional permission- and read-only-based
+    filtering.
+
+    If allowed_permissions is None, all specs pass that filter (backward
+    compat). Otherwise, a spec passes it only if:
     - its permissions set is empty (always available), or
     - its permissions are a subset of allowed_permissions.
+
+    If read_only is True, a spec passes only if its own Tool.annotations
+    say it's read-only (see _is_read_only_tool) -- independent of the
+    permissions filter above, so both can be combined. A tool excluded
+    this way isn't just hidden from list_tools(): calling it by name still
+    dispatches through call_tool(), which raises the same "unknown tool"
+    ValueError as a permissions-filtered-out tool, so there's no separate
+    code path to keep this from being bypassed.
     """
 
     def __init__(
         self,
         specs: list[ToolSpec],
         allowed_permissions: frozenset[str] | None = None,
+        read_only: bool = False,
     ):
         self._specs: dict[str, ToolSpec] = {}
         for spec in specs:
+            if read_only and not _is_read_only_tool(spec):
+                continue
             if (
-                allowed_permissions is None
-                or not spec.permissions
-                or spec.permissions <= allowed_permissions
+                allowed_permissions is not None
+                and spec.permissions
+                and not spec.permissions <= allowed_permissions
             ):
-                self._specs[spec.tool.name] = spec
+                continue
+            self._specs[spec.tool.name] = spec
 
     def list_tools(self) -> list[types.Tool]:
         """Return list of types.Tool for all registered (permitted) specs."""
