@@ -21,11 +21,15 @@ LAN host). ``foreign`` is anything else; a different port is a
 different origin, and one test reaches it by a different hostname too.
 """
 
+import asyncio
 import base64
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import mcp.types as types
 import pytest
+import requests
+import requests.adapters
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
@@ -330,3 +334,146 @@ class TestScopedDestinations:
         client = _scoped(own)
         client.session.post(client.rpc_url, data=b"", timeout=5)
         assert own.auth_for("/trac_test/login/rpc") == [BASIC]
+
+
+# ---------------------------------------------------------------------------
+# Review findings on #118 (local /code-review high)
+# ---------------------------------------------------------------------------
+
+
+class _Recorder(requests.adapters.BaseAdapter):
+    """A transport adapter that records what the session would put on
+    the wire and answers 200, so hosts that do not resolve here (an IDN,
+    an https name) can still drive the real ``send()`` path."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent: list[tuple[str, str | None]] = []
+
+    def send(self, request, **kwargs):
+        self.sent.append(
+            (request.url, request.headers.get("Authorization"))
+        )
+        response = requests.Response()
+        response.status_code = 200
+        response.url = request.url
+        response.request = request
+        response._content = b""
+        return response
+
+    def close(self):
+        pass
+
+
+def _recorded(client: TracClient) -> _Recorder:
+    recorder = _Recorder()
+    client.session.mount("http://", recorder)
+    client.session.mount("https://", recorder)
+    return recorder
+
+
+class TestReviewFindings:
+    def test_idn_trac_url_keeps_credentials_on_its_own_requests(self):
+        """Finding 2: preparation punycodes the host, so the raw
+        ``trac_url`` never matched its own requests and every RPC call
+        went out anonymous."""
+        client = TracClient(
+            Config(
+                trac_url="http://bücher.example/x",
+                username=USERNAME,
+                password=PASSWORD,
+            )
+        )
+        recorder = _recorded(client)
+        client.session.post(client.rpc_url, data=b"", timeout=5)
+        assert recorder.sent == [
+            ("http://xn--bcher-kva.example/x/login/rpc", BASIC)
+        ]
+
+    def test_scoped_https_upgrade_of_an_http_base_is_in_scope(self):
+        """Finding 3: a server that redirects RPC from http to https on
+        the default ports must not lock a scoped client out; the
+        credential rule already treats that upgrade as the same
+        origin."""
+        client = _client_at("http://trac.lan/x", {"http://trac.lan/x"})
+        recorder = _recorded(client)
+        client.session.post(
+            "https://trac.lan/x/login/rpc", data=b"", timeout=5
+        )
+        assert recorder.sent == [
+            ("https://trac.lan/x/login/rpc", BASIC)
+        ]
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://trac.lan:8443/x/login/rpc",
+            "https://trac.lan/y/login/rpc",
+            "https://other.lan/x/login/rpc",
+        ],
+        ids=["explicit-port", "other-instance", "other-host"],
+    )
+    def test_the_upgrade_admits_nothing_else(self, url):
+        from trac_mcp_server.core.scope import DestinationOutOfScope
+
+        client = _client_at("http://trac.lan/x", {"http://trac.lan/x"})
+        recorder = _recorded(client)
+        with pytest.raises(DestinationOutOfScope):
+            client.session.post(url, data=b"", timeout=5)
+        assert recorder.sent == []
+
+    def test_a_refusal_inside_any_tool_is_instance_not_allowed(self):
+        """Finding 4: the session can refuse inside any tool, not only
+        the probe; the dispatch choke point maps it to the same error
+        type #110 gives a refusal up front."""
+        from trac_mcp_server.mcp.tools.registry import (
+            ToolRegistry,
+            ToolSpec,
+        )
+
+        client = _client_at("http://trac.lan/x", {"http://trac.lan/x"})
+        recorder = _recorded(client)
+
+        async def handler(client, args):
+            client.session.get("http://trac.lan/y/ticket/1", timeout=5)
+
+        spec = ToolSpec(
+            tool=types.Tool(
+                name="probe_tool",
+                description="t",
+                inputSchema={"type": "object", "properties": {}},
+            ),
+            permissions=frozenset(),
+            handler=handler,
+        )
+        result = asyncio.run(
+            ToolRegistry([spec]).call_tool("probe_tool", {}, client)
+        )
+        assert result.isError
+        assert "instance_not_allowed" in result.content[0].text
+        assert recorder.sent == []
+
+    def test_probe_and_session_share_one_scope_derivation(self, own):
+        """Finding 5: an allowlist given as a plain set is enforced by
+        the session, so the probe's up-front pass must see it too --
+        otherwise a refused href costs a cap slot."""
+        client = _client(own, {f"{own.base}/trac_test"})
+        refused = f"{own.base}/auto_pm{WIKI_TARGET}"
+        allowed = f"{own.base}/trac_test{WIKI_TARGET}"
+        result = probe_targets(
+            client, [refused, allowed], cap=1, timeout=5
+        )
+        assert result[refused]["reason"] == "instance_not_allowed"
+        assert result[allowed]["status"] == EXISTS
+        assert own.paths() == [f"/trac_test{WIKI_TARGET}"]
+
+
+def _client_at(trac_url: str, allowed: set[str]) -> TracClient:
+    return TracClient(
+        Config(
+            trac_url=trac_url,
+            username=USERNAME,
+            password=PASSWORD,
+            allowed_instances=frozenset(allowed),
+        )
+    )

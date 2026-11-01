@@ -15,7 +15,7 @@ from urllib3.connection import HTTPConnection
 
 from ..config import Config
 from ..validators import validate_content, validate_page_name
-from .scope import ScopedSession, scope_bases
+from .scope import ScopedSession, scope_for
 
 # Seconds a pooled connection may sit idle before the kernel sends a TCP
 # keepalive probe. Deliberately far below the idle timeout of any plausible
@@ -163,12 +163,8 @@ class TracClient:
         # and with what credentials -- the configured password only to
         # this client's own origin, and, under an allowlist (#110),
         # nothing outside it. See core/scope.py.
-        allowed = self.config.allowed_instances
         session = ScopedSession(
-            self.config.trac_url,
-            None
-            if allowed is None
-            else scope_bases(allowed, self.config.trac_url),
+            self.config.trac_url, scope_for(self.config)
         )
         session.auth = (self.config.username, self.config.password)
         session.verify = not self.config.insecure

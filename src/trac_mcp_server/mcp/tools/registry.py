@@ -22,6 +22,7 @@ from typing import Any
 import mcp.types as types
 
 from ...core.client import TracClient
+from ...core.scope import DestinationOutOfScope
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,15 @@ class ToolRegistry:
                 "XML-RPC fault in %s: %s", name, e.faultString
             )
             return translate_xmlrpc_error(e, domain, entity_name)
+        except DestinationOutOfScope as e:
+            # Ticket #118: the session refused a request outside the
+            # caller's allowlist -- the same refusal #110 gives up front,
+            # so the same error type, wherever in a tool it surfaced.
+            return build_error_response(
+                "instance_not_allowed",
+                str(e),
+                "Call list_instances to see what is reachable.",
+            )
         except ValueError as e:
             return build_error_response(
                 "validation_error",

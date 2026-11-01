@@ -111,7 +111,30 @@ def scope_bases(
         where = urlsplit(prepared)
         if (where.scheme, where.netloc) == (own.scheme, own.netloc):
             bases.add(prepared)
+            # The http -> https upgrade on the default ports is the same
+            # instance, and the one origin change `should_strip_auth`
+            # keeps credentials for; refusing it would make scope
+            # stricter than the credential rule beside it, and break a
+            # server that redirects RPC to https (review finding 3,
+            # #118). Any explicit port, either side, does not qualify.
+            if where.scheme == "http" and where.port is None:
+                bases.add("https" + prepared[len("http") :])
     return frozenset(bases)
+
+
+def scope_for(config) -> frozenset[str] | None:
+    """The scope a client built from ``config`` runs under: the
+    :func:`scope_bases` of its ``allowed_instances``, or ``None`` when
+    unrestricted.
+
+    The one derivation both :class:`ScopedSession` (enforcement) and the
+    probe's up-front pass (reporting) use, so the two cannot drift
+    (review finding 5, #118).
+    """
+    allowed = config.allowed_instances
+    if allowed is None:
+        return None
+    return scope_bases(frozenset(allowed), config.trac_url)
 
 
 def in_scope(url: str, bases: frozenset[str]) -> bool:
@@ -151,7 +174,10 @@ class ScopedSession(requests.Session):
         self, own_url: str, scope: frozenset[str] | None = None
     ):
         super().__init__()
-        self.own_url = own_url
+        # Prepared, like every `request.url` it is compared with: an IDN
+        # host is punycoded by preparation, and the raw form would never
+        # match its own requests (review finding 2, #118).
+        self.own_url = requests.Request("GET", own_url).prepare().url
         self.scope = scope
         self.max_redirects = MAX_REDIRECTS
 

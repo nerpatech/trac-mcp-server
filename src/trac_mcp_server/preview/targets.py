@@ -61,12 +61,13 @@ is invisible to the probing account, which would read as missing.
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from ..config import Config
 from ..core.client import TracClient
 from ..core.scope import (
     DestinationOutOfScope,
     dispatcher_base,
     in_scope,
-    scope_bases,
+    scope_for,
 )
 
 # Trac's own new-page template: `<div id="content" class="wiki create ...">`
@@ -200,9 +201,9 @@ def is_missing_realm_href(href: str | None) -> bool:
     return colon_index == -1 or slash_index < colon_index
 
 
-# `dispatcher_base`, `scope_bases` and `in_scope` live in `core.scope`
-# since ticket #118, which enforces them at the session; they are
-# imported above and stay importable from here.
+# `dispatcher_base` and `in_scope` live in `core.scope` since ticket
+# #118, which enforces scope at the session; both are imported above
+# and stay importable from here (`scope_bases` too, from `core.scope`).
 
 
 def _get(client: TracClient, url: str, timeout: float):
@@ -432,19 +433,12 @@ def probe_targets(
     # Ticket #110. The session enforces the scope on every request
     # (#118); this up-front pass is the reporting half: a refused href
     # is SKIPPED with a reason and kept out of the cap, rather than
-    # costing a slot to discover the refusal. A bare MagicMock client
-    # (many tests) has a MagicMock `allowed_instances`, and a
-    # hand-rolled one may have no `config` at all, so only a real
-    # frozenset counts as a scope.
-    allowed = getattr(
-        getattr(client, "config", None), "allowed_instances", None
-    )
-    # Prepared once per run, and confined to this client's own host.
-    scope = (
-        scope_bases(allowed, client.config.trac_url)
-        if isinstance(allowed, frozenset)
-        else None
-    )
+    # costing a slot to discover the refusal. Same derivation as the
+    # session's (`scope_for`). A bare MagicMock client (many tests) has
+    # a MagicMock `config`, and a hand-rolled one may have none at all,
+    # so only a real Config carries a scope.
+    config = getattr(client, "config", None)
+    scope = scope_for(config) if isinstance(config, Config) else None
 
     unique: list[str] = []
     refused: set[str] = set()
