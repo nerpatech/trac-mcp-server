@@ -14,6 +14,7 @@ instances (``instances:`` on a ``TRAC_IDENTITIES`` entry, or
 *resolved* URL in :meth:`InstanceRegistry.resolve`.
 """
 
+import dataclasses
 import os
 import threading
 from dataclasses import dataclass
@@ -498,7 +499,12 @@ class InstanceRegistry:
             url = _host_root(self._default.trac_url) + (
                 url if url.startswith("/") else f"/{url}"
             )
-        config = Config(
+        # replace() rather than a field-by-field Config(...): every field
+        # not named here is inherited from the default, including ones
+        # added later. The field-by-field copy dropped write_gate, so the
+        # #64 kill switch never reached synthesized configs (ticket #117).
+        config = dataclasses.replace(
+            self._default,
             trac_url=url,
             username=username or self._default.username,
             password=password or self._default.password,
@@ -507,10 +513,6 @@ class InstanceRegistry:
                 if insecure is not None
                 else self._default.insecure
             ),
-            debug=self._default.debug,
-            max_parallel_requests=self._default.max_parallel_requests,
-            max_batch_size=self._default.max_batch_size,
-            rpc_timeout=self._default.rpc_timeout,
             # Ticket #110: the caller's scope rides on the Config so the
             # probes, which see only the client, enforce it too.
             allowed_instances=allowed,
