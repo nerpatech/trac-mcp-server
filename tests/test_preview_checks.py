@@ -1829,7 +1829,7 @@ def test_code_span_swallowing_the_closing_bold_quotes_is_flagged():
         "</strong>default<strong> now routes</strong></li>"
     )
     kinds = {w["evidence"]["pattern"] for w in found}
-    assert "code_span_ends_in_quotes" in kinds, found
+    assert "code_span_with_quote_run" in kinds, found
     assert "backtick_in_prose" in kinds, found
     assert all(w["severity"] == "warning" for w in found)
 
@@ -1861,6 +1861,14 @@ def test_quote_run_left_as_text_is_flagged():
         "<pre class=\"wiki\">a ` b '''c'''</pre><p>clean prose</p>",
         # An apostrophe pair is not a run.
         "<p>It's the user's choice.</p>",
+        # Empty-string literals are code, not a swallowed bold (the
+        # #115 review): two quotes mid-span or at the end of a span.
+        "<p>Set <code>name = ''</code> and <code>O''Brien</code>.</p>",
+        # A <code> inside a <pre> is a code block, not an inline span.
+        "<pre><code>x = '''y'''.strip()</code></pre><p>ok</p>",
+        "<pre><code></code></pre><p>ok</p>",
+        # A lone ``` is the Markdown-fence error's, not this check's.
+        "<p>A stray fence ``` in prose.</p>",
         # A well-formed render.
         "<p><strong>Contact point:</strong> <code>telegram-operator"
         "</code></p>",
@@ -1874,3 +1882,15 @@ def test_broken_inline_markup_is_advisory_not_blocking():
     from trac_mcp_server.preview.gate import BLOCKING_CODES
 
     assert "broken_inline_markup_in_render" not in BLOCKING_CODES
+
+
+def test_blank_code_span_and_quote_count_message():
+    """Review findings on #115: a whitespace-only span is empty too, and
+    the quote-run message reports how many quotes, not a garbled
+    quoted string."""
+    blank = _broken_inline("<p><code> </code>x</p>")
+    assert [w["evidence"]["pattern"] for w in blank] == [
+        "empty_code_span"
+    ]
+    run = _broken_inline("<p>word ''' bold stayed</p>")
+    assert "3 quotes" in run[0]["message"], run[0]["message"]

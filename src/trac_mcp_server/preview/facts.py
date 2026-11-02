@@ -62,6 +62,10 @@ class PreviewFacts:
         anchors: Every ``<a>`` element, in document order.
         code_spans: Text content of every ``<code>`` element, in document
             order -- inline code spans, not fenced ``<pre>`` blocks.
+        inline_code_spans: Like ``code_spans`` but only the ``<code>``
+            elements NOT inside a ``<pre>`` -- a highlighted block can
+            render as ``<pre><code>`` and is not an inline span
+            (ticket #115).
         plain_text: The document's full visible text content, whitespace
             collapsed. Used for patterns that never produce their own
             element (e.g. literal TracWiki markup that failed to convert).
@@ -74,6 +78,7 @@ class PreviewFacts:
 
     anchors: tuple[Anchor, ...] = field(default_factory=tuple)
     code_spans: tuple[str, ...] = field(default_factory=tuple)
+    inline_code_spans: tuple[str, ...] = field(default_factory=tuple)
     plain_text: str = ""
     code_blocks: tuple[CodeBlock, ...] = field(default_factory=tuple)
     prose_text: str = ""
@@ -106,6 +111,10 @@ def extract_facts(rendered_html: str) -> PreviewFacts:
         for a in tree.xpath("//a")
     )
     code_spans = tuple(c.text_content() for c in tree.xpath("//code"))
+    inline_code_spans = tuple(
+        c.text_content()
+        for c in tree.xpath("//code[not(ancestor::pre)]")
+    )
     plain_text = tree.text_content()
 
     code_blocks = tuple(
@@ -135,6 +144,7 @@ def extract_facts(rendered_html: str) -> PreviewFacts:
     return PreviewFacts(
         anchors=anchors,
         code_spans=code_spans,
+        inline_code_spans=inline_code_spans,
         plain_text=plain_text,
         code_blocks=code_blocks,
         prose_text=prose_text,

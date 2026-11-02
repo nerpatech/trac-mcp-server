@@ -1335,6 +1335,11 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
 
 
 _QUOTE_RUN_RE = re.compile(r"'{2,}")
+# A bold's closing is always three quotes, so a span is only suspect when
+# it holds that many: `''` alone is a Python/SQL/shell empty string
+# (`name = ''`, `O''Brien`), which a code review of #115 showed the
+# two-quote form flagging.
+_BOLD_CLOSE_RE = re.compile(r"'{3,}")
 _LEADING_QUOTE_RUN_RE = re.compile(r"^\s*'{2,}")
 
 
@@ -1350,16 +1355,19 @@ def _check_broken_inline_markup_in_render(
     of the line. `literal_markup_in_render` looks only for five other
     patterns, so the check reported clean on it.
 
-    Four patterns, each scanned in ``facts.prose_text`` (which excludes
-    ``<pre>``/``<code>``) or ``facts.code_spans``, one finding per
-    pattern:
+    Four patterns, one finding per pattern, named in
+    ``evidence["pattern"]``. Prose patterns read ``facts.prose_text``
+    (which excludes ``<pre>``/``<code>``); span patterns read
+    ``facts.inline_code_spans`` (``<code>`` NOT inside a ``<pre>``, so
+    a code block is never scanned).
 
-    * ``backtick_in_prose``: a backtick outside any code element.
-    * ``code_span_ends_in_quotes``: a span that holds a ``''`` run (the
-      ticket's own render has it mid-span, not only at the end) and does
-      NOT open with one. A span such as ``'''bold'''`` is a
-      page documenting the syntax and stays silent.
-    * ``empty_code_span``: an empty ``<code>`` element.
+    * ``backtick_in_prose``: a backtick outside any code element. A
+      triple backtick is left to the existing Markdown-fence error.
+    * ``code_span_with_quote_run``: a span holding ``'''`` or more (the
+      ticket's own render has it mid-span, not only at the end) that does
+      NOT open with a quote run. ``'''bold'''`` is a page documenting the
+      syntax and stays silent, as does a ``''`` empty-string literal.
+    * ``empty_code_span``: an empty or blank ``<code>`` element.
     * ``quote_run_in_prose``: a ``''`` or ``'''`` run left as text.
 
     Severity is ``warning``, not ``error``. A sweep of both stores
@@ -1368,69 +1376,66 @@ def _check_broken_inline_markup_in_render(
     backtick -- so none clears the zero-legitimate-hit bar for the
     blocking column (Rules/testing/RecallGateEveryTightening).
     """
-    found: list[tuple[str, str]] = []
+    prose = facts.prose_text
+    hits: list[tuple[str, str, str]] = []  # (pattern, message, matched)
 
-    if "`" in facts.prose_text:
-        i = facts.prose_text.index("`")
-        found.append(
+    # "```" belongs to `literal_markup_in_render` (Markdown code fence),
+    # which already refuses it; do not report the same debris twice.
+    backtick = prose.replace("```", "").find("`")
+    if backtick != -1:
+        scan = prose.replace("```", "")
+        hits.append(
             (
                 "backtick_in_prose",
                 "a backtick appears as literal text outside any code "
                 "span -- a code span did not close where intended.",
+                scan[max(0, backtick - 20) : backtick + 20],
             )
         )
-        matched = facts.prose_text[max(0, i - 20) : i + 20]
-    else:
-        matched = ""
-    evidence_for = {"backtick_in_prose": matched}
 
-    for span in facts.code_spans:
-        if _QUOTE_RUN_RE.search(
-            span
-        ) and not _LEADING_QUOTE_RUN_RE.search(span):
-            found.append(
+    for span in facts.inline_code_spans:
+        run = _BOLD_CLOSE_RE.search(span)
+        if run and not _LEADING_QUOTE_RUN_RE.search(span):
+            hits.append(
                 (
-                    "code_span_ends_in_quotes",
-                    "a code span ends in a run of quotes it never "
-                    "opened -- the closing ''' of a bold swallowed by "
-                    "the span. Close the bold before the code span.",
+                    "code_span_with_quote_run",
+                    "a code span holds a run of quotes it did not open "
+                    "with -- usually the closing ''' of a bold swallowed "
+                    "by the span. Close the bold before the code span.",
+                    span[max(0, run.start() - 20) : run.end() + 20],
                 )
             )
-            evidence_for["code_span_ends_in_quotes"] = span[-40:]
             break
 
-    if any(span == "" for span in facts.code_spans):
-        found.append(
+    if any(not span.strip() for span in facts.inline_code_spans):
+        hits.append(
             (
                 "empty_code_span",
                 "an empty code element -- a code span was cut in two "
                 "(a backtick nested inside it).",
+                "",
             )
         )
-        evidence_for["empty_code_span"] = ""
 
-    run = _QUOTE_RUN_RE.search(facts.prose_text)
-    if run:
-        found.append(
+    quotes = _QUOTE_RUN_RE.search(prose)
+    if quotes:
+        hits.append(
             (
                 "quote_run_in_prose",
-                f"a run of quotes ('{run.group(0)}') survived as "
+                f"a run of {len(quotes.group(0))} quotes survived as "
                 "literal text -- emphasis markup did not convert.",
+                prose[max(0, quotes.start() - 20) : quotes.end() + 20],
             )
         )
-        evidence_for["quote_run_in_prose"] = run.group(0)
 
     return [
         _warning(
             "broken_inline_markup_in_render",
             "warning",
             message,
-            {
-                "pattern": pattern,
-                "matched": evidence_for.get(pattern, ""),
-            },
+            {"pattern": pattern, "matched": matched},
         )
-        for pattern, message in found
+        for pattern, message, matched in hits
     ]
 
 

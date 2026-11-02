@@ -516,6 +516,10 @@ class TestRenderCheckLive:
         ]
         assert found, "the replication string rendered clean"
         assert all(w["severity"] == "warning" for w in found)
+        # The ticket's shape specifically, not just any of the four.
+        assert "code_span_with_quote_run" in {
+            w["evidence"]["pattern"] for w in found
+        }, found
 
 
 if __name__ == "__main__":
