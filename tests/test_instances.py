@@ -6,6 +6,7 @@ inheritance, client cache identity, describe() never leaking passwords,
 load_declared_instances() merge precedence, and mtime-based live reload.
 """
 
+import dataclasses
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -294,6 +295,109 @@ class TestResolveIdentity:
             registry.resolve(
                 "https://evil.example.com/trac", self._IDENTITY
             )
+
+
+# ---------------------------------------------------------------------------
+# resolve() -- synthesized Configs inherit the default's non-identity fields
+# ---------------------------------------------------------------------------
+
+
+_SYNTH_IDENTITY = Identity(
+    name="alice", username="alice-trac", password="alice-pw"
+)
+
+# (name passed to resolve(), declared instances) for each resolve() entry
+# form. Ticket #117.
+_ENTRY_FORMS = {
+    "default-none": (None, {}),
+    "default-literal": ("default", {}),
+    "declared": ("bcs", {"bcs": InstanceSpec(name="bcs", url="/bcs")}),
+    "adhoc-path": ("/trac_test", {}),
+    "adhoc-url": ("http://192.168.10.4:8000/trac_test", {}),
+}
+
+
+class TestSynthesizedConfigInheritsDefault:
+    """Ticket #117: ``_synthesize`` built the Config field by field and
+    dropped ``write_gate``, so the #64 kill switch (``write_gate=False``)
+    never reached an identity call or an ``instance=`` call. Every
+    Config ``resolve()`` returns must carry the default's fields.
+    """
+
+    @pytest.mark.parametrize("identity", [None, _SYNTH_IDENTITY])
+    @pytest.mark.parametrize("form", sorted(_ENTRY_FORMS))
+    def test_write_gate_false_is_inherited(self, form, identity):
+        name, declared = _ENTRY_FORMS[form]
+        registry = InstanceRegistry(
+            _default_config(write_gate=False), declared
+        )
+
+        resolved = registry.resolve(name, identity)
+
+        assert resolved.write_gate is False
+
+    @pytest.mark.parametrize("identity", [None, _SYNTH_IDENTITY])
+    @pytest.mark.parametrize("form", sorted(_ENTRY_FORMS))
+    def test_write_gate_true_is_preserved(self, form, identity):
+        name, declared = _ENTRY_FORMS[form]
+        registry = InstanceRegistry(
+            _default_config(write_gate=True), declared
+        )
+
+        resolved = registry.resolve(name, identity)
+
+        assert resolved.write_gate is True
+
+    @pytest.mark.parametrize("form", sorted(_ENTRY_FORMS))
+    def test_every_other_field_is_inherited(self, form):
+        """Guard for fields added to Config later: anything but the
+        per-instance fields must equal the default's."""
+        name, declared = _ENTRY_FORMS[form]
+        default = _default_config(
+            insecure=True,
+            debug=True,
+            max_parallel_requests=11,
+            max_batch_size=123,
+            rpc_timeout=17,
+            write_gate=False,
+        )
+        registry = InstanceRegistry(default, declared)
+
+        resolved = registry.resolve(name, _SYNTH_IDENTITY)
+
+        per_instance = {
+            "trac_url",
+            "username",
+            "password",
+            "allowed_instances",
+        }
+        for f in dataclasses.fields(Config):
+            if f.name in per_instance:
+                continue
+            assert getattr(resolved, f.name) == getattr(
+                default, f.name
+            ), f.name
+
+    def test_allowed_instances_is_not_inherited_from_default(self):
+        """The default's own allowlist scopes the default credentials
+        only (ticket #110); an unrestricted identity's synthesized
+        Config must be unrestricted, not carry the default's list."""
+        default = _default_config(
+            allowed_instances=frozenset(
+                {"http://192.168.10.4:8000/trac_test"}
+            )
+        )
+        registry = InstanceRegistry(default, {})
+        unrestricted = Identity(
+            name="alice",
+            username="alice-trac",
+            password="alice-pw",
+            instances=None,
+        )
+
+        resolved = registry.resolve("/trac_test", unrestricted)
+
+        assert resolved.allowed_instances is None
 
 
 # ---------------------------------------------------------------------------
