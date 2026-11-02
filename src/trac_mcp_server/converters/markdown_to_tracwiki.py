@@ -782,34 +782,42 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Render children - check if there's a nested list
                 if "children" in token:
                     children = token["children"]
-                    # Separate inline content from nested lists
-                    inline_parts = []
-                    nested_lists = []
-
+                    # Split the children into runs, in SOURCE order: a run
+                    # of non-list blocks, or one nested list. Ticket #112:
+                    # collecting "all non-lists, then all lists" moved a
+                    # paragraph that follows a sub-list above it.
+                    runs: list[tuple[bool, list[dict[str, Any]]]] = []
                     for child in children:
-                        if child.get("type") == "list":
-                            nested_lists.append(child)
+                        is_list = child.get("type") == "list"
+                        if (
+                            runs
+                            and runs[-1][0] == is_list
+                            and not is_list
+                        ):
+                            runs[-1][1].append(child)
                         else:
-                            inline_parts.append(child)
+                            runs.append((is_list, [child]))
 
-                    # Render inline content
-                    if inline_parts:
-                        text = self.render_tokens(inline_parts, state)
+                    # The item's own text is the run before the first list.
+                    if runs and not runs[0][0]:
+                        text = self.render_tokens(runs[0][1], state)
+                        runs = runs[1:]
                     else:
                         text = ""
 
-                    # Render nested lists (they handle their own newlines)
-                    if nested_lists:
-                        nested_text = self.render_tokens(
-                            nested_lists, state
+                    # Everything after it, in order. A nested list handles
+                    # its own newlines; a later non-list run is a
+                    # continuation paragraph that follows a sub-list.
+                    after_runs: list[tuple[bool, str]] = []
+                    for is_list, run in runs:
+                        rendered = self.render_tokens(run, state).strip(
+                            "\n"
                         )
-                        # The nested list adds its items directly, don't add to text
-                        nested_text = nested_text.rstrip("\n")
-                    else:
-                        nested_text = ""
+                        if rendered:
+                            after_runs.append((is_list, rendered))
                 else:
                     text = token.get("raw", "")
-                    nested_text = ""
+                    after_runs = []
 
                 # Build TracWiki list item with proper depth
                 # TracWiki uses indentation for nesting: 1 space for level 0, +2 spaces per level
@@ -842,11 +850,23 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         ]
                     )
 
-                # Combine text and nested list
-                if nested_text:
-                    result = f"{prefix} {text}\n{nested_text}\n"
-                else:
-                    result = f"{prefix} {text}\n"
+                # Combine the item text with what follows it, in source
+                # order. A continuation paragraph after a sub-list is set
+                # off by a blank line and indented under the item text;
+                # Trac renders it as a blockquote (a Trac limit, #112), but
+                # the order is the author's.
+                parts = [f"{prefix} {text}"]
+                for is_list, rendered in after_runs:
+                    if is_list:
+                        parts.append(rendered)
+                    else:
+                        continuation_indent = " " * (len(prefix) + 1)
+                        parts.append("")
+                        parts.extend(
+                            continuation_indent + line if line else line
+                            for line in rendered.split("\n")
+                        )
+                result = "\n".join(parts) + "\n"
 
             # Default rendering: extract text from raw, text, or children, pass attrs
             case _:
