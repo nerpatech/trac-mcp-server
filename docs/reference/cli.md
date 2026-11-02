@@ -171,9 +171,9 @@ trac-mcp ticket-create --summary S --description-file FILE [--type T] [--compone
 trac-mcp ticket-pull TICKET FILE [--comment N]
 ```
 
-The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and sent **verbatim** as TracWiki -- no format detection and no conversion -- and an empty file is a usage error (exit 2).
+The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and sent **verbatim** as TracWiki -- no format detection and no conversion -- and an empty or whitespace-only file is a usage error (exit 2). Standard input is read as bytes, so `-` keeps CRLF line endings exactly as a file path does. A comment is limited to 10000 characters (the server's limit); `ticket-comment` refuses a longer one with exit 2 before connecting, and `ticket-describe` has no such limit, so a long body belongs there or split across comments.
 
-- `ticket-comment` prints `Added comment N to ticket #T`; `N` is read back from the ticket's changelog, never counted. If it cannot be determined the command exits 1.
+- `ticket-comment` prints `Added comment N to ticket #T`; `N` is read back from the ticket's changelog, never counted. If it cannot be determined (the read-back failed, or the stored body differs from the sent one) the command exits **4**, not 1: the comment *was* stored, so do not retry the write. Exit 1 always means nothing was stored.
 - `ticket-comment` and `ticket-describe` lock optimistically: they read the ticket's `_ts` just before writing and pass it as `base_ts`, so a change in between is refused with `version_conflict` (exit 1) instead of overwritten. `--base-ts TS` supplies the token yourself and skips that read.
 - `ticket-create` prints the server's `Created ticket #N: ...` line.
 - `ticket-pull` writes the stored description (or comment `N`) to `FILE` (`-` for stdout) byte for byte, so `cmp` against the pushed file holds.

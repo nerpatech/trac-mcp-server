@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..core.client import MAX_COMMENT_CHARS
 from ..file_handler import detect_file_format, read_file_with_encoding
 
 EXIT_OK = 0
@@ -47,6 +48,11 @@ EXIT_USAGE_ERROR = 2  # argparse, or a local file problem
 EXIT_CONNECT_ERROR = (
     3  # no endpoint, missing token, or transport failure
 )
+# The write was stored, but the CLI could not finish reporting it (a
+# ticket-comment whose number could not be read back). Distinct from
+# EXIT_TOOL_ERROR, which means nothing was stored: a caller that retries
+# on 1 must not retry on 4, or it posts the comment twice.
+EXIT_STORED_INCOMPLETE = 4
 
 DEFAULT_SERVER = "trac-http"
 DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN"
@@ -317,7 +323,20 @@ def _read_body(path: str, what: str) -> str:
     """The body file as text, sent verbatim. An empty one is refused here
     (the server would refuse it too), with the same non-UTF-8 warning as
     wiki-push."""
-    text, encoding, _ = _read_text(path)
+    if path == "-":
+        # Text-mode stdin translates CRLF and lone CR to LF, which a file
+        # path does not: read the bytes, so "verbatim" holds for both.
+        try:
+            text, encoding = (
+                sys.stdin.buffer.read().decode("utf-8"),
+                "utf-8",
+            )
+        except UnicodeDecodeError:
+            raise CliError(
+                "stdin is not valid UTF-8", EXIT_USAGE_ERROR
+            ) from None
+    else:
+        text, encoding, _ = _read_text(path)
     if encoding != "utf-8":
         print(
             f"warning: {path} decoded as '{encoding}', not UTF-8 "
@@ -370,21 +389,16 @@ def _comment_number(changelog: list, text: str) -> str | None:
     """The number of the comment this CLI just added, read from the
     changelog (never counted: numbers have gaps after a deleted comment).
     ``--reply-to`` stores a quoted prefix ahead of the body, hence
-    ``endswith``; the highest-numbered match wins."""
-    best: tuple[float, str] | None = None
+    ``endswith``. The changelog is chronological, so the last match is the
+    newest; numbers are compared as text only, never as floats, because a
+    threaded number such as ``1.10`` is not the decimal 1.1."""
+    found: str | None = None
     for entry in changelog:
         if entry.get("field") != "comment":
             continue
-        if not (entry.get("newvalue") or "").endswith(text):
-            continue
-        number = str(entry.get("oldvalue"))
-        try:
-            key = float(number)
-        except ValueError:
-            key = float("-inf")
-        if best is None or key >= best[0]:
-            best = (key, number)
-    return best[1] if best else None
+        if (entry.get("newvalue") or "").endswith(text):
+            found = str(entry.get("oldvalue"))
+    return found
 
 
 async def _ticket_update(
@@ -395,6 +409,13 @@ async def _ticket_update(
     text = _read_body(
         args.file, "description" if describe else "comment"
     )
+    if not describe and len(text) > MAX_COMMENT_CHARS:
+        raise CliError(
+            f"the comment is {len(text)} characters; a ticket comment is "
+            f"limited to {MAX_COMMENT_CHARS}. Split it across comments, or "
+            "put the long text in the description with ticket-describe",
+            EXIT_USAGE_ERROR,
+        )
     base_ts, failed = await _lock_token(args, url, token)
     if failed is not None:
         return _report(failed)
@@ -411,25 +432,31 @@ async def _ticket_update(
     if describe or result.isError:
         return _report(result)
 
-    changelog = await call_tool(
-        url,
-        token,
-        "ticket_changelog",
-        _with_instance(args, {"ticket_id": args.ticket}),
-    )
-    number = None
-    if not changelog.isError:
-        number = _comment_number(
-            _sc(changelog).get("changelog") or [], text
-        )
+    # The comment is stored. Report that first, so the tool's text and the
+    # gate's notes survive whatever the read-back does.
     _report(result)
+    number = None
+    try:
+        changelog = await call_tool(
+            url,
+            token,
+            "ticket_changelog",
+            _with_instance(args, {"ticket_id": args.ticket}),
+        )
+        if not changelog.isError:
+            number = _comment_number(
+                _sc(changelog).get("changelog") or [], text
+            )
+    except Exception:  # transport failure on the read-back
+        pass
     if number is None:
         print(
-            "trac-mcp: the comment was added, but trac-mcp could not "
-            "determine the comment number",
+            "trac-mcp: the comment WAS stored, but trac-mcp could not "
+            "determine its number -- do not retry the write "
+            f"(exit {EXIT_STORED_INCOMPLETE})",
             file=sys.stderr,
         )
-        return EXIT_TOOL_ERROR
+        return EXIT_STORED_INCOMPLETE
     print(f"Added comment {number} to ticket #{args.ticket}")
     return EXIT_OK
 

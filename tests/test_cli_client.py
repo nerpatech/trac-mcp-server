@@ -12,6 +12,7 @@ the bytes "Trac" stored, and back.
 
 import base64
 import json
+import sys
 import xmlrpc.client
 from contextlib import contextmanager
 from pathlib import Path
@@ -981,7 +982,7 @@ class TestTicketBodies:
         assert rc == cli.EXIT_TOOL_ERROR
         assert trac.updates == []
 
-    def test_undeterminable_comment_number_exits_1(
+    def test_undeterminable_comment_number_exits_4_not_1(
         self, tmp_path, capsys
     ):
         trac = FakeTracTickets()
@@ -990,9 +991,12 @@ class TestTicketBodies:
         src = _body_file(tmp_path)
         with _served(trac) as url:
             rc = _cli(url, "ticket-comment", "7", str(src))
-        assert rc == cli.EXIT_TOOL_ERROR
+        # 4, not 1: the comment IS stored, and a caller that retries on 1
+        # (nothing stored) must not retry this.
+        assert rc == cli.EXIT_STORED_INCOMPLETE
+        assert rc != cli.EXIT_TOOL_ERROR
         captured = capsys.readouterr()
-        assert "could not determine the comment number" in captured.err
+        assert "WAS stored" in captured.err
         assert "Updated ticket #7" in captured.out
         assert len(trac.updates) == 1
 
@@ -1122,3 +1126,96 @@ class TestTicketBodies:
         assert all(a["instance"] == "/other" for _, a in sent)
         assert sent[0][1]["include_comments"] is False
         assert sent[1][1]["base_ts"] == "5"
+
+
+class TestTicketBodyReview:
+    """Findings of the local review of Trac #114."""
+
+    def test_changelog_transport_failure_still_reports_the_write(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        real = cli.call_tool
+
+        async def _flaky(url, token, name, arguments):
+            if name == "ticket_changelog":
+                raise ConnectionError("changelog read-back dropped")
+            return await real(url, token, name, arguments)
+
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            monkeypatch.setattr(cli, "call_tool", _flaky)
+            rc = _cli(url, "ticket-comment", "7", str(src))
+        captured = capsys.readouterr()
+        assert rc == cli.EXIT_STORED_INCOMPLETE
+        assert "Updated ticket #7" in captured.out
+        assert "WAS stored" in captured.err
+        assert len(trac.updates) == 1
+
+    def test_stdin_keeps_crlf_like_a_file_does(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import io
+
+        body = b"line one\r\nline two\r\nlone cr\rend\r\n"
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(io.BytesIO(body), encoding="utf-8"),
+        )
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-describe", "7", "-") == 0
+            out = tmp_path / "back.wiki"
+            assert _cli(url, "ticket-pull", "7", str(out)) == 0
+        assert out.read_bytes() == body
+
+    def test_oversize_comment_is_refused_before_any_call(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        from trac_mcp_server.core.client import MAX_COMMENT_CHARS
+
+        _no_network(monkeypatch)
+        src = _body_file(tmp_path, "x" * (MAX_COMMENT_CHARS + 1))
+        rc = cli.main(
+            ["--url", "http://x/mcp", "ticket-comment", "7", str(src)],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+        err = capsys.readouterr().err
+        assert str(MAX_COMMENT_CHARS) in err
+        assert "ticket-describe" in err
+
+    def test_comment_at_the_limit_is_sent(self, tmp_path):
+        from trac_mcp_server.core.client import MAX_COMMENT_CHARS
+
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        src = _body_file(tmp_path, "y" * MAX_COMMENT_CHARS)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-comment", "7", str(src)) == 0
+        assert len(trac.updates[0]["comment"]) == MAX_COMMENT_CHARS
+
+    def test_description_has_no_comment_size_limit(self, tmp_path):
+        from trac_mcp_server.core.client import MAX_COMMENT_CHARS
+
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        src = _body_file(tmp_path, "z" * (MAX_COMMENT_CHARS * 2))
+        with _served(trac) as url:
+            assert _cli(url, "ticket-describe", "7", str(src)) == 0
+
+    def test_comment_number_is_the_newest_match_not_a_float_max(self):
+        # Threaded numbers are text: "1.10" is not the decimal 1.1, and
+        # the changelog is chronological, so the last match is ours.
+        changelog = [
+            {"field": "comment", "oldvalue": "1.2", "newvalue": "ok"},
+            {"field": "comment", "oldvalue": "1.10", "newvalue": "ok"},
+            {"field": "status", "oldvalue": "new", "newvalue": "x"},
+        ]
+        # float("1.10") < float("1.2"), so a float max would say "1.2".
+        assert cli._comment_number(changelog, "ok") == "1.10"
+        assert cli._comment_number(changelog, "absent") is None
