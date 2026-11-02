@@ -134,6 +134,11 @@ def bootstrap_server_config(
     whenever a client reaches this server by a name other than what it's
     bound to, such as a docker-compose service name.
 
+    ``TRAC_MCP_DISABLED_TOOLS`` (comma-separated tool names, or YAML
+    ``server.disabled_tools``) drops individual tools from the tool list,
+    e.g. ``ticket_comment_history`` when the Trac server lacks the plugin
+    it needs.
+
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
 
@@ -251,6 +256,13 @@ def bootstrap_server_config(
         else list(yaml_server.get("allowed_hosts", []))
     )
 
+    disabled_tools_env = _parse_csv_env("TRAC_MCP_DISABLED_TOOLS")
+    disabled_tools = (
+        disabled_tools_env
+        if disabled_tools_env is not None
+        else list(yaml_server.get("disabled_tools", []))
+    )
+
     allowed_origins_env = _parse_csv_env("TRAC_MCP_ALLOWED_ORIGINS")
     allowed_origins = (
         allowed_origins_env
@@ -301,6 +313,7 @@ def bootstrap_server_config(
         oidc_rpc_url=oidc_rpc_url,
         allow_unauthenticated=allow_unauthenticated,
         read_only=read_only,
+        disabled_tools=disabled_tools,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         file_access=file_access,

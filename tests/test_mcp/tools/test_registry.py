@@ -439,6 +439,56 @@ class TestToolRegistryReadOnlyFilter(unittest.TestCase):
         self.assertIn("Unknown tool", str(ctx.exception))
 
 
+class TestToolRegistryDisabledTools(unittest.TestCase):
+    """Test ToolRegistry's disabled_tools filter (by tool name)."""
+
+    def setUp(self):
+        self.specs = [
+            _make_spec("ticket_search", read_only_hint=True),
+            _make_spec("ticket_render_check", read_only_hint=True),
+            _make_spec("ticket_create", read_only_hint=False),
+        ]
+
+    def test_default_disables_nothing(self):
+        self.assertEqual(ToolRegistry(self.specs).tool_count(), 3)
+
+    def test_disabled_tool_is_not_listed(self):
+        registry = ToolRegistry(
+            self.specs,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        names = [t.name for t in registry.list_tools()]
+        self.assertEqual(names, ["ticket_search", "ticket_create"])
+
+    def test_combines_with_read_only(self):
+        registry = ToolRegistry(
+            self.specs,
+            read_only=True,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        names = [t.name for t in registry.list_tools()]
+        self.assertEqual(names, ["ticket_search"])
+
+    def test_unknown_name_is_ignored(self):
+        registry = ToolRegistry(
+            self.specs, disabled_tools=frozenset({"no_such_tool"})
+        )
+        self.assertEqual(registry.tool_count(), 3)
+
+    def test_call_disabled_tool_raises(self):
+        registry = ToolRegistry(
+            self.specs,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                registry.call_tool(
+                    "ticket_render_check", {}, MagicMock()
+                )
+            )
+        self.assertIn("Unknown tool", str(ctx.exception))
+
+
 class TestLoadPermissionsFile(unittest.TestCase):
     """Test load_permissions_file function."""
 

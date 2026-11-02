@@ -50,6 +50,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
 | `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
+| `TRAC_MCP_DISABLED_TOOLS` | No | (empty) | Comma-separated tool names to leave out, e.g. tools needing a Trac plugin the server lacks -- see [Tool Architecture: Disabling Individual Tools](docs/reference/tool-architecture.md#disabling-individual-tools) |
 | `TRAC_MCP_READ_ONLY` | No | `false` | Expose only read-only tools, regardless of transport -- see [Tool Architecture: Read-Only Filtering](docs/reference/tool-architecture.md#read-only-filtering---read-only) |
 | `TRAC_IDENTITIES` | No | -- | Path to a file mapping per-caller bearer tokens to their own Trac username/password (`http` transport only) |
 

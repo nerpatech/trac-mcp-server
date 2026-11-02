@@ -265,6 +265,7 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_ALLOWED_HOSTS",
         "TRAC_MCP_ALLOWED_ORIGINS",
         "TRAC_MCP_READ_ONLY",
+        "TRAC_MCP_DISABLED_TOOLS",
         "TRAC_MCP_FILE_ACCESS",
         "TRAC_MCP_MAX_INLINE_BYTES",
     ):
@@ -810,3 +811,55 @@ def test_file_access_survives_real_yaml_parsing(
         f"transport: http\n{line}\n", Loader=ConfigLoader
     )
     assert _bootstrap_server(yaml_server=server).file_access == expected
+
+
+# --- disabled_tools: env (CSV) > YAML > default ([]) ---
+
+
+def _bootstrap_with_yaml(yaml_data):
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=["/fake/config.yaml"] if yaml_data else [],
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value=yaml_data or {},
+        ),
+    ):
+        return bootstrap_server_config(None)
+
+
+def test_disabled_tools_defaults_to_empty(monkeypatch):
+    _clear_server_env(monkeypatch)
+    assert _bootstrap_with_yaml(None).disabled_tools == []
+
+
+def test_disabled_tools_env_csv(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv(
+        "TRAC_MCP_DISABLED_TOOLS",
+        " ticket_render_check, ticket_comment_history ,",
+    )
+    assert _bootstrap_with_yaml(None).disabled_tools == [
+        "ticket_render_check",
+        "ticket_comment_history",
+    ]
+
+
+def test_disabled_tools_from_yaml(monkeypatch):
+    _clear_server_env(monkeypatch)
+    cfg = _bootstrap_with_yaml(
+        {"server": {"disabled_tools": ["ticket_render_check"]}}
+    )
+    assert cfg.disabled_tools == ["ticket_render_check"]
+
+
+def test_disabled_tools_env_overrides_yaml(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_DISABLED_TOOLS", "")
+    cfg = _bootstrap_with_yaml(
+        {"server": {"disabled_tools": ["ticket_render_check"]}}
+    )
+    assert cfg.disabled_tools == []

@@ -465,10 +465,18 @@ async def main(config_overrides: dict | None = None):
     ):
         specs = with_instance_param(specs, declared_names)
     all_specs = with_strict_schema(specs)
+    disabled_tools = frozenset(server_config.disabled_tools)
+    unknown_disabled = disabled_tools - {s.tool.name for s in all_specs}
+    if unknown_disabled:
+        logger.warning(
+            "Disabled tools not found (ignored): %s",
+            ", ".join(sorted(unknown_disabled)),
+        )
     registry = ToolRegistry(
         all_specs,
         allowed_permissions,
         read_only=server_config.read_only,
+        disabled_tools=disabled_tools,
     )
     logger.info(
         "Registered %d tools (of %d total)",
@@ -492,6 +500,12 @@ async def main(config_overrides: dict | None = None):
         print(
             f"Read-only mode: {registry.tool_count()} of "
             f"{len(all_specs)} tools enabled",
+            file=sys.stderr,
+        )
+
+    if disabled_tools:
+        print(
+            "Disabled tools: " + ", ".join(sorted(disabled_tools)),
             file=sys.stderr,
         )
 

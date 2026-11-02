@@ -287,6 +287,10 @@ With permissions file containing `TICKET_VIEW`, `WIKI_VIEW`, `MILESTONE_VIEW`:
 
 It's independent of, and combinable with, `--permissions-file` -- a tool must pass both filters when both are configured. Prefer `--read-only` when the goal is simply "no write access, regardless of which Trac permissions the service account happens to have"; prefer `--permissions-file` when you need finer-grained control (e.g. tickets read-only but wiki read-write) or want the exposed tool list to mirror the service account's actual Trac permissions.
 
+## Disabling Individual Tools
+
+`TRAC_MCP_DISABLED_TOOLS` (comma-separated, or `config.yaml`'s `server.disabled_tools` list) drops tools by name. Use it for tools that can't work in a given deployment and would only return errors -- e.g. `ticket_comment_history` when the Trac server lacks the `tracrpc_comment` plugin, or `ticket_render_check` when the server's ticket pages aren't reachable with the credentials the MCP server uses. Disabled tools are neither listed nor dispatchable; unknown names are logged as a warning and otherwise ignored. Combinable with `--read-only` and `--permissions-file`.
+
 ## Error Handling
 
 All tool errors are handled centrally by `ToolRegistry.call_tool()`:

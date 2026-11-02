@@ -75,6 +75,12 @@ class ToolRegistry:
     dispatches through call_tool(), which raises the same "unknown tool"
     ValueError as a permissions-filtered-out tool, so there's no separate
     code path to keep this from being bypassed.
+
+    disabled_tools names tools to drop outright, by Tool.name -- for a
+    tool that can't work in a particular deployment (e.g. one that needs a
+    Trac plugin the server doesn't have) and would otherwise only produce
+    errors. It's applied after the other two filters and uses the same
+    "unknown tool" dispatch path.
     """
 
     def __init__(
@@ -82,9 +88,12 @@ class ToolRegistry:
         specs: list[ToolSpec],
         allowed_permissions: frozenset[str] | None = None,
         read_only: bool = False,
+        disabled_tools: frozenset[str] = frozenset(),
     ):
         self._specs: dict[str, ToolSpec] = {}
         for spec in specs:
+            if spec.tool.name in disabled_tools:
+                continue
             if read_only and not _is_read_only_tool(spec):
                 continue
             if (
