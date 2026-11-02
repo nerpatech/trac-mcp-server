@@ -7,6 +7,7 @@ from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types as types
+import pytest
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TicketCreateTimeout, TracClient
@@ -1225,6 +1226,187 @@ class TestHandleTicketUpdate(unittest.TestCase):
 
         self.assertTrue(result.isError)
         self.assertIn("comment is required", result.content[0].text)
+
+
+class TestHandleTicketUpdateChangeToken(unittest.TestCase):
+    """ticket_update hands back the new _ts, so a chained write needs no
+    ticket_get (ticket #127)."""
+
+    def _run(self, update_reply):
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = update_reply
+            return asyncio.run(
+                _handle_update(
+                    MagicMock(),
+                    {
+                        "ticket_id": 42,
+                        "comment": "x",
+                        "base_ts": "1793631012200654",
+                    },
+                )
+            )
+
+    def test_new_token_in_text_and_structured_content(self):
+        # Trac's ticket.update reply: [id, created, changed, attrs].
+        result = self._run(
+            [42, "c", "m", {"status": "new", "_ts": "1793631099000001"}]
+        )
+
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("Updated ticket #42 (added comment)", text)
+        self.assertIn(
+            "New change token (base_ts): 1793631099000001", text
+        )
+        self.assertNotIn("WARNING", text)
+        self.assertEqual(
+            result.structuredContent["_ts"], "1793631099000001"
+        )
+        self.assertEqual(result.structuredContent["ticket_id"], 42)
+        self.assertEqual(result.structuredContent["message"], text)
+
+    def test_token_returned_as_string(self):
+        # _ts overflows XML-RPC's 32-bit int, so it travels as a string;
+        # the handler keeps it one even if the client hands back an int.
+        result = self._run([42, "c", "m", {"_ts": 1793631099000001}])
+
+        self.assertEqual(
+            result.structuredContent["_ts"], "1793631099000001"
+        )
+
+    def test_missing_token_warns_but_write_succeeds(self):
+        for reply in (
+            True,  # not the reply shape at all
+            [42, "c", "m"],  # too short
+            [42, "c", "m", "not-a-dict"],
+            [42, "c", "m", {"status": "new"}],  # no _ts
+            [42, "c", "m", {"_ts": ""}],
+        ):
+            with self.subTest(reply=reply):
+                result = self._run(reply)
+
+                self.assertFalse(result.isError)
+                text = result.content[0].text
+                self.assertIn("Updated ticket #42", text)
+                self.assertIn("WARNING", text)
+                self.assertIn(
+                    "ticket_get(ticket_id=42, include_comments=false)",
+                    text,
+                )
+                self.assertNotIn("New change token", text)
+                self.assertIsNone(result.structuredContent["_ts"])
+                self.assertIn(
+                    "WARNING", result.structuredContent["message"]
+                )
+
+    def test_structured_content_keeps_the_remap_warning(self):
+        # Claude Code shows structuredContent, not the text, so a
+        # warning that only lived in the text would never reach it.
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                [],  # get_ticket_actions: no resolve input field
+                [42, "c", "m", {"_ts": "1793631099000001"}],
+            ]
+            result = asyncio.run(
+                _handle_update(
+                    MagicMock(),
+                    {
+                        "ticket_id": 42,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                        "base_ts": "1793631012200654",
+                    },
+                )
+            )
+
+        self.assertFalse(result.isError)
+        message = result.structuredContent["message"]
+        self.assertIn("could not find an input field", message)
+        self.assertEqual(message, result.content[0].text)
+        self.assertEqual(
+            result.structuredContent["_ts"], "1793631099000001"
+        )
+
+    def test_description_advertises_the_returned_token(self):
+        tool = next(
+            t
+            for t in TICKET_WRITE_SPECS
+            if t.tool.name == "ticket_update"
+        ).tool
+        self.assertIn("new change token", tool.description)
+        self.assertIn(
+            "ticket_update",
+            tool.inputSchema["properties"]["base_ts"]["description"],
+        )
+
+
+@pytest.mark.live
+async def test_live_chained_update_uses_returned_token():
+    """Real Trac (/trac_test): the token ticket_update returns is the
+    one Trac now holds -- a second write with it lands, and the
+    superseded token is refused (ticket #127)."""
+    import os
+    from urllib.parse import urlparse
+
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names.
+    parsed = urlparse(os.environ["TRAC_URL"])
+    config = Config(
+        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
+        username=os.environ["TRAC_USERNAME"],
+        password=os.environ["TRAC_PASSWORD"],
+        insecure=os.environ.get("TRAC_INSECURE", "").lower()
+        in ("1", "true", "yes"),
+    )
+    client = TracClient(config)
+    ticket_id = client.create_ticket(
+        "#127 live test: chained ticket_update",
+        "Throwaway; deleted by the test.",
+        attributes={"owner": "agent_rpc"},
+    )
+    try:
+        first_ts = client.get_ticket(ticket_id)[3]["_ts"]
+        first = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "one",
+                "base_ts": first_ts,
+            },
+        )
+        assert not first.isError, first.content[0].text
+        second_ts = first.structuredContent["_ts"]
+        assert second_ts and second_ts != first_ts
+        expected = f"New change token (base_ts): {second_ts}"
+        assert expected in first.structuredContent["message"]
+        assert client.get_ticket(ticket_id)[3]["_ts"] == second_ts
+
+        second = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "two",
+                "base_ts": second_ts,
+            },
+        )
+        assert not second.isError, second.content[0].text
+
+        stale = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "three",
+                "base_ts": second_ts,
+            },
+        )
+        assert stale.isError
+        assert "version_conflict" in stale.content[0].text
+    finally:
+        client.delete_ticket(ticket_id)
 
 
 # ---------------------------------------------------------------------------
