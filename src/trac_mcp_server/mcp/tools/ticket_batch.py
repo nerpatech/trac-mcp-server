@@ -20,8 +20,10 @@ from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import (
+    NEW_TARGET_ATTACHMENT_NAMES,
     NEW_TICKET_COMMENT_NUMBERS,
     TARGET_CAP_SCHEMA,
+    attachment_names_for_ticket,
     check_write,
     gate_enabled,
 )
@@ -188,6 +190,9 @@ async def _handle_batch_create(
                 recheck_with="ticket_render_check",
                 target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
                 known_comment_numbers=NEW_TICKET_COMMENT_NUMBERS,
+                # Ticket #113: nothing is attached to a ticket that
+                # does not exist yet.
+                attachment_names=NEW_TARGET_ATTACHMENT_NAMES,
             )
             if outcome.refused:
                 return {
@@ -363,12 +368,21 @@ async def _handle_batch_update(
 
         # Per item, for the reason spelled out in _create_one.
         if gate_enabled(client):
+            comment_text = update_data.get("comment", "")
+            # Ticket #113: this ticket's attachments, fetched only when
+            # the comment mentions one.
+            attachment_names = (
+                await attachment_names_for_ticket(client, ticket_id)
+                if comment_text and "attachment:" in comment_text
+                else None
+            )
             outcome = await check_write(
                 client,
-                update_data.get("comment", ""),
+                comment_text,
                 field="comment",
                 recheck_with="ticket_render_check",
                 target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
+                attachment_names=attachment_names,
             )
             if outcome.refused:
                 return {
