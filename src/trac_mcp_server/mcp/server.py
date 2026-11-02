@@ -389,6 +389,12 @@ async def handle_call_tool(
             str(e),
             "Use list_tools to see available tools.",
         )
+    # With OIDC per-user auth there is exactly one instance and no
+    # `instance` argument, so the echo carries no information -- and as a
+    # trailing text block it turns a JSON result into JSON plus a line,
+    # which code that parses the result text cannot read.
+    if _oidc_cache is not None:
+        return result
     return annotate(result, url, explicit)
 
 

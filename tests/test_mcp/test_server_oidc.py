@@ -146,3 +146,42 @@ class TestResolveClientOidcModeWikiResource:
 
         mock_get_instances.assert_not_called()
         assert "oidc" in result.lower() or "token" in result.lower()
+
+
+class TestInstanceEchoInOidcMode:
+    """The [instance: ...] echo (ticket #94) is left out under OIDC."""
+
+    def _run(self, oidc: bool):
+        import mcp.types as types
+
+        mock_client = MagicMock()
+        mock_client.config.trac_url = "https://trac.example.com/trac"
+        mock_registry = MagicMock()
+
+        async def fake_call_tool(name, args, client):
+            return types.CallToolResult(
+                content=[
+                    types.TextContent(type="text", text='{"a": 1}')
+                ]
+            )
+
+        async def fake_resolve(instance):
+            return mock_client
+
+        mock_registry.call_tool = MagicMock(side_effect=fake_call_tool)
+        set_registry(mock_registry)
+        if oidc:
+            set_oidc_cache(_oidc_cache())
+        with patch(
+            "trac_mcp_server.mcp.server._resolve_client",
+            side_effect=fake_resolve,
+        ):
+            return asyncio.run(handle_call_tool("ping", {}))
+
+    def test_no_echo_under_oidc(self):
+        result = self._run(oidc=True)
+        assert [c.text for c in result.content] == ['{"a": 1}']
+
+    def test_echo_without_oidc(self):
+        result = self._run(oidc=False)
+        assert result.content[-1].text.startswith("[instance:")
