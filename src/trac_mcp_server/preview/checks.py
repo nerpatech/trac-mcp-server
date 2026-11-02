@@ -1334,6 +1334,111 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
     return warnings
 
 
+_QUOTE_RUN_RE = re.compile(r"'{2,}")
+# A bold's closing is always three quotes, so a span is only suspect when
+# it holds that many: `''` alone is a Python/SQL/shell empty string
+# (`name = ''`, `O''Brien`), which a code review of #115 showed the
+# two-quote form flagging.
+_BOLD_CLOSE_RE = re.compile(r"'{3,}")
+_LEADING_QUOTE_RUN_RE = re.compile(r"^\s*'{2,}")
+
+
+def _check_broken_inline_markup_in_render(
+    facts: PreviewFacts,
+) -> list[dict]:
+    """Wiki emphasis and code-span markup that collided and left its
+    debris in the render (ticket #115).
+
+    The motivating shape is a code span right before a closing ``'''``:
+    Trac closes the bold first, the span swallows the quotes, the next
+    backtick comes out as literal text, and the bold flips for the rest
+    of the line. `literal_markup_in_render` looks only for five other
+    patterns, so the check reported clean on it.
+
+    Four patterns, one finding per pattern, named in
+    ``evidence["pattern"]``. Prose patterns read ``facts.prose_text``
+    (which excludes ``<pre>``/``<code>``); span patterns read
+    ``facts.inline_code_spans`` (``<code>`` NOT inside a ``<pre>``, so
+    a code block is never scanned).
+
+    * ``backtick_in_prose``: a backtick outside any code element. A
+      triple backtick is left to the existing Markdown-fence error.
+    * ``code_span_with_quote_run``: a span holding ``'''`` or more (the
+      ticket's own render has it mid-span, not only at the end) that does
+      NOT open with a quote run. ``'''bold'''`` is a page documenting the
+      syntax and stays silent, as does a ``''`` empty-string literal.
+    * ``empty_code_span``: an empty or blank ``<code>`` element.
+    * ``quote_run_in_prose``: a ``''`` or ``'''`` run left as text.
+
+    Severity is ``warning``, not ``error``. A sweep of both stores
+    (1,020 documents, cache of 2026-09-03) found legitimate hits for
+    every pattern -- pages documenting ``'''bold'''`` or a literal
+    backtick -- so none clears the zero-legitimate-hit bar for the
+    blocking column (Rules/testing/RecallGateEveryTightening).
+    """
+    prose = facts.prose_text
+    hits: list[tuple[str, str, str]] = []  # (pattern, message, matched)
+
+    # "```" belongs to `literal_markup_in_render` (Markdown code fence),
+    # which already refuses it; do not report the same debris twice.
+    backtick = prose.replace("```", "").find("`")
+    if backtick != -1:
+        scan = prose.replace("```", "")
+        hits.append(
+            (
+                "backtick_in_prose",
+                "a backtick appears as literal text outside any code "
+                "span -- a code span did not close where intended.",
+                scan[max(0, backtick - 20) : backtick + 20],
+            )
+        )
+
+    for span in facts.inline_code_spans:
+        run = _BOLD_CLOSE_RE.search(span)
+        if run and not _LEADING_QUOTE_RUN_RE.search(span):
+            hits.append(
+                (
+                    "code_span_with_quote_run",
+                    "a code span holds a run of quotes it did not open "
+                    "with -- usually the closing ''' of a bold swallowed "
+                    "by the span. Close the bold before the code span.",
+                    span[max(0, run.start() - 20) : run.end() + 20],
+                )
+            )
+            break
+
+    if any(not span.strip() for span in facts.inline_code_spans):
+        hits.append(
+            (
+                "empty_code_span",
+                "an empty code element -- a code span was cut in two "
+                "(a backtick nested inside it).",
+                "",
+            )
+        )
+
+    quotes = _QUOTE_RUN_RE.search(prose)
+    if quotes:
+        hits.append(
+            (
+                "quote_run_in_prose",
+                f"a run of {len(quotes.group(0))} quotes survived as "
+                "literal text -- emphasis markup did not convert.",
+                prose[max(0, quotes.start() - 20) : quotes.end() + 20],
+            )
+        )
+
+    return [
+        _warning(
+            "broken_inline_markup_in_render",
+            "warning",
+            message,
+            {"pattern": pattern, "matched": matched},
+        )
+        for pattern, message, matched in hits
+    ]
+
+
 def _bracket_form_for_markdown_link(matched: str) -> str | None:
     """`[label](target)` rewritten as TracWiki's `[target label]`, or
     None when the match is not a Markdown link (ticket #64 section 5).
@@ -1686,6 +1791,7 @@ def build_warnings(
     # byte-identical to what `build_verify_warnings` produced when it
     # appended this itself.
     warnings.extend(_check_literal_markup_in_render(facts))
+    warnings.extend(_check_broken_inline_markup_in_render(facts))
 
     allowed = _allowed_codes(markdown_source, tracwiki)
     if allowed:

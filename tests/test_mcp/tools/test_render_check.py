@@ -486,6 +486,41 @@ class TestRenderCheckLive:
         )
         assert '/wiki/GitHub"' not in html, html
 
+    def test_ticket_115_replication_string_is_flagged(self):
+        """The ticket's own seeded defect, pushed through the real
+        renderer: a code span right before the closing bold quotes.
+        The offline tests pin hand-copied HTML; this one fails if
+        Trac's render of the string ever stops looking like that
+        (`Rules/testing/RealSubstrateNotMocks`)."""
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.preview.checks import build_warnings
+        from trac_mcp_server.preview.facts import extract_facts
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+
+        source = "'''label `code'''' then `second` code.\n"
+        facts = extract_facts(client.wiki_to_html(source))
+        found = [
+            w
+            for w in build_warnings(
+                None,
+                source,
+                facts,
+                probes={},
+                check_targets=False,
+                source_format="tracwiki",
+            )
+            if w["code"] == "broken_inline_markup_in_render"
+        ]
+        assert found, "the replication string rendered clean"
+        assert all(w["severity"] == "warning" for w in found)
+        # The ticket's shape specifically, not just any of the four.
+        assert "code_span_with_quote_run" in {
+            w["evidence"]["pattern"] for w in found
+        }, found
+
 
 if __name__ == "__main__":
     unittest.main()
