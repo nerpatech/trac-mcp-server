@@ -1334,6 +1334,106 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
     return warnings
 
 
+_QUOTE_RUN_RE = re.compile(r"'{2,}")
+_LEADING_QUOTE_RUN_RE = re.compile(r"^\s*'{2,}")
+
+
+def _check_broken_inline_markup_in_render(
+    facts: PreviewFacts,
+) -> list[dict]:
+    """Wiki emphasis and code-span markup that collided and left its
+    debris in the render (ticket #115).
+
+    The motivating shape is a code span right before a closing ``'''``:
+    Trac closes the bold first, the span swallows the quotes, the next
+    backtick comes out as literal text, and the bold flips for the rest
+    of the line. `literal_markup_in_render` looks only for five other
+    patterns, so the check reported clean on it.
+
+    Four patterns, each scanned in ``facts.prose_text`` (which excludes
+    ``<pre>``/``<code>``) or ``facts.code_spans``, one finding per
+    pattern:
+
+    * ``backtick_in_prose``: a backtick outside any code element.
+    * ``code_span_ends_in_quotes``: a span that holds a ``''`` run (the
+      ticket's own render has it mid-span, not only at the end) and does
+      NOT open with one. A span such as ``'''bold'''`` is a
+      page documenting the syntax and stays silent.
+    * ``empty_code_span``: an empty ``<code>`` element.
+    * ``quote_run_in_prose``: a ``''`` or ``'''`` run left as text.
+
+    Severity is ``warning``, not ``error``. A sweep of both stores
+    (1,020 documents, cache of 2026-09-03) found legitimate hits for
+    every pattern -- pages documenting ``'''bold'''`` or a literal
+    backtick -- so none clears the zero-legitimate-hit bar for the
+    blocking column (Rules/testing/RecallGateEveryTightening).
+    """
+    found: list[tuple[str, str]] = []
+
+    if "`" in facts.prose_text:
+        i = facts.prose_text.index("`")
+        found.append(
+            (
+                "backtick_in_prose",
+                "a backtick appears as literal text outside any code "
+                "span -- a code span did not close where intended.",
+            )
+        )
+        matched = facts.prose_text[max(0, i - 20) : i + 20]
+    else:
+        matched = ""
+    evidence_for = {"backtick_in_prose": matched}
+
+    for span in facts.code_spans:
+        if _QUOTE_RUN_RE.search(
+            span
+        ) and not _LEADING_QUOTE_RUN_RE.search(span):
+            found.append(
+                (
+                    "code_span_ends_in_quotes",
+                    "a code span ends in a run of quotes it never "
+                    "opened -- the closing ''' of a bold swallowed by "
+                    "the span. Close the bold before the code span.",
+                )
+            )
+            evidence_for["code_span_ends_in_quotes"] = span[-40:]
+            break
+
+    if any(span == "" for span in facts.code_spans):
+        found.append(
+            (
+                "empty_code_span",
+                "an empty code element -- a code span was cut in two "
+                "(a backtick nested inside it).",
+            )
+        )
+        evidence_for["empty_code_span"] = ""
+
+    run = _QUOTE_RUN_RE.search(facts.prose_text)
+    if run:
+        found.append(
+            (
+                "quote_run_in_prose",
+                f"a run of quotes ('{run.group(0)}') survived as "
+                "literal text -- emphasis markup did not convert.",
+            )
+        )
+        evidence_for["quote_run_in_prose"] = run.group(0)
+
+    return [
+        _warning(
+            "broken_inline_markup_in_render",
+            "warning",
+            message,
+            {
+                "pattern": pattern,
+                "matched": evidence_for.get(pattern, ""),
+            },
+        )
+        for pattern, message in found
+    ]
+
+
 def _bracket_form_for_markdown_link(matched: str) -> str | None:
     """`[label](target)` rewritten as TracWiki's `[target label]`, or
     None when the match is not a Markdown link (ticket #64 section 5).
@@ -1686,6 +1786,7 @@ def build_warnings(
     # byte-identical to what `build_verify_warnings` produced when it
     # appended this itself.
     warnings.extend(_check_literal_markup_in_render(facts))
+    warnings.extend(_check_broken_inline_markup_in_render(facts))
 
     allowed = _allowed_codes(markdown_source, tracwiki)
     if allowed:

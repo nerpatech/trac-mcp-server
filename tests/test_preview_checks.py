@@ -1791,3 +1791,86 @@ def test_113_a_qualified_attachment_in_parentheses_is_fully_blanked():
         code="unconfigured_intertrac_prefix",
     )
     assert found == []
+
+
+# ---------------------------------------------------------------------
+# Ticket #115: a code span before a closing `'''` breaks the bold and
+# the render reports clean.
+#
+# The HTML below is what Trac rendered for the ticket's two real
+# sources (copied from the ticket body), not a hand-built guess. The
+# severity is `warning`: a store sweep of 1,020 documents found
+# legitimate hits for every pattern (pages that document `'''bold'''`
+# or a literal backtick), so none can be a blocking `error` (#64's
+# column; Rules/testing/RecallGateEveryTightening).
+# ---------------------------------------------------------------------
+
+
+def _broken_inline(html: str) -> list[dict]:
+    return [
+        w
+        for w in build_warnings(
+            None,
+            "",
+            extract_facts(html),
+            probes={},
+            check_targets=False,
+        )
+        if w["code"] == "broken_inline_markup_in_render"
+    ]
+
+
+def test_code_span_swallowing_the_closing_bold_quotes_is_flagged():
+    """The ticket's first source: the span's content ends in `''''`
+    and the bold flips for the rest of the bullet."""
+    found = _broken_inline(
+        "<li><strong>Contact point <code>telegram-operator'''' "
+        "(type Telegram, bot </code>@nerpa_alerts_bot`, the chat)."
+        "</strong>default<strong> now routes</strong></li>"
+    )
+    kinds = {w["evidence"]["pattern"] for w in found}
+    assert "code_span_ends_in_quotes" in kinds, found
+    assert "backtick_in_prose" in kinds, found
+    assert all(w["severity"] == "warning" for w in found)
+
+
+def test_empty_code_element_is_flagged():
+    """The ticket's related shape: a span cut in two."""
+    found = _broken_inline(
+        "<p><code>…</code>telegram-operator<code></code></p>"
+    )
+    assert [w["evidence"]["pattern"] for w in found] == [
+        "empty_code_span"
+    ]
+
+
+def test_quote_run_left_as_text_is_flagged():
+    found = _broken_inline("<p>The word '''bold'' stayed literal.</p>")
+    assert [w["evidence"]["pattern"] for w in found] == [
+        "quote_run_in_prose"
+    ]
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        # A page documenting the syntax: balanced, opens with quotes.
+        "<p>Write <code>'''bold'''</code> or <code>''italic''</code>."
+        "</p>",
+        # A backtick and a quote run inside a code BLOCK are code.
+        "<pre class=\"wiki\">a ` b '''c'''</pre><p>clean prose</p>",
+        # An apostrophe pair is not a run.
+        "<p>It's the user's choice.</p>",
+        # A well-formed render.
+        "<p><strong>Contact point:</strong> <code>telegram-operator"
+        "</code></p>",
+    ],
+)
+def test_legitimate_shapes_stay_silent_for_broken_inline_markup(html):
+    assert _broken_inline(html) == []
+
+
+def test_broken_inline_markup_is_advisory_not_blocking():
+    from trac_mcp_server.preview.gate import BLOCKING_CODES
+
+    assert "broken_inline_markup_in_render" not in BLOCKING_CODES
