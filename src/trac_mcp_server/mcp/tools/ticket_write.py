@@ -97,7 +97,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): every write moves it, so pass that as base_ts on your next write to the same ticket instead of calling ticket_get again. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only adds new ones.",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): pass it as base_ts on your next ticket_update to the same ticket instead of calling ticket_get again. Any other write to the ticket moves _ts too without returning it (ticket_comment_reply, ticket_comment_edit, ticket_batch_update, another session), so after one of those, re-read with ticket_get. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only adds new ones.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -545,32 +545,34 @@ async def _handle_update(
     new_ts = _change_token_from_update(update_result)
     if new_ts is not None:
         token_line = (
-            f"New change token (base_ts): {new_ts} -- pass this to the "
-            f"next ticket_update's base_ts on this ticket; no ticket_get "
-            f"needed."
+            f"New change token (base_ts): {new_ts} -- pass this to "
+            f"the next ticket_update's base_ts on this ticket; no "
+            f"ticket_get needed unless another tool writes to it first."
         )
     else:
         token_line = (
             f"WARNING: the update landed, but Trac's reply carried no "
             f"change token. Call ticket_get(ticket_id={ticket_id}, "
-            f"include_comments=false) for a fresh base_ts before the "
-            f"next write to this ticket."
+            f"include_comments=false) on the same instance for a fresh "
+            f"base_ts before the next write to this ticket."
         )
 
+    message = "\n".join(
+        [f"Updated ticket #{ticket_id} ({change_summary})", token_line]
+        + gate_lines
+    )
+    # Claude Code shows structuredContent in preference to the text
+    # (see instance_echo.py), so the dict carries the whole message:
+    # without it the remap warning, the missing-token warning and the
+    # write-gate notes would reach the model only on clients that read
+    # the text block.
     return types.CallToolResult(
-        content=[
-            types.TextContent(
-                type="text",
-                text="\n".join(
-                    [
-                        f"Updated ticket #{ticket_id} ({change_summary})",
-                        token_line,
-                    ]
-                    + gate_lines
-                ),
-            )
-        ],
-        structuredContent={"ticket_id": ticket_id, "_ts": new_ts},
+        content=[types.TextContent(type="text", text=message)],
+        structuredContent={
+            "ticket_id": ticket_id,
+            "_ts": new_ts,
+            "message": message,
+        },
     )
 
 
@@ -578,9 +580,13 @@ def _change_token_from_update(result: Any) -> str | None:
     """The new ``_ts`` out of a ``ticket.update`` reply, or None.
 
     Trac returns ``[id, time_created, time_changed, attributes]``, and
-    ``attributes["_ts"]`` is the token the write just minted -- the same
-    value a fresh ``ticket.get`` reports (checked against /trac_test
-    for #127). Anything else -- a reply of another shape, a missing or
+    ``attributes["_ts"]`` is the ticket's token as tracrpc re-reads it
+    straight after saving -- the same value a fresh ``ticket.get``
+    reports (checked against /trac_test for #127). A different write
+    landing inside that re-read's window would be absorbed into the
+    token, exactly as it would be by a ticket_get made only to fetch
+    ``_ts``; the window here is the narrower of the two. Anything
+    else -- a reply of another shape, a missing or
     empty token -- yields None rather than raising, because the write
     this reply acknowledges has already been stored.
     """

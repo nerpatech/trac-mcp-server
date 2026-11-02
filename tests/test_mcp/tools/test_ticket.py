@@ -1265,6 +1265,7 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
             result.structuredContent["_ts"], "1793631099000001"
         )
         self.assertEqual(result.structuredContent["ticket_id"], 42)
+        self.assertEqual(result.structuredContent["message"], text)
 
     def test_token_returned_as_string(self):
         # _ts overflows XML-RPC's 32-bit int, so it travels as a string;
@@ -1296,6 +1297,39 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
                 )
                 self.assertNotIn("New change token", text)
                 self.assertIsNone(result.structuredContent["_ts"])
+                self.assertIn(
+                    "WARNING", result.structuredContent["message"]
+                )
+
+    def test_structured_content_keeps_the_remap_warning(self):
+        # Claude Code shows structuredContent, not the text, so a
+        # warning that only lived in the text would never reach it.
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                [],  # get_ticket_actions: no resolve input field
+                [42, "c", "m", {"_ts": "1793631099000001"}],
+            ]
+            result = asyncio.run(
+                _handle_update(
+                    MagicMock(),
+                    {
+                        "ticket_id": 42,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                        "base_ts": "1793631012200654",
+                    },
+                )
+            )
+
+        self.assertFalse(result.isError)
+        message = result.structuredContent["message"]
+        self.assertIn("could not find an input field", message)
+        self.assertEqual(message, result.content[0].text)
+        self.assertEqual(
+            result.structuredContent["_ts"], "1793631099000001"
+        )
 
     def test_description_advertises_the_returned_token(self):
         tool = next(
@@ -1316,12 +1350,13 @@ async def test_live_chained_update_uses_returned_token():
     one Trac now holds -- a second write with it lands, and the
     superseded token is refused (ticket #127)."""
     import os
-    import re
+    from urllib.parse import urlparse
 
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names.
+    parsed = urlparse(os.environ["TRAC_URL"])
     config = Config(
-        trac_url=re.sub(
-            r"/[^/]+/?$", "/trac_test", os.environ["TRAC_URL"]
-        ),
+        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
         username=os.environ["TRAC_USERNAME"],
         password=os.environ["TRAC_PASSWORD"],
         insecure=os.environ.get("TRAC_INSECURE", "").lower()
@@ -1331,6 +1366,7 @@ async def test_live_chained_update_uses_returned_token():
     ticket_id = client.create_ticket(
         "#127 live test: chained ticket_update",
         "Throwaway; deleted by the test.",
+        attributes={"owner": "agent_rpc"},
     )
     try:
         first_ts = client.get_ticket(ticket_id)[3]["_ts"]
@@ -1345,9 +1381,8 @@ async def test_live_chained_update_uses_returned_token():
         assert not first.isError, first.content[0].text
         second_ts = first.structuredContent["_ts"]
         assert second_ts and second_ts != first_ts
-        assert f"New change token (base_ts): {second_ts}" in (
-            first.content[0].text
-        )
+        expected = f"New change token (base_ts): {second_ts}"
+        assert expected in first.structuredContent["message"]
         assert client.get_ticket(ticket_id)[3]["_ts"] == second_ts
 
         second = await _handle_update(
