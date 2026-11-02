@@ -143,6 +143,10 @@ trac-mcp wiki-push Docs/Design design.md          # Markdown is converted on the
 trac-mcp wiki-pull Docs/Design design.md
 trac-mcp attach-put --ticket 42 trace.bin
 trac-mcp attach-get --page Docs/Design diagram.png diagram.png
+trac-mcp ticket-comment 42 note.wiki              # TracWiki body sent verbatim; prints the new comment number
+trac-mcp ticket-describe 42 body.wiki             # replace the description, locked against concurrent edits
+trac-mcp ticket-create --summary "Title" --description-file body.wiki
+trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment) back, byte for byte
 ```
 
 It connects with the nearest `.mcp.json` entry (or `--url`). See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).

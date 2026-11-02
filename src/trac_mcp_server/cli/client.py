@@ -1,4 +1,5 @@
-"""trac-mcp: move files between this machine and a trac-mcp-server (ticket #111).
+"""trac-mcp: move files and ticket bodies between this machine and a
+trac-mcp-server (tickets #111, #114).
 
 The server's file tools cannot see the caller's filesystem once the server
 runs somewhere else (the http transport), and with ``file_access: off``
@@ -8,7 +9,9 @@ same tools over streamable HTTP with their inline forms (``content`` /
 ``content_base64``). A program serializes the bytes, so nothing passes
 through a model's transcript, and the call keeps everything the server
 does on a write: the caller's identity, Markdown conversion, the
-indentation guard and the link gate.
+indentation guard and the link gate. Ticket comments, descriptions and
+new tickets go the same way (``ticket-comment``, ``ticket-describe``,
+``ticket-create``, ``ticket-pull``), the body sent verbatim as TracWiki.
 
 Where to connect, in order:
 
@@ -307,10 +310,231 @@ def _attach_target(args: argparse.Namespace) -> tuple[str, dict]:
     return "wiki", {"page_name": args.page}
 
 
+_CREATED_RE = re.compile(r"Created ticket #(\d+)")
+
+
+def _read_body(path: str, what: str) -> str:
+    """The body file as text, sent verbatim. An empty one is refused here
+    (the server would refuse it too), with the same non-UTF-8 warning as
+    wiki-push."""
+    text, encoding, _ = _read_text(path)
+    if encoding != "utf-8":
+        print(
+            f"warning: {path} decoded as '{encoding}', not UTF-8 "
+            f"-- check the stored {what}",
+            file=sys.stderr,
+        )
+    if not text.strip():
+        raise CliError(
+            f"{path} is empty: no {what} to send", EXIT_USAGE_ERROR
+        )
+    return text
+
+
+def _sc(result) -> dict:
+    return result.structuredContent or {}
+
+
+async def _lock_token(
+    args: argparse.Namespace, url: str, token: str | None
+) -> tuple[str | None, Any]:
+    """The ``base_ts`` for an update: ``--base-ts``, else the ticket's
+    current ``_ts`` read just now, so a change between this read and the
+    write is refused rather than overwritten. Returns ``(base_ts, None)``,
+    or ``(None, error_result)`` when the pre-read itself failed."""
+    if args.base_ts is not None:
+        return args.base_ts, None
+    result = await call_tool(
+        url,
+        token,
+        "ticket_get",
+        _with_instance(
+            args,
+            {"ticket_id": args.ticket, "include_comments": False},
+        ),
+    )
+    if result.isError:
+        return None, result
+    ts = _sc(result).get("_ts")
+    if ts is None or ts == "":
+        raise CliError(
+            f"ticket #{args.ticket} carries no change token (_ts); "
+            "refusing to write without optimistic locking -- pass "
+            "--base-ts to choose a token yourself",
+            EXIT_TOOL_ERROR,
+        )
+    return str(ts), None
+
+
+def _comment_number(changelog: list, text: str) -> str | None:
+    """The number of the comment this CLI just added, read from the
+    changelog (never counted: numbers have gaps after a deleted comment).
+    ``--reply-to`` stores a quoted prefix ahead of the body, hence
+    ``endswith``; the highest-numbered match wins."""
+    best: tuple[float, str] | None = None
+    for entry in changelog:
+        if entry.get("field") != "comment":
+            continue
+        if not (entry.get("newvalue") or "").endswith(text):
+            continue
+        number = str(entry.get("oldvalue"))
+        try:
+            key = float(number)
+        except ValueError:
+            key = float("-inf")
+        if best is None or key >= best[0]:
+            best = (key, number)
+    return best[1] if best else None
+
+
+async def _ticket_update(
+    args: argparse.Namespace, url: str, token: str | None
+) -> int:
+    """ticket-comment and ticket-describe."""
+    describe = args.command == "ticket-describe"
+    text = _read_body(
+        args.file, "description" if describe else "comment"
+    )
+    base_ts, failed = await _lock_token(args, url, token)
+    if failed is not None:
+        return _report(failed)
+    arguments: dict[str, Any] = {
+        "ticket_id": args.ticket,
+        "description" if describe else "comment": text,
+        "base_ts": base_ts,
+    }
+    if not describe and args.reply_to is not None:
+        arguments["reply_to"] = args.reply_to
+    result = await call_tool(
+        url, token, "ticket_update", _with_instance(args, arguments)
+    )
+    if describe or result.isError:
+        return _report(result)
+
+    changelog = await call_tool(
+        url,
+        token,
+        "ticket_changelog",
+        _with_instance(args, {"ticket_id": args.ticket}),
+    )
+    number = None
+    if not changelog.isError:
+        number = _comment_number(
+            _sc(changelog).get("changelog") or [], text
+        )
+    _report(result)
+    if number is None:
+        print(
+            "trac-mcp: the comment was added, but trac-mcp could not "
+            "determine the comment number",
+            file=sys.stderr,
+        )
+        return EXIT_TOOL_ERROR
+    print(f"Added comment {number} to ticket #{args.ticket}")
+    return EXIT_OK
+
+
+async def _ticket_create(
+    args: argparse.Namespace, url: str, token: str | None
+) -> int:
+    description = _read_body(args.description_file, "description")
+    if not args.summary.strip():
+        raise CliError("--summary is empty", EXIT_USAGE_ERROR)
+    arguments: dict[str, Any] = {
+        "summary": args.summary,
+        "description": description,
+    }
+    # `type` would be dropped silently by the server; its field is
+    # ticket_type.
+    for flag, key in (
+        ("type", "ticket_type"),
+        ("component", "component"),
+        ("keywords", "keywords"),
+        ("owner", "owner"),
+        ("priority", "priority"),
+        ("milestone", "milestone"),
+    ):
+        value = getattr(args, flag)
+        if value is not None:
+            arguments[key] = value
+    result = await call_tool(
+        url, token, "ticket_create", _with_instance(args, arguments)
+    )
+    rc = _report(result)
+    if rc != EXIT_OK:
+        return rc
+    if not _CREATED_RE.search(_result_text(result)):
+        print(
+            "trac-mcp: could not read the new ticket number from the "
+            "result above",
+            file=sys.stderr,
+        )
+        return EXIT_TOOL_ERROR
+    return EXIT_OK
+
+
+async def _ticket_pull(
+    args: argparse.Namespace, url: str, token: str | None
+) -> int:
+    _check_output_dir(args.file)
+    if args.comment is None:
+        result = await call_tool(
+            url,
+            token,
+            "ticket_get",
+            _with_instance(
+                args,
+                {"ticket_id": args.ticket, "include_comments": False},
+            ),
+        )
+        if result.isError:
+            return _report(result)
+        body = _payload(result, "description")
+        what = f"description of ticket #{args.ticket}"
+    else:
+        result = await call_tool(
+            url,
+            token,
+            "ticket_changelog",
+            _with_instance(args, {"ticket_id": args.ticket}),
+        )
+        if result.isError:
+            return _report(result)
+        body = None
+        for entry in _payload(result, "changelog"):
+            if entry.get("field") == "comment" and str(
+                entry.get("oldvalue")
+            ) == str(args.comment):
+                body = entry.get("newvalue") or ""
+        if body is None:
+            raise CliError(
+                f"ticket #{args.ticket} has no comment {args.comment}",
+                EXIT_TOOL_ERROR,
+            )
+        what = f"comment {args.comment} of ticket #{args.ticket}"
+    data = body.encode("utf-8")
+    _write_bytes(args.file, data)
+    _say(
+        args.file == "-",
+        f"Pulled {what} to {args.file} ({len(data)} bytes)",
+    )
+    _say_instance(args.file == "-", result)
+    return EXIT_OK
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
     cmd = args.command
+
+    if cmd in ("ticket-comment", "ticket-describe"):
+        return await _ticket_update(args, url, token)
+
+    if cmd == "ticket-create":
+        return await _ticket_create(args, url, token)
+
+    if cmd == "ticket-pull":
+        return await _ticket_pull(args, url, token)
 
     if cmd == "wiki-push":
         text, encoding, filename = _read_text(args.file)
@@ -451,9 +675,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trac-mcp",
         description=(
-            "Push and pull wiki pages and attachments between this machine "
-            "and a trac-mcp-server over HTTP. Connects using --url, else "
-            "the nearest .mcp.json's trac-http entry, else TRAC_MCP_URL."
+            "Push and pull wiki pages, attachments and ticket bodies "
+            "(ticket-comment, ticket-describe, ticket-create, ticket-pull) "
+            "between this machine and a trac-mcp-server over HTTP. "
+            "Connects using --url, else the nearest .mcp.json's trac-http "
+            "entry, else TRAC_MCP_URL."
         ),
     )
     parser.add_argument(
@@ -549,6 +775,63 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "file", help="Local output file ('-' for stdout)"
             )
+
+    for name, helptext in (
+        ("ticket-comment", "Add a comment to a ticket from a file"),
+        (
+            "ticket-describe",
+            "Replace a ticket's description from a file",
+        ),
+    ):
+        p = sub.add_parser(name, help=helptext)
+        p.add_argument("ticket", type=int, help="Ticket number")
+        p.add_argument(
+            "file",
+            help="Local TracWiki file ('-' for stdin), sent verbatim",
+        )
+        p.add_argument(
+            "--base-ts",
+            help="Change token to lock against (default: the ticket's "
+            "current _ts, read just before the write)",
+        )
+        if name == "ticket-comment":
+            p.add_argument(
+                "--reply-to",
+                type=int,
+                help="Comment number to reply to (quotes it)",
+            )
+
+    p = sub.add_parser(
+        "ticket-create",
+        help="Create a ticket whose description comes from a file",
+    )
+    p.add_argument("--summary", required=True, help="Ticket title")
+    p.add_argument(
+        "--description-file",
+        required=True,
+        help="Local TracWiki file ('-' for stdin), sent verbatim",
+    )
+    for flag in (
+        "type",
+        "component",
+        "keywords",
+        "owner",
+        "priority",
+        "milestone",
+    ):
+        p.add_argument(f"--{flag}", help=f"Ticket {flag}")
+
+    p = sub.add_parser(
+        "ticket-pull",
+        help="Write a ticket's description (or one comment) to a file",
+    )
+    p.add_argument("ticket", type=int, help="Ticket number")
+    p.add_argument("file", help="Local output file ('-' for stdout)")
+    p.add_argument(
+        "--comment",
+        type=int,
+        help="Pull this comment's body instead of the description",
+    )
 
     p = sub.add_parser(
         "detect-format",

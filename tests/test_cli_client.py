@@ -574,3 +574,551 @@ def test_result_without_payload_is_a_tool_error(
     assert rc == cli.EXIT_TOOL_ERROR
     assert "carries no content" in capsys.readouterr().err
     assert not (tmp_path / "p.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Ticket bodies (#114): ticket-comment / -describe / -create / -pull
+# ---------------------------------------------------------------------------
+
+# Everything an inline JSON body or a shell heredoc used to mangle: both
+# quote kinds, backslashes, a literal two-character \n, a tab, a non-ASCII
+# dash, a TracWiki code block, and a trailing newline.
+_HARD_BODY = (
+    "= Heading =\n"
+    "\"double\" 'single' \\backslash\\ and a literal \\n here\n"
+    "\tTab — em dash\n"
+    "{{{\n  indented code\n}}}\n"
+)
+
+
+class FakeTracTickets(FakeTrac):
+    """FakeTrac plus the ticket client methods the ticket tools call.
+
+    ``_ts`` is a numeric string that changes on every write, as in Trac;
+    ``update_ticket`` enforces ``base_ts`` the way the real client does.
+    Comment rows are ``[time, author, "comment", number, body, permanent]``
+    with the number in ``oldvalue``, as the server's own handlers read them.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.tickets: dict[int, dict] = {}
+        self.changelogs: dict[int, list[list]] = {}
+        self._clock = 1_700_000_000
+        self.get_calls = 0
+        self.updates: list[dict] = []
+        self.creates: list[dict] = []
+        # Called after each get_ticket: a "concurrent" writer.
+        self.on_get = None
+        self.omit_ts = False
+        self.hide_changelog = False
+
+    def _tick(self) -> int:
+        self._clock += 1
+        return self._clock
+
+    def add_ticket(self, ticket_id, description="old", comments=()):
+        """Seed a ticket; ``comments`` is a list of (number, body)."""
+        self.tickets[ticket_id] = {
+            "summary": f"ticket {ticket_id}",
+            "description": description,
+            "status": "new",
+            "type": "defect",
+            "_ts": str(self._tick()),
+        }
+        self.changelogs[ticket_id] = [
+            [self._tick(), "alice", "comment", str(n), body, 1]
+            for n, body in comments
+        ]
+
+    def touch(self, ticket_id, who="bob"):
+        """Someone else changes the ticket."""
+        self.tickets[ticket_id]["_ts"] = str(self._tick())
+        self.changelogs[ticket_id].append(
+            [self._clock, who, "keywords", "", "x", 1]
+        )
+
+    def get_ticket(self, ticket_id):
+        self.get_calls += 1
+        attrs = dict(self.tickets[ticket_id])
+        if self.omit_ts:
+            attrs.pop("_ts")
+        result = [ticket_id, self._clock, self._clock, attrs]
+        if self.on_get:
+            self.on_get(ticket_id)
+        return result
+
+    def get_ticket_changelog(self, ticket_id):
+        if self.hide_changelog:
+            return []
+        return list(self.changelogs[ticket_id])
+
+    def update_ticket(
+        self,
+        ticket_id,
+        comment="",
+        attributes=None,
+        notify=False,
+        base_ts=None,
+    ):
+        from trac_mcp_server.core.client import TicketUpdateConflict
+
+        self.updates.append(
+            {
+                "ticket_id": ticket_id,
+                "comment": comment,
+                "attributes": dict(attributes or {}),
+                "base_ts": base_ts,
+            }
+        )
+        ticket = self.tickets[ticket_id]
+        if base_ts is not None and str(base_ts) != ticket["_ts"]:
+            raise TicketUpdateConflict(
+                "stale",
+                ticket_id,
+                base_ts,
+                [
+                    {
+                        "field": "keywords",
+                        "author": "bob",
+                        "timestamp": "t",
+                    }
+                ],
+            )
+        for key, value in (attributes or {}).items():
+            ticket[key] = value
+        if comment:
+            numbers = [
+                int(r[3])
+                for r in self.changelogs[ticket_id]
+                if r[2] == "comment"
+            ]
+            self.changelogs[ticket_id].append(
+                [
+                    self._tick(),
+                    "agent",
+                    "comment",
+                    str(max(numbers, default=0) + 1),
+                    comment,
+                    1,
+                ]
+            )
+        ticket["_ts"] = str(self._tick())
+        return [ticket_id]
+
+    def create_ticket(
+        self,
+        summary,
+        description,
+        ticket_type=None,
+        attributes=None,
+        notify=False,
+    ):
+        new_id = max(self.tickets, default=0) + 1
+        self.creates.append(
+            {
+                "summary": summary,
+                "description": description,
+                "ticket_type": ticket_type,
+                "attributes": dict(attributes or {}),
+            }
+        )
+        self.add_ticket(new_id, description)
+        self.tickets[new_id]["type"] = ticket_type
+        return new_id
+
+
+def _body_file(tmp_path, body=_HARD_BODY, name="body.wiki"):
+    f = tmp_path / name
+    f.write_bytes(body.encode("utf-8"))
+    return f
+
+
+def _printed_comment_number(out: str) -> int:
+    import re
+
+    m = re.search(r"Added comment (\d+) to ticket #\d+", out)
+    assert m, out
+    return int(m.group(1))
+
+
+def _comments_of(trac, ticket_id):
+    return [r for r in trac.changelogs[ticket_id] if r[2] == "comment"]
+
+
+class TestTicketBodies:
+    def test_comment_roundtrip_is_byte_exact(self, tmp_path, capsys):
+        src = _body_file(tmp_path)
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-comment", "7", str(src)) == 0
+            n = _printed_comment_number(capsys.readouterr().out)
+            out = tmp_path / "back.wiki"
+            rc = _cli(
+                url, "ticket-pull", "7", str(out), "--comment", str(n)
+            )
+            assert rc == cli.EXIT_OK
+        assert out.read_bytes() == src.read_bytes()
+        assert trac.updates[0]["comment"] == _HARD_BODY
+
+    def test_describe_roundtrip_is_byte_exact(self, tmp_path):
+        src = _body_file(tmp_path)
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-describe", "7", str(src)) == 0
+            out = tmp_path / "back.wiki"
+            assert _cli(url, "ticket-pull", "7", str(out)) == 0
+        assert out.read_bytes() == src.read_bytes()
+        assert trac.updates[0]["attributes"] == {
+            "description": _HARD_BODY
+        }
+
+    def test_create_roundtrip_is_byte_exact(self, tmp_path, capsys):
+        src = _body_file(tmp_path)
+        trac = FakeTracTickets()
+        with _served(trac) as url:
+            rc = _cli(
+                url,
+                "ticket-create",
+                "--summary",
+                "S",
+                "--description-file",
+                str(src),
+            )
+            assert rc == cli.EXIT_OK
+            assert "Created ticket #1" in capsys.readouterr().out
+            out = tmp_path / "back.wiki"
+            assert _cli(url, "ticket-pull", "1", str(out)) == 0
+        assert out.read_bytes() == src.read_bytes()
+
+    def test_create_names_the_argument_ticket_type_on_the_wire(
+        self, tmp_path, monkeypatch
+    ):
+        # The server aliases a bare `type` to `ticket_type` today (#97), so
+        # the real-substrate test below cannot tell the two apart. The
+        # contract is the canonical name; pin what the CLI itself sends.
+        sent = []
+
+        async def _record(url, token, name, arguments):
+            sent.append((name, arguments))
+            return SimpleNamespace(
+                isError=False,
+                content=[SimpleNamespace(text="Created ticket #9: S")],
+                structuredContent=None,
+            )
+
+        monkeypatch.setattr(cli, "call_tool", _record)
+        src = _body_file(tmp_path)
+        rc = cli.main(
+            [
+                "--url",
+                "http://x/mcp",
+                "ticket-create",
+                "--summary",
+                "S",
+                "--description-file",
+                str(src),
+                "--type",
+                "task",
+            ],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_OK
+        ((name, arguments),) = sent
+        assert name == "ticket_create"
+        assert arguments["ticket_type"] == "task"
+        assert "type" not in arguments
+
+    def test_create_sends_ticket_type_not_type(self, tmp_path):
+        # "enhancement", not the default "defect": a dropped argument must
+        # not look the same as a delivered one.
+        src = _body_file(tmp_path)
+        trac = FakeTracTickets()
+        with _served(trac) as url:
+            rc = _cli(
+                url,
+                "ticket-create",
+                "--summary",
+                "S",
+                "--description-file",
+                str(src),
+                "--type",
+                "enhancement",
+                "--component",
+                "cli",
+                "--keywords",
+                "k",
+                "--owner",
+                "o",
+                "--priority",
+                "high",
+                "--milestone",
+                "m1",
+            )
+        assert rc == cli.EXIT_OK
+        sent = trac.creates[0]
+        assert sent["ticket_type"] == "enhancement"
+        assert sent["attributes"] == {
+            "component": "cli",
+            "keywords": "k",
+            "owner": "o",
+            "priority": "high",
+            "milestone": "m1",
+        }
+
+    def test_comment_number_is_read_not_counted(self, tmp_path, capsys):
+        # Comments 1, 2, 5: a gap, as after a deleted comment. Counting
+        # would say 4; the stored number is 6.
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "a"), (2, "b"), (5, "c")])
+        src = _body_file(tmp_path, "new comment\n")
+        with _served(trac) as url:
+            assert _cli(url, "ticket-comment", "7", str(src)) == 0
+        assert _printed_comment_number(capsys.readouterr().out) == 6
+
+    def test_reply_to_sends_reply_to_and_number_is_right(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "first"), (5, "fifth")])
+        src = _body_file(tmp_path, "my reply\n")
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-comment", "7", str(src), "--reply-to", "5"
+            )
+            assert rc == cli.EXIT_OK
+            n = _printed_comment_number(capsys.readouterr().out)
+            out = tmp_path / "back.wiki"
+            rc = _cli(
+                url, "ticket-pull", "7", str(out), "--comment", str(n)
+            )
+            assert rc == cli.EXIT_OK
+        assert n == 6
+        stored = trac.updates[0]["comment"]
+        assert stored.startswith(
+            "Replying to [comment:5 alice]:\n> fifth"
+        )
+        assert out.read_bytes().decode().endswith("my reply\n")
+
+    def test_comment_locks_with_the_ts_it_read(self, tmp_path):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        ts = trac.tickets[7]["_ts"]
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-comment", "7", str(src)) == 0
+        assert trac.updates[0]["base_ts"] == ts
+
+    @pytest.mark.parametrize(
+        "cmd", ["ticket-comment", "ticket-describe"]
+    )
+    def test_change_between_read_and_write_is_a_conflict(
+        self, tmp_path, capsys, cmd
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, description="theirs")
+        trac.on_get = (
+            trac.touch
+        )  # a concurrent writer, after our pre-read
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(url, cmd, "7", str(src))
+        assert rc == cli.EXIT_TOOL_ERROR
+        err = capsys.readouterr().err
+        assert "version_conflict" in err
+        assert "modified since" in err
+        assert trac.tickets[7]["description"] == "theirs"
+        assert _comments_of(trac, 7) == []
+
+    def test_stale_base_ts_is_a_conflict(self, tmp_path, capsys):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-comment", "7", str(src), "--base-ts", "1"
+            )
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "version_conflict" in capsys.readouterr().err
+        assert trac.get_calls == 0  # --base-ts skips the pre-read
+        assert _comments_of(trac, 7) == []
+
+    def test_correct_base_ts_succeeds_without_a_preread(self, tmp_path):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        ts = trac.tickets[7]["_ts"]
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-describe", "7", str(src), "--base-ts", ts
+            )
+        assert rc == cli.EXIT_OK
+        assert trac.get_calls == 0
+        assert trac.updates[0]["base_ts"] == ts
+        assert trac.tickets[7]["description"] == _HARD_BODY
+
+    def test_missing_change_token_refuses_to_write_unlocked(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        trac.omit_ts = True
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment", "7", str(src))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "_ts" in capsys.readouterr().err
+        assert trac.updates == []
+
+    def test_failed_preread_is_reported(self, tmp_path, capsys):
+        trac = FakeTracTickets()  # no ticket 9
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment", "9", str(src))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert trac.updates == []
+
+    def test_undeterminable_comment_number_exits_1(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        trac.hide_changelog = True
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment", "7", str(src))
+        assert rc == cli.EXIT_TOOL_ERROR
+        captured = capsys.readouterr()
+        assert "could not determine the comment number" in captured.err
+        assert "Updated ticket #7" in captured.out
+        assert len(trac.updates) == 1
+
+    def test_pull_of_a_missing_comment_exits_1(self, tmp_path, capsys):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "a")])
+        out = tmp_path / "out.wiki"
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-pull", "7", str(out), "--comment", "99"
+            )
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "ticket #7 has no comment 99" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_pull_to_stdout_keeps_stdout_for_the_data(
+        self, tmp_path, capfd
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, description=_HARD_BODY)
+        with _served(trac) as url:
+            assert _cli(url, "ticket-pull", "7", "-") == 0
+        captured = capfd.readouterr()
+        assert captured.out == _HARD_BODY
+        assert "Pulled" in captured.err
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["ticket-comment", "7"],
+            ["ticket-describe", "7"],
+            ["ticket-create", "--summary", "S", "--description-file"],
+        ],
+    )
+    @pytest.mark.parametrize("body", ["", "  \n\t\n"])
+    def test_empty_body_is_a_usage_error_with_no_call(
+        self, tmp_path, monkeypatch, capsys, argv, body
+    ):
+        _no_network(monkeypatch)
+        src = _body_file(tmp_path, body)
+        rc = cli.main(
+            ["--url", "http://x/mcp", *argv, str(src)],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+        assert "empty" in capsys.readouterr().err
+
+    def test_pull_to_missing_output_dir_fails_before_any_call(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _no_network(monkeypatch)
+        for extra in ([], ["--comment", "1"]):
+            rc = cli.main(
+                [
+                    "--url",
+                    "http://x/mcp",
+                    "ticket-pull",
+                    "7",
+                    str(tmp_path / "missing" / "o.wiki"),
+                    *extra,
+                ],
+                cwd=tmp_path,
+                environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+            )
+            assert rc == cli.EXIT_USAGE_ERROR
+        assert (
+            "output directory does not exist" in capsys.readouterr().err
+        )
+
+    def test_non_utf8_body_warns_like_wiki_push(self, tmp_path, capsys):
+        trac = FakeTracTickets()
+        trac.add_ticket(7)
+        src = tmp_path / "latin.wiki"
+        src.write_bytes(
+            "caf\xe9 cr\xe8me, na\xefve fa\xe7ade\n".encode("latin-1")
+        )
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment", "7", str(src))
+        assert rc == cli.EXIT_OK
+        assert "not UTF-8" in capsys.readouterr().err
+
+    def test_instance_reaches_every_call(self, tmp_path, monkeypatch):
+        sent = []
+
+        async def _record(url, token, name, arguments):
+            sent.append((name, arguments))
+            structured = {
+                "ticket_get": {"_ts": "5"},
+                "ticket_changelog": {
+                    "changelog": [
+                        {
+                            "field": "comment",
+                            "oldvalue": "3",
+                            "newvalue": "hi\n",
+                        }
+                    ]
+                },
+            }.get(name, {})
+            return SimpleNamespace(
+                isError=False,
+                content=[SimpleNamespace(text="ok")],
+                structuredContent=structured,
+            )
+
+        monkeypatch.setattr(cli, "call_tool", _record)
+        src = _body_file(tmp_path, "hi\n")
+        rc = cli.main(
+            [
+                "--url",
+                "http://x/mcp",
+                "--instance",
+                "/other",
+                "ticket-comment",
+                "7",
+                str(src),
+            ],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_OK
+        assert [n for n, _ in sent] == [
+            "ticket_get",
+            "ticket_update",
+            "ticket_changelog",
+        ]
+        assert all(a["instance"] == "/other" for _, a in sent)
+        assert sent[0][1]["include_comments"] is False
+        assert sent[1][1]["base_ts"] == "5"

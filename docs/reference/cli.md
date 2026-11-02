@@ -165,7 +165,20 @@ trac-mcp wiki-pull PAGE FILE [--format markdown|tracwiki] [--page-version N]
 trac-mcp attach-put (--ticket N | --page PAGE) FILE [--filename NAME] [--description TEXT] [--replace]
 trac-mcp attach-get (--ticket N | --page PAGE) NAME FILE
 trac-mcp detect-format FILE        # runs locally, no server call
+trac-mcp ticket-comment TICKET FILE [--reply-to N] [--base-ts TS]
+trac-mcp ticket-describe TICKET FILE [--base-ts TS]
+trac-mcp ticket-create --summary S --description-file FILE [--type T] [--component C] [--keywords K] [--owner O] [--priority P] [--milestone M]
+trac-mcp ticket-pull TICKET FILE [--comment N]
 ```
+
+The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and sent **verbatim** as TracWiki -- no format detection and no conversion -- and an empty file is a usage error (exit 2).
+
+- `ticket-comment` prints `Added comment N to ticket #T`; `N` is read back from the ticket's changelog, never counted. If it cannot be determined the command exits 1.
+- `ticket-comment` and `ticket-describe` lock optimistically: they read the ticket's `_ts` just before writing and pass it as `base_ts`, so a change in between is refused with `version_conflict` (exit 1) instead of overwritten. `--base-ts TS` supplies the token yourself and skips that read.
+- `ticket-create` prints the server's `Created ticket #N: ...` line.
+- `ticket-pull` writes the stored description (or comment `N`) to `FILE` (`-` for stdout) byte for byte, so `cmp` against the pushed file holds.
+
+The server's write-time link gate and notes apply to all three writes, as for the equivalent MCP tools.
 
 `FILE` may be `-` for stdin or stdout. From stdin `wiki-push` has no filename to detect a format from, so the text is stored as TracWiki unless you pass `--format markdown`. Global options go before the subcommand: `trac-mcp --instance /bcs wiki-push ...`.
 
