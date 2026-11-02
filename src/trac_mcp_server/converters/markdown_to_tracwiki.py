@@ -221,6 +221,12 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
 
 
+def _indent_nonblank(lines: list[str], indent: str) -> list[str]:
+    """Prefix every non-blank line with `indent`; a blank line stays blank
+    rather than picking up trailing whitespace (tickets #75, #112)."""
+    return [indent + line if line else line for line in lines]
+
+
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -506,10 +512,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         should terminate that absorbed paragraph gets consumed as the
         separator that terminated the list instead, silently merging it
         into whatever real paragraph comes next (ticket #52). Safe for
-        nested lists too: `list_item`'s handling of a nested list already
-        strips all trailing newlines from `nested_text` before splicing it
-        in, so the extra blank line added here never leaks into a parent
-        item.
+        nested lists too: `render_token`'s list-item branch already strips
+        all surrounding newlines from each rendered run (a nested list, or
+        a continuation paragraph after one) before joining the runs, so
+        the extra blank line added here never leaks into a parent item.
         """
         return text + "\n"
 
@@ -789,11 +795,9 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     runs: list[tuple[bool, list[dict[str, Any]]]] = []
                     for child in children:
                         is_list = child.get("type") == "list"
-                        if (
-                            runs
-                            and runs[-1][0] == is_list
-                            and not is_list
-                        ):
+                        # Adjacent non-lists share a run; every list is
+                        # its own run.
+                        if runs and not is_list and not runs[-1][0]:
                             runs[-1][1].append(child)
                         else:
                             runs.append((is_list, [child]))
@@ -828,6 +832,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 prefix = f"{indent}{marker}"
 
                 text = text.rstrip("\n")
+                continuation_indent = " " * (len(prefix) + 1)
 
                 # A soft break inside the item (or a blank line between two
                 # loose paragraphs) lands in `text` as a literal "\n": at
@@ -840,14 +845,12 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # itself does. A blank line stays blank rather than
                 # picking up trailing whitespace.
                 if "\n" in text:
-                    continuation_indent = " " * (len(prefix) + 1)
                     lines = text.split("\n")
                     text = "\n".join(
                         [lines[0]]
-                        + [
-                            continuation_indent + line if line else line
-                            for line in lines[1:]
-                        ]
+                        + _indent_nonblank(
+                            lines[1:], continuation_indent
+                        )
                     )
 
                 # Combine the item text with what follows it, in source
@@ -860,11 +863,12 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     if is_list:
                         parts.append(rendered)
                     else:
-                        continuation_indent = " " * (len(prefix) + 1)
                         parts.append("")
                         parts.extend(
-                            continuation_indent + line if line else line
-                            for line in rendered.split("\n")
+                            _indent_nonblank(
+                                rendered.split("\n"),
+                                continuation_indent,
+                            )
                         )
                 result = "\n".join(parts) + "\n"
 

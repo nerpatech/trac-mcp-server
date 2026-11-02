@@ -216,9 +216,12 @@ class TestItemChildrenKeepSourceOrder(unittest.TestCase):
     is not a list" and "the lists", and emit all of the first group, then
     all of the second -- so a paragraph that FOLLOWS a nested list in the
     Markdown was written ABOVE it. Every byte survived, so no check could
-    see it. Each expected value below was measured on the fixed
-    converter's design, and every row except the unchanged control fails
-    on the pre-fix code.
+    see it. Every row except the unchanged control fails on the pre-fix
+    code. These pin the converter's output string only. How Trac renders
+    that shape was measured live on /trac_test and is recorded on the
+    ticket: the paragraph follows the sub-list, but Trac closes the outer
+    list at the blank line, so later siblings open a new list (an ordered
+    one continues its numbering via ``<ol start>``).
     """
 
     def test_ticket_input_paragraph_stays_after_sub_list(self):
