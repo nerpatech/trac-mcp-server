@@ -511,51 +511,11 @@ class TestProbeAllowlist:
         assert result[href]["reason"] == "instance_not_allowed"
         assert _fetched(client) == []
 
-    def test_redirect_out_of_scope_is_not_followed(self):
-        """An allowed instance's dispatcher redirects a nested InterTrac
-        target onward: measured live, ``/trac_test/intertrac/
-        auto_pm%3Awiki%3AIndex`` answers 302 to ``/auto_pm/intertrac/
-        wiki%3AIndex``. The query string makes the href probeable."""
-        href = (
-            f"{TRAC_TEST}/intertrac/auto_pm%3Awiki%3AIndex"
-            "?/intertrac/wiki%3A"
-        )
-        client = _probe_client(frozenset({TRAC_TEST}))
-        client.session.get.return_value = MagicMock(
-            status_code=302,
-            headers={"Location": f"{AUTO_PM}/intertrac/wiki%3AIndex"},
-            url=href,
-        )
-        result = probe_targets(client, [href])
-        assert result[href] == {
-            "status": SKIPPED,
-            "resolved_url": None,
-            "reason": "instance_not_allowed",
-        }
-        assert _fetched(client) == [href]
-
-    def test_redirect_within_scope_is_followed(self):
-        page = f"{TRAC_TEST}/wiki/WikiStart"
-        responses = {
-            ALLOWED_HREF: MagicMock(
-                status_code=302,
-                headers={"Location": page},
-                url=ALLOWED_HREF,
-            ),
-            page: MagicMock(
-                status_code=200, text=EXISTING_PAGE_STUB, url=page
-            ),
-        }
-        client = _probe_client(frozenset({TRAC_TEST}))
-        client.session.get.side_effect = lambda url, **kw: responses[
-            url
-        ]
-        result = probe_targets(client, [ALLOWED_HREF])
-        assert result[ALLOWED_HREF] == {
-            "status": "exists",
-            "resolved_url": page,
-        }
-        assert _fetched(client) == [ALLOWED_HREF, page]
+    # The redirect cases (out of scope, within scope, to an encoded dot
+    # segment, to another allowed host, to another instance's
+    # dispatcher) moved to tests/test_session_destination_scope.py in
+    # #118: the session now follows redirects and refuses each
+    # out-of-scope hop itself, which a mocked `session.get` cannot show.
 
     @pytest.mark.parametrize(
         "href",
@@ -576,19 +536,6 @@ class TestProbeAllowlist:
         assert result[href]["reason"] == "instance_not_allowed"
         assert _fetched(client) == []
 
-    def test_redirect_to_an_encoded_dot_segment_is_not_followed(self):
-        client = _probe_client(frozenset({TRAC_TEST}))
-        client.session.get.return_value = MagicMock(
-            status_code=302,
-            headers={
-                "Location": f"{TRAC_TEST}/%2e%2e/auto_pm/wiki/Index"
-            },
-            url=ALLOWED_HREF,
-        )
-        result = probe_targets(client, [ALLOWED_HREF])
-        assert result[ALLOWED_HREF]["reason"] == "instance_not_allowed"
-        assert _fetched(client) == [ALLOWED_HREF]
-
     def test_allowed_other_host_is_not_probed_with_this_clients_session(
         self,
     ):
@@ -603,18 +550,6 @@ class TestProbeAllowlist:
         assert result[href]["reason"] == "instance_not_allowed"
         assert _fetched(client) == []
 
-    def test_redirect_to_another_allowed_host_is_not_followed(self):
-        other = "https://other.example/x"
-        client = _probe_client(frozenset({TRAC_TEST, other}))
-        client.session.get.return_value = MagicMock(
-            status_code=302,
-            headers={"Location": f"{other}/wiki/Y"},
-            url=ALLOWED_HREF,
-        )
-        result = probe_targets(client, [ALLOWED_HREF])
-        assert result[ALLOWED_HREF]["reason"] == "instance_not_allowed"
-        assert _fetched(client) == [ALLOWED_HREF]
-
     def test_a_dispatcher_must_be_an_allowed_instance_exactly(self):
         """resolve() matches exactly, so the probe must too: a host-root
         entry allows a Trac AT the root, not every instance below it
@@ -626,23 +561,6 @@ class TestProbeAllowlist:
         result = probe_targets(client, [REFUSED_HREF])
         assert result[REFUSED_HREF]["reason"] == "instance_not_allowed"
         assert _fetched(client) == []
-
-    def test_redirect_to_another_instances_dispatcher_is_not_followed(
-        self,
-    ):
-        client = _probe_client(frozenset({HOST}))
-        client.config = _config(
-            trac_url=HOST, allowed_instances=frozenset({HOST})
-        )
-        href = f"{HOST}/intertrac/wiki%3AWikiStart"
-        client.session.get.return_value = MagicMock(
-            status_code=302,
-            headers={"Location": REFUSED_HREF},
-            url=href,
-        )
-        result = probe_targets(client, [href])
-        assert result[href]["reason"] == "instance_not_allowed"
-        assert _fetched(client) == [href]
 
     def test_no_allowlist_probes_everything(self):
         client = _probe_client(None)
