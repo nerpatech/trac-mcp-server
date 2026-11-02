@@ -1716,3 +1716,78 @@ def test_113_a_real_unconfigured_prefix_still_warns_alone():
         code="unconfigured_intertrac_prefix",
     )
     assert len(found) == 1
+
+
+# ---------------------------------------------------------------------
+# Ticket #113, review fixes.
+# ---------------------------------------------------------------------
+
+
+def test_113_backtracking_cannot_turn_a_qualified_form_into_a_bare_one():
+    """`attachment:ab:wiki:Page` must not be read as the bare token
+    `attachment:a` by backtracking the filename one character."""
+    found = _attachment_findings(
+        "[attachment:ab:wiki:Page l]",
+        "<p>" + _MISSING_ATTACHMENT.format("l") + "</p>",
+        frozenset({"a"}),
+    )
+    assert len(found) == 1
+    assert found[0]["severity"] == "error"
+
+
+def test_113_an_escaped_token_is_not_counted():
+    """`!attachment:ok.jpg` renders as plain text -- no anchor -- so it
+    must not spend the budget the unescaped token's anchor needs."""
+    found = _attachment_findings(
+        "!attachment:ok.jpg and attachment:gone.jpg",
+        "<p>attachment:ok.jpg and "
+        + _MISSING_ATTACHMENT.format("attachment:gone.jpg")
+        + "</p>",
+        frozenset({"ok.jpg"}),
+    )
+    assert len(found) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "See attachment:x.jpg.",
+        "(attachment:x.jpg)",
+        "attachment:x.jpg,",
+        "attachment:x.jpg: the picture",
+        "Is it attachment:x.jpg?",
+        "[attachment:x.jpg label]",
+    ],
+)
+def test_113_trailing_punctuation_is_not_part_of_the_filename(source):
+    found = _attachment_findings(
+        source,
+        "<p>" + _MISSING_ATTACHMENT.format("attachment:x.jpg") + "</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert found == [], source
+
+
+def test_113_a_prefix_glued_to_an_attachment_link_still_warns():
+    """`(attachment:x.jpg,foo:wiki:Page)`: only the attachment token is
+    Trac's; `foo:wiki:Page` is a real unconfigured prefix."""
+    found = _attachment_findings(
+        "(attachment:x.jpg,foo:wiki:Page)",
+        "<p>("
+        + _MISSING_ATTACHMENT.format("attachment:x.jpg")
+        + ",foo:wiki:Page)</p>",
+        frozenset({"x.jpg"}),
+        code="unconfigured_intertrac_prefix",
+    )
+    assert len(found) == 1
+    assert "foo:wiki:Page" in str(found[0])
+
+
+def test_113_a_qualified_attachment_in_parentheses_is_fully_blanked():
+    found = _attachment_findings(
+        "(attachment:x.jpg:wiki:b-node/bench/SonoffS31)",
+        f"<p>({_QUALIFIED_ATTACHMENT_HTML})</p>",
+        frozenset(),
+        code="unconfigured_intertrac_prefix",
+    )
+    assert found == []

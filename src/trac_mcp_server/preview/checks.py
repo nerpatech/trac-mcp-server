@@ -205,10 +205,21 @@ _PREFIX_REALM_RE = re.compile(
 # then starts again at `jpg` (`\b` holds after the `.`), so a dotted
 # filename -- every real one -- still matched. Measured.
 #
-# `(?<!:)` keeps `foo:attachment:file`, the InterTrac form
+# `(?<![\w:])` keeps `foo:attachment:file`, the InterTrac form
 # `_INTERTRAC_REALMS` names, scanned: there `attachment` is the realm
 # of an unconfigured prefix, and blanking it would hide that prefix.
-_ATTACHMENT_TOKEN_RE = re.compile(r"(?<![\w:])attachment:[^\s\]`\"']*")
+#
+# Only the token itself is blanked: the filename, plus -- when one
+# follows -- the qualified `:realm:target` tail. The filename class
+# stops at the delimiters Trac stops at, so a prefix glued on behind a
+# comma (`(attachment:x.jpg,foo:wiki:Page)`) is not swallowed with it.
+# One filename class, shared with `_BARE_ATTACHMENT_RE`.
+_ATTACHMENT_FILE = r"[^\s\]:\"'<>,;()]"
+_ATTACHMENT_TOKEN_RE = re.compile(
+    r"(?<![\w:])attachment:"
+    + _ATTACHMENT_FILE
+    + r"+(?::[A-Za-z]+:[^\s\]`\"'<>,;()]+)?"
+)
 
 # The zero-width glyph Trac injects ahead of an InterTrac anchor's visible
 # text (`<span class="icon">​</span>`) -- stripped before any exact
@@ -502,14 +513,26 @@ def _autolinked_page_name(anchor: Any) -> str | None:
 
 
 # A BARE attachment reference in source (ticket #113): `attachment:FILE`
-# or `[attachment:FILE label]`. FILE excludes whitespace, `]`, `:` and
-# both quote characters, so a quoted filename is never captured (those
-# stay errors -- conservative), and the lookahead refuses a token whose
-# FILE is followed by a second colon segment (`attachment:FILE:wiki:P`),
-# the qualified form Trac resolves itself. `(?<![\w:])` keeps
-# `foo:attachment:x` (an InterTrac reference) from counting.
+# or `[attachment:FILE label]`. FILE is `_ATTACHMENT_FILE`, which
+# excludes whitespace, `]`, `:`, both quote characters and the
+# delimiters Trac ends a bare link at (`<>,;()`), so a quoted filename
+# is never captured (those stay errors -- conservative).
+#
+# Two lookaheads. The first, "no filename character follows", is what
+# makes the capture maximal: without it, for `attachment:ab:wiki:Page`
+# the engine backtracks from `ab` to `a` (next char `b`, not a colon)
+# and counts a QUALIFIED link as the bare token `a`. The second refuses
+# a `:realm:` tail -- the qualified form Trac resolves itself -- but
+# lets a sentence colon (`attachment:x.jpg: the picture`) through.
+# `(?<![\w:!])`: `foo:attachment:x` is an InterTrac reference, and
+# `!attachment:x` is escaped, renders no anchor, and so must not spend
+# the budget an unescaped token's anchor needs.
 _BARE_ATTACHMENT_RE = re.compile(
-    r"(?<![\w:])attachment:([^\s\]:\"']+)(?!:)"
+    r"(?<![\w:!])attachment:("
+    + _ATTACHMENT_FILE
+    + r"+)(?!"
+    + _ATTACHMENT_FILE
+    + r")(?!:[A-Za-z])"
 )
 
 
@@ -518,12 +541,16 @@ def _bare_attachment_counts(
 ) -> int:
     """How many bare attachment tokens in the source name a file that
     IS attached to the write's target -- outside code spans and fences.
-    Each one is entitled to clear one `missing attachment` anchor."""
+    Each one is entitled to clear one `missing attachment` anchor.
+
+    Trac drops sentence punctuation from the end of a bare link
+    (`attachment:x.jpg.` links `x.jpg`), so the captured name is
+    stripped of a trailing `.`, `!` or `?` before the comparison."""
     scan = blank_inline_code_spans(blank_code_fences(tracwiki))
     return sum(
         1
         for match in _BARE_ATTACHMENT_RE.finditer(scan)
-        if match.group(1) in attachment_names
+        if match.group(1).rstrip(".!?") in attachment_names
     )
 
 
@@ -614,6 +641,12 @@ def _check_missing_local_target(
     missing attachment -- and neither are quoted filenames. A token
     whose file is not attached clears nothing and stays an error, and a
     `missing wiki` anchor is never eligible.
+
+    Known residual: a bare `attachment:` token sitting inside another
+    link's label (`[wiki:X attachment:ok.jpg]`) is still counted
+    although Trac renders no anchor for it, so it can clear one
+    genuinely dead anchor. Accepted -- before #113 every such link was
+    refused.
     """
     budget = _bare_autolink_counts(tracwiki) if tracwiki else {}
     attachment_budget = (

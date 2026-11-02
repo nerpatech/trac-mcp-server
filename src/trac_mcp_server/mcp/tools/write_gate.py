@@ -395,7 +395,14 @@ async def _attachment_names(
                 and item
                 and isinstance(item[0], str)
             )
-    except Exception:
+    except Exception as exc:
+        target = wiki_page if wiki_page is not None else ticket_id
+        logger.warning(
+            "attachment lookup failed for %s: %s: %s",
+            target,
+            type(exc).__name__,
+            exc,
+        )
         return None
     return None
 

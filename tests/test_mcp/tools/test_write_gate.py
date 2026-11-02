@@ -1856,3 +1856,20 @@ def test_113_wiki_create_has_no_attachments_yet():
     )
     assert result.isError
     client.put_wiki_page.assert_not_called()
+
+
+def test_113_a_failed_attachment_lookup_is_logged(caplog):
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.side_effect = RuntimeError("boom")
+    with caplog.at_level(
+        "WARNING", logger="trac_mcp_server.mcp.tools.write_gate"
+    ):
+        refusal, _ = _gate(client, wiki_page="Page")
+    assert refusal is not None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "attachment lookup failed for" in m
+        and "Page" in m
+        and "RuntimeError: boom" in m
+        for m in messages
+    ), messages
