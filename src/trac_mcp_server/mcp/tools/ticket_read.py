@@ -430,7 +430,9 @@ async def _handle_get(
 
     # Extract fields
     summary = attrs.get("summary", "")
-    description = attrs.get("description", "")
+    # Trac returns None for a ticket whose description was never set; the
+    # response lines are joined as strings, so None must become "".
+    description = attrs.get("description") or ""
     status = attrs.get("status", "")
     owner = attrs.get("owner", "")
     reporter = attrs.get("reporter", "")

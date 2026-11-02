@@ -1779,6 +1779,32 @@ class TestHandleTicketGet:
                 == "https://trac.example.com/ticket/42"
             )
 
+    def test_get_none_description(self):
+        """A ticket whose description was never set comes back from Trac
+        with description None; ticket_get must still answer instead of
+        failing to join its response lines."""
+        client = self._client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [
+                    7,
+                    created,
+                    created,
+                    {"summary": "No text", "description": None},
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            assert not result.isError
+            assert "Ticket #7: No text" in result.content[0].text
+            assert result.structuredContent["description"] == ""
+
     def test_get_exposes_change_token(self):
         """ticket_get surfaces _ts as the change token callers pass back
         to ticket_update's base_ts (ticket #50) -- without this, there is

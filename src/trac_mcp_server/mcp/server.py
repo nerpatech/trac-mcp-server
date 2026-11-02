@@ -456,11 +456,15 @@ async def main(config_overrides: dict | None = None):
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
     declared_names = sorted(load_declared_instances())
-    all_specs = with_strict_schema(
-        with_instance_param(
-            with_page_alias([PING_SPEC] + ALL_SPECS), declared_names
-        )
-    )
+    specs = with_page_alias([PING_SPEC] + ALL_SPECS)
+    # With OIDC per-user auth every call goes to the one configured endpoint
+    # and _resolve_client rejects any other instance; advertising the
+    # argument only invites calls that are bound to fail.
+    if not (
+        server_config.transport == "http" and server_config.oidc_rpc_url
+    ):
+        specs = with_instance_param(specs, declared_names)
+    all_specs = with_strict_schema(specs)
     registry = ToolRegistry(
         all_specs,
         allowed_permissions,

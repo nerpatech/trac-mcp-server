@@ -209,7 +209,7 @@ async def _handle_get(
     milestone_name = milestone_data.get("name", name)
     due = milestone_data.get("due", 0)
     completed = milestone_data.get("completed", 0)
-    description = milestone_data.get("description", "")
+    description = milestone_data.get("description") or ""
 
     # Returned as stored, matching milestone_create/update, which have
     # always written verbatim -- that asymmetry was ticket #66.
