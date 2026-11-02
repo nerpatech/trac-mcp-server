@@ -951,6 +951,42 @@ def test_batch_update_refuses_one_item_and_writes_the_rest():
     assert "missing_local_target" in text
 
 
+def _batch_update_attachment_text(client):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": 1, "comment": ATTACHMENT_SOURCE},
+                        {"ticket_id": 2, "comment": ATTACHMENT_SOURCE},
+                    ]
+                },
+            )
+        )
+    return _text(result)
+
+
+def test_113_batch_update_checks_each_tickets_own_attachments():
+    client = _client(ATTACHMENT_HTML)
+    held = {1: [("x.jpg", "d", 1, 0, "u")], 2: []}
+    client.list_ticket_attachments.side_effect = lambda tid: held[tid]
+    text = _batch_update_attachment_text(client)
+    assert "1/2 succeeded, 1 failed" in text
+    assert "missing_local_target" in text
+
+
+def test_113_batch_update_keeps_its_strictness_when_the_list_raises():
+    client = _client(ATTACHMENT_HTML)
+    client.list_ticket_attachments.side_effect = RuntimeError("boom")
+    assert "0/2 succeeded, 2 failed" in _batch_update_attachment_text(
+        client
+    )
+
+
 # ---------------------------------------------------------------------
 # Live acceptance (ticket #64 section 8).
 #
@@ -1672,3 +1708,151 @@ class TestTicket105ChecksLive:
             assert client.get_wiki_page(self.PAGE) == body
         finally:
             client.delete_ticket(ticket_id)
+
+
+# ---------------------------------------------------------------------
+# Ticket #113. The pre-write render has no page/ticket context, so every
+# `attachment:` form renders `missing attachment` there. The gate asks
+# the target for its attachment list and clears the bare forms it holds.
+# ---------------------------------------------------------------------
+
+ATTACHMENT_HTML = (
+    '<p>\nSee <a class="missing attachment">label</a> here.\n</p>\n'
+)
+ATTACHMENT_SOURCE = "See [attachment:x.jpg label] here."
+
+
+def _gate(client, source=ATTACHMENT_SOURCE, **kwargs):
+    return asyncio.run(
+        gate_or_refuse(
+            client,
+            {"content": source},
+            {},
+            recheck_with="wiki_render_check",
+            **kwargs,
+        )
+    )
+
+
+def test_113_gate_allows_a_bare_attachment_the_page_holds():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.return_value = ["Page/x.jpg"]
+    refusal, _ = _gate(client, wiki_page="Page")
+    assert refusal is None
+    client.list_wiki_attachments.assert_called_once_with("Page")
+
+
+def test_113_gate_strips_the_exact_page_prefix_for_slashed_pages():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.return_value = ["A/B/x.jpg"]
+    refusal, _ = _gate(client, wiki_page="A/B")
+    assert refusal is None
+    # A file of a different page must not count.
+    client.list_wiki_attachments.return_value = ["A/x.jpg"]
+    refusal, _ = _gate(client, wiki_page="A/B")
+    assert refusal is not None
+
+
+def test_113_gate_refuses_when_the_page_has_no_attachments():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.return_value = []
+    refusal, _ = _gate(client, wiki_page="Page")
+    assert refusal is not None
+    assert "link_check_failed" in _text(refusal) or (
+        "missing_local_target" in _text(refusal)
+    )
+
+
+def test_113_gate_keeps_its_strictness_when_the_list_call_raises():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.side_effect = RuntimeError("boom")
+    refusal, _ = _gate(client, wiki_page="Page")
+    assert refusal is not None
+
+
+def test_113_gate_keeps_its_strictness_for_a_page_not_yet_created():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.side_effect = xmlrpc.client.Fault(
+        1, "page does not exist"
+    )
+    refusal, _ = _gate(client, wiki_page="Page")
+    assert refusal is not None
+
+
+def test_113_gate_allows_a_bare_attachment_the_ticket_holds():
+    client = _client(ATTACHMENT_HTML)
+    client.list_ticket_attachments.return_value = [
+        ("x.jpg", "d", 1, 0, "u")
+    ]
+    refusal, _ = _gate(client, ticket_id=7)
+    assert refusal is None
+    client.list_ticket_attachments.assert_called_once_with(7)
+
+
+def test_113_gate_refuses_when_the_ticket_has_no_attachments():
+    client = _client(ATTACHMENT_HTML)
+    client.list_ticket_attachments.return_value = []
+    refusal, _ = _gate(client, ticket_id=7)
+    assert refusal is not None
+
+
+def test_113_gate_keeps_its_strictness_when_the_ticket_list_raises():
+    client = _client(ATTACHMENT_HTML)
+    client.list_ticket_attachments.side_effect = RuntimeError("boom")
+    refusal, _ = _gate(client, ticket_id=7)
+    assert refusal is not None
+
+
+def test_113_a_new_ticket_has_no_attachments_and_is_not_asked():
+    client = _client(ATTACHMENT_HTML)
+    refusal, _ = _gate(client, new_ticket=True)
+    assert refusal is not None
+    client.list_ticket_attachments.assert_not_called()
+
+
+def test_113_no_target_means_no_lookup_and_no_downgrade():
+    client = _client(ATTACHMENT_HTML)
+    refusal, _ = _gate(client)
+    assert refusal is not None
+    client.list_wiki_attachments.assert_not_called()
+    client.list_ticket_attachments.assert_not_called()
+
+
+def test_113_no_attachment_text_means_no_lookup():
+    client = _client(BROKEN_HTML)
+    refusal, _ = _gate(client, BROKEN_SOURCE, wiki_page="Page")
+    assert refusal is not None
+    client.list_wiki_attachments.assert_not_called()
+
+
+def test_113_wiki_update_passes_the_page_being_written():
+    client = _client(ATTACHMENT_HTML)
+    client.list_wiki_attachments.return_value = ["Page/x.jpg"]
+    client.put_wiki_page.return_value = {"version": 2}
+    result = asyncio.run(
+        _handle_wiki_update(
+            client,
+            {
+                "page_name": "Page",
+                "content": ATTACHMENT_SOURCE,
+                "version": 1,
+            },
+        )
+    )
+    client.list_wiki_attachments.assert_called_once_with("Page")
+    assert not result.isError, _text(result)
+
+
+def test_113_wiki_create_has_no_attachments_yet():
+    client = _client(ATTACHMENT_HTML)
+    client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+        1, "does not exist"
+    )
+    result = asyncio.run(
+        _handle_wiki_create(
+            client,
+            {"page_name": "Page", "content": ATTACHMENT_SOURCE},
+        )
+    )
+    assert result.isError
+    client.put_wiki_page.assert_not_called()

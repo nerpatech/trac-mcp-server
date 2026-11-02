@@ -132,6 +132,7 @@ async def _run_checks(
     content: str,
     target_cap: int,
     known_comment_numbers: frozenset[int] | None,
+    attachment_names: frozenset[str] | None = None,
 ) -> list[dict]:
     """Render, probe, and assemble findings. Every step that can touch
     the network or the parser lives here, so `check_write`'s one guard
@@ -162,6 +163,7 @@ async def _run_checks(
         local_intertrac_bases=local_intertrac_bases(),
         own_prefix=own_intertrac_prefix(client),
         known_comment_numbers=known_comment_numbers,
+        attachment_names=attachment_names,
     )
 
 
@@ -173,6 +175,7 @@ async def check_write(
     recheck_with: str | None,
     target_cap: int = DEFAULT_TARGET_CAP,
     known_comment_numbers: frozenset[int] | None = None,
+    attachment_names: frozenset[str] | None = None,
 ) -> GateOutcome:
     """Run the link checks on one field of a pending write.
 
@@ -205,6 +208,12 @@ async def check_write(
             is no ticket to check against (a wiki/milestone write) or
             the caller hasn't computed it -- that check simply does not
             run.
+        attachment_names: Ticket #113. The file names attached to the
+            wiki page or ticket this write targets, so a bare
+            ``attachment:`` link to one of them is not refused as
+            missing -- the pre-write render has no page context and
+            marks every such link missing. ``None`` (the default) is no
+            context: those links stay errors, as before.
 
     Returns:
         A :class:`GateOutcome`. ``refusal`` is non-None exactly when a
@@ -215,7 +224,11 @@ async def check_write(
 
     try:
         warnings = await _run_checks(
-            client, content, target_cap, known_comment_numbers
+            client,
+            content,
+            target_cap,
+            known_comment_numbers,
+            attachment_names,
         )
     except Exception as exc:
         # The gate could not do its job. See the module docstring: a
@@ -333,6 +346,70 @@ async def _known_comment_numbers(
     return frozenset(known)
 
 
+# Ticket #113. ``attachment_names`` for a write that has no target yet
+# (a new ticket, a new page): nothing is attached, so every bare
+# ``attachment:`` link is still a dead one. Empty, not ``None`` -- the
+# result is the same errors, but the lookup is skipped for a target that
+# cannot have attachments.
+NEW_TARGET_ATTACHMENT_NAMES: frozenset[str] = frozenset()
+
+
+async def _attachment_names(
+    client: TracClient,
+    *,
+    wiki_page: str | None,
+    ticket_id: int | None,
+    new_ticket: bool,
+) -> frozenset[str] | None:
+    """Ticket #113. The file names attached to the target of this write,
+    or ``None`` for no context.
+
+    ``None`` on any failure of the list call: a target whose
+    attachments cannot be read gets today's strictness (the anchors stay
+    errors) rather than a guess -- the opposite of the fail-open paths
+    above, because here a wrong answer would CLEAR a finding. A page
+    that does not exist yet raises on the list call, and so lands on
+    ``None`` too; its bare links are errors either way.
+    """
+    if new_ticket:
+        return NEW_TARGET_ATTACHMENT_NAMES
+    try:
+        if wiki_page is not None:
+            listed = await run_sync(
+                client.list_wiki_attachments, wiki_page
+            )
+            prefix = wiki_page + "/"
+            return frozenset(
+                item[len(prefix) :]
+                for item in listed
+                if isinstance(item, str) and item.startswith(prefix)
+            )
+        if ticket_id is not None:
+            listed = await run_sync(
+                client.list_ticket_attachments, ticket_id
+            )
+            return frozenset(
+                item[0]
+                for item in listed
+                if isinstance(item, (list, tuple))
+                and item
+                and isinstance(item[0], str)
+            )
+    except Exception:
+        return None
+    return None
+
+
+async def attachment_names_for_ticket(
+    client: TracClient, ticket_id: int
+) -> frozenset[str] | None:
+    """:func:`_attachment_names` for a caller that gates through
+    :func:`check_write` directly (the batch tools)."""
+    return await _attachment_names(
+        client, wiki_page=None, ticket_id=ticket_id, new_ticket=False
+    )
+
+
 async def gate_or_refuse(
     client: TracClient,
     fields: dict[str, str | None],
@@ -341,6 +418,7 @@ async def gate_or_refuse(
     recheck_with: str | None,
     ticket_id: int | None = None,
     new_ticket: bool = False,
+    wiki_page: str | None = None,
 ) -> tuple[types.CallToolResult | None, list[str]]:
     """Gate several fields of one write, refusing on the first failure.
 
@@ -371,6 +449,14 @@ async def gate_or_refuse(
     comments, so every bare ``comment:N`` in its description is
     dangling. Skipping the check there used to let a description in
     that no later ``ticket_update`` could re-save.
+
+    ``wiki_page``, ticket #113: the page THIS write targets, the wiki
+    counterpart of ``ticket_id``. With either (or ``new_ticket``), the
+    target's attachment names are fetched -- only when a field contains
+    the substring ``attachment:`` -- so ``check_write`` can stop
+    refusing a bare ``attachment:`` link to a file the target holds.
+    Omitted by every caller with no target (milestone): no lookup, and
+    those links stay errors.
     """
     if not gate_enabled(client):
         return None, []
@@ -386,6 +472,20 @@ async def gate_or_refuse(
             client, ticket_id
         )
 
+    attachment_names: frozenset[str] | None = None
+    if (
+        new_ticket or wiki_page is not None or ticket_id is not None
+    ) and any(
+        content and "attachment:" in content
+        for content in fields.values()
+    ):
+        attachment_names = await _attachment_names(
+            client,
+            wiki_page=wiki_page,
+            ticket_id=ticket_id,
+            new_ticket=new_ticket,
+        )
+
     lines: list[str] = []
     for field, content in fields.items():
         outcome = await check_write(
@@ -395,6 +495,7 @@ async def gate_or_refuse(
             recheck_with=recheck_with,
             target_cap=target_cap,
             known_comment_numbers=known_comment_numbers,
+            attachment_names=attachment_names,
         )
         if outcome.refused:
             return outcome.refusal, []

@@ -1519,3 +1519,200 @@ def test_non_link_literal_markup_carries_no_suggestion():
     ]
     assert len(found) == 1, found
     assert "suggestion" not in found[0]["evidence"]
+
+
+# ---------------------------------------------------------------------
+# Ticket #113: `attachment:` links in a pre-write render.
+#
+# Measured on the live server: `wiki.wikiToHtml` has no page/ticket
+# context, so EVERY `attachment:` form renders as `<a class="missing
+# attachment">LABEL</a>` with no href -- `[attachment:x.jpg label]`
+# -> `<a class="missing attachment">label</a>`, bare `attachment:x.jpg`
+# -> `<a class="missing attachment">attachment:x.jpg</a>`. A fully
+# qualified `attachment:FILE:wiki:PAGE` resolves when that attachment
+# exists and stays `missing attachment` when it does not.
+# ---------------------------------------------------------------------
+
+_MISSING_ATTACHMENT = '<a class="missing attachment">{}</a>'
+
+
+def _attachment_findings(
+    source, html, attachment_names, code="missing_local_target"
+):
+    kwargs = {}
+    if attachment_names is not ...:
+        kwargs["attachment_names"] = attachment_names
+    return [
+        w
+        for w in build_warnings(
+            None,
+            source,
+            extract_facts(html),
+            probes={},
+            check_targets=False,
+            source_format="tracwiki",
+            **kwargs,
+        )
+        if w["code"] == code
+    ]
+
+
+def test_113_present_bare_attachment_link_is_not_an_error():
+    found = _attachment_findings(
+        "See [attachment:x.jpg label] here.",
+        "<p>See " + _MISSING_ATTACHMENT.format("label") + " here.</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert found == []
+
+
+def test_113_present_bare_autolinked_attachment_is_not_an_error():
+    found = _attachment_findings(
+        "See attachment:x.jpg here.",
+        "<p>See "
+        + _MISSING_ATTACHMENT.format("attachment:x.jpg")
+        + " here.</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert found == []
+
+
+def test_113_absent_from_an_empty_list_stays_an_error():
+    found = _attachment_findings(
+        "See [attachment:x.jpg label] here.",
+        "<p>See " + _MISSING_ATTACHMENT.format("label") + " here.</p>",
+        frozenset(),
+    )
+    assert len(found) == 1
+    assert found[0]["severity"] == "error"
+
+
+def test_113_no_context_is_todays_behaviour():
+    """`attachment_names=None` (the default) is no context: the anchor
+    stays an error, exactly as before the parameter existed."""
+    html = (
+        "<p>See " + _MISSING_ATTACHMENT.format("label") + " here.</p>"
+    )
+    source = "See [attachment:x.jpg label] here."
+    for names in (None, ...):
+        found = _attachment_findings(source, html, names)
+        assert len(found) == 1, names
+        assert found[0]["severity"] == "error"
+
+
+def test_113_only_the_attached_file_is_cleared():
+    found = _attachment_findings(
+        "[attachment:x.jpg a] and [attachment:y.jpg b]",
+        "<p>"
+        + _MISSING_ATTACHMENT.format("a")
+        + " and "
+        + _MISSING_ATTACHMENT.format("b")
+        + "</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert len(found) == 1
+    assert found[0]["severity"] == "error"
+
+
+def test_113_two_tokens_for_one_present_file_clear_two_anchors():
+    found = _attachment_findings(
+        "[attachment:x.jpg a] [attachment:x.jpg b]",
+        "<p>"
+        + _MISSING_ATTACHMENT.format("a")
+        + _MISSING_ATTACHMENT.format("b")
+        + "</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert found == []
+
+
+def test_113_three_anchors_two_tokens_leaves_one_error():
+    """The budget is counted per token and never over-clears."""
+    found = _attachment_findings(
+        "[attachment:x.jpg a] [attachment:x.jpg b]",
+        "<p>"
+        + _MISSING_ATTACHMENT.format("a")
+        + _MISSING_ATTACHMENT.format("b")
+        + _MISSING_ATTACHMENT.format("c")
+        + "</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert len(found) == 1
+
+
+def test_113_qualified_form_never_draws_on_the_budget():
+    """Trac resolves the qualified form itself, so a `missing` render
+    of it is a genuinely missing attachment -- even though the same
+    filename is attached to the page being written."""
+    found = _attachment_findings(
+        "See [attachment:x.jpg:wiki:Page label] here.",
+        "<p>See " + _MISSING_ATTACHMENT.format("label") + " here.</p>",
+        frozenset({"x.jpg"}),
+    )
+    assert len(found) == 1
+    assert found[0]["severity"] == "error"
+
+
+def test_113_bare_tokens_in_code_are_not_counted():
+    html = "<p>" + _MISSING_ATTACHMENT.format("label") + "</p>"
+    names = frozenset({"x.jpg"})
+    for source in (
+        "`[attachment:x.jpg label]` and [attachment:z.jpg label]",
+        "```\n[attachment:x.jpg label]\n```\n[attachment:z.jpg label]",
+    ):
+        found = _attachment_findings(source, html, names)
+        assert len(found) == 1, source
+
+
+def test_113_a_missing_wiki_anchor_is_untouched():
+    html = (
+        '<p><a class="missing wiki" href="http://h/p/wiki/NoSuchPage">'
+        "NoSuchPage</a></p>"
+    )
+    found = _attachment_findings(
+        "[[NoSuchPage]]", html, frozenset({"NoSuchPage", "x.jpg"})
+    )
+    assert len(found) == 1
+    assert found[0]["severity"] == "error"
+
+
+_QUALIFIED_ATTACHMENT_HTML = (
+    '<a class="attachment" href="http://h/p/attachment/wiki/'
+    'b-node/bench/SonoffS31/x.jpg">label</a>'
+)
+
+
+def test_113_qualified_attachment_is_not_an_unconfigured_prefix():
+    found = _attachment_findings(
+        "[attachment:x.jpg:wiki:b-node/bench/SonoffS31 label]",
+        f"<p>{_QUALIFIED_ATTACHMENT_HTML}</p>",
+        frozenset(),
+        code="unconfigured_intertrac_prefix",
+    )
+    assert found == []
+
+
+def test_113_a_real_unconfigured_prefix_still_warns_beside_one():
+    source = (
+        "[attachment:x.jpg:wiki:b-node/bench/SonoffS31 label] "
+        "and foo:wiki:Page"
+    )
+    found = _attachment_findings(
+        source,
+        f"<p>{_QUALIFIED_ATTACHMENT_HTML} and foo:wiki:Page</p>",
+        frozenset(),
+        code="unconfigured_intertrac_prefix",
+    )
+    assert len(found) == 1
+    assert "foo:wiki:Page" in str(found[0])
+    assert "x.jpg" not in str(found[0]["evidence"])
+
+
+def test_113_a_real_unconfigured_prefix_still_warns_alone():
+    found = _attachment_findings(
+        "See foo:wiki:Page here.",
+        "<p>See foo:wiki:Page here.</p>",
+        None,
+        code="unconfigured_intertrac_prefix",
+    )
+    assert len(found) == 1

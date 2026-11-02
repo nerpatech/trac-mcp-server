@@ -194,6 +194,22 @@ _PREFIX_REALM_RE = re.compile(
     + r"):[^\s`]+"
 )
 
+# Ticket #113. Trac's own qualified attachment syntax is
+# `attachment:FILE:wiki:PAGE` (or `:ticket:N`), and `_PREFIX_REALM_RE`
+# read its `FILE:wiki:PAGE` tail as an InterTrac `prefix:realm:target`,
+# warning `unconfigured_intertrac_prefix` on a link Trac resolves
+# itself. A token directly preceded by `attachment:` is never a prefix,
+# so the whole `attachment:...` token is blanked out of the scanned copy
+# first. A negative lookbehind on the regex alone is NOT enough: for
+# `attachment:x.jpg:wiki:P` it blocks the match at `x` and the engine
+# then starts again at `jpg` (`\b` holds after the `.`), so a dotted
+# filename -- every real one -- still matched. Measured.
+#
+# `(?<!:)` keeps `foo:attachment:file`, the InterTrac form
+# `_INTERTRAC_REALMS` names, scanned: there `attachment` is the realm
+# of an unconfigured prefix, and blanking it would hide that prefix.
+_ATTACHMENT_TOKEN_RE = re.compile(r"(?<![\w:])attachment:[^\s\]`\"']*")
+
 # The zero-width glyph Trac injects ahead of an InterTrac anchor's visible
 # text (`<span class="icon">​</span>`) -- stripped before any exact
 # text comparison so the comparison can BE exact instead of a substring
@@ -485,8 +501,36 @@ def _autolinked_page_name(anchor: Any) -> str | None:
     return page
 
 
+# A BARE attachment reference in source (ticket #113): `attachment:FILE`
+# or `[attachment:FILE label]`. FILE excludes whitespace, `]`, `:` and
+# both quote characters, so a quoted filename is never captured (those
+# stay errors -- conservative), and the lookahead refuses a token whose
+# FILE is followed by a second colon segment (`attachment:FILE:wiki:P`),
+# the qualified form Trac resolves itself. `(?<![\w:])` keeps
+# `foo:attachment:x` (an InterTrac reference) from counting.
+_BARE_ATTACHMENT_RE = re.compile(
+    r"(?<![\w:])attachment:([^\s\]:\"']+)(?!:)"
+)
+
+
+def _bare_attachment_counts(
+    tracwiki: str, attachment_names: frozenset[str]
+) -> int:
+    """How many bare attachment tokens in the source name a file that
+    IS attached to the write's target -- outside code spans and fences.
+    Each one is entitled to clear one `missing attachment` anchor."""
+    scan = blank_inline_code_spans(blank_code_fences(tracwiki))
+    return sum(
+        1
+        for match in _BARE_ATTACHMENT_RE.finditer(scan)
+        if match.group(1) in attachment_names
+    )
+
+
 def _check_missing_local_target(
-    facts: PreviewFacts, tracwiki: str
+    facts: PreviewFacts,
+    tracwiki: str,
+    attachment_names: frozenset[str] | None = None,
 ) -> list[dict]:
     """A dead local wiki-page target (`class="missing wiki"`), including
     a hand-built relative URL that resolved to a nonexistent page
@@ -546,11 +590,43 @@ def _check_missing_local_target(
     render missing regardless, so an authored dead link stays caught.
     No source-side change here: this docstring is the record, for a
     host without the option, of what the check still does.
+
+    ATTACHMENT LINKS IN A CONTEXT-FREE RENDER (ticket #113). The
+    pre-write render is `wiki.wikiToHtml`, which has no page or ticket
+    to resolve against. Measured on the live server, EVERY `attachment:`
+    form renders there as `<a class="missing attachment">LABEL</a>` with
+    no href -- `[attachment:x.jpg label]` -> `label`, bare
+    `attachment:x.jpg` -> `attachment:x.jpg` -- so a valid same-page
+    link was refused as `missing_local_target`. The fully qualified
+    `attachment:FILE:wiki:PAGE` does resolve there (a real href when the
+    attachment exists, `missing attachment` when it does not).
+
+    `attachment_names` is the set of file names attached to the target
+    of the write, or None when there is no such context (every caller
+    with no target, and a list call that failed): None reproduces the
+    behaviour before this ticket exactly. With a set, the same COUNTING
+    technique as above applies: each BARE token in the source (code
+    spans and fences blanked) whose file is in the set is entitled to
+    clear ONE `missing`+`attachment` anchor, spent one anchor at a time.
+    Which anchor of an identical pair is cleared is arbitrary; only the
+    counts carry meaning. Qualified forms are never counted -- Trac
+    resolved those itself, so their `missing` render is a genuinely
+    missing attachment -- and neither are quoted filenames. A token
+    whose file is not attached clears nothing and stays an error, and a
+    `missing wiki` anchor is never eligible.
     """
     budget = _bare_autolink_counts(tracwiki) if tracwiki else {}
+    attachment_budget = (
+        _bare_attachment_counts(tracwiki, attachment_names)
+        if attachment_names and tracwiki
+        else 0
+    )
     warnings = []
     for anchor in facts.anchors:
         if "missing" not in anchor.classes:
+            continue
+        if attachment_budget > 0 and "attachment" in anchor.classes:
+            attachment_budget -= 1
             continue
         page = _autolinked_page_name(anchor)
         if page is not None and budget.get(page, 0) > 0:
@@ -1090,7 +1166,9 @@ def _check_unconfigured_intertrac_prefix(
     # `blank_code_fences`, not `_strip_code_fences`: the offsets below
     # index back into `tracwiki` for the bracketed-label logic, so the
     # scanned copy has to be the same length as the original.
-    scan_text = blank_code_fences(tracwiki)
+    scan_text = _ATTACHMENT_TOKEN_RE.sub(
+        _blank_preserving_layout, blank_code_fences(tracwiki)
+    )
     warnings = []
     for pattern in (_PREFIX_TICKET_RE, _PREFIX_REALM_RE):
         for match in pattern.finditer(scan_text):
@@ -1458,6 +1536,7 @@ def build_warnings(
     local_intertrac_bases: frozenset[str] = frozenset(),
     own_prefix: str | None = None,
     known_comment_numbers: frozenset[int] | None = None,
+    attachment_names: frozenset[str] | None = None,
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
@@ -1513,6 +1592,14 @@ def build_warnings(
             rule here does. ``None`` (the default, and every caller
             outside a ticket write) means no ticket context is
             available and that check does not run.
+        attachment_names: The file names attached to the wiki page or
+            ticket this write targets (ticket #113), for
+            ``missing_local_target``: a context-free pre-write render
+            marks EVERY ``attachment:`` link missing, so the bare links
+            to files in this set are cleared. ``None`` (the default,
+            and every caller with no target or no list) means no
+            context and anchors stay errors; an empty set is context
+            with nothing attached.
 
     Returns:
         List of warning dicts, each ``{code, severity, message,
@@ -1541,7 +1628,9 @@ def build_warnings(
                 markdown_source, tracwiki
             )
         )
-    warnings.extend(_check_missing_local_target(facts, tracwiki))
+    warnings.extend(
+        _check_missing_local_target(facts, tracwiki, attachment_names)
+    )
     warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(

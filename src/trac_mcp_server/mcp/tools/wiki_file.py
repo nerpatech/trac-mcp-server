@@ -363,6 +363,7 @@ async def _handle_push(
         {"content": wiki_content},
         args,
         recheck_with="wiki_render_check",
+        wiki_page=page_name,
     )
     if refusal is not None:
         return refusal

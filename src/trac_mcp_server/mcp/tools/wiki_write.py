@@ -171,6 +171,7 @@ async def _handle_create(
         {"content": wiki_content},
         args,
         recheck_with="wiki_render_check",
+        wiki_page=page_name,
     )
     if refusal is not None:
         return refusal
@@ -239,6 +240,7 @@ async def _handle_update(
         {"content": wiki_content},
         args,
         recheck_with="wiki_render_check",
+        wiki_page=page_name,
     )
     if refusal is not None:
         return refusal
