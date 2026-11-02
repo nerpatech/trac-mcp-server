@@ -3338,6 +3338,28 @@ class TestHandleTicketChangelog:
             assert "comment" in text
             assert "Fixed the bug" in text
 
+    def test_changelog_empty_comment_says_no_text(self):
+        """A change without comment text still carries a numbered,
+        empty comment entry; it must not read as a hidden comment."""
+        client = MagicMock(spec=TracClient)
+        ts = datetime(2026, 1, 20, 10, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = [
+                [ts, "alice", "comment", "2", "", 1],
+                [ts, "alice", "milestone", "A", "B", 1],
+            ]
+
+            result = self._run(
+                _handle_changelog(client, {"ticket_id": 5})
+            )
+
+            text = result.content[0].text
+            assert "comment 2 without text" in text
+            assert "comment added" not in text
+
     def test_changelog_returns_stored_tracwiki(self):
         """Comment content comes back as stored, with no `raw` argument
         to ask for it (ticket #69)."""
