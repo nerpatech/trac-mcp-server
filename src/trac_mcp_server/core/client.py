@@ -29,6 +29,10 @@ TCP_KEEPALIVE_IDLE_SECONDS = 60
 TCP_KEEPALIVE_INTERVAL_SECONDS = 15
 TCP_KEEPALIVE_PROBE_COUNT = 4
 
+# The longest ticket comment ``update_ticket`` accepts. The trac-mcp CLI
+# checks the same limit before it connects (Trac #114).
+MAX_COMMENT_CHARS = 10000
+
 
 def _keepalive_socket_options() -> list[tuple[int, int, int | bytes]]:
     """Socket options that keep pooled connections visible to middleboxes.
@@ -642,9 +646,10 @@ class TracClient:
                 (when base_ts is omitted) another other server-side error
         """
         # Validate comment length
-        if comment and len(comment) > 10000:
+        if comment and len(comment) > MAX_COMMENT_CHARS:
             raise ValueError(
-                "Comment exceeds maximum length of 10000 characters"
+                f"Comment exceeds maximum length of {MAX_COMMENT_CHARS} "
+                "characters"
             )
 
         update_attrs: dict[str, Any] = (
