@@ -620,8 +620,14 @@ async def _handle_changelog(
                     )
                 newvalue_text = comment_text
             else:
+                # Trac numbers every change as a comment, also one made
+                # without text; "comment added" made agents look for a
+                # comment that ticket_get (rightly) never returns.
+                number = str(oldvalue).strip() if oldvalue else ""
+                label = f"comment {number}" if number else "comment"
                 entries.append(
-                    f"- {timestamp_str} by {author}: comment added"
+                    f"- {timestamp_str} by {author}: {label} without "
+                    "text (only the field changes of this entry)"
                 )
                 newvalue_text = ""
         else:
