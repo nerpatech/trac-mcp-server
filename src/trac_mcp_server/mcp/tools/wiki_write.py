@@ -12,7 +12,7 @@ import xmlrpc.client
 import mcp.types as types
 
 from ...core.async_utils import run_sync
-from ...core.client import TracClient
+from ...core.client import TracClient, WikiPageConflict
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
@@ -54,7 +54,7 @@ WIKI_WRITE_TOOLS = [
     ),
     types.Tool(
         name="wiki_update",
-        description="Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
+        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -253,6 +253,20 @@ async def _handle_update(
             wiki_content,
             comment,
             version,
+        )
+    except WikiPageConflict as e:
+        # Stale version caught by the client's precheck (ticket #120);
+        # putPage was never posted.
+        if e.current_version is None:
+            return build_error_response(
+                "version_conflict",
+                f"Page '{page_name}' does not exist, so version {version} cannot be updated.",
+                f"Create it with wiki_create(page_name='{page_name}', content=...).",
+            )
+        return build_error_response(
+            "version_conflict",
+            f"Page has been modified. Current version is {e.current_version}, you tried to update version {version}.",
+            f"Fetch current content with wiki_get(page_name='{page_name}'), then retry update with version={e.current_version}.",
         )
     except xmlrpc.client.Fault as e:
         # Check for version conflict
