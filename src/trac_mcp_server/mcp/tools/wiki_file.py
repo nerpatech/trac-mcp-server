@@ -24,7 +24,7 @@ from ...converters.common import (
 )
 from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
-from ...core.client import TracClient
+from ...core.client import TracClient, WikiPageConflict
 from ...file_handler import detect_file_format
 from .errors import build_error_response
 from .file_io import (
@@ -412,6 +412,19 @@ async def _handle_push(
             action = "created"
         else:
             raise
+    except WikiPageConflict as e:
+        # The page changed between the read above and the write (ticket
+        # #120); put_wiki_page refused before posting anything.
+        current = (
+            f"Current version is {e.current_version}"
+            if e.current_version is not None
+            else "The page no longer exists"
+        )
+        return build_error_response(
+            "version_conflict",
+            f"Page has been modified. {current}, you tried to update version {e.expected_version}.",
+            f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
+        )
 
     new_version = result.get("version", 1)
 

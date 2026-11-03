@@ -141,6 +141,33 @@ class TicketUpdateConflict(Exception):
         self.changes = changes
 
 
+class WikiPageConflict(ValueError):
+    """A wiki_update's ``version`` was stale: the page's current version is
+    not the one the caller read (ticket #120).
+
+    Raised by ``TracClient.put_wiki_page`` BEFORE ``wiki.putPage`` is
+    posted, because Trac ignores the ``version`` attribute of putPage --
+    no fault ever comes back for a stale one, so the comparison has to be
+    made here (see ``put_wiki_page``).
+
+    ``current_version`` is ``None`` when the page does not exist at all.
+    Subclasses ``ValueError`` so callers that already catch the client's
+    plain version-conflict ``ValueError`` keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        page_name: str,
+        expected_version: int,
+        current_version: int | None,
+    ):
+        super().__init__(message)
+        self.page_name = page_name
+        self.expected_version = expected_version
+        self.current_version = current_version
+
+
 class TracClient:
     def __init__(self, config: Config):
         self.config = config
@@ -1011,13 +1038,24 @@ class TracClient:
             page_name: Name of the wiki page to create/update
             content: Page content in TracWiki format
             comment: Comment describing the change
-            version: Optional version number for optimistic locking (prevents concurrent edits)
+            version: Optional version the caller read (prevents concurrent
+                edits). The check is made client-side, immediately before
+                the write: Trac ignores the ``version`` attribute of
+                ``wiki.putPage``, so it would never refuse a stale one
+                itself (ticket #120). A narrow race between that check and
+                putPage remains -- closing it needs a Trac-side
+                precondition, which is out of scope. ``None`` (create, and
+                unversioned callers) skips the check and costs no extra RPC.
 
         Returns:
             Dict with keys: name, version, author, lastModified, url
 
         Raises:
-            ValueError: If page_name or content validation fails, or version conflict detected
+            WikiPageConflict: If ``version`` is not the page's current
+                version (or the page does not exist); putPage is not
+                called. A ``ValueError`` subclass.
+            ValueError: If page_name or content validation fails, or the
+                server reports a version conflict
             xmlrpc.client.Fault: If server returns error or permissions denied
         """
         # Validate page name
@@ -1034,6 +1072,29 @@ class TracClient:
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
             attrs["version"] = version
+
+            # Trac ignores the version attr, so compare it here. A Fault
+            # from getPageInfo propagates unchanged.
+            info = self.get_wiki_page_info(page_name)
+            # Some Trac instances return 0 (int) instead of raising a
+            # Fault for a non-existent page.
+            current = (
+                info.get("version")
+                if isinstance(info, dict) and info
+                else None
+            )
+            if current != version:
+                if current is None:
+                    detail = "the page does not exist"
+                else:
+                    detail = f"its current version is {current}"
+                raise WikiPageConflict(
+                    f"Version conflict on '{page_name}': you tried to "
+                    f"update version {version} but {detail}",
+                    page_name,
+                    version,
+                    current,
+                )
 
         # Make the RPC call
         try:

@@ -13,7 +13,10 @@ import xmlrpc.client
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from trac_mcp_server.config import Config
+from trac_mcp_server.core.client import WikiPageConflict
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
 from trac_mcp_server.mcp.tools.errors import format_timestamp
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -887,6 +890,60 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("you tried to update version 5", text)
             self.assertIn("version=7", text)
 
+    def test_handle_update_wiki_page_conflict(self):
+        """A stale version refused by the client precheck (ticket #120)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageConflict(
+                "stale", "TestPage", 5, 7
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Updated",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (version_conflict)", text)
+            self.assertIn("Current version is 7", text)
+            self.assertIn("you tried to update version 5", text)
+            self.assertIn("version=7", text)
+
+    def test_handle_update_wiki_page_conflict_page_missing(self):
+        """current_version None: the page does not exist."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageConflict(
+                "gone", "TestPage", 5, None
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Updated",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (version_conflict)", text)
+            self.assertIn("does not exist", text)
+            self.assertIn("wiki_create", text)
+            self.assertNotIn("Current version is", text)
+
 
 class TestHandleDelete(unittest.TestCase):
     """Test _handle_delete handler."""
@@ -1030,3 +1087,70 @@ class TestHandleWikiTool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Live: /trac_test (ticket #120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestWikiUpdateStaleVersionLive:
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Writes one
+    Scratch/ page on /trac_test and deletes it afterwards.
+
+    The offline tests mock the transport, which is how the original
+    defect shipped: Trac ignores the `version` attr of wiki.putPage, so
+    only a real server shows whether a stale update is actually refused.
+    """
+
+    def test_stale_version_is_refused_and_the_store_is_unchanged(self):
+        import os
+        import uuid
+
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        default_config = Config(
+            trac_url=os.environ["TRAC_URL"],
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
+        client = TracClient(
+            InstanceRegistry(default_config, {}).resolve("/trac_test")
+        )
+
+        page = f"Scratch/Ticket120StaleVersion{uuid.uuid4().hex[:8]}"
+        v1 = "Ticket 120 stale version scratch, first revision.\n"
+        v2 = "Ticket 120 stale version scratch, second revision.\n"
+        stale = "Ticket 120 stale version scratch, must never land.\n"
+        client.put_wiki_page(page, v1, "v1")
+        try:
+            first = asyncio.run(
+                _handle_update(
+                    client,
+                    {"page_name": page, "content": v2, "version": 1},
+                )
+            )
+            assert not first.isError, first.content[0].text
+            assert client.get_wiki_page_info(page)["version"] == 2
+
+            result = asyncio.run(
+                _handle_update(
+                    client,
+                    {"page_name": page, "content": stale, "version": 1},
+                )
+            )
+
+            assert result.isError, result.content[0].text
+            text = result.content[0].text
+            assert "version_conflict" in text
+            assert "Current version is 2" in text
+            # The half that matters: the refusal must not be an error
+            # response over a write that landed anyway.
+            assert client.get_wiki_page_info(page)["version"] == 2
+            assert client.get_wiki_page(page) == v2
+        finally:
+            client.delete_wiki_page(page)

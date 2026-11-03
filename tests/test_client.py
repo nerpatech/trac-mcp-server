@@ -14,6 +14,7 @@ from trac_mcp_server.core.client import (
     TicketCreateTimeout,
     TicketUpdateConflict,
     TracClient,
+    WikiPageConflict,
     _keepalive_socket_options,
 )
 from trac_mcp_server.validators import (
@@ -1800,7 +1801,12 @@ def test_put_wiki_page_update_with_version(mock_post, mock_config):
   </params>
 </methodResponse>"""
 
-    mock_post.side_effect = [put_response, info_response]
+    # The version precheck (ticket #120) reads the page first: v2 is current.
+    mock_post.side_effect = [
+        _page_info_response(2),
+        put_response,
+        info_response,
+    ]
 
     client = TracClient(mock_config)
     result = client.put_wiki_page(
@@ -1808,7 +1814,7 @@ def test_put_wiki_page_update_with_version(mock_post, mock_config):
     )
 
     # Verify version was passed to RPC
-    first_payload = mock_post.call_args_list[0][1]["data"]
+    first_payload = mock_post.call_args_list[1][1]["data"]
     assert "wiki.putPage" in first_payload
     assert "<int>2</int>" in first_payload
 
@@ -1864,7 +1870,9 @@ def test_put_wiki_page_version_conflict(mock_post, mock_config):
   </fault>
 </methodResponse>"""
 
-    mock_post.return_value = fault_response
+    # The precheck (ticket #120) sees a matching version, so the write is
+    # attempted and this server-side fault still maps to ValueError.
+    mock_post.side_effect = [_page_info_response(1), fault_response]
 
     client = TracClient(mock_config)
 
@@ -1872,6 +1880,116 @@ def test_put_wiki_page_version_conflict(mock_post, mock_config):
         client.put_wiki_page("Page", "content", "comment", version=1)
 
     assert "Version conflict" in str(exc_info.value)
+
+
+def _xmlrpc_response(body: bytes) -> Mock:
+    response = Mock()
+    response.status_code = 200
+    response.content = (
+        b'<?xml version="1.0"?><methodResponse><params><param><value>'
+        + body
+        + b"</value></param></params></methodResponse>"
+    )
+    return response
+
+
+def _page_info_response(version: int) -> Mock:
+    return _xmlrpc_response(
+        b"<struct>"
+        b"<member><name>name</name><value><string>Page</string></value></member>"
+        b"<member><name>author</name><value><string>u</string></value></member>"
+        b"<member><name>version</name><value><int>"
+        + str(version).encode()
+        + b"</int></value></member>"
+        b"<member><name>lastModified</name><value><int>1234567900</int></value></member>"
+        b"</struct>"
+    )
+
+
+def _posted_methods(mock_post) -> list[str]:
+    import re
+
+    return [
+        re.search(
+            r"<methodName>(.*?)</methodName>", c[1]["data"]
+        ).group(1)
+        for c in mock_post.call_args_list
+    ]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_stale_version_is_refused_before_putpage(
+    mock_post, mock_config
+):
+    """Trac ignores the `version` attr of wiki.putPage (ticket #120), so
+    the client compares it itself and must never post putPage when stale."""
+    mock_post.side_effect = [_page_info_response(7)]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageConflict) as exc_info:
+        client.put_wiki_page("Page", "content", "comment", version=5)
+
+    assert exc_info.value.page_name == "Page"
+    assert exc_info.value.expected_version == 5
+    assert exc_info.value.current_version == 7
+    assert isinstance(exc_info.value, ValueError)
+    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_matching_version_writes(mock_post, mock_config):
+    mock_post.side_effect = [
+        _page_info_response(7),
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(8),
+    ]
+
+    client = TracClient(mock_config)
+    result = client.put_wiki_page(
+        "Page", "content", "comment", version=7
+    )
+
+    assert result["version"] == 8
+    assert _posted_methods(mock_post) == [
+        "wiki.getPageInfo",
+        "wiki.putPage",
+        "wiki.getPageInfo",
+    ]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_unversioned_makes_no_precheck(
+    mock_post, mock_config
+):
+    """version=None (create, unversioned callers) must cost no extra RPC."""
+    mock_post.side_effect = [
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(1),
+    ]
+
+    client = TracClient(mock_config)
+    client.put_wiki_page("Page", "content", "comment")
+
+    assert _posted_methods(mock_post) == [
+        "wiki.putPage",
+        "wiki.getPageInfo",
+    ]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_versioned_missing_page_is_a_conflict(
+    mock_post, mock_config
+):
+    """Some Trac instances answer 0 rather than a Fault for a missing page."""
+    mock_post.side_effect = [_xmlrpc_response(b"<int>0</int>")]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageConflict) as exc_info:
+        client.put_wiki_page("Page", "content", "comment", version=1)
+
+    assert exc_info.value.expected_version == 1
+    assert exc_info.value.current_version is None
+    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
