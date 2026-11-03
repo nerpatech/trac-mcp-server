@@ -25,6 +25,7 @@ from trac_mcp_server.mcp.tools.render_check import (
     WIKI_RENDER_CHECK_TOOL,
     _handle_ticket_render_check,
     _handle_wiki_render_check,
+    _missing_links_lines,
 )
 
 FIXTURES_DIR = (
@@ -410,8 +411,94 @@ class TestRenderCheckTextBlock(unittest.TestCase):
         self.assertTrue(missing)
         text = result.content[0].text
         self.assertIn("Missing links (", text)
+        self.assertIsNotNone(missing[0]["href"])
         self.assertIn(missing[0]["href"], text)
         self.assertIn("[page] wiki: ", text)
+
+    def test_html_total_budget_omits_later_sections(self):
+        client = _mock_ticket_client(
+            "row01_clean", ["row02_missing_local_target"]
+        )
+        args = {
+            "ticket_id": 1,
+            "check_targets": False,
+            "include_html": True,
+        }
+        # Unpatched run first: the budget is sized from the extracted
+        # section HTML, which is not byte-identical to the fixture body.
+        baseline = asyncio.run(
+            _handle_ticket_render_check(client, args)
+        )
+        first_html = baseline.structuredContent["sections"][0]["html"]
+        with patch(
+            "trac_mcp_server.mcp.tools.render_check.MAX_TEXT_HTML_BYTES",
+            len(first_html.encode("utf-8")) + 10,
+        ):
+            result = asyncio.run(
+                _handle_ticket_render_check(client, args)
+            )
+        text = result.content[0].text
+        sections = result.structuredContent["sections"]
+        self.assertIn("HTML [description]:", text)
+        self.assertIn(sections[0]["html"], text)
+        self.assertNotIn("HTML [comment 1]:", text)
+        self.assertNotIn(sections[1]["html"], text)
+        self.assertIn(
+            "HTML omitted for 1 more section(s) ([comment 1])", text
+        )
+        self.assertIn("-byte text budget", text)
+        self.assertIn("comment=<n>", text)
+        # structuredContent keeps every section's html.
+        self.assertIsNotNone(sections[1]["html"])
+
+    def test_missing_link_no_href_and_whitespace_collapsed(self):
+        section = {
+            "kind": "comment",
+            "ref": "3",
+            "links": {
+                "wiki": [
+                    {"href": None, "text": "a\nb", "missing": True}
+                ]
+            },
+        }
+        self.assertEqual(
+            _missing_links_lines([section]),
+            [
+                "Missing links (1):",
+                '  [comment 3] wiki: (no href) "a b"',
+            ],
+        )
+
+    def test_missing_link_long_text_truncated(self):
+        section = {
+            "kind": "page",
+            "ref": None,
+            "links": {
+                "wiki": [
+                    {"href": "/x", "text": "t" * 200, "missing": True}
+                ]
+            },
+        }
+        line = _missing_links_lines([section])[1]
+        self.assertTrue(line.endswith('…"'), line)
+        self.assertNotIn("t" * 81, line)
+
+    def test_missing_link_long_href_capped(self):
+        section = {
+            "kind": "page",
+            "ref": None,
+            "links": {
+                "wiki": [
+                    {
+                        "href": "/" + "h" * 500,
+                        "text": "x",
+                        "missing": True,
+                    }
+                ]
+            },
+        }
+        line = _missing_links_lines([section])[1]
+        self.assertNotIn("h" * 201, line)
 
     def test_no_missing_links_says_none(self):
         text = self._wiki("row01_clean").content[0].text

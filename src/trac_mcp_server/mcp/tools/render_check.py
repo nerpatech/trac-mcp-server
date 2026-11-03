@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 # defaults off here entirely (include_html=False) rather than just capped.
 MAX_HTML_BYTES = 20_000
 
+# Total HTML the text block carries across all sections. The per-section
+# cap alone lets include_html on a long ticket (description plus dozens
+# of comments) yield megabytes of text; structuredContent is unaffected.
+MAX_TEXT_HTML_BYTES = 100_000
+
+# Link text/href are printed on one line per entry, so they are collapsed
+# to a single line and capped.
+_MAX_LINK_TEXT_CHARS = 80
+_MAX_LINK_HREF_CHARS = 200
+
 TICKET_RENDER_CHECK_TOOL = types.Tool(
     name="ticket_render_check",
     description=(
@@ -359,18 +369,34 @@ def _section_label(section: dict) -> str:
     return f"[{section['kind']} {section['ref']}]"
 
 
+def _one_line(value: str, limit: int) -> str:
+    """Collapse every whitespace run (newlines included) to one space
+    and cap at ``limit`` characters, so an entry stays on one line."""
+    collapsed = " ".join(value.split())
+    if len(collapsed) > limit:
+        return collapsed[:limit] + "…"
+    return collapsed
+
+
 def _missing_links_lines(section_results: list[dict]) -> list[str]:
     """Every link Trac rendered with the ``missing`` class, across all
     sections. Always emits a line, so a text-only client (which never
     sees structuredContent) can tell the check ran."""
-    missing = [
-        f"  {_section_label(s)} {realm}: "
-        f'{link["href"] or "(no href)"} "{link["text"]}"'
-        for s in section_results
-        for realm, links in s["links"].items()
-        for link in links
-        if link["missing"]
-    ]
+    missing: list[str] = []
+    for s in section_results:
+        for realm, links in s["links"].items():
+            for link in links:
+                if not link["missing"]:
+                    continue
+                href = (
+                    _one_line(link["href"], _MAX_LINK_HREF_CHARS)
+                    if link["href"]
+                    else "(no href)"
+                )
+                text = _one_line(link["text"], _MAX_LINK_TEXT_CHARS)
+                missing.append(
+                    f'  {_section_label(s)} {realm}: {href} "{text}"'
+                )
     if not missing:
         return ["Missing links: none."]
     return [f"Missing links ({len(missing)}):", *missing]
@@ -390,15 +416,33 @@ def _code_block_lines(section_results: list[dict]) -> list[str]:
 
 def _html_lines(section_results: list[dict]) -> list[str]:
     """The (already capped) HTML of each section that carries it, i.e.
-    when ``include_html`` was requested."""
+    when ``include_html`` was requested, in order, until the total
+    would pass ``MAX_TEXT_HTML_BYTES``; the rest are named, not shown."""
     lines: list[str] = []
+    total = 0
+    omitted: list[str] = []
     for s in section_results:
         if s["html"] is None:
             continue
+        size = len(s["html"].encode("utf-8"))
+        if omitted or total + size > MAX_TEXT_HTML_BYTES:
+            omitted.append(_section_label(s))
+            continue
+        total += size
         header = f"HTML {_section_label(s)}"
         if s["html_truncated"]:
             header += f" (truncated at {MAX_HTML_BYTES} bytes)"
         lines.extend(["", f"{header}:", s["html"]])
+    if omitted:
+        lines.extend(
+            [
+                "",
+                f"HTML omitted for {len(omitted)} more section(s) "
+                f"({', '.join(omitted)}): over the "
+                f"{MAX_TEXT_HTML_BYTES}-byte text budget; re-run with "
+                "comment=<n> for one comment.",
+            ]
+        )
     return lines
 
 
