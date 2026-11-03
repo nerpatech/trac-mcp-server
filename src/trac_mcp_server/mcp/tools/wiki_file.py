@@ -415,14 +415,15 @@ async def _handle_push(
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket
         # #120); put_wiki_page refused before posting anything.
-        current = (
-            f"Current version is {e.current_version}"
-            if e.current_version is not None
-            else "The page no longer exists"
-        )
+        if e.current_version is None:
+            return build_error_response(
+                "version_conflict",
+                f"Page '{page_name}' was deleted after it was read.",
+                "Push again to recreate it.",
+            )
         return build_error_response(
             "version_conflict",
-            f"Page has been modified. {current}, you tried to update version {e.expected_version}.",
+            f"Page has been modified. Current version is {e.current_version}, you tried to update version {e.expected_version}.",
             f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
         )
 

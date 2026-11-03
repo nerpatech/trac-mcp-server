@@ -1073,9 +1073,19 @@ class TracClient:
         if version is not None:
             attrs["version"] = version
 
-            # Trac ignores the version attr, so compare it here. A Fault
-            # from getPageInfo propagates unchanged.
-            info = self.get_wiki_page_info(page_name)
+            # Trac ignores the version attr, so compare it here.
+            try:
+                info = self.get_wiki_page_info(page_name)
+            except xmlrpc.client.Fault as err:
+                # A not-found Fault means the page is missing, same as
+                # the 0 return below; any other Fault propagates.
+                fault_str = err.faultString.lower()
+                if (
+                    "not found" not in fault_str
+                    and "does not exist" not in fault_str
+                ):
+                    raise
+                info = None
             # Some Trac instances return 0 (int) instead of raising a
             # Fault for a non-existent page.
             current = (

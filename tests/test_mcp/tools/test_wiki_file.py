@@ -240,6 +240,40 @@ class TestPush:
         assert "you tried to update version 3" in text
 
     @patch("trac_mcp_server.mcp.tools.wiki_file.auto_convert")
+    async def test_push_page_deleted_between_read_and_write(
+        self, mock_convert, tmp_path
+    ):
+        """current_version None: the page vanished after it was read."""
+        md_file = tmp_path / "page.md"
+        md_file.write_text("# Updated\nContent")
+
+        mock_result = MagicMock()
+        mock_result.text = "= Updated =\nContent"
+        mock_result.converted = True
+        mock_result.warnings = []
+        mock_convert.return_value = mock_result
+
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageConflict(
+            "gone", "TestPage", 3, None
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert "Page 'TestPage' was deleted after it was read." in text
+        assert "Push again to recreate it." in text
+        assert "has been modified" not in text
+        assert "wiki_get" not in text
+
+    @patch("trac_mcp_server.mcp.tools.wiki_file.auto_convert")
     async def test_push_strips_frontmatter(
         self, mock_convert, tmp_path
     ):

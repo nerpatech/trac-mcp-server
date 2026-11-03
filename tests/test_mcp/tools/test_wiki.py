@@ -1085,10 +1085,6 @@ class TestHandleWikiTool(unittest.TestCase):
             )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # ---------------------------------------------------------------------------
 # Live: /trac_test (ticket #120)
 # ---------------------------------------------------------------------------
@@ -1154,3 +1150,7 @@ class TestWikiUpdateStaleVersionLive:
             assert client.get_wiki_page(page) == v2
         finally:
             client.delete_wiki_page(page)
+
+
+if __name__ == "__main__":
+    unittest.main()

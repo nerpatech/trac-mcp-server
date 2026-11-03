@@ -1992,6 +1992,53 @@ def test_put_wiki_page_versioned_missing_page_is_a_conflict(
     assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
 
 
+def _fault_response(fault_string: str) -> Mock:
+    response = Mock()
+    response.status_code = 200
+    response.content = (
+        b'<?xml version="1.0"?><methodResponse><fault><value><struct>'
+        b"<member><name>faultCode</name><value><int>1</int></value></member>"
+        b"<member><name>faultString</name><value><string>"
+        + fault_string.encode()
+        + b"</string></value></member>"
+        b"</struct></value></fault></methodResponse>"
+    )
+    return response
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_missing_page_fault_is_a_conflict(
+    mock_post, mock_config
+):
+    """Some Trac instances raise a not-found Fault from getPageInfo
+    instead of answering 0; both mean the page is missing."""
+    mock_post.side_effect = [
+        _fault_response("Wiki page 'Page' does not exist")
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageConflict) as exc_info:
+        client.put_wiki_page("Page", "content", "comment", version=1)
+
+    assert exc_info.value.current_version is None
+    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_other_precheck_fault_propagates(
+    mock_post, mock_config
+):
+    import xmlrpc.client
+
+    mock_post.side_effect = [_fault_response("Permission denied")]
+
+    client = TracClient(mock_config)
+    with pytest.raises(xmlrpc.client.Fault):
+        client.put_wiki_page("Page", "content", "comment", version=1)
+
+    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_put_wiki_page_not_modified(mock_post, mock_config):
     """Test put_wiki_page handles 'not modified' errors."""

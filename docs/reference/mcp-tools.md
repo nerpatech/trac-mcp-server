@@ -957,7 +957,7 @@ Each update object:
 
 ## wiki_update
 
-**Description:** Update an existing wiki page with optimistic locking (requires version for conflict detection). Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.
+**Description:** Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.
 
 **Parameters:**
 
@@ -965,7 +965,7 @@ Each update object:
 |------|------|----------|---------|-------------|
 | `page_name` | string | **Yes** | - | Wiki page name to update |
 | `content` | string | **Yes** | - | Page content. TracWiki, stored verbatim |
-| `version` | integer | **Yes** | - | Current page version for optimistic locking (minimum: 1) |
+| `version` | integer | **Yes** | - | The version you read; checked against the page's current version before the write (minimum: 1) |
 | `comment` | string | No | - | Change comment |
 
 **Success Response:**
@@ -978,7 +978,7 @@ Each update object:
 
 **Error Responses:**
 
-- **version_conflict:** Page was modified by another user
+- **version_conflict:** Page was modified after you read it, or no longer exists
   ```json
   {
     "type": "text",
