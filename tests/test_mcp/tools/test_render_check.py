@@ -14,7 +14,7 @@ import asyncio
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -374,6 +374,85 @@ class TestWikiRenderCheckHandler(unittest.TestCase):
         self.assertEqual(len(sections), 1)
         self.assertEqual(sections[0]["kind"], "page")
         self.assertTrue(sections[0]["source_paired"])
+
+
+class TestRenderCheckTextBlock(unittest.TestCase):
+    """Ticket #122: text-only MCP clients never see structuredContent,
+    so the text block must carry the missing links, code blocks and
+    (when requested) the HTML."""
+
+    def _wiki(self, row, **extra):
+        client = _mock_wiki_client(row)
+        args = {"page_name": "Foo", "check_targets": False, **extra}
+        return asyncio.run(_handle_wiki_render_check(client, args))
+
+    def _ticket(self, row, **extra):
+        client = _mock_ticket_client(row)
+        args = {"ticket_id": 1, "check_targets": False, **extra}
+        return asyncio.run(_handle_ticket_render_check(client, args))
+
+    def test_links_line_counts_other_realm(self):
+        text = self._wiki("row01_clean").content[0].text
+        self.assertRegex(
+            text,
+            r"Links: \d+ ticket, \d+ wiki, \d+ external, \d+ other\.",
+        )
+
+    def test_missing_link_href_in_text(self):
+        result = self._wiki("row02_missing_local_target")
+        missing = [
+            link
+            for s in result.structuredContent["sections"]
+            for realm in s["links"].values()
+            for link in realm
+            if link["missing"]
+        ]
+        self.assertTrue(missing)
+        text = result.content[0].text
+        self.assertIn("Missing links (", text)
+        self.assertIn(missing[0]["href"], text)
+        self.assertIn("[page] wiki: ", text)
+
+    def test_no_missing_links_says_none(self):
+        text = self._wiki("row01_clean").content[0].text
+        self.assertIn("Missing links: none.", text)
+
+    def test_ticket_html_in_text_when_requested(self):
+        result = self._ticket("row01_clean", include_html=True)
+        html = result.structuredContent["sections"][0]["html"]
+        self.assertTrue(html)
+        text = result.content[0].text
+        self.assertIn("HTML [description]:", text)
+        self.assertIn(html, text)
+
+    def test_ticket_html_absent_from_text_by_default(self):
+        text = self._ticket("row01_clean").content[0].text
+        self.assertNotIn("HTML [", text)
+
+    def test_html_truncation_header(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.render_check.MAX_HTML_BYTES", 50
+        ):
+            result = self._ticket("row01_clean", include_html=True)
+        self.assertTrue(
+            result.structuredContent["sections"][0]["html_truncated"]
+        )
+        self.assertIn(
+            "HTML [description] (truncated at 50 bytes):",
+            result.content[0].text,
+        )
+
+    def test_code_blocks_listed(self):
+        result = self._wiki("row09_code_blocks_mixed")
+        blocks = result.structuredContent["sections"][0]["code_blocks"]
+        self.assertTrue(blocks)
+        text = result.content[0].text
+        self.assertIn(f"Code blocks ({len(blocks)}):", text)
+        self.assertIn("line(s)", text)
+
+    def test_no_code_blocks_says_none(self):
+        text = self._wiki("row01_clean").content[0].text
+        self.assertIn("Code blocks: none.", text)
 
 
 @pytest.mark.live

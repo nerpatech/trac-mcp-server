@@ -61,7 +61,9 @@ TICKET_RENDER_CHECK_TOOL = types.Tool(
         "'preview-checks: allow <code>' line in its source). Use this "
         "right after any "
         "ticket_update/ticket_create write to verify what Trac actually "
-        "rendered, not just what was stored."
+        "rendered, not just what was stored. The text result also lists "
+        "each missing link, the code blocks, and the rendered HTML when "
+        "include_html is true, for clients that only see text."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -124,9 +126,9 @@ TICKET_RENDER_CHECK_TOOL = types.Tool(
                 "type": "boolean",
                 "description": (
                     "Include each section's rendered HTML in the "
-                    "response (capped at 20KB per section, with "
-                    "html_truncated set if cut). Default: false -- the "
-                    "structured links/warnings are the point of this "
+                    "response, structured and text (capped at 20KB per "
+                    "section, with html_truncated set if cut). Default: "
+                    "false -- the links/warnings are the point of this "
                     "tool; set true only to inspect raw markup."
                 ),
                 "default": False,
@@ -155,7 +157,9 @@ WIKI_RENDER_CHECK_TOOL = types.Tool(
         "instead of converting; a page can opt out of a "
         "named code with a 'preview-checks: allow <code>' line in its "
         "source). Use this right after any wiki_update/wiki_create "
-        "write."
+        "write. The text result also lists each missing link, the code "
+        "blocks, and the rendered HTML when include_html is true, for "
+        "clients that only see text."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -207,11 +211,11 @@ WIKI_RENDER_CHECK_TOOL = types.Tool(
             "include_html": {
                 "type": "boolean",
                 "description": (
-                    "Include the rendered HTML in the response (capped "
-                    "at 20KB, with html_truncated set if cut). Default: "
-                    "false -- the structured links/warnings are the "
-                    "point of this tool; set true only to inspect raw "
-                    "markup."
+                    "Include the rendered HTML in the response, structured "
+                    "and text (capped at 20KB, with html_truncated set "
+                    "if cut). Default: false -- the links/warnings are "
+                    "the point of this tool; set true only to inspect "
+                    "raw markup."
                 ),
                 "default": False,
             },
@@ -347,6 +351,57 @@ async def _probe_all_sections(
     return await run_sync(probe_targets, client, probeable, target_cap)
 
 
+def _section_label(section: dict) -> str:
+    """``[page]`` / ``[description]`` / ``[comment 3]`` -- the one label
+    every part of the text block uses for a section."""
+    if section["ref"] is None:
+        return f"[{section['kind']}]"
+    return f"[{section['kind']} {section['ref']}]"
+
+
+def _missing_links_lines(section_results: list[dict]) -> list[str]:
+    """Every link Trac rendered with the ``missing`` class, across all
+    sections. Always emits a line, so a text-only client (which never
+    sees structuredContent) can tell the check ran."""
+    missing = [
+        f"  {_section_label(s)} {realm}: "
+        f'{link["href"] or "(no href)"} "{link["text"]}"'
+        for s in section_results
+        for realm, links in s["links"].items()
+        for link in links
+        if link["missing"]
+    ]
+    if not missing:
+        return ["Missing links: none."]
+    return [f"Missing links ({len(missing)}):", *missing]
+
+
+def _code_block_lines(section_results: list[dict]) -> list[str]:
+    blocks = [
+        f"  {_section_label(s)} {cb['lines']} line(s)"
+        f"{', highlighted' if cb['highlighted'] else ''}"
+        for s in section_results
+        for cb in s["code_blocks"]
+    ]
+    if not blocks:
+        return ["Code blocks: none."]
+    return [f"Code blocks ({len(blocks)}):", *blocks]
+
+
+def _html_lines(section_results: list[dict]) -> list[str]:
+    """The (already capped) HTML of each section that carries it, i.e.
+    when ``include_html`` was requested."""
+    lines: list[str] = []
+    for s in section_results:
+        if s["html"] is None:
+            continue
+        header = f"HTML {_section_label(s)}"
+        if s["html_truncated"]:
+            header += f" (truncated at {MAX_HTML_BYTES} bytes)"
+        lines.extend(["", f"{header}:", s["html"]])
+    return lines
+
+
 def _document_response(
     target: str,
     section_results: list[dict],
@@ -378,11 +433,7 @@ def _document_response(
         "",
     ]
     for s in section_results:
-        label = (
-            f"[{s['kind']}]"
-            if s["ref"] is None
-            else f"[{s['kind']} {s['ref']}]"
-        )
+        label = _section_label(s)
         if not s["warnings"]:
             response_lines.append(f"{label} No warnings.")
             continue
@@ -396,8 +447,12 @@ def _document_response(
         f"ticket, {sum(len(s['links']['wiki']) for s in section_results)} "
         f"wiki, "
         f"{sum(len(s['links']['external']) for s in section_results)} "
-        "external."
+        "external, "
+        f"{sum(len(s['links']['other']) for s in section_results)} other."
     )
+    response_lines.extend(_missing_links_lines(section_results))
+    response_lines.extend(_code_block_lines(section_results))
+    response_lines.extend(_html_lines(section_results))
 
     return types.CallToolResult(
         content=[
