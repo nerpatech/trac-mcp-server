@@ -675,9 +675,11 @@ class TracClient:
         Accepts a str (surrounding whitespace ignored) or an int. Returns
         None for anything else: None, the empty string, non-numeric text,
         more than two dotted parts or an empty part (``"2."``, ``".5"``),
-        a non-positive number, a float, a bool. Each part is parsed with
-        ``int()``, never ``isdigit()``: ``"²".isdigit()`` is True and
-        ``int("²")`` raises.
+        a non-positive number, a float, a bool. Each part must be ASCII
+        digits and is then parsed with ``int()``. Neither test alone is
+        enough: ``"²".isdigit()`` is True but ``int("²")``
+        raises, and ``int()`` alone accepts ``"1_0"``, ``"+5"`` and
+        ``"٥"``.
         """
         if isinstance(oldvalue, bool):
             return None
@@ -689,6 +691,11 @@ class TracClient:
             return None
         parts = oldvalue.strip().split(".")
         if len(parts) > 2:
+            return None
+        # ASCII digits only: int() alone also takes "1_0", "+5" and
+        # non-ASCII digits such as "\u0665". isdigit() is only the
+        # pre-filter (it passes "\u00b2"); int() still does the parsing.
+        if not all(part.isascii() and part.isdigit() for part in parts):
             return None
         try:
             numbers = [int(part) for part in parts]

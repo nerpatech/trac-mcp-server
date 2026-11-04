@@ -1288,6 +1288,30 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertIn("not_found", result.content[0].text)
             self.assertEqual(posted, [])
 
+    def test_update_reply_to_unparseable_never_reads_the_changelog(
+        self,
+    ):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        for reply_to in ("abc", "2.", 0, True, "1_0", "+3"):
+            self.mock_client.get_ticket_changelog.reset_mock()
+            with patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+            ) as mock_run_sync:
+                mock_run_sync.return_value = changelog
+                result = asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "ticket_id": 42,
+                            "comment": "New reply text",
+                            "reply_to": reply_to,
+                        },
+                    )
+                )
+            self.assertTrue(result.isError, reply_to)
+            self.assertIn("not_found", result.content[0].text)
+            mock_run_sync.assert_not_called()
+
     def test_update_reply_to_without_comment_errors(self):
         """reply_to without a comment is rejected -- there's nothing to
         post as the reply.
@@ -3446,6 +3470,37 @@ class TestHandleTicketGet:
             "4",
             "5",
         ]
+
+    def test_get_omitted_notice_is_plain_but_heading_keeps_reply_to(
+        self,
+    ):
+        """The heading of a shown threaded comment says "(reply to M)";
+        the omitted-comments notice names its range by plain
+        comment:N refs, threaded ends included."""
+        rows = [
+            self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
+        ]
+        rows[1] = self._comment("1.2", "a", "threaded two")
+        rows[4] = self._comment("3.5", "a", "threaded five")
+        rows[5] = self._comment("4.6", "a", "threaded six")
+        client = MagicMock(spec=TracClient)
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 2})
+            )
+        text = result.content[0].text
+        assert "(comment:2 through comment:5)" in text
+        assert "### comment:6 (reply to 4) -- a" in text
+        notice = next(
+            line for line in text.splitlines() if "omitted from" in line
+        )
+        assert "reply to" not in notice
 
     def test_get_reports_a_failed_comment_fetch(self):
         """A changelog failure degrades loudly: the ticket still comes

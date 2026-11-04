@@ -318,12 +318,11 @@ def _cap_comments(
 def _comment_ref(comment: dict[str, Any]) -> str:
     """Render a comment's number as a reference, or flag its absence."""
     number = comment.get("number")
-    if not number:
-        return "comment (number unavailable)"
-    ref = f"comment:{number}"
-    if comment.get("in_reply_to"):
-        ref += f" (reply to {comment['in_reply_to']})"
-    return ref
+    return (
+        f"comment:{number}"
+        if number
+        else "comment (number unavailable)"
+    )
 
 
 def _omitted_notice(omitted: list[dict[str, Any]]) -> str:
@@ -372,11 +371,18 @@ def _format_comment_section(
     for index, comment in enumerate(comments):
         if omitted and index == head_count:
             lines.extend(["", _omitted_notice(omitted)])
+        # Only the heading carries "(reply to M)"; the omitted notice
+        # names its range by the plain ref.
+        reply_note = (
+            f" (reply to {comment['in_reply_to']})"
+            if comment.get("in_reply_to")
+            else ""
+        )
         lines.extend(
             [
                 "",
-                f"### {_comment_ref(comment)} -- {comment['author']}, "
-                f"{comment['timestamp']}",
+                f"### {_comment_ref(comment)}{reply_note} -- "
+                f"{comment['author']}, {comment['timestamp']}",
                 comment["body"],
             ]
         )

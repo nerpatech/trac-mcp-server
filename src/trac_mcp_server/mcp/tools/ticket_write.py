@@ -356,17 +356,25 @@ async def _handle_update(
                 "comment is required when reply_to is set",
                 "Provide a comment parameter along with reply_to.",
             )
+        # Both sides go through the shared parser (Trac #131): a
+        # threaded comment 5 has oldvalue "2.5" and is quoted as
+        # reply_to=5, the number Trac's comment:5 link names it by. The
+        # caller's value is parsed once, before the changelog read; one
+        # that is no comment number cannot match, so skip the read.
+        wanted = TracClient.parse_comment_number(reply_to)
+        if wanted is None:
+            return build_error_response(
+                "not_found",
+                f"Comment #{reply_to} not found on ticket #{ticket_id}",
+                "Use ticket_changelog to see valid comment numbers.",
+            )
         changelog = await run_sync(
             client.get_ticket_changelog, ticket_id
         )
-        # Both sides go through the shared parser (Trac #131): a
-        # threaded comment 5 has oldvalue "2.5" and is quoted as
-        # reply_to=5, the number Trac's comment:5 link names it by.
-        wanted = TracClient.parse_comment_number(reply_to)
         quoted_author = None
         quoted_text = None
         for entry in changelog or []:
-            if entry[2] != "comment" or wanted is None:
+            if entry[2] != "comment":
                 continue
             row = TracClient.parse_comment_number(entry[3])
             if row is not None and row.cnum == wanted.cnum:

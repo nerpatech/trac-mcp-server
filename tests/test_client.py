@@ -3171,6 +3171,10 @@ def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
         "0.5",
         "-1.5",
         "a.5",
+        "1_0",
+        "+5",
+        "\u0665",  # Arabic-Indic five: int() accepts it
+        "2.\u0665",
         True,
         False,
         5.0,
