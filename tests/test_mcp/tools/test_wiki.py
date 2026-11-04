@@ -688,6 +688,28 @@ class TestHandleGetHistory(unittest.TestCase):
         self.assertIn("validation_error", text)
         self.assertIn("page_name is required", text)
 
+    def test_handle_get_history_nonexistent_page_is_not_found(self):
+        """getPageInfo answers a missing page with 0, not a fault; that is
+        not_found with wiki_get's wording, not a server_error (#121)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync_limited"
+        ) as mock_run_sync_limited:
+            mock_run_sync_limited.side_effect = [0]
+
+            result = asyncio.run(
+                _handle_get_history(
+                    self.mock_client, {"page_name": "NoSuchPage"}
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("not_found", text)
+            self.assertIn('Wiki page "NoSuchPage" does not exist', text)
+            self.assertNotIn("server_error", text)
+            # One lookup, no per-version walk.
+            self.assertEqual(mock_run_sync_limited.call_count, 1)
+
     def test_handle_get_history_empty_comment_coerced_to_string(self):
         """_handle_get_history returns empty string for missing/None comment."""
         with patch(

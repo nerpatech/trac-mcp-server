@@ -562,6 +562,16 @@ async def _handle_get_history(
     except xmlrpc.client.Fault as err:
         return translate_xmlrpc_error(err, "wiki", page_name)
 
+    # getPageInfo answers a missing page with 0, not a fault, so without
+    # this a missing page read as a server_error (ticket #121). Same
+    # wording as wiki_get's fault and wiki_diff's identical check.
+    if not isinstance(current_info, dict):
+        return build_error_response(
+            "not_found",
+            f'Wiki page "{page_name}" does not exist',
+            f"Use wiki_search to find pages similar to '{page_name}'.",
+        )
+
     current_version = current_info.get("version", 1)
     if not isinstance(current_version, int) or current_version < 1:
         current_version = 1
