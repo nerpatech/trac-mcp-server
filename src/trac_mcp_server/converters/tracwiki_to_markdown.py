@@ -938,6 +938,19 @@ class TracWikiParser:
         are literal text and stay inside the fence unchanged.  Same rule
         _fallback_processor_blocks applies -- only a block at top level
         is a construct of its own (ticket #51).
+
+        A block indented under a list item (ticket #144) keeps the
+        opener's indentation on its fence, body and closer, so the
+        Markdown fence belongs to the item. Before, the body and closer
+        came out at column 0: the list passes saw the column-0
+        ``\\x00CODEn\\x00`` placeholder line, decided the list had ended
+        and inserted a blank line after the opener (F3), and writing that
+        back pulled the next item into a code block.  The body is what
+        Trac shows (F2): the opener's indentation is stripped from every
+        line only if EVERY non-blank line starts with it, otherwise
+        nothing is stripped.  See `_fence_in_list_item`.  A block that is
+        not directly under an item, and any block whose opener is not
+        first on its line, take the path they always did.
         """
 
         def stash(body: str) -> str:
@@ -1000,6 +1013,18 @@ class TracWikiParser:
                         if m.group(1)
                         else ""
                     )
+                    # Ticket #144: an indented block directly under a list
+                    # item keeps its indentation on the fence, body and
+                    # closer. Everything it declines takes the path below.
+                    item_fence = self._fence_in_list_item(
+                        text, i, code, fence, info
+                    )
+                    if item_fence is not None:
+                        replacement, indent_len = item_fence
+                        del out[len(out) - indent_len :]
+                        out.append(replacement)
+                        i = end
+                        continue
                     out.append(f"{fence}{info}\n{stash(code)}\n{fence}")
                     i = end
                     continue
@@ -1038,6 +1063,62 @@ class TracWikiParser:
             text,
         )
         return text
+
+    def _fence_in_list_item(
+        self, text: str, start: int, code: str, fence: str, info: str
+    ) -> tuple[str, int] | None:
+        """Fence a block that sits directly under a list item (#144).
+
+        `start` is the index of the opener's `{{{`, `code` the block's body
+        (already known to be fenceable), `fence`/`info` the Markdown fence
+        and info string the caller would emit. Returns (replacement, length
+        of the opener's indentation already emitted by the caller), or None
+        to leave the block to the caller's ordinary path.
+
+        Takes the block only when the opener has nothing but a non-empty
+        run of spaces/tabs before it on its line and
+        `_enclosing_list_marker` finds the item it sits in. The replacement
+        replaces the opener's indentation too (see `_convert_code_blocks`).
+
+        The output indent O is the opener's indentation; if that holds a TAB
+        it is the item's content column in spaces (as `_unwrap_div_table`
+        does: a tab is 8 columns, which Markdown reads as an indented code
+        block). The body shown is what Trac shows (F2): the opener's
+        indentation is stripped from every line when every non-blank line
+        starts with it, and nothing is stripped otherwise. Fence, each
+        non-blank shown line and closer are emitted at O; a blank line stays
+        empty. The body is stashed as usual, but behind a placeholder line
+        that is itself at O, so `_separate_list_from_trailing_paragraph` and
+        `_convert_lists` read the block as the item's continuation (F3).
+        The first shown line is carried by the placeholder itself, so the
+        stash holds it without O.
+        """
+        line_start = text.rfind("\n", 0, start) + 1
+        indent = text[line_start:start]
+        if not indent or indent.strip(" \t"):
+            return None
+        above = text[:line_start].split("\n")[:-1]
+        marker = _enclosing_list_marker(above, _indent_width(indent))
+        if marker is None:
+            return None
+        out_indent = indent
+        if "\t" in indent:
+            lead = _indent_of(marker.string)
+            token = marker.group(0)[len(lead) :]
+            out_indent = " " * (_indent_width(lead) + len(token) + 1)
+        lines = code.split("\n")
+        if all(ln.startswith(indent) for ln in lines if ln.strip()):
+            lines = [ln[len(indent) :] for ln in lines]
+        shown = [out_indent + ln if ln.strip() else "" for ln in lines]
+        # A blank first line leaves the placeholder line whitespace-only.
+        first = shown[0][len(out_indent) :] if shown[0] else ""
+        self._code_placeholders.append("\n".join([first] + shown[1:]))
+        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
+        return (
+            f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
+            f"{out_indent}{fence}",
+            len(indent),
+        )
 
     @staticmethod
     def _div_end(text: str, start: int) -> int:
