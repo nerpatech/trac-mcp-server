@@ -2474,6 +2474,55 @@ def test_put_wiki_page_missing_plugin_falls_back_and_precheck_refuses(
     ]
 
 
+@pytest.mark.parametrize(
+    "version, current_page, expected_current",
+    [
+        (0, None, None),
+        (0, 3, 3),
+        (-1, None, None),
+        (-1, 3, 3),
+    ],
+    ids=[
+        "zero-missing",
+        "zero-exists",
+        "negative-missing",
+        "negative-exists",
+    ],
+)
+def test_put_wiki_page_version_below_one_never_reaches_the_plugin(
+    mock_config, version, current_page, expected_current
+):
+    """Versions start at 1, so 0 and below name no page: they skip
+    wiki.putPageIfVersion (which would create a missing page for 0 and
+    fault on a negative with a message `wiki_update` mislabels as a
+    modified page) and take the precheck path, which refuses them with
+    WikiPageConflict whether or not the page exists."""
+    calls = []
+
+    def _rpc(namespace, method, *args):
+        calls.append(method)
+        assert method == "getPageInfo", method
+        if current_page is None:
+            raise xmlrpc.client.Fault(
+                1, "Wiki page 'Page' does not exist"
+            )
+        return {"name": "Page", "version": current_page}
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(WikiPageConflict) as exc_info:
+            client.put_wiki_page(
+                "Page", "content", "comment", version=version
+            )
+
+    err = exc_info.value
+    assert err.expected_version == version
+    assert err.current_version == expected_current
+    assert "putPageIfVersion" not in calls
+    assert "putPage" not in calls
+    assert calls == ["getPageInfo"]
+
+
 def test_put_wiki_page_missing_plugin_by_text_also_falls_back(
     mock_config,
 ):

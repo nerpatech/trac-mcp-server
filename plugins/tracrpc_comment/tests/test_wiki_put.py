@@ -385,3 +385,33 @@ class WikiConditionalPutInterleaveTestCase(unittest.TestCase):
         self.assertEqual(1, caught.exception.current_version)
         self.assertEqual([(1, 'other', 'theirs')],
                          _history(self.env, 'Fresh'))
+
+    def test_an_integrity_error_with_no_other_writer_is_not_a_conflict(self):
+        """Only the (name, version) primary-key race is a version
+        conflict. A NOT NULL, or a constraint another plugin added, fails
+        the INSERT with the same IntegrityError while the page's version is
+        unchanged; reporting that as a conflict would send the client to
+        refetch and retry forever, so it must propagate as what it is."""
+        req = MockRequest(self.env, authname='editor')
+        boom = self.env.db_exc.IntegrityError('NOT NULL constraint failed')
+        with mock.patch.object(WikiPage, 'save', side_effect=boom):
+            with self.assertRaises(self.env.db_exc.IntegrityError) as caught:
+                self.rpc.putPageIfVersion(req, 'Page', 'mine',
+                                          {'comment': 'c'}, 1)
+
+        self.assertIs(boom, caught.exception)
+        self.assertNotIsInstance(caught.exception, WikiVersionConflict)
+        # Nothing stored.
+        self.assertEqual([(1, 'someone', 'v1')], _history(self.env, 'Page'))
+
+    def test_an_integrity_error_for_a_missing_page_is_not_a_conflict(self):
+        """Same, for expected_version 0 on a page that stays absent: its
+        re-read version is 0, which equals expected_version."""
+        req = MockRequest(self.env, authname='editor')
+        boom = self.env.db_exc.IntegrityError('NOT NULL constraint failed')
+        with mock.patch.object(WikiPage, 'save', side_effect=boom):
+            with self.assertRaises(self.env.db_exc.IntegrityError):
+                self.rpc.putPageIfVersion(req, 'Fresh', 'mine',
+                                          {'comment': 'c'}, 0)
+
+        self.assertEqual([], _history(self.env, 'Fresh'))

@@ -1164,7 +1164,11 @@ class TracClient:
                 result (``possible_overwrite``, below). "No plugin" is
                 remembered for ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``.
                 ``None`` (create, and unversioned callers) skips both and
-                posts ``wiki.putPage`` with no extra RPC.
+                posts ``wiki.putPage`` with no extra RPC. Versions start
+                at 1, so a ``version`` below 1 (0 or negative) never takes
+                the plugin path: the client-side check refuses it with
+                ``WikiPageConflict``, whether or not the plugin is
+                installed, and the page is not created.
 
         Returns:
             Dict with keys: name, version, author, lastModified, url,
@@ -1243,7 +1247,9 @@ class TracClient:
         server has no such method -- the plugin is not installed or not
         enabled -- in which case nothing was stored and the caller falls
         back to the client-side precheck. That absence is remembered for
-        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``.
+        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``. Also ``None``, with
+        no RPC posted, for a ``version`` that is not a whole number or is
+        below 1: no page has such a version.
 
         Raises:
             WikiPageConflict: The plugin's conflict fault: ``version`` is
@@ -1256,8 +1262,11 @@ class TracClient:
         """
         # A JSON-schema "integer" admits 3.0; the plugin takes an int.
         expected = int(version)
-        if expected != version:
-            # Not a whole number, so no page is at that version; let the
+        if expected != version or expected < 1:
+            # Not a whole number, or below 1 (versions start at 1): no
+            # page is at that version. The plugin would read 0 as "create
+            # only if absent" and fault on a negative with a message
+            # `wiki_update` mislabels as a modified page, so let the
             # precheck refuse it with the usual conflict.
             return None
         try:

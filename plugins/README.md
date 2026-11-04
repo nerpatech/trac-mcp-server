@@ -77,7 +77,11 @@ the version the caller read and stores the page only if it is still current.
   called inside one `env.db_transaction`. On top of that, the `wiki` table's
   primary key `(name, version)` makes a write that commits between the
   comparison and the `INSERT` fail the `INSERT`, so the call refuses instead
-  of overwriting on every database backend. Returns `True`.
+  of overwriting on every database backend. Returns `True`. Only that race
+  is reported as a conflict: after an `IntegrityError` the page is re-read,
+  and if its version is still `expected_version` nobody else wrote, so the
+  original error (a NOT NULL, or a constraint another plugin added)
+  propagates instead of a conflict the client could never clear by retrying.
 - **The conflict fault** is code **409** with a message starting
   `[wiki-version-conflict current_version=N]` (`none` when the page does not
   exist). TracXMLRPC wraps it as

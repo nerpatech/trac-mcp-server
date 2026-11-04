@@ -186,10 +186,16 @@ class WikiConditionalPutRPC(Component):
                 # IWikiChangeListener notifications -- not reimplemented.
                 page.save(req.authname, attributes.get('comment'))
         except self.env.db_exc.IntegrityError:
-            # Another write committed version + 1 between our read and our
-            # INSERT; the transaction has rolled back. Report the version
-            # that write left behind.
+            # The transaction has rolled back. Another write that committed
+            # version + 1 between our read and our INSERT is the
+            # (name, version) primary-key race, and the page now reads at a
+            # version other than the one the caller named. If it does not,
+            # nobody else wrote: this is some other violation (a NOT NULL,
+            # or a constraint another plugin added), and calling it a
+            # conflict would send the client to refetch and retry for ever.
+            latest = WikiPage(self.env, pagename)
+            if latest.version == expected_version:
+                raise
             raise WikiVersionConflict(
-                pagename, expected_version,
-                _current_version(WikiPage(self.env, pagename)))
+                pagename, expected_version, _current_version(latest))
         return True
