@@ -256,7 +256,7 @@ The registry includes a tool only if:
 | `ticket_batch_update` | `TICKET_MODIFY`, `TICKET_BATCH_MODIFY` |
 | `ticket_batch_delete` | `TICKET_ADMIN`, `TICKET_BATCH_MODIFY` |
 | `wiki_get` | `WIKI_VIEW` |
-| `wiki_search` | `WIKI_VIEW` |
+| `wiki_search` | `WIKI_VIEW`, `SEARCH_VIEW` for Trac's own search |
 | `wiki_recent_changes` | `WIKI_VIEW` |
 | `wiki_create` | `WIKI_CREATE` |
 | `wiki_update` | `WIKI_MODIFY` |

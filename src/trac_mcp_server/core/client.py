@@ -7,6 +7,7 @@ import xmlrpc.client
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree
 
 import requests
@@ -75,6 +76,26 @@ def _keepalive_socket_options() -> list[tuple[int, int, int | bytes]]:
             )
         )
     return options
+
+
+# XML-RPC faults of Trac for a method that is missing or not allowed.
+_SEARCH_UNAVAILABLE_FAULTS = (-32601, 403)
+
+
+def _wiki_page_of_search_result(href: str, title: str) -> str | None:
+    """Return the page name of a search result, None for anything else.
+
+    Trac titles a wiki page "<name>: <first line>" and also returns attachments
+    of wiki pages. The name is whichever title prefix the URL ends with, as a
+    name or first line may itself contain ": ".
+    """
+    path = unquote(urlsplit(href).path)
+    parts = title.split(": ")
+    for end in range(1, len(parts)):
+        name = ": ".join(parts[:end])
+        if path.endswith(f"/wiki/{name}"):
+            return name
+    return None
 
 
 class KeepAliveHTTPAdapter(HTTPAdapter):
@@ -1014,14 +1035,55 @@ class TracClient:
         return matches
 
     def search_wiki_pages_by_content(
-        self, query: str, max_results: int = 10
+        self, query: str
     ) -> list[dict[str, Any]]:
         """
-        Search wiki pages by content (full-text search).
+        Search wiki pages with Trac's own search (search.performSearch).
+
+        Words are searched separately and all must occur in the page's name,
+        author or text; quotes keep a phrase together. This is one request.
+        Fetching every page instead takes one request per page, which on a
+        wiki with hundreds of pages outlasts a client's tool timeout as soon
+        as a few searches run in parallel.
+
+        Instances without the method, or whose user lacks SEARCH_VIEW, get
+        the page-by-page scan.
 
         Args:
             query: Search string (case-insensitive)
-            max_results: Maximum number of results to return (default: 10)
+
+        Returns:
+            All matching pages sorted by name, as dicts with keys: name, snippet
+
+        Raises:
+            xmlrpc.client.Fault: If server returns error
+        """
+        try:
+            results = self._rpc_request(
+                "search", "performSearch", query, ["wiki"]
+            )
+        except xmlrpc.client.Fault as e:
+            if e.faultCode not in _SEARCH_UNAVAILABLE_FAULTS:
+                raise
+            return self._scan_wiki_pages_by_content(query)
+
+        matches = []
+        for result in results:
+            name = _wiki_page_of_search_result(result[0], result[1])
+            if name is not None:
+                matches.append(
+                    {"name": name, "snippet": result[4] or ""}
+                )
+        return sorted(matches, key=lambda match: match["name"])
+
+    def _scan_wiki_pages_by_content(
+        self, query: str
+    ) -> list[dict[str, Any]]:
+        """
+        Search wiki pages by fetching each one; the query is a single phrase.
+
+        Args:
+            query: Search string (case-insensitive)
 
         Returns:
             List of dicts with keys: name, snippet (matching context ~100 chars)
@@ -1056,9 +1118,6 @@ class TracClient:
                     matches.append(
                         {"name": page_name, "snippet": snippet}
                     )
-
-                    if len(matches) >= max_results:
-                        break
             except Exception:
                 # Skip pages that can't be read (permission denied, etc.)
                 continue

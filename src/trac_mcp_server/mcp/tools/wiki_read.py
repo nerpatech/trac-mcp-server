@@ -57,7 +57,7 @@ WIKI_READ_TOOLS = [
     ),
     types.Tool(
         name="wiki_search",
-        description="Search wiki pages by content with relevance ranking. Returns snippets showing matched text, as stored: TracWiki, byte-for-byte.",
+        description="Search wiki pages with Trac's own search. Returns matching pages sorted by name, with snippets showing matched text, as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -69,7 +69,7 @@ WIKI_READ_TOOLS = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query string (required)",
+                    "description": "Search query (required). Words are searched separately and must all occur in the page's name, author or text; put a phrase in double quotes.",
                 },
                 "prefix": {
                     "type": "string",
@@ -309,7 +309,7 @@ async def _handle_search(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
     """Handle wiki_search."""
-    query = args.get("query")
+    query = (args.get("query") or "").strip()
     if not query:
         return build_error_response(
             "validation_error",
@@ -389,7 +389,7 @@ async def _handle_search(
     for result in results_page:
         name = result.get("name", "")
         snippet = result.get("snippet", "")
-        formatted.append(f"**{name}**\n  ...{snippet}...")
+        formatted.append(f"**{name}**\n  {snippet}")
 
     # Build response
     response_lines = [f"Found {total} wiki pages"]

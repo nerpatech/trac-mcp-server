@@ -862,13 +862,13 @@ Each update object:
 
 ## wiki_search
 
-**Description:** Search wiki pages by content with relevance ranking. Returns snippets showing matched text.
+**Description:** Search wiki pages with Trac's own search (`search.performSearch`). Returns matching pages sorted by name, with snippets showing matched text. Instances without that method, or whose user lacks `SEARCH_VIEW`, fall back to fetching every page, which takes one request per page and treats the query as one phrase.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `query` | string | **Yes** | - | Search query string |
+| `query` | string | **Yes** | - | Words are searched separately and must all occur in the page's name, author or text; put a phrase in double quotes |
 | `prefix` | string | No | - | Filter to pages starting with this prefix (namespace filter) |
 | `limit` | integer | No | `10` | Maximum results per page (min: 1, max: 50) |
 | `cursor` | string | No | - | Pagination cursor from previous response |
@@ -877,7 +877,7 @@ Each update object:
 ```json
 {
   "type": "text",
-  "text": "Found 15 wiki pages (showing 1-10):\n\n**DevelopmentGuide**\n  ...follow the **coding standards** defined in this document...\n\n**API/Authentication**\n  ...use JWT tokens for **authentication**...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
+  "text": "Found 15 wiki pages (showing 1-10):\n\n**API/Authentication**\n  ... use JWT tokens for authentication ...\n\n**DevelopmentGuide**\n  ... follow the coding standards defined in this document ...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
 }
 ```
 

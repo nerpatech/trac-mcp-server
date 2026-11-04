@@ -363,6 +363,62 @@ class TestHandleSearch(unittest.TestCase):
             self.assertIn("**User/Bob**", text)
             self.assertNotIn("**System/Config**", text)
 
+    def test_handle_search_pages_through_all_results(self):
+        """Cursor and total work beyond the first page."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = [
+                {"name": f"P{i:02}", "snippet": "x"} for i in range(25)
+            ]
+            first = (
+                asyncio.run(
+                    _handle_search(self.mock_client, {"query": "x"})
+                )
+                .content[0]
+                .text
+            )
+            self.assertIn("Found 25 wiki pages (showing 1-10)", first)
+            cursor = first.split("Use cursor '")[1].split("'")[0]
+            second = (
+                asyncio.run(
+                    _handle_search(
+                        self.mock_client,
+                        {"query": "x", "cursor": cursor},
+                    )
+                )
+                .content[0]
+                .text
+            )
+            self.assertIn("(showing 11-20)", second)
+            self.assertIn("**P10**", second)
+
+    def test_handle_search_shows_snippet_as_given(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = [
+                {"name": "P", "snippet": "... text ..."}
+            ]
+            text = (
+                asyncio.run(
+                    _handle_search(self.mock_client, {"query": "x"})
+                )
+                .content[0]
+                .text
+            )
+            self.assertIn("**P**\n  ... text ...", text)
+
+    def test_handle_search_blank_query(self):
+        text = (
+            asyncio.run(
+                _handle_search(self.mock_client, {"query": "  "})
+            )
+            .content[0]
+            .text
+        )
+        self.assertIn("query is required", text)
+
     def test_handle_search_missing_query(self):
         """Test _handle_search returns error when query is missing."""
         result = asyncio.run(_handle_search(self.mock_client, {}))

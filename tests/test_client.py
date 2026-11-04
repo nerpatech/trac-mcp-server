@@ -1500,9 +1500,136 @@ def test_search_wiki_pages_by_title(mock_post, mock_config):
         assert "name" in r
 
 
+def _fault_xml(code: int, message: str) -> bytes:
+    return xmlrpc.client.dumps(
+        xmlrpc.client.Fault(code, message)
+    ).encode()
+
+
+def _search_response(results: list) -> Mock:
+    response = Mock()
+    response.status_code = 200
+    response.content = xmlrpc.client.dumps(
+        (results,), methodresponse=True
+    ).encode()
+    return response
+
+
+_SEARCH_DATE = xmlrpc.client.DateTime("20261104T10:00:00")
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_search_wiki_pages_by_content(mock_post, mock_config):
-    """Test search_wiki_pages_by_content method."""
+def test_search_wiki_pages_by_content_uses_one_request(
+    mock_post, mock_config
+):
+    """Trac's search answers in one request, with names taken from the URL."""
+    base = "http://trac.example.com"
+    mock_post.return_value = _search_response(
+        [
+            [
+                f"{base}/login/wiki/Zeta",
+                "Zeta: first line",
+                _SEARCH_DATE,
+                "a",
+                "z",
+            ],
+            [
+                f"{base}/login/wiki/Dev/M%C3%A4rz",
+                "Dev/März: Note: first line",
+                _SEARCH_DATE,
+                "a",
+                "m",
+            ],
+            [
+                f"{base}/login/wiki/Empty",
+                "Empty: ",
+                _SEARCH_DATE,
+                "a",
+                "",
+            ],
+            [
+                f"{base}/login/attachment/wiki/Zeta/a.txt",
+                "Attachment 'a.txt' in Zeta",
+                _SEARCH_DATE,
+                "a",
+                "x",
+            ],
+        ]
+    )
+
+    client = TracClient(mock_config)
+    result = client.search_wiki_pages_by_content("first line")
+
+    assert mock_post.call_count == 1
+    params, method = xmlrpc.client.loads(
+        mock_post.call_args.kwargs["data"]
+    )
+    assert method == "search.performSearch"
+    assert params == ("first line", ["wiki"])
+    assert result == [
+        {"name": "Dev/März", "snippet": "m"},
+        {"name": "Empty", "snippet": ""},
+        {"name": "Zeta", "snippet": "z"},
+    ]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_search_wiki_pages_by_content_returns_all_matches(
+    mock_post, mock_config
+):
+    """No cap: paging and the prefix filter work on the complete result."""
+    mock_post.return_value = _search_response(
+        [
+            [
+                f"http://t/wiki/P{i:02}",
+                f"P{i:02}: x",
+                _SEARCH_DATE,
+                "a",
+                "x",
+            ]
+            for i in range(25)
+        ]
+    )
+
+    result = TracClient(mock_config).search_wiki_pages_by_content("x")
+
+    assert len(result) == 25
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_search_wiki_pages_by_content_scans_without_search_view(
+    mock_post, mock_config
+):
+    denied = Mock(
+        status_code=200, content=_fault_xml(403, "SEARCH_VIEW")
+    )
+    no_pages = _search_response([])
+    mock_post.side_effect = [denied, no_pages]
+
+    assert (
+        TracClient(mock_config).search_wiki_pages_by_content("x") == []
+    )
+    assert mock_post.call_count == 2
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_search_wiki_pages_by_content_raises_other_faults(
+    mock_post, mock_config
+):
+    mock_post.return_value = Mock(
+        status_code=200, content=_fault_xml(500, "database down")
+    )
+
+    with pytest.raises(xmlrpc.client.Fault):
+        TracClient(mock_config).search_wiki_pages_by_content("x")
+    assert mock_post.call_count == 1
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_search_wiki_pages_by_content_falls_back_to_scan(
+    mock_post, mock_config
+):
+    """Without Trac's search the pages are fetched one by one."""
     # First response for getAllPages
     pages_response = Mock()
     pages_response.status_code = 200
@@ -1546,7 +1673,13 @@ def test_search_wiki_pages_by_content(mock_post, mock_config):
   </params>
 </methodResponse>"""
 
+    # Trac without search.performSearch
+    no_search_response = Mock()
+    no_search_response.status_code = 200
+    no_search_response.content = _fault_xml(-32601, "method not found")
+
     mock_post.side_effect = [
+        no_search_response,
         pages_response,
         page1_response,
         page2_response,
