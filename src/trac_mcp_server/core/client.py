@@ -168,6 +168,47 @@ class WikiPageConflict(ValueError):
         self.current_version = current_version
 
 
+def _describe_error(err: BaseException) -> str:
+    """A one-line description of ``err``: a Fault's faultString, else its
+    message, else its type name."""
+    if isinstance(err, xmlrpc.client.Fault):
+        return err.faultString
+    return str(err) or type(err).__name__
+
+
+class WikiPageStoredReadbackFailed(Exception):
+    """``wiki.putPage`` returned ``True`` -- the page WAS stored -- but the
+    read-back that fetches its new version failed (Trac /trac_mcp_server
+    #140).
+
+    Raised by ``TracClient.put_wiki_page`` instead of the read-back's own
+    error, so a caller can never mistake "stored, read-back failed" for
+    "nothing stored" and write the page again. Deliberately neither an
+    ``xmlrpc.client.Fault`` nor a ``ValueError``: a caller's existing
+    ``except Fault`` (e.g. a "not found -> create it" fallback) or
+    ``except ValueError`` (write rejected) must not match it. A caller
+    that does not know about it still sees an error, never a success with
+    a made-up version.
+
+    ``cause`` is the read-back's exception (also chained as
+    ``__cause__``), or ``None`` when the read-back returned something
+    other than a page-info dict (some Trac instances return 0 for a
+    missing page). ``url`` is the page's URL.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        page_name: str,
+        url: str,
+        cause: BaseException | None,
+    ):
+        super().__init__(message)
+        self.page_name = page_name
+        self.url = url
+        self.cause = cause
+
+
 class TracClient:
     def __init__(self, config: Config):
         self.config = config
@@ -1057,6 +1098,9 @@ class TracClient:
             ValueError: If page_name or content validation fails, or the
                 server reports a version conflict
             xmlrpc.client.Fault: If server returns error or permissions denied
+            WikiPageStoredReadbackFailed: If putPage returned ``True`` (the
+                page IS stored) but reading back its new version failed.
+                Every other exception above means nothing was stored.
         """
         # Validate page name
         is_valid, error_msg = validate_page_name(page_name)
@@ -1106,29 +1150,12 @@ class TracClient:
                     current,
                 )
 
-        # Make the RPC call
+        # The write. Only a fault from putPage itself is translated here:
+        # every exception raised from this block means nothing was stored.
         try:
             result = self._rpc_request(
                 "wiki", "putPage", page_name, content, attrs
             )
-
-            # If successful, get updated page info
-            if result is True:
-                info = self.get_wiki_page_info(page_name)
-
-                # Construct URL from config
-                page_url = f"{self.config.trac_url.rstrip('/')}/wiki/{page_name}"
-
-                return {
-                    "name": page_name,
-                    "version": info.get("version"),
-                    "author": info.get("author"),
-                    "lastModified": info.get("lastModified"),
-                    "url": page_url,
-                }
-            else:
-                raise ValueError(f"Failed to update page '{page_name}'")
-
         except xmlrpc.client.Fault as err:
             # Handle specific fault conditions
             fault_str = err.faultString.lower()
@@ -1144,6 +1171,44 @@ class TracClient:
             else:
                 # Re-raise other faults
                 raise
+        if result is not True:
+            raise ValueError(f"Failed to update page '{page_name}'")
+
+        # The page is stored from here on. The read-back is a separate
+        # step (Trac /trac_mcp_server #140): any failure in it -- a fault
+        # (even "not found", if the page was deleted in between), a
+        # transport error, or a non-dict reply -- is raised as
+        # WikiPageStoredReadbackFailed, never as the plain error a caller
+        # would read as "nothing stored" and retry.
+        page_url = (
+            f"{self.config.trac_url.rstrip('/')}/wiki/{page_name}"
+        )
+        try:
+            info = self.get_wiki_page_info(page_name)
+        except Exception as err:
+            raise WikiPageStoredReadbackFailed(
+                f"Page '{page_name}' was stored, but reading back its "
+                f"new version failed: {_describe_error(err)}",
+                page_name,
+                page_url,
+                err,
+            ) from err
+        if not isinstance(info, dict) or not info:
+            raise WikiPageStoredReadbackFailed(
+                f"Page '{page_name}' was stored, but reading back its "
+                f"new version returned no page info ({info!r})",
+                page_name,
+                page_url,
+                None,
+            )
+
+        return {
+            "name": page_name,
+            "version": info.get("version"),
+            "author": info.get("author"),
+            "lastModified": info.get("lastModified"),
+            "url": page_url,
+        }
 
     def get_wiki_page_html(
         self, page_name: str, version: int | None = None

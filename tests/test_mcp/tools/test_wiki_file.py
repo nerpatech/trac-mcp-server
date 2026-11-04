@@ -599,6 +599,142 @@ class TestPush:
         assert "    return 1" in client.put_wiki_page.call_args[0][1]
 
 
+class TestPushReadbackAfterWrite:
+    """A fault after a successful putPage (Trac /trac_mcp_server #140).
+
+    A real TracClient with only ``_rpc_request`` mocked: putPage returns
+    True and the read-back getPageInfo that follows it faults. Everything
+    between -- put_wiki_page's precheck and read-back, and the handler's
+    existence probe -- runs for real.
+    """
+
+    @staticmethod
+    def _client(mock_config, readback_fault):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+        calls: list[tuple] = []
+        page_info = {
+            "name": "X",
+            "version": 3,
+            "author": "someone",
+            "lastModified": 1234567890,
+        }
+
+        def _rpc(namespace, method, *args):
+            calls.append((namespace, method, *args))
+            if method == "putPage":
+                return True
+            if method == "getPageInfo":
+                wrote = any(c[1] == "putPage" for c in calls[:-1])
+                if wrote:
+                    raise readback_fault
+                return dict(page_info)
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        return client, calls, _rpc
+
+    async def _push(self, mock_config, readback_fault):
+        client, calls, rpc = self._client(mock_config, readback_fault)
+        with (
+            patch.object(client, "_rpc_request", side_effect=rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\nnew text\n", "page_name": "X"},
+                client,
+            )
+        puts = [c for c in calls if c[1] == "putPage"]
+        return result, puts
+
+    async def test_not_found_readback_does_not_write_twice(
+        self, mock_config
+    ):
+        """The page is deleted between putPage and its read-back: the
+        read-back's "not found" fault must not reach the create fallback,
+        which would post putPage again and recreate the deleted page."""
+        result, puts = await self._push(
+            mock_config, xmlrpc.client.Fault(1, "Page 'X' not found")
+        )
+
+        assert len(puts) == 1
+        # With the existing page's version, i.e. the update -- not a
+        # create with no version.
+        assert puts[0][4]["version"] == 3
+        assert not result.isError
+        assert result.structuredContent["action"] == "updated"
+        assert result.structuredContent["readback_failed"] is True
+
+    async def test_other_readback_fault_reports_the_page_as_stored(
+        self, mock_config
+    ):
+        """Any other read-back fault after a stored write must say the
+        page was stored, not come back as an error (which means nothing
+        was stored, and invites a retry)."""
+        result, puts = await self._push(
+            mock_config, xmlrpc.client.Fault(1, "Internal error")
+        )
+
+        assert len(puts) == 1
+        assert not result.isError
+        sc = result.structuredContent
+        assert sc["readback_failed"] is True
+        assert sc["version"] is None
+        assert "Internal error" in sc["readback_error"]
+        text = result.content[0].text
+        assert "WAS stored" in text
+        assert "Do not push again" in text
+
+    async def test_clean_push_reports_no_readback_failure(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.return_value = {"version": 4}
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.structuredContent["readback_failed"] is False
+        assert "readback_error" not in result.structuredContent
+
+    async def test_probe_not_found_still_creates_once(self):
+        """The fallback the fix narrows still works: a not-found fault
+        from the existence probe creates the page, with one write."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page X does not exist"
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.structuredContent["action"] == "created"
+        client.put_wiki_page.assert_called_once()
+        assert client.put_wiki_page.call_args[0][3] is None
+
+    async def test_write_fault_is_not_retried_as_a_create(self):
+        """A not-found fault raised by the write itself (not the probe)
+        is an error, never a second write."""
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = xmlrpc.client.Fault(
+            1, "Page X not found"
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.isError
+        client.put_wiki_page.assert_called_once()
+
+
 # =============================================================================
 # _handle_pull (via ToolRegistry.call_tool)
 # =============================================================================

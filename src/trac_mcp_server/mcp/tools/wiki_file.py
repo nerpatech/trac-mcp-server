@@ -28,7 +28,11 @@ from ...converters.markdown_to_tracwiki import (
 )
 from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
-from ...core.client import TracClient, WikiPageConflict
+from ...core.client import (
+    TracClient,
+    WikiPageConflict,
+    WikiPageStoredReadbackFailed,
+)
 from ...file_handler import detect_file_format
 from ...preview.checks import _allowed_codes
 from .errors import build_error_response
@@ -57,7 +61,11 @@ WIKI_FILE_TOOLS = [
             "`trac-mcp wiki-push PAGE FILE`. Refuses the push when "
             "converting would strip a code block's indentation and "
             "store syntactically invalid content -- pass "
-            'format="tracwiki" to push the text verbatim instead.'
+            'format="tracwiki" to push the text verbatim instead. An '
+            "error result means nothing was stored. If the page was "
+            "stored but its new version could not be read back, the "
+            "result is not an error: structuredContent.readback_failed "
+            "is true and version is null -- do not push again."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -388,48 +396,48 @@ async def _handle_push(
 
     # Create or update page (client already provided)
 
+    # The existence probe, alone in its try: a not-found fault means the
+    # page is absent ONLY when it comes from this probe. A fault raised
+    # after putPage (its read-back) must never reach a "create it"
+    # fallback, or the push writes twice -- recreating a page someone
+    # just deleted (Trac /trac_mcp_server #140).
     try:
         info = await run_sync(client.get_wiki_page_info, page_name)
-        # Some Trac instances return 0 (int) instead of raising Fault
-        # for non-existent pages — treat falsy/non-dict as "page not found"
-        if not isinstance(info, dict) or not info:
-            # Page doesn't exist — create
-            result = await run_sync(
-                client.put_wiki_page,
-                page_name,
-                wiki_content,
-                comment,
-                None,
-            )
-            action = "created"
-        else:
-            # Page exists — update with optimistic locking
-            version = info.get("version")
-            result = await run_sync(
-                client.put_wiki_page,
-                page_name,
-                wiki_content,
-                comment,
-                version,
-            )
-            action = "updated"
     except xmlrpc.client.Fault as e:
         fault_lower = e.faultString.lower()
         if (
-            "not found" in fault_lower
-            or "does not exist" in fault_lower
+            "not found" not in fault_lower
+            and "does not exist" not in fault_lower
         ):
-            # Page doesn't exist — create
-            result = await run_sync(
-                client.put_wiki_page,
-                page_name,
-                wiki_content,
-                comment,
-                None,
-            )
-            action = "created"
-        else:
             raise
+        info = None
+    # Some Trac instances return 0 (int) instead of raising Fault
+    # for non-existent pages — treat falsy/non-dict as "page not found"
+    if not isinstance(info, dict) or not info:
+        # Page doesn't exist — create
+        action = "created"
+        version = None
+    else:
+        # Page exists — update with optimistic locking
+        action = "updated"
+        version = info.get("version")
+
+    # The write: exactly one putPage, with no fallback.
+    readback_error: str | None = None
+    try:
+        result = await run_sync(
+            client.put_wiki_page,
+            page_name,
+            wiki_content,
+            comment,
+            version,
+        )
+    except WikiPageStoredReadbackFailed as e:
+        # Stored, but the new version is unknown. Not an error result:
+        # an error means nothing was stored, and a caller retrying on
+        # one would write the page a second time.
+        result = {}
+        readback_error = str(e)
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket
         # #120); put_wiki_page refused before posting anything.
@@ -445,12 +453,21 @@ async def _handle_push(
             f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
         )
 
-    new_version = result.get("version", 1)
-
-    # Build response
-    text_parts = [
-        f"{'Created' if action == 'created' else 'Updated'} wiki page '{page_name}' (version {new_version})"
-    ]
+    verb = "Created" if action == "created" else "Updated"
+    if readback_error is None:
+        new_version = result.get("version", 1)
+        text_parts = [
+            f"{verb} wiki page '{page_name}' (version {new_version})"
+        ]
+    else:
+        new_version = None
+        text_parts = [
+            f"{verb} wiki page '{page_name}' (version unknown): the "
+            "page WAS stored, but reading back its new version failed. "
+            "Do not push again; check the page with "
+            f"wiki_get(page_name='{page_name}').",
+            f"Read-back error: {readback_error}",
+        ]
     if warnings:
         text_parts.append("")
         text_parts.append("Conversion warnings:")
@@ -467,7 +484,12 @@ async def _handle_push(
         "file_path": args.get("file_path"),
         "source": source_label,
         "warnings": warnings,
+        # Trac /trac_mcp_server #140: true when the page was stored but
+        # its new version could not be read back (version is then None).
+        "readback_failed": readback_error is not None,
     }
+    if readback_error is not None:
+        structured["readback_error"] = readback_error
 
     return types.CallToolResult(
         content=[

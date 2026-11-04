@@ -12,7 +12,11 @@ import xmlrpc.client
 import mcp.types as types
 
 from ...core.async_utils import run_sync
-from ...core.client import TracClient, WikiPageConflict
+from ...core.client import (
+    TracClient,
+    WikiPageConflict,
+    WikiPageStoredReadbackFailed,
+)
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
@@ -21,11 +25,30 @@ from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 logger = logging.getLogger(__name__)
 
 
+def _stored_readback_failed_lines(
+    verb: str,
+    page_name: str,
+    err: WikiPageStoredReadbackFailed,
+    tool: str,
+) -> list[str]:
+    """The result text for a write that was stored but whose read-back
+    failed (Trac /trac_mcp_server #140). Not an error result: an error
+    means nothing was stored, and a caller retrying on one would write
+    the page a second time."""
+    return [
+        f"{verb} wiki page '{page_name}' (version unknown): the page WAS "
+        "stored, but reading back its new version failed. Do not call "
+        f"{tool} again for this change; check the page with "
+        f"wiki_get(page_name='{page_name}').",
+        f"Read-back error: {err}",
+    ]
+
+
 # Tool definitions for list_tools()
 WIKI_WRITE_TOOLS = [
     types.Tool(
         name="wiki_create",
-        description="Create a new wiki page. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Fails if the page exists (use wiki_update instead).",
+        description="Create a new wiki page. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Fails if the page exists (use wiki_update instead). If the result says the page WAS stored but its version could not be read back, do not create it again.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -54,7 +77,7 @@ WIKI_WRITE_TOOLS = [
     ),
     types.Tool(
         name="wiki_update",
-        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written.",
+        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. If the result says the page WAS stored but its new version could not be read back, do not update it again.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -177,17 +200,20 @@ async def _handle_create(
         return refusal
 
     # Create the page (version=None creates new page)
-    result = await run_sync(
-        client.put_wiki_page, page_name, wiki_content, comment, None
-    )
-
-    # Extract version from result
-    new_version = result.get("version", 1)
-
-    # Build response
-    response_lines = [
-        f"Created wiki page '{page_name}' (version {new_version})"
-    ]
+    try:
+        result = await run_sync(
+            client.put_wiki_page, page_name, wiki_content, comment, None
+        )
+    except WikiPageStoredReadbackFailed as e:
+        response_lines = _stored_readback_failed_lines(
+            "Created", page_name, e, "wiki_create"
+        )
+    else:
+        # Extract version from result
+        new_version = result.get("version", 1)
+        response_lines = [
+            f"Created wiki page '{page_name}' (version {new_version})"
+        ]
     response_lines.extend(gate_lines)
 
     return types.CallToolResult(
@@ -253,6 +279,18 @@ async def _handle_update(
             wiki_content,
             comment,
             version,
+        )
+    except WikiPageStoredReadbackFailed as e:
+        response_lines = _stored_readback_failed_lines(
+            "Updated", page_name, e, "wiki_update"
+        )
+        response_lines.extend(gate_lines)
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text", text="\n".join(response_lines)
+                )
+            ]
         )
     except WikiPageConflict as e:
         # Stale version caught by the client's precheck (ticket #120);

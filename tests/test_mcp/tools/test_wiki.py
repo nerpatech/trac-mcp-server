@@ -967,6 +967,74 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertNotIn("Current version is", text)
 
 
+class TestWriteReadbackAfterStore:
+    """wiki_create / wiki_update when putPage stored the page but the
+    read-back after it faulted (Trac /trac_mcp_server #140): the result
+    must say the page was stored, not come back as an error."""
+
+    @staticmethod
+    def _client(page_exists: bool):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(
+            Config(trac_url="http://test", username="u", password="p")
+        )
+        calls: list[str] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "putPage":
+                return True
+            if method == "getPageInfo" and "putPage" in calls[:-1]:
+                raise xmlrpc.client.Fault(1, "Internal error")
+            if method == "getPageInfo" and page_exists:
+                return {"name": "P", "version": 5}
+            if method == "getPage" and page_exists:
+                return "old"
+            raise xmlrpc.client.Fault(1, "Page P does not exist")
+
+        return client, calls, _rpc
+
+    @pytest.mark.parametrize(
+        "tool, args, exists, verb",
+        [
+            (
+                "wiki_create",
+                {"page_name": "P", "content": "x"},
+                False,
+                "Created",
+            ),
+            (
+                "wiki_update",
+                {"page_name": "P", "content": "x", "version": 5},
+                True,
+                "Updated",
+            ),
+        ],
+    )
+    async def test_stored_readback_failure_is_not_an_error(
+        self, tool, args, exists, verb
+    ):
+        client, calls, rpc = self._client(exists)
+        with (
+            patch.object(client, "_rpc_request", side_effect=rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                tool, args, client
+            )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert f"{verb} wiki page 'P' (version unknown)" in text
+        assert "WAS stored" in text
+        assert "Internal error" in text
+        assert calls.count("putPage") == 1
+
+
 class TestHandleDelete(unittest.TestCase):
     """Test _handle_delete handler."""
 

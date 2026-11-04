@@ -1152,9 +1152,12 @@ Each update object:
   "converted": true,
   "file_path": null,
   "source": "inline content",
-  "warnings": []
+  "warnings": [],
+  "readback_failed": false
 }
 ```
+
+**Stored, read-back failed:** if `wiki.putPage` succeeded but reading back the page's new version then failed, the result is **not** an error -- the page was stored, and an error result means nothing was. `readback_failed` is `true`, `version` is `null`, `readback_error` carries the read-back's error, and the text says the page WAS stored and not to push again. The push posts `putPage` exactly once: a "not found" fault from the read-back (the page was deleted just after the write) no longer triggers a second write as a create (Trac /trac_mcp_server #140).
 
 **Error Responses:**
 
@@ -1179,7 +1182,7 @@ Each update object:
 - Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
-- Creates new page if it doesn't exist, updates with optimistic locking if it does
+- Creates new page if it doesn't exist, updates with optimistic locking if it does. Only the existence probe's "not found" means "create"; the write itself is never retried
 - Handles Trac instances that return 0 (int) instead of Fault for non-existent pages
 
 **Example Call:**
