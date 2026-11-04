@@ -56,6 +56,13 @@ _MAX_LINK_HREF_CHARS = 200
 # inside the title, and the type and status around it are the point.
 _MAX_TICKET_REF_CHARS = 160
 
+# The `Ticket refs` line lists at most this many entries. Each entry is
+# capped by `_MAX_TICKET_REF_CHARS`, but the number of entries is not
+# otherwise bounded: a document citing 300 distinct tickets would give a
+# single ~49K-character line. Past the cap the line ends with a count of
+# the rest; every ticket is still in `structuredContent` `links.ticket`.
+_MAX_TICKET_REFS = 50
+
 # The ticket number a local ticket link points at, from its href. Trac
 # writes `.../ticket/N`, with `#comment:M` or a query after it for the
 # comment and query forms, which name the same ticket.
@@ -427,14 +434,19 @@ def _ticket_ref_key(link: dict) -> str:
 
 
 def _ticket_ref_summary(key: str, title: str | None) -> str | None:
-    """Trac's title for the link without its leading ``#N: ``, which
-    would only repeat the key. ``None`` when there is no title."""
+    """Trac's title for the link without its leading ``#N: `` (or, for a
+    ``comment:`` link, ``Comment M for #N: ``), which would only repeat
+    the key. ``None`` when there is no title."""
     if not title:
         return None
     summary = " ".join(title.split())
     prefix = f"{key}: "
     if summary.startswith(prefix):
         summary = summary[len(prefix) :]
+    else:
+        summary = re.sub(
+            rf"^Comment \d+ for {re.escape(key)}: ", "", summary
+        )
     return summary or None
 
 
@@ -477,9 +489,15 @@ def _ticket_refs_line(section_results: list[dict]) -> str:
             f"{key} {summary}" if summary else key,
             _MAX_TICKET_REF_CHARS,
         )
-        for key, (summary, _) in refs.items()
+        for key, (summary, _) in list(refs.items())[:_MAX_TICKET_REFS]
     ]
-    return f"Ticket refs ({len(entries)}): {'; '.join(entries)}"
+    line = f"Ticket refs ({len(refs)}): {'; '.join(entries)}"
+    if len(refs) > _MAX_TICKET_REFS:
+        line += (
+            f"; ... and {len(refs) - _MAX_TICKET_REFS} more "
+            "(all in structuredContent links.ticket)"
+        )
+    return line
 
 
 def _code_block_lines(section_results: list[dict]) -> list[str]:

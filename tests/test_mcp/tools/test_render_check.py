@@ -698,6 +698,69 @@ class TestRenderCheckTextBlock(unittest.TestCase):
             "Ticket refs (2): #18 task: Do it (new); #7",
         )
 
+    def test_ticket_refs_lone_comment_link_drops_the_title_prefix(self):
+        """A ticket cited only through a `comment:` link has no
+        `#N: ...` title to fall back on; Trac's `Comment M for #N: `
+        prefix is dropped, not shown as the summary."""
+        sections = [
+            {
+                "links": {
+                    "ticket": [
+                        {
+                            "href": "http://h/t/ticket/18#comment:2",
+                            "text": "comment:2:ticket:18",
+                            "title": "Comment 2 for #18: task: Do it (new)",
+                            "missing": False,
+                        }
+                    ]
+                }
+            }
+        ]
+        self.assertEqual(
+            _ticket_refs_line(sections),
+            "Ticket refs (1): #18 task: Do it (new)",
+        )
+
+    @staticmethod
+    def _sections_with_tickets(count):
+        return [
+            {
+                "links": {
+                    "ticket": [
+                        {
+                            "href": f"http://h/t/ticket/{n}",
+                            "text": f"#{n}",
+                            "title": f"#{n}: task: Ticket {n} (new)",
+                            "missing": False,
+                        }
+                        for n in range(1, count + 1)
+                    ]
+                }
+            }
+        ]
+
+    def test_ticket_refs_line_is_capped_at_fifty_entries(self):
+        """60 distinct tickets: the header keeps the full count, only
+        the first 50 (first-seen order) are listed, and the tail says
+        how many were left off and where they are."""
+        line = _ticket_refs_line(self._sections_with_tickets(60))
+        tail = (
+            "; ... and 10 more (all in structuredContent links.ticket)"
+        )
+        self.assertTrue(line.endswith(tail), line)
+        head = line[: -len(tail)]
+        self.assertTrue(head.startswith("Ticket refs (60): "), line)
+        entries = head[len("Ticket refs (60): ") :].split("; ")
+        self.assertEqual(len(entries), 50, line)
+        self.assertEqual(entries[0], "#1 task: Ticket 1 (new)")
+        self.assertEqual(entries[-1], "#50 task: Ticket 50 (new)")
+
+    def test_ticket_refs_line_at_the_cap_has_no_tail(self):
+        line = _ticket_refs_line(self._sections_with_tickets(50))
+        self.assertTrue(line.startswith("Ticket refs (50): "), line)
+        self.assertEqual(len(line.split("; ")), 50, line)
+        self.assertNotIn("more", line)
+
     def test_code_blocks_listed(self):
         result = self._wiki("row09_code_blocks_mixed")
         blocks = result.structuredContent["sections"][0]["code_blocks"]
