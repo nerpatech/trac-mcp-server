@@ -44,9 +44,10 @@ from dotenv import find_dotenv, load_dotenv
 # This heredoc has no file of its own -- it arrives on stdin -- so
 # find_dotenv() has no calling file to start from. usecwd=True starts it at
 # the repo root this script has already cd'd to and walks up from there. That
-# is the same lookup tests/conftest.py's bare load_dotenv() makes, so a
-# worktree nested in the main checkout (.claude/worktrees/*) reaches the main
-# checkout's .env instead of failing the probe before pytest (Trac #128).
+# is the same upward walk tests/conftest.py's bare load_dotenv() makes, except
+# that conftest's walk starts one level down in tests/, which holds no .env.
+# A worktree nested in the main checkout (.claude/worktrees/*) so reaches the
+# main checkout's .env instead of failing the probe before pytest (Trac #128).
 load_dotenv(find_dotenv(usecwd=True))
 
 REQUIRED = (

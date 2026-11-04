@@ -15,6 +15,7 @@ look like "no .env anywhere".
 """
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -40,10 +41,10 @@ SCRUBBED = (
 )
 
 
-def _dotenv(url: str) -> str:
+def _dotenv(url: str, user: str = "u1") -> str:
     return (
         f"TRAC_URL={url}\n"
-        "TRAC_USERNAME=u1\n"
+        f"TRAC_USERNAME={user}\n"
         "TRAC_PASSWORD=p1\n"
         "TRAC_USERNAME_2=u2\n"
         "TRAC_PASSWORD_2=p2\n"
@@ -65,8 +66,14 @@ def layout(tmp_path):
     stub.write_text('#!/bin/sh\necho "STUB-PYTEST-RAN $@"\nexit 0\n')
     stub.chmod(0o755)
     # The script calls `python -`; make that name resolve to the interpreter
-    # running this test, the one that has python-dotenv.
-    (bin_dir / "python").symlink_to(sys.executable)
+    # running this test, the one that has python-dotenv. A wrapper rather than
+    # a symlink: the interpreter then runs from its real path, so venv
+    # detection (pyvenv.cfg next to the executable) works as usual.
+    wrapper = bin_dir / "python"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n'
+    )
+    wrapper.chmod(0o755)
 
     env = {k: v for k, v in os.environ.items() if k not in SCRUBBED}
     env["PATH"] = (
@@ -113,9 +120,13 @@ def test_probe_refuses_when_no_dotenv_anywhere(layout):
 def test_probe_prefers_the_checkouts_own_dotenv(layout):
     tmp_path, child, script, env = layout
     (tmp_path / "parent" / ".env").write_text(
-        "TRAC_URL=http://parent.invalid\n"
+        _dotenv("http://parent.invalid", user="parent_user")
     )
-    (child / ".env").write_text(_dotenv("http://child.invalid"))
+    (child / ".env").write_text(
+        _dotenv("http://child.invalid", user="child_user")
+    )
     result = _run(tmp_path, script, env)
     assert result.returncode == 0, result.stderr
     assert "http://child.invalid" in result.stdout
+    assert "child_user" in result.stdout
+    assert "parent" not in result.stdout
