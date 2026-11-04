@@ -33,11 +33,17 @@ from .registry import ToolSpec
 
 _MARKER = "'''Wiki style:'''"
 
-#: A valid declaration: the whole line, from column 0.
+#: A valid declaration: the whole line, from column 0. The page may end
+#: in a ``#anchor``, accepted and dropped; an ``@`` anywhere in the target
+#: (a ``page@version`` link) is not accepted, so such a line is malformed.
 _DECLARATION_RE = re.compile(
     r"^'''Wiki style:''' \[(?:(?P<prefix>[A-Za-z0-9_-]+):)?wiki:"
-    r"(?P<page>[^\s\]]+) (?P<label>[a-z]+)\]\s*$"
+    r"(?P<page>[^\s\]#@]+)(?:#[^\s\]@]*)? (?P<label>[a-z]+)\]\s*$"
 )
+
+#: Labels that would be indistinguishable from the tool's own status
+#: values in ``style``.
+_RESERVED_LABELS = frozenset({"malformed", "undeclared"})
 
 _TEMPLATE_PREFIX = "PageTemplates/"
 
@@ -93,6 +99,8 @@ def parse_style_declaration(text: str) -> StyleDeclaration:
     if len(parsed) != 1:
         return StyleDeclaration("malformed", None, None, None, lines)
     ((prefix, page, label),) = parsed
+    if label in _RESERVED_LABELS:
+        return StyleDeclaration("malformed", None, None, None, lines)
     return StyleDeclaration(label, prefix, page, label, lines)
 
 
@@ -118,68 +126,81 @@ def _own_instance_path(client: TracClient) -> str:
     return urlparse(client.config.trac_url).path.rstrip("/")
 
 
+def _failure(exc: Exception) -> tuple[str, str]:
+    """``(reason, message)`` for a failed page read: a Fault is classified
+    by :func:`_fault_reason`, anything else is a plain ``error``."""
+    if isinstance(exc, xmlrpc.client.Fault):
+        return _fault_reason(exc), str(exc.faultString)
+    return "error", str(exc)
+
+
 async def _read_page(client: TracClient, name: str) -> tuple[str, int]:
-    """A page's body as stored, and its version."""
-    body, info = await asyncio.gather(
-        run_sync_limited(client.get_wiki_page, name),
-        run_sync_limited(client.get_wiki_page_info, name),
-    )
-    return body, int(info["version"])
+    """A page's body as stored, and its version.
+
+    The info is read first and the body is pinned to the version it names,
+    so the two always match even if the page is saved in between. Trac
+    answers ``getPageInfo`` with ``0`` rather than a fault for a missing
+    page (#119); that is reported as the not-found fault it stands for.
+    """
+    info = await run_sync_limited(client.get_wiki_page_info, name)
+    if not isinstance(info, dict):
+        raise xmlrpc.client.Fault(404, f"Page {name} does not exist")
+    version = int(info["version"])
+    body = await run_sync_limited(client.get_wiki_page, name, version)
+    return body, version
+
+
+def _style_unavailable(
+    path: str, page: str, reason: str, message: str
+) -> dict:
+    return {
+        "instance": path,
+        "name": page,
+        "available": False,
+        "reason": reason,
+        "message": message,
+    }
 
 
 async def _read_style_page(
     client: TracClient, prefix: str | None, page: str
 ) -> dict:
     """The style page's record; a failure is reported, never raised."""
-    if prefix is None or prefix == own_intertrac_prefix(client):
+    own_prefix = (own_intertrac_prefix(client) or "").lower()
+    if prefix is None or prefix.lower() == own_prefix:
         target = client
         path = _own_instance_path(client)
     else:
-        path = "/" + prefix
+        # InterTrac prefixes are case-insensitive; the instance path is
+        # the lower-cased prefix.
+        path = "/" + prefix.lower()
         registry = get_instance_registry()
-
-        def unavailable(reason: str, message: str) -> dict:
-            return {
-                "instance": path,
-                "name": page,
-                "available": False,
-                "reason": reason,
-                "message": message,
-            }
-
         if registry is None:
-            return unavailable(
-                "unknown_instance", "Instance registry not initialized."
+            return _style_unavailable(
+                path,
+                page,
+                "unknown_instance",
+                "Instance registry not initialized.",
             )
         try:
             target = registry.get_client(
                 path, identity=caller_identity()
             )
         except InstanceNotAllowedError as exc:
-            return unavailable("instance_not_allowed", str(exc))
+            return _style_unavailable(
+                path, page, "instance_not_allowed", str(exc)
+            )
         except UnknownInstanceError as exc:
-            return unavailable("unknown_instance", str(exc))
+            return _style_unavailable(
+                path, page, "unknown_instance", str(exc)
+            )
         except Exception as exc:  # noqa: BLE001 - reported, not raised
-            return unavailable("error", str(exc))
+            return _style_unavailable(path, page, "error", str(exc))
 
     try:
         body, version = await _read_page(target, page)
-    except xmlrpc.client.Fault as exc:
-        return {
-            "instance": path,
-            "name": page,
-            "available": False,
-            "reason": _fault_reason(exc),
-            "message": str(exc.faultString),
-        }
     except Exception as exc:  # noqa: BLE001 - reported, not raised
-        return {
-            "instance": path,
-            "name": page,
-            "available": False,
-            "reason": "error",
-            "message": str(exc),
-        }
+        return _style_unavailable(path, page, *_failure(exc))
     return {
         "instance": path,
         "name": page,
@@ -198,19 +219,32 @@ async def _read_wikistart(client: TracClient) -> str:
         raise
 
 
+async def _read_template(client: TracClient, name: str) -> dict:
+    """One template's record; a failed read is reported, never raised."""
+    try:
+        body, version = await _read_page(client, name)
+    except Exception as exc:  # noqa: BLE001 - reported, not raised
+        reason, message = _failure(exc)
+        return {
+            "name": name,
+            "available": False,
+            "reason": reason,
+            "message": message,
+        }
+    return {"name": name, "version": version, "body": body}
+
+
 async def _read_templates(client: TracClient) -> list[dict]:
     names = sorted(
         n
         for n in await run_sync_limited(client.list_wiki_pages)
         if n.startswith(_TEMPLATE_PREFIX)
     )
-    pages = await asyncio.gather(
-        *(_read_page(client, n) for n in names)
+    return list(
+        await asyncio.gather(
+            *(_read_template(client, n) for n in names)
+        )
     )
-    return [
-        {"name": name, "version": version, "body": body}
-        for name, (body, version) in zip(names, pages, strict=True)
-    ]
 
 
 async def _handle_conventions(
@@ -219,12 +253,16 @@ async def _handle_conventions(
     """Handle wiki_conventions."""
     declaration = parse_style_declaration(await _read_wikistart(client))
 
-    style_page = None
-    if declaration.page is not None:
-        style_page = await _read_style_page(
-            client, declaration.prefix, declaration.page
-        )
-    templates = await _read_templates(client)
+    async def no_style_page() -> None:
+        return None
+
+    # Neither read raises for a per-page failure, so no return_exceptions.
+    style_page, templates = await asyncio.gather(
+        _read_style_page(client, declaration.prefix, declaration.page)
+        if declaration.page is not None
+        else no_style_page(),
+        _read_templates(client),
+    )
 
     result = {
         "style": declaration.style,
