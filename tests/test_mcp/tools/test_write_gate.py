@@ -91,6 +91,14 @@ PR_NUMBER_HTML = (
 )
 PR_NUMBER_SOURCE = "See PR #99999 for context."
 
+# Ticket #151. A bare `#99999` to a ticket that does not exist, with no
+# `PR` in front: the same `missing ticket` anchor Trac rendered for
+# `PR_NUMBER_HTML` above (no href), only the surrounding prose differs.
+DEAD_TICKET_HTML = (
+    '<p>\nSee <a class="missing ticket">#99999</a> for context.\n</p>\n'
+)
+DEAD_TICKET_SOURCE = "See #99999 for context."
+
 # `bcs:#99999` (a configured prefix) alongside a bare `#99999` in the
 # same document -- the bare form resolves to THIS instance's own
 # ticket 99999, not bcs's.
@@ -367,6 +375,9 @@ def test_pr_number_as_ticket_refuses_and_clean_pr_mention_passes():
     )
     assert outcome.refused
     assert "pr_number_as_ticket" in outcome.refusal_text
+    # Ticket #151: the "Also reported, not blocking" list no longer
+    # repeats the same `#99999` as a `bare_ticket_ref` advisory.
+    assert "bare_ticket_ref" not in outcome.refusal_text
 
     clean = asyncio.run(
         check_write(
@@ -390,6 +401,7 @@ def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
     )
     assert outcome.refused
     assert "bare_ref_shadows_prefixed" in outcome.refusal_text
+    assert "bare_ticket_ref" not in outcome.refusal_text
 
     # The other half of #105's own scoping note: a lone bare reference
     # with no prefixed twin is NOT this check's population. An EXISTING
@@ -409,6 +421,31 @@ def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
         )
     )
     assert not lone.refused, lone.refusal_text
+    # Ticket #151: and it is not reported at all -- a correct citation
+    # of an existing ticket used to come back as a `bare_ticket_ref`
+    # advisory line on every write that cited anything.
+    assert lone.advisory == [], lone.advisory
+    assert lone.summary_lines() == []
+
+
+def test_dead_bare_ticket_ref_still_refuses_as_missing_local_target():
+    """Ticket #151's seeded control. Removing `bare_ticket_ref` must not
+    let a bare `#N` to a ticket that does not exist through: Trac renders
+    it `class="missing ticket"` (same captured shape as `PR_NUMBER_HTML`)
+    and `missing_local_target` refuses it at `error`."""
+    outcome = asyncio.run(
+        check_write(
+            _client(DEAD_TICKET_HTML),
+            DEAD_TICKET_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "[missing_local_target]" in outcome.refusal_text
+    assert "#99999" in outcome.refusal_text
+    assert "bare_ticket_ref" not in outcome.refusal_text
+    assert outcome.advisory == []
 
 
 def test_self_intertrac_prefix_refuses_and_clean_configured_ref_passes():

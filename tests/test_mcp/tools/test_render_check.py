@@ -26,11 +26,30 @@ from trac_mcp_server.mcp.tools.render_check import (
     _handle_ticket_render_check,
     _handle_wiki_render_check,
     _missing_links_lines,
+    _ticket_refs_line,
 )
 
 FIXTURES_DIR = (
     Path(__file__).parent.parent.parent / "fixtures" / "render_check"
 )
+
+# Ticket #151. Ticket anchors in the shapes the live daemon rendered
+# them: #57 is `row04_bare_ticket_ref.html`'s, #3 is
+# `convert_preview/row14_bare_ticket_ref.html`'s, and the dead one is
+# `test_write_gate.py`'s captured `missing ticket` (no href).
+_TICKET_57_ANCHOR = (
+    '<a class="closed ticket" '
+    'href="http://192.168.10.4:8000/trac_mcp_server/ticket/57" '
+    'title="#57: defect: convert_preview: unconfigured_intertrac_prefix '
+    'misses the realm form, ... (closed: fixed)">#57</a>'
+)
+_TICKET_3_ANCHOR = (
+    '<a class="closed ticket" '
+    'href="http://192.168.10.4:8000/trac_mcp_server/ticket/3" '
+    'title="#3: defect: Expand DEFAULT_TICKET_TYPE docstring comment in '
+    'mcp/tools/constants.py (closed: fixed)">#3</a>'
+)
+_DEAD_TICKET_ANCHOR = '<a class="missing ticket">#99999</a>'
 MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 
 BASE_URL = "http://192.168.10.4:8000/trac_mcp_server"
@@ -299,6 +318,29 @@ class TestTicketRenderCheckHandler(unittest.TestCase):
         self.assertEqual(len(links["ticket"]), 1)
         self.assertEqual(links["ticket"][0]["text"], "#57")
 
+    def test_bare_ticket_ref_is_not_a_warning_but_keeps_its_title(self):
+        """Ticket #151. A bare `#57` to an existing ticket raises no
+        warning, so a correct ticket reads `0 error(s), 0 warning(s)`;
+        the resolved summary is still in `links.ticket` and on the
+        `Ticket refs` line."""
+        client = _mock_ticket_client("row04_bare_ticket_ref")
+        result = self._run(
+            client, {"ticket_id": 1, "check_targets": False}
+        )
+        section = result.structuredContent["sections"][0]
+        self.assertEqual(section["warnings"], [])
+        self.assertEqual(
+            result.structuredContent["stats"]["warnings"], 0
+        )
+        entry = section["links"]["ticket"][0]
+        self.assertEqual(entry["text"], "#57")
+        self.assertTrue(entry["title"].startswith("#57: defect: "))
+        self.assertFalse(entry["missing"])
+        text = result.content[0].text
+        self.assertIn("0 error(s), 0 warning(s)", text)
+        self.assertNotIn("bare_ticket_ref", text)
+        self.assertIn("Ticket refs (1): #57 defect: ", text)
+
     def test_unpaired_section_notes_the_skip(self):
         """A comment whose changelog entry can't be found gets an
         explicit source_not_paired warning, never a silent pass
@@ -528,6 +570,196 @@ class TestRenderCheckTextBlock(unittest.TestCase):
             "HTML [description] (truncated at 50 bytes):",
             result.content[0].text,
         )
+
+    def test_ticket_refs_listed_once_in_first_seen_order(self):
+        """Ticket #151. The same `#57` cited in the description and
+        again in a later comment is listed ONCE, and the order is the
+        order first seen across sections: #57 (description), #3
+        (comment 1) -- not sorted by number, and not once per section.
+        A missing ticket is left off this line; it stays an error and
+        is listed under `Missing links`. None of it counts toward the
+        totals."""
+        page = (
+            '<html><body><div class="description"><div class="searchable">'
+            f"{_fixture_html_body('row04_bare_ticket_ref')}"
+            "</div></div>"
+            '<div class="change" id="trac-change-1-1000000000">'
+            f'<div class="comment"><p>Also {_TICKET_3_ANCHOR}, and '
+            f"{_TICKET_57_ANCHOR} again.</p></div></div>"
+            '<div class="change" id="trac-change-2-1000000001">'
+            f'<div class="comment"><p>Then {_TICKET_57_ANCHOR} and '
+            f"{_DEAD_TICKET_ANCHOR}.</p></div></div>"
+            "</body></html>"
+        )
+        client = _mock_ticket_client("row04_bare_ticket_ref")
+        client.session.get.return_value.text = page
+        client.get_ticket_changelog.return_value = [
+            [
+                "2026-09-01T00:00:00",
+                "someone",
+                "comment",
+                str(n),
+                src,
+                True,
+            ]
+            for n, src in (
+                (1, "Also #3, and #57 again."),
+                (2, "Then #57 and #99999."),
+            )
+        ]
+        result = asyncio.run(
+            _handle_ticket_render_check(
+                client, {"ticket_id": 1, "check_targets": False}
+            )
+        )
+        text = result.content[0].text
+        refs = [
+            line
+            for line in text.splitlines()
+            if line.startswith("Ticket refs")
+        ]
+        self.assertEqual(len(refs), 1, text)
+        self.assertEqual(
+            refs[0],
+            "Ticket refs (2): "
+            "#57 defect: convert_preview: unconfigured_intertrac_prefix "
+            "misses the realm form, ... (closed: fixed); "
+            "#3 defect: Expand DEFAULT_TICKET_TYPE docstring comment in "
+            "mcp/tools/constants.py (closed: fixed)",
+        )
+        self.assertIn("Missing links (1):", text)
+        # The dead ticket is the one error; the line adds nothing to
+        # either total.
+        stats = result.structuredContent["stats"]
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(stats["warnings"], 1)
+        self.assertIn("1 error(s), 1 warning(s)", text)
+
+    def test_no_ticket_refs_says_none(self):
+        text = self._wiki("row01_clean").content[0].text
+        self.assertIn("Ticket refs: none.", text)
+
+    def test_ticket_refs_line_comes_right_after_links_line(self):
+        lines = self._ticket("row04_bare_ticket_ref").content[0].text
+        lines = lines.splitlines()
+        at = next(
+            i
+            for i, line in enumerate(lines)
+            if line.startswith("Links:")
+        )
+        self.assertTrue(lines[at + 1].startswith("Ticket refs (1): "))
+
+    def test_ticket_refs_merge_forms_and_prefer_a_summary_title(self):
+        """`#18`, `ticket:18` and a `comment:` link to 18 all name one
+        ticket (keyed by the href). The comment link's title is not a
+        summary, so a later summary-shaped title replaces it; an entry
+        with no title is just its number."""
+
+        def link(href, text, title):
+            return {
+                "href": href,
+                "text": text,
+                "title": title,
+                "missing": False,
+            }
+
+        sections = [
+            {
+                "links": {
+                    "ticket": [
+                        link(
+                            "http://h/t/ticket/18#comment:2",
+                            "comment:2:ticket:18",
+                            "Comment 2 for #18: task: Do it (new)",
+                        ),
+                        link("http://h/t/ticket/7", "#7", None),
+                    ]
+                }
+            },
+            {
+                "links": {
+                    "ticket": [
+                        link(
+                            "http://h/t/ticket/18",
+                            "ticket:18",
+                            "#18: task: Do it (new)",
+                        ),
+                        link(
+                            "http://h/t/ticket/18",
+                            "#18",
+                            "#18: task: something else",
+                        ),
+                    ]
+                }
+            },
+        ]
+        self.assertEqual(
+            _ticket_refs_line(sections),
+            "Ticket refs (2): #18 task: Do it (new); #7",
+        )
+
+    def test_ticket_refs_lone_comment_link_drops_the_title_prefix(self):
+        """A ticket cited only through a `comment:` link has no
+        `#N: ...` title to fall back on; Trac's `Comment M for #N: `
+        prefix is dropped, not shown as the summary."""
+        sections = [
+            {
+                "links": {
+                    "ticket": [
+                        {
+                            "href": "http://h/t/ticket/18#comment:2",
+                            "text": "comment:2:ticket:18",
+                            "title": "Comment 2 for #18: task: Do it (new)",
+                            "missing": False,
+                        }
+                    ]
+                }
+            }
+        ]
+        self.assertEqual(
+            _ticket_refs_line(sections),
+            "Ticket refs (1): #18 task: Do it (new)",
+        )
+
+    @staticmethod
+    def _sections_with_tickets(count):
+        return [
+            {
+                "links": {
+                    "ticket": [
+                        {
+                            "href": f"http://h/t/ticket/{n}",
+                            "text": f"#{n}",
+                            "title": f"#{n}: task: Ticket {n} (new)",
+                            "missing": False,
+                        }
+                        for n in range(1, count + 1)
+                    ]
+                }
+            }
+        ]
+
+    def test_ticket_refs_line_is_capped_at_fifty_entries(self):
+        """60 distinct tickets: the header keeps the full count, only
+        the first 50 (first-seen order) are listed, and the tail says
+        how many were left off and where they are."""
+        line = _ticket_refs_line(self._sections_with_tickets(60))
+        tail = (
+            "; ... and 10 more (all in structuredContent links.ticket)"
+        )
+        self.assertTrue(line.endswith(tail), line)
+        head = line[: -len(tail)]
+        self.assertTrue(head.startswith("Ticket refs (60): "), line)
+        entries = head[len("Ticket refs (60): ") :].split("; ")
+        self.assertEqual(len(entries), 50, line)
+        self.assertEqual(entries[0], "#1 task: Ticket 1 (new)")
+        self.assertEqual(entries[-1], "#50 task: Ticket 50 (new)")
+
+    def test_ticket_refs_line_at_the_cap_has_no_tail(self):
+        line = _ticket_refs_line(self._sections_with_tickets(50))
+        self.assertTrue(line.startswith("Ticket refs (50): "), line)
+        self.assertEqual(len(line.split("; ")), 50, line)
+        self.assertNotIn("more", line)
 
     def test_code_blocks_listed(self):
         result = self._wiki("row09_code_blocks_mixed")
