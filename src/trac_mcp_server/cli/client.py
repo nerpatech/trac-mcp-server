@@ -606,6 +606,37 @@ async def _run(
                 file=sys.stderr,
             )
             return EXIT_STORED_INCOMPLETE
+        if rc == EXIT_OK and _sc(result).get("possible_overwrite"):
+            # Trac /trac_mcp_server #130: the write succeeded, so the exit
+            # stays 0 -- a non-zero code would read as "not stored" and
+            # invite a retry that writes the page again. The warning goes
+            # to stderr, where a script that captures stdout still sees it.
+            sc = _sc(result)
+            intervening = sc.get("intervening_versions") or []
+            if len(intervening) == 1:
+                detail = (
+                    f"version {intervening[0]} was most likely written "
+                    "by someone else just before this push and replaced "
+                    "by it; inspect it with the wiki_diff tool"
+                )
+            elif intervening:
+                detail = (
+                    f"versions {intervening[0]}-{intervening[-1]} were "
+                    "most likely written by someone else just before "
+                    "this push and replaced by it; inspect them with the "
+                    "wiki_diff tool"
+                )
+            else:
+                detail = (
+                    "check the page's history with the wiki_get_history "
+                    "tool"
+                )
+            print(
+                f"trac-mcp: warning: possible overwrite on wiki page "
+                f"'{args.page}' (stored as version {sc.get('version')}): "
+                f"{detail}",
+                file=sys.stderr,
+            )
         return rc
 
     if cmd == "wiki-pull":

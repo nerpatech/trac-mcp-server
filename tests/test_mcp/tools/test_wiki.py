@@ -1035,6 +1035,83 @@ class TestWriteReadbackAfterStore:
         assert calls.count("putPage") == 1
 
 
+class TestUpdatePossibleOverwrite:
+    """wiki_update when the read-back version is not version + 1 (Trac
+    /trac_mcp_server #130). A real TracClient with only ``_rpc_request``
+    mocked: the precheck sees ``precheck``, putPage returns True, and
+    the read-back sees ``readback``."""
+
+    @staticmethod
+    async def _update(precheck, readback, version):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(
+            Config(trac_url="http://test", username="u", password="p")
+        )
+        calls: list[str] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "putPage":
+                return True
+            if method == "getPageInfo":
+                seen = readback if "putPage" in calls[:-1] else precheck
+                return {"name": "P", "version": seen}
+            raise AssertionError(f"unexpected RPC {method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                "wiki_update",
+                {"page_name": "P", "content": "x", "version": version},
+                client,
+            )
+        return result, calls
+
+    async def test_skipped_version_warns(self):
+        result, calls = await self._update(
+            precheck=3, readback=5, version=3
+        )
+
+        # Still a success: the page was stored.
+        assert not result.isError
+        text = result.content[0].text
+        assert "Updated wiki page 'P' to version 5" in text
+        assert "possible overwrite" in text
+        assert (
+            "Version 4 was most likely written by someone else" in text
+        )
+        assert (
+            "wiki_diff(page_name='P', from_version=3, to_version=4)"
+            in text
+        )
+        assert calls.count("putPage") == 1
+
+    async def test_several_skipped_versions_are_named(self):
+        result, _ = await self._update(
+            precheck=3, readback=7, version=3
+        )
+
+        text = result.content[0].text
+        assert "Versions 4-6 were most likely written" in text
+        assert "from_version=3, to_version=6" in text
+
+    async def test_uncontended_update_stays_quiet(self):
+        result, _ = await self._update(
+            precheck=3, readback=4, version=3
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert text == "Updated wiki page 'P' to version 4"
+        assert "overwrite" not in text.lower()
+
+
 class TestHandleDelete(unittest.TestCase):
     """Test _handle_delete handler."""
 

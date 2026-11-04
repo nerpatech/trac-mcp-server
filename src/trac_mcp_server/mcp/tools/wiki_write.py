@@ -44,6 +44,46 @@ def _stored_readback_failed_lines(
     ]
 
 
+def possible_overwrite_warning(
+    page_name: str, sent_version: int, result: dict
+) -> str | None:
+    """The warning line for an update whose read-back version is not
+    ``sent_version + 1`` (Trac /trac_mcp_server #130), or ``None`` when
+    ``put_wiki_page`` did not flag one. A warning, never an error: the
+    page was stored, and an error result means nothing was."""
+    if not result.get("possible_overwrite"):
+        return None
+    new_version = result.get("version")
+    expected = sent_version + 1
+    head = (
+        f"Warning: possible overwrite on '{page_name}'. This update was "
+        f"based on version {sent_version}, so it should have stored "
+        f"version {expected}, but the page reads back as version "
+        f"{new_version}."
+    )
+    intervening = result.get("intervening_versions") or []
+    if not intervening:
+        return (
+            f"{head} The page was stored; check its history with "
+            f"wiki_get_history(page_name='{page_name}')."
+        )
+    if len(intervening) == 1:
+        others = f"version {intervening[0]}"
+        verb = "was"
+    else:
+        others = f"versions {intervening[0]}-{intervening[-1]}"
+        verb = "were"
+    return (
+        f"{head} {others[0].upper()}{others[1:]} {verb} most likely "
+        "written by someone else between the version check and this "
+        "write, which replaced it without merging. The page was stored; "
+        f"inspect what {others} changed with wiki_diff(page_name="
+        f"'{page_name}', from_version={sent_version}, "
+        f"to_version={intervening[-1]}) and re-apply anything this write "
+        "dropped."
+    )
+
+
 # Tool definitions for list_tools()
 WIKI_WRITE_TOOLS = [
     types.Tool(
@@ -77,7 +117,7 @@ WIKI_WRITE_TOOLS = [
     ),
     types.Tool(
         name="wiki_update",
-        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. If the result says the page WAS stored but its new version could not be read back, do not update it again.",
+        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. If the result says the page WAS stored but its new version could not be read back, do not update it again. A 'possible overwrite' warning means the stored version is not version + 1: another write most likely landed just before this one and was replaced; inspect it with wiki_diff.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -341,6 +381,9 @@ async def _handle_update(
     response_lines = [
         f"Updated wiki page '{page_name}' to version {new_version}"
     ]
+    overwrite = possible_overwrite_warning(page_name, version, result)
+    if overwrite is not None:
+        response_lines.append(overwrite)
     response_lines.extend(gate_lines)
 
     return types.CallToolResult(

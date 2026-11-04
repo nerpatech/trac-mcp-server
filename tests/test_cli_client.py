@@ -313,6 +313,49 @@ class TestRealSubstrate:
         assert "do not retry" in captured.err
         assert "Created wiki page 'P' (version unknown)" in captured.out
 
+    def test_wiki_push_possible_overwrite_warns_on_stderr_exits_0(
+        self, tmp_path, capsys
+    ):
+        """Trac /trac_mcp_server #130: the update was based on version 3
+        but stored as 5. The write succeeded, so the exit stays 0; the
+        warning goes to stderr."""
+
+        class _Raced(FakeTrac):
+            def get_wiki_page_info(self, name, version=None):
+                return {"name": name, "version": 3}
+
+            def put_wiki_page(self, name, content, comment, version):
+                self.pages.setdefault(name, []).append(content)
+                return {
+                    "version": 5,
+                    "possible_overwrite": True,
+                    "intervening_versions": [4],
+                }
+
+        src = tmp_path / "page.wiki"
+        src.write_text("= Title =\n")
+        with _served(_Raced()) as url:
+            rc = _cli(url, "wiki-push", "P", str(src))
+        assert rc == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "Updated wiki page 'P' (version 5)" in captured.out
+        assert "possible overwrite on wiki page 'P'" in captured.err
+        assert "version 4" in captured.err
+        assert "wiki_diff" in captured.err
+
+    def test_wiki_push_uncontended_prints_no_overwrite_warning(
+        self, tmp_path, capsys
+    ):
+        src = tmp_path / "page.wiki"
+        src.write_text("= Title =\n")
+        trac = FakeTrac()
+        trac.pages["P"] = ["old\n"]
+        with _served(trac) as url:
+            assert _cli(url, "wiki-push", "P", str(src)) == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "overwrite" not in captured.err.lower()
+        assert "overwrite" not in captured.out.lower()
+
     def test_markdown_file_converted_on_push(self, tmp_path):
         src = tmp_path / "notes.md"
         src.write_text("# Notes\n\nSome **bold**.\n")
