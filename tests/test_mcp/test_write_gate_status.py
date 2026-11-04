@@ -46,7 +46,13 @@ def _ping(write_gate: bool):
 def test_ping_reports_the_write_gate(state):
     result = _ping(state)
     assert not result.isError
-    assert result.structuredContent == {"write_gate": state}
+    structured = result.structuredContent
+    # Claude Code shows structuredContent in preference to the text
+    # block, so the dict carries what the text does.
+    assert structured["write_gate"] is state
+    assert structured["api_version"] == "1.2.0"
+    assert "connected successfully" in structured["message"]
+    assert structured["message"] == result.content[0].text
     text = result.content[0].text
     assert "API version: 1.2.0" in text
     assert f"write_gate: {'true' if state else 'false'}" in text
@@ -63,11 +69,11 @@ def _server_config():
     )
 
 
-def _records(caplog):
+def _records(caplog, needle="write_gate="):
     return [
         r
         for r in caplog.records
-        if r.name == LOGGER and "file_access=" in r.getMessage()
+        if r.name == LOGGER and needle in r.getMessage()
     ]
 
 
@@ -76,9 +82,7 @@ def test_startup_log_names_the_gate_on_at_info(caplog):
     log_startup_settings(_server_config(), True)
     (record,) = _records(caplog)
     assert record.levelno == logging.INFO
-    assert record.getMessage() == (
-        "file_access=off, max_inline_bytes=77, write_gate=on"
-    )
+    assert record.getMessage() == "write_gate=on"
 
 
 def test_startup_log_names_the_gate_off_at_warning(caplog):
@@ -88,7 +92,7 @@ def test_startup_log_names_the_gate_off_at_warning(caplog):
     log_startup_settings(_server_config(), False)
     (record,) = _records(caplog)
     assert record.levelno == logging.WARNING
-    assert record.getMessage().endswith("write_gate=off")
+    assert record.getMessage() == "write_gate=off"
 
 
 @pytest.mark.parametrize(
@@ -132,7 +136,50 @@ async def test_main_logs_the_registrys_write_gate(
         await server_module.main()
 
     (record,) = _records(caplog)
-    assert record.getMessage().endswith(expected)
+    assert record.getMessage() == expected
+    assert record.levelno == (
+        logging.INFO if write_gate else logging.WARNING
+    )
+    # file_access is logged straight after set_file_access, before the
+    # lifespan, so it survives a lifespan validation failure.
+    (fa,) = _records(caplog, "file_access=")
+    assert fa.levelno == logging.INFO
+    assert fa.getMessage() == "file_access=off, max_inline_bytes=77"
+    assert caplog.records.index(fa) < caplog.records.index(record)
+
+
+async def test_file_access_is_logged_when_the_lifespan_fails(caplog):
+    @asynccontextmanager
+    async def _failing_lifespan(config_overrides=None):
+        raise RuntimeError("validation failed")
+        yield  # pragma: no cover
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    with (
+        patch.object(
+            server_module,
+            "bootstrap_server_config",
+            return_value=_server_config(),
+        ),
+        patch.object(server_module, "setup_logging"),
+        patch.object(
+            server_module,
+            "check_version_consistency",
+            return_value=(True, "ok"),
+        ),
+        patch.object(
+            server_module, "load_declared_instances", return_value=[]
+        ),
+        patch.object(
+            server_module, "server_lifespan", _failing_lifespan
+        ),
+        pytest.raises(RuntimeError),
+    ):
+        await server_module.main()
+
+    (fa,) = _records(caplog, "file_access=")
+    assert fa.levelno == logging.INFO
+    assert not _records(caplog)
 
 
 def test_registry_write_gate_follows_the_default_config():

@@ -943,6 +943,20 @@ def test_153_no_off_line_when_the_gate_is_on(name, call):
     assert "write gate is OFF" not in _text(result)
 
 
+def test_153_wiki_file_push_carries_the_off_line_in_structured_content():
+    """Claude Code shows structuredContent in preference to the text
+    block, so the line must ride in the dict too."""
+    result = _wiki_file_push(_gate_off_client(), BROKEN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE in result.structuredContent["gate_notes"]
+
+
+def test_153_wiki_file_push_gate_notes_hold_no_off_line_when_on():
+    result = _wiki_file_push(_client(CLEAN_HTML), CLEAN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE not in result.structuredContent["gate_notes"]
+
+
 def test_153_a_write_with_no_text_still_says_so():
     """A field-only ticket_update carries nothing to check, but the
     line reports the daemon, not this write's content: the cheapest
@@ -1013,6 +1027,8 @@ def test_153_batch_tools_say_so_once_per_call(name, call):
     text = _text(result)
     assert "2/2 succeeded" in text, text
     assert text.count(GATE_OFF_LINE) == 1, text
+    # Claude Code shows structuredContent in preference to the text.
+    assert result.structuredContent["gate_notes"] == [GATE_OFF_LINE]
     client.wiki_to_html.assert_not_called()
 
 
@@ -1022,6 +1038,8 @@ def test_153_batch_tools_say_nothing_when_the_gate_is_on(name, call):
     text = _text(result)
     assert "2/2 succeeded" in text, text
     assert GATE_OFF_LINE not in text
+    assert GATE_OFF_LINE not in result.structuredContent["gate_notes"]
+    assert result.structuredContent["gate_notes"] == []
 
 
 def test_reply_to_does_not_charge_the_author_for_the_quoted_comment():

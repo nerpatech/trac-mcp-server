@@ -49,11 +49,23 @@ NOTE: the write gate is OFF on this daemon (TRAC_WRITE_GATE=0, or write_gate: fa
 ```
 
 The line appears whether or not the write carried any text: it reports the
-daemon's state. With the gate on it never appears. `list_instances` and
-`ping` report the switch too, as `write_gate: true|false` (top-level in
-`structuredContent` and in the text), and the server's startup log line reads
-`file_access=..., max_inline_bytes=..., write_gate=on|off`, at `WARNING` when
-the gate is off.
+daemon's state. With the gate on it never appears.
+
+**The note is in `structuredContent` too.** Claude Code shows a tool result's
+`structuredContent` in preference to its text block whenever the handler
+returns a dict, so a note carried only in the text is invisible there.
+`wiki_file_push`, `ticket_batch_create` and `ticket_batch_update` therefore
+carry it as `gate_notes`, a list of strings (the OFF line when the gate is
+off, empty otherwise). `wiki_file_push`'s `gate_notes` also holds the
+gate-on advisory lines the push appends to its text. The other write tools
+return text only, which Claude Code does show.
+
+`list_instances` and `ping` report the switch too, as `write_gate: true|false`
+(top-level in `structuredContent` and in the text). The server's startup log
+carries `write_gate=on` (`INFO`) or `write_gate=off` (`WARNING`) as its own
+line, written once the lifespan has loaded the Trac config; the
+`file_access=..., max_inline_bytes=...` line is separate and is written
+before the lifespan starts.
 
 ---
 
@@ -76,12 +88,15 @@ the gate is off.
 ```
 ```json
 {
+  "message": "Trac MCP server connected successfully. API version: [1, 1, 6]\nwrite_gate: true",
+  "api_version": [1, 1, 6],
   "write_gate": true
 }
 ```
 
-`write_gate` is whether the write-time link gate runs on this daemon -- see
-[Write Gate Status](#write-gate-status).
+`message` is the full text, because Claude Code shows `structuredContent` in
+preference to the text block. `write_gate` is whether the write-time link gate
+runs on this daemon -- see [Write Gate Status](#write-gate-status).
 
 **Error Response:**
 ```json
@@ -648,9 +663,12 @@ Each ticket object:
   ],
   "total": 3,
   "succeeded": 2,
-  "failed_count": 1
+  "failed_count": 1,
+  "gate_notes": []
 }
 ```
+
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
 
 **Error Responses:**
 
@@ -802,9 +820,12 @@ Each update object:
   "failed": [],
   "total": 3,
   "succeeded": 3,
-  "failed_count": 0
+  "failed_count": 0,
+  "gate_notes": []
 }
 ```
+
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
 
 **Error Responses:**
 
@@ -1196,9 +1217,12 @@ Each update object:
   "source": "inline content",
   "warnings": [],
   "readback_failed": false,
-  "possible_overwrite": false
+  "possible_overwrite": false,
+  "gate_notes": []
 }
 ```
+
+**`gate_notes`** (list of strings, always present): the lines the write gate appended to the text -- the write-gate OFF line when the gate is off on this daemon, or the gate-on advisory ("Also reported") lines -- empty when there are none. Carried in `structuredContent` because Claude Code shows it in preference to the text block; see [Write Gate Status](#write-gate-status).
 
 **`readback_failed`** (boolean, always present): `true` when the page was stored but its new version could not be read back; see below.
 

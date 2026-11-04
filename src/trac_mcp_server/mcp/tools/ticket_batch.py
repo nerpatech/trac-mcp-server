@@ -262,7 +262,8 @@ async def _handle_batch_create(
             )
     # Ticket #153: once per call, not per item -- it is the daemon's
     # state, and the per-item checks never reach gate_or_refuse.
-    if off := gate_off_lines(client):
+    off = gate_off_lines(client)
+    if off:
         lines.extend(["", *off])
 
     return types.CallToolResult(
@@ -273,6 +274,9 @@ async def _handle_batch_create(
             "total": total,
             "succeeded": len(created),
             "failed_count": len(failed),
+            # Claude Code shows structuredContent in preference to the
+            # text block, so the note rides here too.
+            "gate_notes": off,
         },
     )
 
@@ -444,7 +448,8 @@ async def _handle_batch_update(
         for item in failed:
             lines.append(f"  - #{item['id']}: {item['error']}")
     # Ticket #153, as in _handle_batch_create.
-    if off := gate_off_lines(client):
+    off = gate_off_lines(client)
+    if off:
         lines.extend(["", *off])
 
     return types.CallToolResult(
@@ -455,6 +460,9 @@ async def _handle_batch_update(
             "total": total,
             "succeeded": len(updated),
             "failed_count": len(failed),
+            # Claude Code shows structuredContent in preference to the
+            # text block, so the note rides here too.
+            "gate_notes": off,
         },
     )
 
