@@ -123,6 +123,8 @@ BLOCKING_CODES = frozenset(
 #:   refusing.
 #: * `tracwiki_markup_in_markdown`, `conversion_warning` -- Markdown-path
 #:   findings, advisory in section 4's table.
+#: * `list_item_split` -- ticket #125: advisory by the ticket's own spec;
+#:   the content survives, only the list structure splits.
 #: * `target_check_failed` -- the CHECKER could not do its job and the
 #:   author can do nothing about it; blocking would stop every write on
 #:   the store while a remote instance is down.
@@ -139,6 +141,7 @@ ADVISORY_CODES = frozenset(
         "incidental_wiki_autolink",
         "tracwiki_markup_in_markdown",
         "conversion_warning",
+        "list_item_split",
         "target_check_failed",
         "target_check_disabled",
         "target_check_not_allowed",

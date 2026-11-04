@@ -17,6 +17,10 @@ from ..converters.common import (
     describe_indentation_loss,
     find_code_block_indentation_loss,
 )
+from ..converters.markdown_to_tracwiki import (
+    describe_list_item_split,
+    find_list_item_splits,
+)
 from .facts import PreviewFacts
 from .targets import (
     ERROR,
@@ -389,6 +393,35 @@ def _check_code_block_indentation_loss(
         for loss in find_code_block_indentation_loss(
             markdown_source, tracwiki
         )
+    ]
+
+
+def _check_list_item_split(markdown_source: str) -> list[dict]:
+    """A list item that continues after its nested list (ticket #125).
+
+    Trac cannot continue a list item once a nested list has started: it
+    ends the list, renders the following block outside it and starts a
+    new list for the next item. The converter keeps the author's source
+    order (#112), so the shape converts faithfully and renders split.
+
+    Severity is `warning`, never `error`: the author's structure
+    visibly changes, but every word of the content survives, and
+    splitting may be exactly what the author accepts. A sweep of both
+    stores (2012 documents, 2026-11-03) found no existing population
+    raising it, so there is nothing blocking would be protecting
+    against.
+
+    Detection lives in `converters.markdown_to_tracwiki` so the write
+    path (`wiki_file_push`) reaches it too, as for #68.
+    """
+    return [
+        _warning(
+            "list_item_split",
+            "warning",
+            describe_list_item_split(split),
+            split,
+        )
+        for split in find_list_item_splits(markdown_source)
     ]
 
 
@@ -1766,6 +1799,7 @@ def build_warnings(
                 markdown_source, tracwiki
             )
         )
+        warnings.extend(_check_list_item_split(markdown_source))
     warnings.extend(
         _check_missing_local_target(facts, tracwiki, attachment_names)
     )
