@@ -148,7 +148,6 @@ def test_section_4_error_column_blocks(code):
 @pytest.mark.parametrize(
     "code",
     [
-        "bare_ticket_ref",
         "link_ref_in_code_span",
         "unconfigured_intertrac_prefix",
         "conversion_warning",
@@ -158,11 +157,22 @@ def test_section_4_error_column_blocks(code):
     ],
 )
 def test_section_4_advisory_column_does_not_block(code):
-    """The right-hand column. `bare_ticket_ref` is the load-bearing one:
-    it fired 10 times on a single correct ticket (auto_pm:#89), so
-    promoting it would refuse essentially every ticket that cites
-    another ticket."""
+    """The right-hand column. `incidental_wiki_autolink` is the
+    load-bearing one: ticket #79 measured 110 findings on correct
+    documents, so promoting it would refuse every page that happens to
+    use a CamelCase word. (`bare_ticket_ref` held this spot until
+    ticket #151 removed the code; see
+    `test_bare_ticket_ref_is_in_neither_column`.)"""
     assert code not in BLOCKING_CODES
+    assert code in ADVISORY_CODES
+
+
+def test_bare_ticket_ref_is_in_neither_column():
+    """Ticket #151. The code is gone, not demoted: no rule emits it, so
+    listing it in either inventory would only describe a code that
+    cannot occur."""
+    assert "bare_ticket_ref" not in BLOCKING_CODES
+    assert "bare_ticket_ref" not in ADVISORY_CODES
 
 
 # ---------------------------------------------------------------------
@@ -269,7 +279,7 @@ def test_self_intertrac_prefix_is_not_the_same_code_as_unconfigured():
 def test_classify_splits_and_preserves_order():
     warnings = [
         _warning("missing_local_target", "error", "first"),
-        _warning("bare_ticket_ref", "warning", "second"),
+        _warning("incidental_wiki_autolink", "warning", "second"),
         _warning("escaped_link_target", "error", "third"),
         _warning("target_check_failed", "info", "fourth"),
     ]
@@ -356,11 +366,17 @@ def test_refusal_pluralises_and_lists_every_blocking_finding():
 def test_refusal_reports_advisories_without_implying_they_blocked():
     text = format_refusal(
         [_warning("missing_local_target", "error", "dead")],
-        [_warning("bare_ticket_ref", "warning", "resolves to #12")],
+        [
+            _warning(
+                "incidental_wiki_autolink",
+                "warning",
+                "'TracClient' is a bare CamelCase word",
+            )
+        ],
         field="description",
     )
     assert "Also reported, not blocking (1)" in text
-    assert "resolves to #12" in text
+    assert "'TracClient' is a bare CamelCase word" in text
     assert "1 blocking link error." in text
 
 

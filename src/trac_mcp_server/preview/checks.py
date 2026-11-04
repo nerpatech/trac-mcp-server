@@ -754,42 +754,18 @@ def _check_missing_local_target(
     return warnings
 
 
-def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
-    """A bare `#N` auto-links to *this* instance's own ticket N -- name
-    the resolved summary so the author can see whether that's actually
-    what was meant (row 14). Restricted to local ticket anchors: an
-    InterTrac ticket reference (`auto_pm:#87`) also carries a `ticket`-
-    adjacent target but renders as `class="ext-link"`, not `class="...
-    ticket"` -- see row 6, which must stay silent."""
-    warnings = []
-    for anchor in facts.anchors:
-        if (
-            "ticket" in anchor.classes
-            and "ext-link" not in anchor.classes
-        ):
-            warnings.append(
-                _warning(
-                    "bare_ticket_ref",
-                    "warning",
-                    f"'{anchor.text}' resolves to: "
-                    f"{anchor.title or '(no title)'}",
-                    {"href": anchor.href, "title": anchor.title},
-                )
-            )
-    return warnings
-
-
 def _check_pr_number_as_ticket(
     tracwiki: str, facts: PreviewFacts
 ) -> list[dict]:
     """Ticket #105. `PR #100`, `pull request #100`, `merge request #100`
     outside a code span -- `#100` autolinks to THIS instance's ticket
     100 regardless of whether that ticket exists, so the sentence reads
-    as a Trac reference it never meant to make. `bare_ticket_ref` does
-    already fire here, but it fires on every legitimate ticket citation
-    too (598 lines in one week's write responses, per the ticket), so
-    in practice nobody reads it before the write lands. This is its own
-    code specifically so this one shape can block.
+    as a Trac reference it never meant to make. The old `bare_ticket_ref`
+    warning did fire here, but it fired on every legitimate ticket
+    citation too (598 lines in one week's write responses, per the
+    ticket), so in practice nobody read it before the write landed --
+    and ticket #151 removed it for that reason. This is its own code
+    specifically so this one shape can block.
 
     Verified against `facts.anchors`, not source alone: a source-only
     match cannot tell a live `PR #100` from one somebody had already
@@ -855,7 +831,10 @@ def _check_bare_ref_shadows_prefixed(
     document is NOT caught -- there is nothing here to shadow it, and
     telling that case apart from an ordinary same-instance reference
     would need knowing what the author meant, not just what they wrote.
-    That population stays a `bare_ticket_ref` render-check-only concern.
+    That population is not a finding at all: ``render_check``'s text
+    output lists every resolved local ticket once, with its summary, on
+    its ``Ticket refs`` line (ticket #151), which is where a mistyped
+    number that hit an existing ticket shows up.
     """
     scan_text = blank_code_fences(tracwiki)
     code_span_texts = list(facts.code_spans)
@@ -1830,7 +1809,6 @@ def build_warnings(
     warnings.extend(
         _check_missing_local_target(facts, tracwiki, attachment_names)
     )
-    warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(
         _check_unconfigured_intertrac_prefix(

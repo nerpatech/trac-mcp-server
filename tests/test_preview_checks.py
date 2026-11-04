@@ -255,13 +255,21 @@ SILENT_ROWS = [
     # Ticket #148. Two resolved label-less bracketed realm links glued
     # by `]/[`; the typo'd control is asserted next to the #147 rows.
     "row148_glued_bracket_both_resolved",
+    # Ticket #151. A bare `#3` that resolves to a real ticket. It was
+    # the must-warn row for `bare_ticket_ref`, which fired on every
+    # local ticket link; that code is gone, and every way a bare `#N`
+    # can be wrong has its own code (`missing_local_target`,
+    # `pr_number_as_ticket`, `bare_ref_shadows_prefixed`), each still
+    # pinned by its own must-warn row or test. The ticket link itself
+    # is still extracted with its title: see
+    # `test_row14_bare_ticket_ref_is_silent_but_keeps_its_anchor`.
+    "row14_bare_ticket_ref",
 ]
 
 WARNING_ROWS = [
     ("row11_code_span_intertrac", "link_ref_in_code_span"),
     ("row12_tracwiki_table_in_md", "tracwiki_markup_in_markdown"),
     ("row13_hand_relative_url", "missing_local_target"),
-    ("row14_bare_ticket_ref", "bare_ticket_ref"),
     (
         "row16_unconfigured_prefix_ticket",
         "unconfigured_intertrac_prefix",
@@ -427,6 +435,35 @@ def test_warning_rows_produce_expected_code(name, expected_code):
     assert expected_code in codes, (
         f"{name} should warn {expected_code!r}, got {codes}"
     )
+
+
+def test_row14_bare_ticket_ref_is_silent_but_keeps_its_anchor():
+    """Ticket #151. A bare `#3` that resolves to a real ticket raises
+    nothing -- no `bare_ticket_ref`, which no longer exists, and no
+    other code either -- but the link is still extracted, with Trac's
+    title for it. That anchor is what `render_check` builds its
+    `links.ticket` entries and its `Ticket refs` line from, so losing
+    it would lose the resolved summary along with the warning."""
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row14_bare_ticket_ref"
+    )
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    assert "bare_ticket_ref" not in [w["code"] for w in warnings]
+    tickets = [
+        a
+        for a in facts.anchors
+        if "ticket" in a.classes and "ext-link" not in a.classes
+    ]
+    assert [a.text for a in tickets] == ["#3"]
+    assert tickets[0].title and tickets[0].title.startswith("#3: ")
+    assert "missing" not in tickets[0].classes
 
 
 # Ticket #147. A label-less bracketed realm link followed directly by
@@ -900,9 +937,14 @@ def test_suite_balance_is_roughly_even():
     # Ticket #148 added row148_glued_bracket_both_resolved, silent. Its
     # must-warn half (the typo'd second link) is a standalone test for
     # the same reason as row 72: it asserts WHICH token was named.
+    #
+    # Ticket #151 moved row 14 from the warning half to the silent half:
+    # its code, `bare_ticket_ref`, no longer exists. That is a removal,
+    # not a narrowing -- the shapes a bare `#N` can be wrong in each
+    # keep their own must-warn rows and tests.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 41
-    assert warning_count == 39
+    assert silent_count == 42
+    assert warning_count == 38
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
