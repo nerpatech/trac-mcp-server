@@ -117,6 +117,94 @@ def test_next_item_is_not_pulled_into_the_code_block():
     assert back.count("{{{") == 1
 
 
+# -- Round 2 (F4-F6): any indent, the innermost OPEN item ---------------------
+#
+# F4: the opener's indentation does not matter -- a block renders inside the
+# innermost open list item at any indent (column 0 included). F5: nested, a
+# block shallower than the inner marker still joins the inner item. F6: the
+# list must still be open: a continuation line keeps it open, flush-left
+# prose or a blank line ends it.
+#
+# The fence goes at the item's TEXT column (marker indent + marker + 1), so
+# CommonMark puts it in the item; stored bytes are normalised, the render is
+# not (Trac strips per F2). name -> (TracWiki, Markdown, written back).
+ANY_INDENT = {
+    "indent 2, shallower than the text column": (
+        " * a\n  {{{\n  code\n  }}}\n * d",
+        " - a\n   ```\n   code\n   ```\n - d",
+        " * a\n   {{{\n   code\n   }}}\n * d",
+    ),
+    "indent 3 under a numbered item": (
+        " 1. a\n   {{{\n   code\n   }}}\n 2. d",
+        " 1. a\n    ```\n    code\n    ```\n 2. d",
+        " 1. a\n    {{{\n    code\n    }}}\n 2. d",
+    ),
+    "marker column": (
+        " * a\n {{{\n code\n }}}\n * d",
+        " - a\n   ```\n   code\n   ```\n - d",
+        " * a\n   {{{\n   code\n   }}}\n * d",
+    ),
+    "marker column, numbered, #!yaml": (
+        " 1. x\n {{{#!yaml\n k: v\n }}}\n 2. y",
+        " 1. x\n    ```yaml\n    k: v\n    ```\n 2. y",
+        " 1. x\n    {{{#!yaml\n    k: v\n    }}}\n 2. y",
+    ),
+    "column zero": (
+        " * a\n{{{\ncode\n}}}\n * d",
+        " - a\n   ```\n   code\n   ```\n - d",
+        " * a\n   {{{\n   code\n   }}}\n * d",
+    ),
+    "nested dedent joins the innermost item": (
+        " * a\n   * b\n {{{\n code\n }}}\n * d",
+        " - a\n   - b\n     ```\n     code\n     ```\n - d",
+        " * a\n   * b\n     {{{\n     code\n     }}}\n * d",
+    ),
+    "column zero after a continuation line": (
+        " * q\n   continued\n{{{\ncode\n}}}\n * d",
+        " - q\n   continued\n   ```\n   code\n   ```\n - d",
+        " * q\n   continued\n   {{{\n   code\n   }}}\n * d",
+    ),
+    "deeper than the text column": (
+        " * a\n     {{{\n     code\n     }}}\n * d",
+        " - a\n   ```\n   code\n   ```\n - d",
+        " * a\n   {{{\n   code\n   }}}\n * d",
+    ),
+    "second block at column zero in the same item": (
+        " * a\n   {{{\n   x\n   }}}\n{{{\ny\n}}}\n * d",
+        " - a\n   ```\n   x\n   ```\n   ```\n   y\n   ```\n - d",
+        " * a\n   {{{\n   x\n   }}}\n   {{{\n   y\n   }}}\n * d",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("wiki", "markdown", "written"),
+    list(ANY_INDENT.values()),
+    ids=list(ANY_INDENT),
+)
+def test_any_indent_joins_the_innermost_open_item(
+    wiki, markdown, written
+):
+    """Master (778d290) put an indent-2 fence OUTSIDE the item (CommonMark)
+    and wrote ' * a\\n\\n{{{...}}}\\n\\n * d' back; the other shapes were not
+    claimed at all (column zero, marker column, nested dedent)."""
+    assert _md(wiki) == markdown
+    assert markdown_to_tracwiki(_md(wiki)) == written
+    # The normalised form is stable.
+    assert _md(written) == markdown
+    assert markdown_to_tracwiki(_md(written)) == written
+
+
+def test_deeper_than_the_text_column_is_normalised_to_it():
+    """Pinned: ' * a' / 5-space opener comes back at the text column (3).
+    Trac strips the opener's indentation from the body (F2), so the render
+    is identical; only the stored bytes change."""
+    wiki = " * a\n     {{{\n     code\n     }}}\n * d"
+    assert markdown_to_tracwiki(_md(wiki)) == (
+        " * a\n   {{{\n   code\n   }}}\n * d"
+    )
+
+
 # -- F2: a shallower body line ------------------------------------------------
 
 SHALLOW_WIKI = " * a\n   {{{\n   prefixed\n  less\n   }}}\n * d"
@@ -274,19 +362,24 @@ def test_language_info_survives_the_write_leg():
         ),
         ("top-level block", "{{{\ncode\n}}}\n", "```\ncode\n```\n"),
         (
-            "block at column zero under a list item",
-            " * a\n{{{\ncode\n}}}\n * d",
-            " - a\n```\ncode\n```\n - d",
+            "column zero after flush-left prose (the prose ended the list)",
+            " * p\nprose at col 0\n{{{\ncode\n}}}\n",
+            " - p\n\nprose at col 0\n```\ncode\n```\n",
+        ),
+        (
+            "column zero after a blank line following a list",
+            " * a\n\n{{{\ncode\n}}}\n",
+            " - a\n\n```\ncode\n```\n",
+        ),
+        (
+            "column zero after a list that a blank line closed",
+            " * a\n * b\n\n{{{\ncode\n}}}\n * d",
+            " - a\n - b\n\n```\ncode\n```\n - d",
         ),
         (
             "indented block after a blank line (outside the list)",
             " * a\n\n   {{{\n   code\n   }}}\n * d",
             " - a\n\n   ```\n\n   code\n```\n - d",
-        ),
-        (
-            "opener no deeper than the marker",
-            " * a\n {{{\n code\n }}}\n * d",
-            " - a\n\n ```\n code\n```\n - d",
         ),
         (
             "text before the opener on its line",
@@ -340,3 +433,40 @@ def test_live_code_block_renders_inside_the_list_item():
     assert "code" in first_li.group(0), html
     assert html.count("<li") == 2, html
     assert html.count("<pre") == 1, html
+
+
+@pytest.mark.live
+@pytest.mark.parametrize(
+    "name",
+    [
+        "marker column",
+        "marker column, numbered, #!yaml",
+        "column zero",
+        "nested dedent joins the innermost item",
+        "column zero after a continuation line",
+    ],
+)
+def test_live_any_indent_shapes_render_inside_the_list_item(name):
+    """Round 2 (F4-F6) acceptance: after tw -> md -> tw each shape renders
+    with the <pre> inside an <li> (the innermost one for the nested shape)
+    and the list continues with the next item. Read-only."""
+    from trac_mcp_server.config_bootstrap import bootstrap_config
+    from trac_mcp_server.core.client import TracClient
+    from trac_mcp_server.instances import InstanceRegistry
+
+    config, _ = bootstrap_config()
+    client = TracClient(
+        InstanceRegistry(config, {}).resolve("/trac_test")
+    )
+    wiki = ANY_INDENT[name][0]
+
+    html = client.wiki_to_html(markdown_to_tracwiki(_md(wiki)))
+
+    assert html.count("<pre") == 1, html
+    lis = re.findall(r"<li[\s>].*?</li>", html, re.DOTALL)
+    assert any("<pre" in li for li in lis), html
+    # The next item is a list item of the same list, not text after a
+    # split list: one top-level <ul>/<ol>.
+    assert len(re.findall(r"<(?:ul|ol)[\s>]", html)) == (
+        2 if name.startswith("nested") else 1
+    ), html

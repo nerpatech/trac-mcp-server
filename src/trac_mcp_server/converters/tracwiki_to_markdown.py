@@ -208,6 +208,32 @@ def _enclosing_list_marker(
     return None
 
 
+def _open_list_item(lines: list[str]) -> re.Match[str] | None:
+    """The list-marker match of the innermost list item still OPEN after
+    `lines`, or None (ticket #144).
+
+    The stack walk `_separate_list_from_trailing_paragraph` uses, over
+    columns in Trac's tab-expanded width: a marker line pops every entry at
+    or past its own column and pushes itself; any other non-blank line pops
+    every entry at or past its column; a blank line empties the stack (Trac
+    ends a list at any blank line, #143). What is left on top is the
+    innermost open item, whose match the caller reads the marker's
+    indentation and width off (as `_enclosing_list_marker` documents).
+    """
+    stack: list[tuple[int, re.Match[str]]] = []
+    for line in lines:
+        if not line.strip():
+            stack.clear()
+            continue
+        column = _indent_width(_indent_of(line))
+        found = _LIST_MARKER_RE.match(line)
+        while stack and stack[-1][0] >= column:
+            stack.pop()
+        if found:
+            stack.append((column, found))
+    return stack[-1][1] if stack else None
+
+
 # The subset of the marker set above that Markdown cannot express at all
 # (ticket #74).  CommonMark's ordered-list marker is digits only, so there is
 # nothing for ``a.`` or ``iv.`` to convert TO: measured, mistune parses
@@ -939,18 +965,21 @@ class TracWikiParser:
         _fallback_processor_blocks applies -- only a block at top level
         is a construct of its own (ticket #51).
 
-        A block indented under a list item (ticket #144) keeps the
-        opener's indentation on its fence, body and closer, so the
-        Markdown fence belongs to the item. Before, the body and closer
-        came out at column 0: the list passes saw the column-0
-        ``\\x00CODEn\\x00`` placeholder line, decided the list had ended
-        and inserted a blank line after the opener (F3), and writing that
-        back pulled the next item into a code block.  The body is what
-        Trac shows (F2): the opener's indentation is stripped from every
-        line only if EVERY non-blank line starts with it, otherwise
-        nothing is stripped.  See `_fence_in_list_item`.  A block that is
-        not directly under an item, and any block whose opener is not
-        first on its line, take the path they always did.
+        A block that belongs to an open list item (ticket #144) is
+        fenced at that item's text column, whatever the opener's own
+        indentation (F4-F6: Trac renders a ``{{{ }}}`` block inside the
+        innermost open item at any indent, column 0 included; flush-left
+        prose or a blank line closes the list first), so the Markdown
+        fence belongs to the item. Before, the body and closer came out at
+        column 0: the list passes saw the column-0 ``\\x00CODEn\\x00``
+        placeholder line, decided the list had ended and inserted a blank
+        line after the opener (F3), and writing that back pulled the next
+        item into a code block.  The body is what Trac shows (F2): the
+        opener's indentation is stripped from every line only if EVERY
+        non-blank line starts with it, otherwise nothing is stripped.  See
+        `_fence_in_list_item`.  A block with no open item, and any block
+        whose opener is not first on its line, take the path they always
+        did.
         """
 
         def stash(body: str) -> str:
@@ -1013,11 +1042,11 @@ class TracWikiParser:
                         if m.group(1)
                         else ""
                     )
-                    # Ticket #144: an indented block directly under a list
-                    # item keeps its indentation on the fence, body and
-                    # closer. Everything it declines takes the path below.
+                    # Ticket #144: a block in an open list item is fenced at
+                    # the item's text column. Everything it declines takes
+                    # the path below.
                     item_fence = self._fence_in_list_item(
-                        text, i, code, fence, info
+                        text, i, out, code, fence, info
                     )
                     if item_fence is not None:
                         replacement, indent_len = item_fence
@@ -1065,47 +1094,59 @@ class TracWikiParser:
         return text
 
     def _fence_in_list_item(
-        self, text: str, start: int, code: str, fence: str, info: str
+        self,
+        text: str,
+        start: int,
+        emitted: list[str],
+        code: str,
+        fence: str,
+        info: str,
     ) -> tuple[str, int] | None:
-        """Fence a block that sits directly under a list item (#144).
+        """Fence a block that belongs to an open list item (#144).
 
-        `start` is the index of the opener's `{{{`, `code` the block's body
+        `start` is the index of the opener's `{{{`, `emitted` the pieces
+        `_convert_code_blocks` has appended so far (the opener's own
+        indentation is the tail of the last line), `code` the block's body
         (already known to be fenceable), `fence`/`info` the Markdown fence
         and info string the caller would emit. Returns (replacement, length
         of the opener's indentation already emitted by the caller), or None
         to leave the block to the caller's ordinary path.
 
-        Takes the block only when the opener has nothing but a non-empty
-        run of spaces/tabs before it on its line and
-        `_enclosing_list_marker` finds the item it sits in. The replacement
-        replaces the opener's indentation too (see `_convert_code_blocks`).
+        Takes the block when the opener is the first non-whitespace on its
+        line, at ANY indentation (column 0 included), and a list item is
+        still open there (`_open_list_item`, over the lines already
+        emitted -- earlier blocks in the item are placeholders at the
+        item's text column and keep it open). Measured on /trac_test
+        (F4-F6): a `{{{ }}}` block renders inside the innermost open item
+        whatever its indentation; flush-left prose or a blank line ends the
+        list first.
 
-        The output indent O is the opener's indentation; if that holds a TAB
-        it is the item's content column in spaces (as `_unwrap_div_table`
-        does: a tab is 8 columns, which Markdown reads as an indented code
-        block). The body shown is what Trac shows (F2): the opener's
-        indentation is stripped from every line when every non-blank line
-        starts with it, and nothing is stripped otherwise. Fence, each
-        non-blank shown line and closer are emitted at O; a blank line stays
-        empty. The body is stashed as usual, but behind a placeholder line
-        that is itself at O, so `_separate_list_from_trailing_paragraph` and
-        `_convert_lists` read the block as the item's continuation (F3).
-        The first shown line is carried by the placeholder itself, so the
-        stash holds it without O.
+        The output indent O is ALWAYS that item's text column in spaces
+        (marker indentation + marker + 1, as `_unwrap_div_table` computes
+        for a TAB), because CommonMark only puts a fence inside the item at
+        or past that column. The opener's own indentation, already in
+        `out`, is replaced by it. The body shown is what Trac shows (F2):
+        the opener's ORIGINAL indentation is stripped from every line when
+        every non-blank line starts with it (an empty one strips nothing),
+        and nothing is stripped otherwise. Fence, each non-blank shown line
+        and closer are emitted at O; a blank line stays empty. The body is
+        stashed as usual, but behind a placeholder line that is itself at
+        O, so `_separate_list_from_trailing_paragraph` and `_convert_lists`
+        read the block as the item's continuation (F3). The first shown
+        line is carried by the placeholder itself, so the stash holds it
+        without O.
         """
         line_start = text.rfind("\n", 0, start) + 1
         indent = text[line_start:start]
-        if not indent or indent.strip(" \t"):
+        if indent.strip(" \t"):
             return None
-        above = text[:line_start].split("\n")[:-1]
-        marker = _enclosing_list_marker(above, _indent_width(indent))
+        above = "".join(emitted).split("\n")[:-1]
+        marker = _open_list_item(above)
         if marker is None:
             return None
-        out_indent = indent
-        if "\t" in indent:
-            lead = _indent_of(marker.string)
-            token = marker.group(0)[len(lead) :]
-            out_indent = " " * (_indent_width(lead) + len(token) + 1)
+        lead = _indent_of(marker.string)
+        token = marker.group(0)[len(lead) :]
+        out_indent = " " * (_indent_width(lead) + len(token) + 1)
         lines = code.split("\n")
         if all(ln.startswith(indent) for ln in lines if ln.strip()):
             lines = [ln[len(indent) :] for ln in lines]
