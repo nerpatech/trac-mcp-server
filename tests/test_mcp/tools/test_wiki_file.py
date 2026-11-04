@@ -18,6 +18,13 @@ pytestmark = pytest.mark.usefixtures("local_file_access")
 
 _registry = ToolRegistry(WIKI_FILE_SPECS)
 
+# The server has no tracrpc_comment conditional put (Trac
+# /trac_mcp_server #129): put_wiki_page falls back to its client-side
+# precheck, which is the path the stand-ins below were written for.
+_NO_PLUGIN = xmlrpc.client.Fault(
+    -32601, 'RPC method "wiki.putPageIfVersion" not found'
+)
+
 # =============================================================================
 # _strip_yaml_frontmatter
 # =============================================================================
@@ -623,6 +630,8 @@ class TestPushReadbackAfterWrite:
 
         def _rpc(namespace, method, *args):
             calls.append((namespace, method, *args))
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
             if method == "putPage":
                 return True
             if method == "getPageInfo":
@@ -769,6 +778,8 @@ class TestPushPossibleOverwrite:
 
         def _rpc(namespace, method, *args):
             calls.append((namespace, method, *args))
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
             if method == "putPage":
                 return True
             if method == "getPageInfo":
@@ -1046,3 +1057,78 @@ class TestPull:
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
         assert "permission_denied" in result.content[0].text
+
+
+class TestPushThroughConditionalPut:
+    """wiki_file_push where the server has wiki.putPageIfVersion (Trac
+    /trac_mcp_server #129): the push's existing conflict handling covers
+    the plugin's refusal."""
+
+    @staticmethod
+    async def _push(mock_config, put_outcome, after=4):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+        calls: list[tuple] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append((namespace, method, *args))
+            if method == "putPageIfVersion":
+                if isinstance(put_outcome, BaseException):
+                    raise put_outcome
+                return put_outcome
+            if method == "getPageInfo":
+                if any(c[1] == "putPageIfVersion" for c in calls[:-1]):
+                    return {"name": "X", "version": after}
+                return {"name": "X", "version": 3}
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\nnew text\n", "page_name": "X"},
+                client,
+            )
+        return result, [c[1] for c in calls]
+
+    async def test_update_stores_through_the_plugin(self, mock_config):
+        result, methods = await self._push(mock_config, True)
+
+        assert not result.isError
+        sc = result.structuredContent
+        assert sc["action"] == "updated"
+        assert sc["version"] == 4
+        assert sc["possible_overwrite"] is False
+        # Probe, conditional write, read-back: no putPage, no precheck.
+        assert methods == [
+            "getPageInfo",
+            "putPageIfVersion",
+            "getPageInfo",
+        ]
+
+    async def test_plugin_conflict_is_the_usual_version_conflict(
+        self, mock_config
+    ):
+        result, methods = await self._push(
+            mock_config,
+            xmlrpc.client.Fault(
+                409,
+                "'[wiki-version-conflict current_version=5] ...' "
+                "while executing 'wiki.putPageIfVersion()'",
+            ),
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Current version is 5, you tried to update version 3"
+            in text
+        )
+        assert methods == ["getPageInfo", "putPageIfVersion"]

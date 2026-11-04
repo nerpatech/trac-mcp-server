@@ -35,6 +35,13 @@ from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_update,
 )
 
+# The server has no tracrpc_comment conditional put (Trac
+# /trac_mcp_server #129): put_wiki_page falls back to its client-side
+# precheck, which is the path the stand-ins below were written for.
+_NO_PLUGIN = xmlrpc.client.Fault(
+    -32601, 'RPC method "wiki.putPageIfVersion" not found'
+)
+
 
 class TestCursorEncoding(unittest.TestCase):
     """Test cursor encoding and decoding."""
@@ -983,6 +990,8 @@ class TestWriteReadbackAfterStore:
 
         def _rpc(namespace, method, *args):
             calls.append(method)
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
             if method == "putPage":
                 return True
             if method == "getPageInfo" and "putPage" in calls[:-1]:
@@ -1052,6 +1061,8 @@ class TestUpdatePossibleOverwrite:
 
         def _rpc(namespace, method, *args):
             calls.append(method)
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
             if method == "putPage":
                 return True
             if method == "getPageInfo":
@@ -1128,6 +1139,111 @@ class TestUpdatePossibleOverwrite:
         text = result.content[0].text
         assert text == "Updated wiki page 'P' to version 4"
         assert "overwrite" not in text.lower()
+
+
+class TestUpdateThroughConditionalPut:
+    """wiki_update where the server has the tracrpc_comment plugin's
+    wiki.putPageIfVersion (Trac /trac_mcp_server #129). A real TracClient
+    with only ``_rpc_request`` mocked: the tool's existing handlers must
+    cover the plugin path with no new error path."""
+
+    @staticmethod
+    async def _update(put_outcome, readback=4):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(
+            Config(trac_url="http://test", username="u", password="p")
+        )
+        calls: list[str] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "putPageIfVersion":
+                if isinstance(put_outcome, BaseException):
+                    raise put_outcome
+                return put_outcome
+            if method == "getPageInfo" and "putPageIfVersion" in calls:
+                return {"name": "P", "version": readback}
+            raise AssertionError(f"unexpected RPC {method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                "wiki_update",
+                {"page_name": "P", "content": "x", "version": 3},
+                client,
+            )
+        return result, calls
+
+    async def test_stores_through_the_plugin(self):
+        result, calls = await self._update(True)
+
+        assert not result.isError
+        assert (
+            result.content[0].text
+            == "Updated wiki page 'P' to version 4"
+        )
+        assert calls == ["putPageIfVersion", "getPageInfo"]
+
+    async def test_plugin_conflict_is_the_usual_version_conflict(self):
+        result, calls = await self._update(
+            xmlrpc.client.Fault(
+                409,
+                "'[wiki-version-conflict current_version=9] Version "
+                'conflict on wiki page "P"\' while executing '
+                "'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Current version is 9, you tried to update version 3"
+            in text
+        )
+        assert "retry update with version=9" in text
+        # The conflict came with the current version: no extra read.
+        assert calls == ["putPageIfVersion"]
+
+    async def test_plugin_conflict_on_a_missing_page(self):
+        result, _ = await self._update(
+            xmlrpc.client.Fault(
+                409,
+                "'[wiki-version-conflict current_version=none] ...' "
+                "while executing 'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "does not exist" in text
+        assert "wiki_create" in text
+
+    async def test_other_plugin_fault_is_not_called_a_version_conflict(
+        self,
+    ):
+        """TracXMLRPC's wrapper names "wiki.putPageIfVersion()", and the
+        tool's Fault handler reads any "version" as a conflict. The
+        client unwraps it, so an unrelated fault stays unrelated."""
+        result, calls = await self._update(
+            xmlrpc.client.Fault(
+                1,
+                "'Invalid Wiki page name \"P\"' while executing "
+                "'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "version_conflict" not in text
+        assert "Invalid Wiki page name" in text
+        assert calls == ["putPageIfVersion"]
 
 
 class TestHandleDelete(unittest.TestCase):

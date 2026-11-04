@@ -1,5 +1,6 @@
 import base64
 import calendar
+import re
 import socket
 import threading
 import time
@@ -176,6 +177,73 @@ def _describe_error(err: BaseException) -> str:
     return str(err) or type(err).__name__
 
 
+# Trac /trac_mcp_server #129: the tracrpc_comment plugin's conditional put
+# (plugins/tracrpc_comment/tracrpc_comment/wiki_put.py). It makes the
+# version check and the save one database transaction on the server, which
+# closes the window between put_wiki_page's client-side precheck and putPage.
+WIKI_CONDITIONAL_PUT_METHOD = "putPageIfVersion"
+
+# The plugin's conflict fault: code 409, and a message (wrapped by
+# TracXMLRPC as "'<message>' while executing 'wiki.putPageIfVersion()'")
+# that starts with this marker. Both must match, so no other fault -- not
+# even another 409 -- can be read as a conflict.
+_WIKI_CONFLICT_FAULT_CODE = 409
+_WIKI_CONFLICT_MARKER = re.compile(
+    r"^'?\[wiki-version-conflict current_version=(\d+|none)\]"
+)
+
+# TracXMLRPC's MethodNotFound fault code (JSON-RPC's "method not found").
+_METHOD_NOT_FOUND_FAULT_CODE = -32601
+
+# How long a client remembers that the plugin method is missing before it
+# tries again. Long enough that a burst of writes to a plugin-less instance
+# pays the extra round trip once, short enough that deploying the plugin is
+# picked up by a running daemon without a restart.
+WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
+
+# TracXMLRPC wraps every fault from a plain TracError as
+# "'<message>' while executing '<method>()'".
+_TRACRPC_FAULT_WRAPPER = re.compile(
+    r"^'(?P<message>.*)' while executing '[\w.]+\(\)'$", re.DOTALL
+)
+
+
+def _is_missing_method_fault(
+    err: xmlrpc.client.Fault, method: str
+) -> bool:
+    """True when ``err`` says the server has no RPC method ``method``.
+
+    TracXMLRPC raises ``MethodNotFound('RPC method "<name>" not found')``
+    with fault code -32601. The text fallback matches the same heuristic as
+    the ticket_comment tools' ``_translate_missing_method``, narrowed to the
+    method name so that a "page not found" fault can never pass for it.
+    """
+    if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
+        return True
+    text = err.faultString.lower()
+    return (
+        "not found" in text
+        and "method" in text
+        and method.lower() in text
+    )
+
+
+def _unwrap_tracrpc_fault(
+    err: xmlrpc.client.Fault,
+) -> xmlrpc.client.Fault:
+    """``err`` with TracXMLRPC's "while executing" wrapper removed.
+
+    The wrapper names the method, and "wiki.putPageIfVersion()" contains
+    "version" -- which ``wiki_update``'s fault handler reads as a version
+    conflict. Unwrapped, a fault from the plugin path reads the same as the
+    same fault from ``wiki.putPage`` would.
+    """
+    match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
+    if match is None:
+        return err
+    return xmlrpc.client.Fault(err.faultCode, match.group("message"))
+
+
 class WikiPageStoredReadbackFailed(Exception):
     """``wiki.putPage`` returned ``True`` -- the page WAS stored -- but the
     read-back that fetches its new version failed (Trac /trac_mcp_server
@@ -214,6 +282,9 @@ class TracClient:
         self.config = config
         self._thread_local = threading.local()
         self.rpc_url = self._get_rpc_url()
+        # time.monotonic() until which put_wiki_page skips the conditional
+        # put plugin method, after the server said it has none (#129).
+        self._wiki_conditional_put_absent_until = 0.0
 
     @property
     def session(self) -> requests.Session:
@@ -1080,15 +1151,20 @@ class TracClient:
             content: Page content in TracWiki format
             comment: Comment describing the change
             version: Optional version the caller read (prevents concurrent
-                edits). The check is made client-side, immediately before
-                the write: Trac ignores the ``version`` attribute of
-                ``wiki.putPage``, so it would never refuse a stale one
-                itself (ticket #120). A narrow race between that check and
-                putPage remains -- closing it needs a Trac-side
-                precondition, which is out of scope; a write that lost
-                the race is flagged in the result (``possible_overwrite``,
-                below). ``None`` (create, and
-                unversioned callers) skips the check and costs no extra RPC.
+                edits). Trac's stock ``wiki.putPage`` ignores its
+                ``version`` attribute, so the check is made one of two
+                ways. Where the server has the tracrpc_comment plugin's
+                ``wiki.putPageIfVersion`` (Trac /trac_mcp_server #129),
+                the write goes through it: the server compares and saves
+                in one database transaction, so no other write can land in
+                between. Where it has not (a method-not-found fault), the
+                check is made client-side, immediately before
+                ``wiki.putPage`` (ticket #120), which leaves a narrow race
+                between the two; a write that lost it is flagged in the
+                result (``possible_overwrite``, below). "No plugin" is
+                remembered for ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``.
+                ``None`` (create, and unversioned callers) skips both and
+                posts ``wiki.putPage`` with no extra RPC.
 
         Returns:
             Dict with keys: name, version, author, lastModified, url,
@@ -1100,12 +1176,16 @@ class TracClient:
             ``version + 1 .. new - 1`` this call did not write (empty if
             the read-back version is not above ``version + 1``). The page
             is stored either way; a create never sets the flag (Trac
-            /trac_mcp_server #130).
+            /trac_mcp_server #130). Through the plugin method only the
+            "just after" case is possible, but the check runs on both
+            paths.
 
         Raises:
             WikiPageConflict: If ``version`` is not the page's current
-                version (or the page does not exist); putPage is not
-                called. A ``ValueError`` subclass.
+                version (or the page does not exist): the client's
+                precheck found it, and putPage was not called, or the
+                plugin method refused, and stored nothing. A
+                ``ValueError`` subclass.
             ValueError: If page_name or content validation fails, or the
                 server reports a version conflict
             xmlrpc.client.Fault: If server returns error or permissions denied
@@ -1123,7 +1203,120 @@ class TracClient:
         if not is_valid:
             raise ValueError(f"Invalid content: {error_msg}")
 
-        # Build attributes dict
+        result = None
+        answered_by_plugin = False
+        if version is not None and self._wiki_conditional_put_due():
+            # The server-side check (#129). None back means the server
+            # has no such method: fall through to the precheck below.
+            result = self._put_wiki_page_if_version(
+                page_name, content, comment, version
+            )
+            answered_by_plugin = result is not None
+
+        if not answered_by_plugin:
+            result = self._put_wiki_page_checked_here(
+                page_name, content, comment, version
+            )
+        if result is not True:
+            raise ValueError(f"Failed to update page '{page_name}'")
+
+        return self._read_back_stored_page(page_name, version)
+
+    def _wiki_conditional_put_due(self) -> bool:
+        """Whether to try ``wiki.putPageIfVersion``: always, unless the
+        server said it has no such method within the last
+        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``."""
+        return (
+            time.monotonic() >= self._wiki_conditional_put_absent_until
+        )
+
+    def _put_wiki_page_if_version(
+        self,
+        page_name: str,
+        content: str,
+        comment: str,
+        version: int,
+    ) -> Any:
+        """Post ``wiki.putPageIfVersion`` (Trac /trac_mcp_server #129).
+
+        Returns its result (``True`` once stored), or ``None`` when the
+        server has no such method -- the plugin is not installed or not
+        enabled -- in which case nothing was stored and the caller falls
+        back to the client-side precheck. That absence is remembered for
+        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``.
+
+        Raises:
+            WikiPageConflict: The plugin's conflict fault: ``version`` is
+                not the page's current version, checked in the same
+                transaction as the save. Nothing was stored.
+            ValueError: "Page not modified", as from ``wiki.putPage``.
+            xmlrpc.client.Fault: Any other fault, with TracXMLRPC's
+                "while executing" wrapper removed (see
+                ``_unwrap_tracrpc_fault``). Nothing was stored.
+        """
+        # A JSON-schema "integer" admits 3.0; the plugin takes an int.
+        expected = int(version)
+        if expected != version:
+            # Not a whole number, so no page is at that version; let the
+            # precheck refuse it with the usual conflict.
+            return None
+        try:
+            return self._rpc_request(
+                "wiki",
+                WIKI_CONDITIONAL_PUT_METHOD,
+                page_name,
+                content,
+                {"comment": comment},
+                expected,
+            )
+        except xmlrpc.client.Fault as err:
+            if _is_missing_method_fault(
+                err, f"wiki.{WIKI_CONDITIONAL_PUT_METHOD}"
+            ):
+                self._wiki_conditional_put_absent_until = (
+                    time.monotonic()
+                    + WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS
+                )
+                return None
+            conflict = (
+                _WIKI_CONFLICT_MARKER.match(err.faultString)
+                if err.faultCode == _WIKI_CONFLICT_FAULT_CODE
+                else None
+            )
+            if conflict is not None:
+                found = conflict.group(1)
+                current = None if found == "none" else int(found)
+                if current is None:
+                    detail = "the page does not exist"
+                else:
+                    detail = f"its current version is {current}"
+                raise WikiPageConflict(
+                    f"Version conflict on '{page_name}': you tried to "
+                    f"update version {version} but {detail}",
+                    page_name,
+                    version,
+                    current,
+                ) from None
+            if "not modified" in err.faultString.lower():
+                raise ValueError(
+                    "Page not modified (content identical)"
+                ) from None
+            raise _unwrap_tracrpc_fault(err) from None
+
+    def _put_wiki_page_checked_here(
+        self,
+        page_name: str,
+        content: str,
+        comment: str,
+        version: int | None,
+    ) -> Any:
+        """The ticket #120 path: compare ``version`` with a fresh
+        ``wiki.getPageInfo`` (when given), then post ``wiki.putPage``.
+
+        Used for creates and unversioned writes, and for versioned ones
+        where the server lacks ``wiki.putPageIfVersion``. Returns
+        putPage's result.
+        """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
             attrs["version"] = version
@@ -1182,9 +1375,13 @@ class TracClient:
             else:
                 # Re-raise other faults
                 raise
-        if result is not True:
-            raise ValueError(f"Failed to update page '{page_name}'")
+        return result
 
+    def _read_back_stored_page(
+        self, page_name: str, version: int | None
+    ) -> dict[str, Any]:
+        """Read back a page ``put_wiki_page`` has just stored, by either
+        path, and build its result dict (tickets #140 and #130)."""
         # The page is stored from here on. The read-back is a separate
         # step (Trac /trac_mcp_server #140): any failure in it -- a fault
         # (even "not found", if the page was deleted in between), a
