@@ -32,6 +32,7 @@ Same precedence as the rest of the server's config: CLI flag > env var (`TRAC_MC
 | Mount path | `--path` | `TRAC_MCP_PATH` | `path` | `/mcp` |
 | Bearer token | *(none -- see below)* | `TRAC_MCP_AUTH_TOKEN` | `auth_token` | unset |
 | OIDC per-user RPC URL | -- | `TRAC_MCP_OIDC_RPC_URL` | `oidc_rpc_url` | unset |
+| Accept plain http for that URL on a non-loopback host | -- | `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP` | `oidc_allow_insecure_http` | `false` |
 | Allow unauthenticated non-loopback bind | `--allow-unauthenticated` | -- | `allow_unauthenticated` | `false` |
 | Extra allowed `Host` headers | -- | -- | `allowed_hosts` | `[]` |
 | Extra allowed `Origin` headers | -- | -- | `allowed_origins` | `[]` |
@@ -148,6 +149,7 @@ TRAC_MCP_OIDC_RPC_URL=https://trac.example.com/trac-api/login/xmlrpc \
 server:
   transport: http
   oidc_rpc_url: ${TRAC_MCP_OIDC_RPC_URL}
+  # oidc_allow_insecure_http: true  # only for a plain http URL on a non-loopback host
 ```
 
 **Trac/Apache side.** This needs a *second* WSGI entry point onto the same Trac environment, distinct from the one used for the Basic/LDAP path, protected by `mod_auth_openidc` instead:
@@ -167,11 +169,17 @@ WSGIScriptAlias /trac-api /path/to/trac.wsgi
 
 `TRAC_MCP_OIDC_RPC_URL` must point at that Location's XML-RPC endpoint (here, `.../trac-api/login/xmlrpc`) -- not necessarily the same path suffix as the default Basic/LDAP endpoint (`.../login/rpc`), since it's a separate Apache `Location` block that can be mounted and routed however your Trac/XML-RPC plugin setup requires.
 
+**The URL is checked at startup.** It must be an absolute `http` or `https` URL with a host, and plain `http` is refused unless the host is loopback, because every request forwards a user's access token to this URL. For a network where unencrypted traffic to Trac is an accepted risk, set `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP=true` (or `server.oidc_allow_insecure_http: true`); the server then logs a warning at startup. The variable is refused outside the http transport: stdio has no per-request token to read.
+
 **Mutually exclusive with the static bearer token.** `TRAC_MCP_AUTH_TOKEN` and `TRAC_MCP_OIDC_RPC_URL` cannot both be set -- `validate_server_config()` rejects that combination at startup. Both would be read off the same `Authorization` header for different purposes: a static shared secret can never equal an arbitrary per-user token, so every real caller would fail the comparison. In this mode, the "who may reach this endpoint" concern is instead handled by not exposing it beyond the trusted network (e.g. no published port in `docker-compose.yml`, matching the example below) plus the fact that Trac's own Apache layer rejects any token it doesn't recognize -- an unauthenticated caller that does reach the container can't do anything with it.
 
 **Multiple instances (`instance` argument) are not supported in this mode.** OIDC per-user auth serves only its single configured Trac endpoint; a tool call passing `instance` (other than `"default"`) is rejected with a clear error rather than silently ignored.
 
-**Caching.** A `TracClient` is built once per distinct token and reused for subsequent calls (bounded to the 256 most recently used tokens, evicted oldest-first) -- so a user's session doesn't pay the cost of a new HTTP connection pool on every tool call, without holding tokens past their natural turnover.
+**`list_instances` reports only this endpoint.** It makes no outbound call in this mode: project discovery would need Basic credentials, and the only ones available belong to the shared account, which no caller may act as.
+
+**A runnable setup.** [`examples/oidc/`](../../examples/oidc/README.md) starts Keycloak, Apache with `mod_auth_openidc` and Trac, with two test users, and checks that each caller's writes are attributed to them.
+
+**Caching.** A `TracClient` is built once per distinct token and reused for subsequent calls (bounded to the 256 most recently used tokens, evicted oldest-first, closing the evicted client's connections) -- so a user's session doesn't pay the cost of a new HTTP connection pool on every tool call, without holding tokens past their natural turnover.
 
 ```bash
 # Missing Authorization header -> 401, before JSON-RPC dispatch:

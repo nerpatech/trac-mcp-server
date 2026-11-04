@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import mcp.server.stdio
 import mcp.types as types
@@ -233,7 +233,9 @@ async def _resolve_client(instance: str | None) -> TracClient:
         )
         return _oidc_cache.get_client(extract_bearer_token(auth_header))
 
-    return get_instances().get_client(instance, identity=_caller_identity())
+    return get_instances().get_client(
+        instance, identity=_caller_identity()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +289,7 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = await _resolve_client(
-                instance
-            )
+            client = await _resolve_client(instance)
         except ValueError as e:
             error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
@@ -521,6 +521,15 @@ async def main(config_overrides: dict | None = None):
                 "'Authorization: Bearer <token>'; no shared identity is "
                 "used for tool calls."
             )
+            if (
+                server_config.oidc_allow_insecure_http
+                and urlsplit(oidc_rpc_url).scheme == "http"
+            ):
+                logger.warning(
+                    "TRAC_MCP_OIDC_RPC_URL uses plain http: users' access "
+                    "tokens travel unencrypted to %s.",
+                    oidc_rpc_url,
+                )
             set_oidc_cache(OidcClientCache(ctx["config"], oidc_rpc_url))
         try:
             if server_config.transport == "stdio":

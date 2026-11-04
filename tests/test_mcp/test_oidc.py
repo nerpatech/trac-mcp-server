@@ -7,7 +7,14 @@ enforcement is tested separately in
 test_http_app.py::TestOidcTokenRequired.
 """
 
+import asyncio
+import calendar
+import http.server
+import threading
+from unittest.mock import MagicMock, patch
+
 import pytest
+import requests
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.mcp.oidc import (
@@ -15,6 +22,7 @@ from trac_mcp_server.mcp.oidc import (
     OidcClientCache,
     extract_bearer_token,
 )
+from trac_mcp_server.mcp.tools.ticket_write import _find_posted_comment
 
 
 class TestExtractBearerToken:
@@ -170,3 +178,118 @@ class TestOidcClientCache:
         # The earliest tokens were evicted first.
         assert "token-0" not in cache._clients
         assert f"token-{_MAX_CACHED_CLIENTS + 9}" in cache._clients
+
+
+class _Hello(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *_args):
+        pass
+
+
+class TestEviction:
+    def _session_in_new_thread(self, client) -> requests.Session:
+        sessions = []
+        worker = threading.Thread(
+            target=lambda: sessions.append(client.session)
+        )
+        worker.start()
+        worker.join()
+        return sessions[0]
+
+    def test_evicting_a_client_closes_the_sessions_of_all_its_threads(
+        self, base_config
+    ):
+        cache = OidcClientCache(base_config, "https://example.com/rpc")
+        with patch("trac_mcp_server.mcp.oidc._MAX_CACHED_CLIENTS", 1):
+            evicted = cache.get_client("first")
+            sessions = [
+                evicted.session,
+                self._session_in_new_thread(evicted),
+            ]
+            assert sessions[0] is not sessions[1]
+            with patch.object(requests.Session, "close") as close:
+                cache.get_client("second")
+        assert close.call_count == 2
+
+    def test_a_client_that_stays_cached_is_not_closed(
+        self, base_config
+    ):
+        cache = OidcClientCache(base_config, "https://example.com/rpc")
+        _ = cache.get_client("first").session
+        with patch.object(requests.Session, "close") as close:
+            cache.get_client("second")
+            cache.get_client("first")
+        close.assert_not_called()
+
+    def test_a_closed_client_can_still_finish_its_work(
+        self, base_config
+    ):
+        """A call may still be running on the client when it is evicted."""
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), _Hello
+        )
+        thread = threading.Thread(
+            target=server.serve_forever, daemon=True
+        )
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/rpc"
+        try:
+            client = OidcClientCache(base_config, url).get_client(
+                "token"
+            )
+            assert client.session.get(url, timeout=5).status_code == 200
+            client.close()
+            assert client.session.get(url, timeout=5).status_code == 200
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestCommentLookup:
+    """ticket_update reads a new comment's number off the changelog. Under
+    OIDC the client has no username to filter that changelog by."""
+
+    _WHEN = "20261104T07:29:00"
+    _EPOCH = str(calendar.timegm((2026, 11, 4, 7, 29, 0)) * 1_000_000)
+
+    def _client(self, changelog) -> MagicMock:
+        client = MagicMock()
+        client.config = Config(
+            trac_url="https://example.com/trac",
+            username="",
+            password="",
+            bearer_token="token",
+            oidc_only=True,
+        )
+        client.get_ticket_changelog.return_value = changelog
+        return client
+
+    def _find(self, changelog, comment="mine"):
+        return asyncio.run(
+            _find_posted_comment(
+                self._client(changelog), 1, comment, None, self._EPOCH
+            )
+        )
+
+    def test_the_number_is_found_without_a_username(self):
+        posted = self._find(
+            [[self._WHEN, "bob", "comment", "3", "mine", 1]]
+        )
+        assert posted.failure is None
+        assert posted.number == 3
+
+    def test_another_users_comment_in_the_same_second_is_told_apart(
+        self,
+    ):
+        posted = self._find(
+            [
+                [self._WHEN, "alice", "comment", "3", "theirs", 1],
+                [self._WHEN, "bob", "comment", "4", "mine", 1],
+            ]
+        )
+        assert posted.number == 4

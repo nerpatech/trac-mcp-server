@@ -4,7 +4,10 @@ Drives the ASGI app with Starlette's TestClient as a context manager so
 the lifespan runs and the StreamableHTTPSessionManager starts.
 """
 
+import asyncio
+
 from mcp.server import Server
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from trac_mcp_server import __version__
@@ -12,6 +15,7 @@ from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp.http_app import (
     BearerAuthMiddleware,
+    OidcTokenRequiredMiddleware,
     build_http_app,
 )
 
@@ -440,3 +444,52 @@ class TestNoTrailingSlashRedirect:
                 "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
             )
         assert response.status_code == 200
+
+
+class TestOidcDuplicateAuthorizationHeaders:
+    """The middleware must gate on the header _resolve_client() then uses,
+    which reads request.headers: Starlette returns the first duplicate."""
+
+    def _run(self, headers: list[tuple[bytes, bytes]]):
+        seen = []
+
+        async def inner(scope, _receive, _send):
+            seen.append(Request(scope).headers.get("authorization"))
+
+        statuses = []
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+
+        middleware = OidcTokenRequiredMiddleware(
+            inner, "https://trac.example.com/trac-api/login/xmlrpc"
+        )
+        asyncio.run(
+            middleware(
+                {"type": "http", "path": "/mcp", "headers": headers},
+                None,
+                send,
+            )
+        )
+        return seen, statuses
+
+    def test_gates_on_the_first_header(self):
+        seen, statuses = self._run(
+            [
+                (b"authorization", b"Basic not-a-bearer-token"),
+                (b"authorization", b"Bearer BBB"),
+            ]
+        )
+        assert seen == []
+        assert statuses == [401]
+
+    def test_the_gated_header_is_the_one_that_gets_used(self):
+        seen, statuses = self._run(
+            [
+                (b"authorization", b"Bearer AAA"),
+                (b"authorization", b"Bearer BBB"),
+            ]
+        )
+        assert seen == ["Bearer AAA"]
+        assert statuses == []

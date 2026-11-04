@@ -202,6 +202,40 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _validate_oidc_rpc_url(url: str, allow_insecure_http: bool) -> None:
+    """Refuse an ``oidc_rpc_url`` that is malformed or sends tokens in clear.
+
+    Every request forwards a user's access token to this URL, and an
+    OIDC-only deployment skips the startup self-test, so this is the only
+    place a typo or a plain ``http://`` value can surface at startup.
+    """
+    parsed = urlparse(url)
+    try:
+        _ = parsed.port
+    except ValueError:
+        raise ValueError(
+            f"Invalid TRAC_MCP_OIDC_RPC_URL '{url}': the port is not valid."
+        ) from None
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(
+            f"Invalid TRAC_MCP_OIDC_RPC_URL '{url}': it must be an absolute "
+            "http or https URL with a host."
+        )
+    if (
+        parsed.scheme == "https"
+        or _is_loopback_host(parsed.hostname)
+        or allow_insecure_http
+    ):
+        return
+    raise ValueError(
+        f"Refusing TRAC_MCP_OIDC_RPC_URL '{url}': every request forwards a "
+        "user's access token to this URL, and plain http sends it "
+        "unencrypted. Use https, or set "
+        "TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP=true (or the "
+        "server.oidc_allow_insecure_http config value) to explicitly opt out."
+    )
+
+
 def validate_server_config(server_config: "ServerConfig") -> None:
     """Validate MCP server (transport) configuration.
 
@@ -216,6 +250,12 @@ def validate_server_config(server_config: "ServerConfig") -> None:
     always-losing static-token comparison against a per-user token no
     caller could ever satisfy.
 
+    Also validates ``oidc_rpc_url`` itself (see ``_validate_oidc_rpc_url``)
+    and refuses it outside the http transport: it relaxes the
+    TRAC_USERNAME/TRAC_PASSWORD requirement in ``load_config``, but only the
+    http transport reads per-request tokens, so a stdio server would start
+    without credentials and then fail every call.
+
     Also validates ``server_config.identities`` (ticket #102) against the
     rest of the server config -- checks that need the auth_token and
     transport together, so they belong here rather than in
@@ -227,7 +267,9 @@ def validate_server_config(server_config: "ServerConfig") -> None:
 
     Raises:
         ValueError: If auth_token or identities are combined with
-            oidc_rpc_url, if an unauthenticated http transport would bind
+            oidc_rpc_url, if oidc_rpc_url is invalid, unencrypted without
+            an opt-out, or set outside the http transport, if an
+            unauthenticated http transport would bind
             a non-loopback host, or an identities config is invalid (see
             below).
     """
@@ -266,7 +308,21 @@ def validate_server_config(server_config: "ServerConfig") -> None:
             )
 
     if server_config.transport != "http":
+        if server_config.oidc_rpc_url:
+            raise ValueError(
+                "TRAC_MCP_OIDC_RPC_URL is set but transport is "
+                f"'{server_config.transport}'. OIDC per-user auth reads a "
+                "bearer token off each HTTP request; stdio has none to "
+                "read, so every call would fail. Use --transport http, or "
+                "drop TRAC_MCP_OIDC_RPC_URL."
+            )
         return
+
+    if server_config.oidc_rpc_url:
+        _validate_oidc_rpc_url(
+            server_config.oidc_rpc_url,
+            server_config.oidc_allow_insecure_http,
+        )
 
     if server_config.auth_token and server_config.oidc_rpc_url:
         raise ValueError(
@@ -347,10 +403,9 @@ def load_config(
     # has no shared service-account identity by design; every request
     # carries its own token instead (mcp/oidc.py). Read directly via
     # os.getenv rather than threading ServerConfig through this call:
-    # TRAC_MCP_OIDC_RPC_URL is only ever meaningful for the http transport,
-    # so an operator running stdio while it happens to be set just gets a
-    # (harmless) relaxed check. Config.oidc_only itself is computed further
-    # down, once we know whether real credentials ended up configured
+    # validate_server_config() runs first for the server and refuses the
+    # variable outside the http transport. Config.oidc_only itself is
+    # computed further down, once we know whether real credentials ended up configured
     # anyway -- so setting TRAC_MCP_OIDC_RPC_URL *alongside* a real
     # TRAC_USERNAME/TRAC_PASSWORD keeps the startup self-test enabled.
     oidc_rpc_configured = bool(os.getenv("TRAC_MCP_OIDC_RPC_URL"))

@@ -109,6 +109,9 @@ class OidcClientCache:
             )
             client = TracClient(config)
             self._clients[token] = client
+            evicted = None
             if len(self._clients) > _MAX_CACHED_CLIENTS:
-                self._clients.popitem(last=False)
-            return client
+                _, evicted = self._clients.popitem(last=False)
+        if evicted is not None:
+            evicted.close()
+        return client

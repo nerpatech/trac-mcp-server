@@ -18,6 +18,7 @@ from mcp.server.streamable_http_manager import (
 )
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.datastructures import Headers
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -25,8 +26,8 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ..config_schema import ServerConfig
-from .oidc import extract_bearer_token
 from ..instances import Identity
+from .oidc import extract_bearer_token
 
 logger = logging.getLogger(__name__)
 
@@ -149,11 +150,12 @@ class OidcTokenRequiredMiddleware:
             await self._app(scope, receive, send)
             return
 
-        headers = dict(scope["headers"])
-        auth_header = headers.get(b"authorization", b"").decode(
-            "latin-1"
+        # Starlette's Headers, as _resolve_client reads them through
+        # request.headers: with duplicate headers, the one gated here must
+        # be the one that gets forwarded.
+        token = extract_bearer_token(
+            Headers(scope=scope).get("authorization")
         )
-        token = extract_bearer_token(auth_header)
         if not token:
             response = Response(
                 "Unauthorized: missing 'Authorization: Bearer <token>' "

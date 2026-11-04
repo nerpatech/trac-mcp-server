@@ -153,6 +153,14 @@ class ServerConfig(BaseModel):
             "token is rejected outright."
         ),
     )
+    oidc_allow_insecure_http: bool = Field(
+        default=False,
+        description=(
+            "Allow a plain http oidc_rpc_url on a non-loopback host, which "
+            "sends every user's access token unencrypted. Without it, such "
+            "a URL is refused at startup."
+        ),
+    )
     allow_unauthenticated: bool = Field(
         default=False,
         description="Allow binding a non-loopback host without an auth_token",

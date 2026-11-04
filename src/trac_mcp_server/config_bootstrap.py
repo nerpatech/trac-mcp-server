@@ -199,6 +199,13 @@ def bootstrap_server_config(
         "TRAC_MCP_OIDC_RPC_URL"
     ) or yaml_server.get("oidc_rpc_url")
 
+    insecure_env = os.getenv("TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP")
+    oidc_allow_insecure_http = (
+        insecure_env.strip().lower() in ("true", "1", "yes", "on")
+        if insecure_env is not None
+        else bool(yaml_server.get("oidc_allow_insecure_http", False))
+    )
+
     allow_unauthenticated = bool(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
@@ -247,6 +254,7 @@ def bootstrap_server_config(
         path=path,
         auth_token=auth_token,
         oidc_rpc_url=oidc_rpc_url,
+        oidc_allow_insecure_http=oidc_allow_insecure_http,
         allow_unauthenticated=allow_unauthenticated,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,

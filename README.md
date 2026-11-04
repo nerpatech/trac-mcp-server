@@ -50,6 +50,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
 | `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
+| `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP` | No | `false` | Accept a plain `http` `TRAC_MCP_OIDC_RPC_URL` on a non-loopback host, which sends users' access tokens unencrypted. Refused at startup otherwise |
 | `TRAC_IDENTITIES` | No | -- | Path to a file mapping per-caller bearer tokens to their own Trac username/password (`http` transport only) |
 
 For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, including multi-identity auth, see [HTTP Transport](docs/reference/http-transport.md).
