@@ -39,11 +39,15 @@ python - <<'PY'
 import os
 import sys
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
-# Explicit path: find_dotenv() walks the CALLING FILE's directory, and this
-# script has no file -- it arrives on stdin.
-load_dotenv(".env")
+# This heredoc has no file of its own -- it arrives on stdin -- so
+# find_dotenv() has no calling file to start from. usecwd=True starts it at
+# the repo root this script has already cd'd to and walks up from there. That
+# is the same lookup tests/conftest.py's bare load_dotenv() makes, so a
+# worktree nested in the main checkout (.claude/worktrees/*) reaches the main
+# checkout's .env instead of failing the probe before pytest (Trac #128).
+load_dotenv(find_dotenv(usecwd=True))
 
 REQUIRED = (
     "TRAC_URL",
