@@ -701,6 +701,21 @@ class TestPushReadbackAfterWrite:
         assert result.structuredContent["readback_failed"] is False
         assert "readback_error" not in result.structuredContent
 
+    async def test_clean_push_reports_no_possible_overwrite(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.return_value = {
+            "version": 4,
+            "possible_overwrite": False,
+        }
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.structuredContent["possible_overwrite"] is False
+        assert "intervening_versions" not in result.structuredContent
+
     async def test_probe_not_found_still_creates_once(self):
         """The fallback the fix narrows still works: a not-found fault
         from the existence probe creates the page, with one write."""
@@ -733,6 +748,100 @@ class TestPushReadbackAfterWrite:
         )
         assert result.isError
         client.put_wiki_page.assert_called_once()
+
+
+class TestPushPossibleOverwrite:
+    """wiki_file_push when the read-back version is not version + 1
+    (Trac /trac_mcp_server #130).
+
+    A real TracClient with only ``_rpc_request`` mocked. Before putPage,
+    getPageInfo (the handler's existence probe and put_wiki_page's
+    precheck) sees ``before`` -- ``None`` for a missing page; after it,
+    the read-back sees ``after``.
+    """
+
+    @staticmethod
+    async def _push(mock_config, before, after):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+        calls: list[tuple] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append((namespace, method, *args))
+            if method == "putPage":
+                return True
+            if method == "getPageInfo":
+                if any(c[1] == "putPage" for c in calls[:-1]):
+                    return {"name": "X", "version": after}
+                if before is None:
+                    raise xmlrpc.client.Fault(1, "Page 'X' not found")
+                return {"name": "X", "version": before}
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\nnew text\n", "page_name": "X"},
+                client,
+            )
+        puts = [c for c in calls if c[1] == "putPage"]
+        return result, puts
+
+    async def test_skipped_version_is_flagged_and_warned(
+        self, mock_config
+    ):
+        result, puts = await self._push(mock_config, before=3, after=5)
+
+        assert len(puts) == 1
+        assert puts[0][4]["version"] == 3
+        # A success: the page was stored.
+        assert not result.isError
+        sc = result.structuredContent
+        assert sc["action"] == "updated"
+        assert sc["version"] == 5
+        assert sc["readback_failed"] is False
+        assert sc["possible_overwrite"] is True
+        assert sc["intervening_versions"] == [4]
+        text = result.content[0].text
+        assert "possible overwrite" in text
+        assert (
+            "Version 4 was most likely written by someone else" in text
+        )
+        assert (
+            "wiki_diff(page_name='X', from_version=3, to_version=4)"
+            in text
+        )
+
+    async def test_uncontended_update_stays_quiet(self, mock_config):
+        result, puts = await self._push(mock_config, before=3, after=4)
+
+        assert len(puts) == 1
+        sc = result.structuredContent
+        assert sc["version"] == 4
+        assert sc["possible_overwrite"] is False
+        assert "intervening_versions" not in sc
+        assert "overwrite" not in result.content[0].text.lower()
+
+    async def test_create_is_never_flagged(self, mock_config):
+        # Even a read-back version other than 1 (the page was written
+        # again right after the create) says nothing about an overwrite.
+        result, puts = await self._push(
+            mock_config, before=None, after=2
+        )
+
+        assert len(puts) == 1
+        assert "version" not in puts[0][4]
+        sc = result.structuredContent
+        assert sc["action"] == "created"
+        assert sc["possible_overwrite"] is False
+        assert "overwrite" not in result.content[0].text.lower()
 
 
 # =============================================================================

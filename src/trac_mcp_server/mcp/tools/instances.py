@@ -172,9 +172,17 @@ async def _handle_list_instances(
         # discovery: it needs the default host and the caller's creds.
         default_config = None
 
+    # Ticket #153: the write gate's kill switch is a per-daemon setting
+    # every routed instance inherits (ticket #117), and nothing else a
+    # session can reach reports it -- the env file is root 600. From the
+    # registry rather than `client`: a caller scoped away from the
+    # default instance reaches this handler with no client at all.
+    write_gate = registry.write_gate
+
     structured: dict = {
         "configured": configured,
         "default": default_config.trac_url if default_config else None,
+        "write_gate": write_gate,
     }
     if allowed is not None:
         structured["allowed"] = sorted(allowed)
@@ -183,6 +191,12 @@ async def _handle_list_instances(
         f"Default instance: {default_config.trac_url}"
         if default_config
         else "Default instance: unavailable to this caller",
+        f"write_gate: {'true' if write_gate else 'false'}"
+        + (
+            ""
+            if write_gate
+            else " -- OFF on this daemon: writes are NOT link-checked"
+        ),
     ]
     if allowed is not None:
         lines.extend(["", "Allowed:"])

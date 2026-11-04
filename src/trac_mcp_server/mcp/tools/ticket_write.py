@@ -356,13 +356,28 @@ async def _handle_update(
                 "comment is required when reply_to is set",
                 "Provide a comment parameter along with reply_to.",
             )
+        # Both sides go through the shared parser (Trac #131): a
+        # threaded comment 5 has oldvalue "2.5" and is quoted as
+        # reply_to=5, the number Trac's comment:5 link names it by. The
+        # caller's value is parsed once, before the changelog read; one
+        # that is no comment number cannot match, so skip the read.
+        wanted = TracClient.parse_comment_number(reply_to)
+        if wanted is None:
+            return build_error_response(
+                "not_found",
+                f"Comment #{reply_to} not found on ticket #{ticket_id}",
+                "Use ticket_changelog to see valid comment numbers.",
+            )
         changelog = await run_sync(
             client.get_ticket_changelog, ticket_id
         )
         quoted_author = None
         quoted_text = None
         for entry in changelog or []:
-            if entry[2] == "comment" and str(entry[3]) == str(reply_to):
+            if entry[2] != "comment":
+                continue
+            row = TracClient.parse_comment_number(entry[3])
+            if row is not None and row.cnum == wanted.cnum:
                 quoted_author = entry[1]
                 quoted_text = entry[4]
         if quoted_text is None:
@@ -375,7 +390,7 @@ async def _handle_update(
             f"> {line}" for line in quoted_text.strip().split("\n")
         )
         comment = (
-            f"Replying to [comment:{reply_to} {quoted_author}]:\n"
+            f"Replying to [comment:{wanted.cnum} {quoted_author}]:\n"
             f"{quote_lines}\n\n{comment}"
         )
 
@@ -727,17 +742,14 @@ def _comment_cnum(entry: Any) -> int | None:
 
     Trac keeps it in the row's oldvalue: ``"5"``. A dotted ``"2.5"`` is a
     reply threaded under comment 2 -- never this tool's own write, since
-    tracrpc's ``ticket.update`` saves without a ``replyto``. ``int()`` is
-    the test, not ``isdigit()``: ``"\u00b2".isdigit()`` is True and
-    ``int("\u00b2")`` raises.
+    tracrpc's ``ticket.update`` saves without a ``replyto``. Parsing is
+    ``TracClient.parse_comment_number``'s; this keeps the flat-only
+    contract on top of it.
     """
-    text = str(entry[3])
-    if "." in text:
+    parsed = TracClient.parse_comment_number(entry[3])
+    if parsed is None or parsed.reply_to is not None:
         return None
-    try:
-        return int(text)
-    except ValueError:
-        return None
+    return parsed.cnum
 
 
 @dataclass(frozen=True)

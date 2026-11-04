@@ -240,6 +240,13 @@ def _indent_nonblank(lines: list[str], indent: str) -> list[str]:
     return [indent + line if line else line for line in lines]
 
 
+def _is_fallback_fence(info: str | None) -> bool:
+    """True when a fenced block's info string is the #63 verbatim-unwrap
+    marker (`FALLBACK_FENCE_INFO`). The one test, for `block_code()` and
+    the list-item run split."""
+    return bool(info) and info.strip() == FALLBACK_FENCE_INFO
+
+
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -464,7 +471,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         here never leaks into their output.
         """
         code = code.rstrip("\n")
-        if info and info.strip() == FALLBACK_FENCE_INFO:
+        if _is_fallback_fence(info):
             # Unwrap, per the operator decision on ticket #63: the read leg
             # emitted this fence around TracWiki it could not express, and the
             # body is the ORIGINAL SOURCE verbatim.  Restoring it is a literal
@@ -809,6 +816,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # ("table"): `||` rows indented under an item end the
                     # list in Trac (measured on /trac_test), so it is
                     # rendered as a `{{{#!div}}}` block below.
+                    # Ticket #144 (and the code-block half of #143): a
+                    # fenced code child is its own run kind ("code"), for
+                    # the same reason -- it goes under the item text at the
+                    # continuation indent with no blank line before it, in
+                    # a tight or a loose item alike (Trac strips the indent
+                    # back off the body). A #63 fallback fence stays in the
+                    # text run: its body is TracWiki source, unwrapped.
                     runs: list[tuple[str, list[dict[str, Any]]]] = []
                     for child in children:
                         child_type = child.get("type")
@@ -817,10 +831,15 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             if child_type == "list"
                             else "table"
                             if child_type == "table"
+                            else "code"
+                            if child_type == "block_code"
+                            and not _is_fallback_fence(
+                                (child.get("attrs") or {}).get("info")
+                            )
                             else "text"
                         )
-                        # Adjacent plain blocks share a run; every list
-                        # and every table is its own run.
+                        # Adjacent plain blocks share a run; every list,
+                        # table and code block is its own run.
                         if (
                             runs
                             and kind == "text"
@@ -890,6 +909,20 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 for kind, rendered in after_runs:
                     if kind == "list":
                         parts.append(rendered)
+                    elif kind == "code":
+                        # Ticket #144. Appended at THIS item's continuation
+                        # indent, in source order. After a nested list that
+                        # is a Trac limit, parallel to #112's continuation
+                        # paragraph: Trac attaches a block to the innermost
+                        # open item (measured, F5), so here it lands on the
+                        # nested item, and no TracWiki form attaches a
+                        # block to the outer item after a nested list.
+                        parts.extend(
+                            _indent_nonblank(
+                                rendered.split("\n"),
+                                continuation_indent,
+                            )
+                        )
                     elif kind == "table":
                         # Wrapped in a `{{{#!div}}}` so Trac keeps the
                         # table inside the <li>, and appended with NO blank
