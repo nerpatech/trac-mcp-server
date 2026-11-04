@@ -109,7 +109,8 @@ trac-convert --version
 | `1` | Runtime error (I/O failure, clipboard unavailable, mutually-exclusive flag conflict) |
 | `2` | Usage error (argparse-emitted: missing required flag, bad choice) |
 | `3` | Conversion error (exception raised inside the converter) |
-| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, and `--to-wiki`. |
+| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, and `--to-wiki`. With `--to-wiki`, nothing was stored. |
+| `5` | `--to-wiki` stored the page, but reading back its new version failed. The message on stderr says the page WAS stored; do not retry the write. |
 
 ### Auto-detection
 
@@ -178,6 +179,8 @@ The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and s
 - `ticket-create` prints the server's `Created ticket #N: ...` line.
 - `ticket-pull` writes the stored description (or comment `N`) to `FILE` (`-` for stdout) byte for byte, so `cmp` against the pushed file holds.
 
+`wiki-push` exits **4**, not 1, when the page was stored but its new version could not be read back afterwards (the server reports `readback_failed`): do not retry the push. Exit 1 means nothing was stored.
+
 The server's write-time link gate and notes apply to all three writes, as for the equivalent MCP tools.
 
 `FILE` may be `-` for stdin or stdout. From stdin `wiki-push` has no filename to detect a format from, so the text is stored as TracWiki unless you pass `--format markdown`. Global options go before the subcommand: `trac-mcp --instance /bcs wiki-push ...`.
@@ -201,6 +204,9 @@ Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working direct
 | 1 | The server answered with an error (the message is printed to stderr) |
 | 2 | Usage error, or a local file problem |
 | 3 | No endpoint, a missing token variable, or a transport/HTTP failure (e.g. 401) |
+| 4 | The write WAS stored, but reading it back failed: a `ticket-comment` whose number could not be determined, or a `wiki-push` whose new page version could not be read. Do not retry the write |
+
+Exit 1 always means nothing was stored.
 
 ### Installation
 
