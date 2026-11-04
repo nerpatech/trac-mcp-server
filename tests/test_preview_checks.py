@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from trac_mcp_server.preview.checks import (
+    _PREFIX_REALM_RE,
     _is_autolink_page_name,
     build_warnings,
 )
@@ -251,6 +252,9 @@ SILENT_ROWS = [
     # local base is supplied, and for the upstream (trac.edgewall.org)
     # target staying silent even then.
     "row86_missing_intertrac_realm",
+    # Ticket #148. Two resolved label-less bracketed realm links glued
+    # by `]/[`; the typo'd control is asserted next to the #147 rows.
+    "row148_glued_bracket_both_resolved",
 ]
 
 WARNING_ROWS = [
@@ -438,7 +442,7 @@ ROW147_RESOLVED = "row147_bracket_no_label_realm_close_paren"
 ROW147_TYPO = "row147_typo_bracket_no_label_realm_close_paren"
 
 
-def _row147_prefix_warnings(name):
+def _prefix_warnings(name):
     markdown_source, tracwiki, facts, source_format = _load(name)
     return [
         w
@@ -455,14 +459,73 @@ def _row147_prefix_warnings(name):
 
 
 def test_row147_resolved_bracket_before_close_paren_is_silent():
-    assert _row147_prefix_warnings(ROW147_RESOLVED) == []
+    assert _prefix_warnings(ROW147_RESOLVED) == []
 
 
 def test_row147_unconfigured_bracket_before_close_paren_still_warns():
-    warnings = _row147_prefix_warnings(ROW147_TYPO)
+    warnings = _prefix_warnings(ROW147_TYPO)
     assert [w["evidence"]["token"] for w in warnings] == [
         "auto-pm:wiki:Rules/testing/SeededDefectFirst"
     ]
+
+
+# Ticket #148. Two label-less bracketed realm links glued together by
+# `]/[`. `_PREFIX_REALM_RE`'s `[^\s`]+` ran past the first `]`, so
+# `finditer` (which never overlaps matches) read both links as ONE
+# token and the second was never checked on its own: a typo'd prefix
+# there (`auto-pm`) rendered as plain text with no warning. Both renders
+# captured live on /trac_mcp_server. The typo row is the seeded defect
+# (`Rules/testing/SeededDefectFirst`): it fails without the fix.
+ROW148_RESOLVED = "row148_glued_bracket_both_resolved"
+ROW148_TYPO = "row148_glued_bracket_typo_second"
+
+
+def test_row148_glued_brackets_both_resolved_are_silent():
+    assert _prefix_warnings(ROW148_RESOLVED) == []
+
+
+def test_row148_glued_bracket_typo_in_second_link_warns():
+    warnings = _prefix_warnings(ROW148_TYPO)
+    assert [w["evidence"]["token"] for w in warnings] == [
+        "auto-pm:wiki:Rules/testing/RecallGateEveryTightening"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text,tokens",
+    [
+        # The ticket's table, row by row.
+        (
+            "[auto_pm:wiki:A]/[auto-pm:wiki:B]",
+            ["auto_pm:wiki:A", "auto-pm:wiki:B"],
+        ),
+        (
+            "[auto_pm:wiki:A] [auto-pm:wiki:B]",
+            ["auto_pm:wiki:A", "auto-pm:wiki:B"],
+        ),
+        ("([auto_pm:wiki:X]).", ["auto_pm:wiki:X"]),
+        ("[auto_pm:wiki:A label]", ["auto_pm:wiki:A"]),
+        # Unbracketed: unchanged, still reads past `]`.
+        (
+            "see auto_pm:wiki:A]x and p:wiki:B).",
+            ["auto_pm:wiki:A]x", "p:wiki:B)."],
+        ),
+        # An EMPTY bracketed target must not fall through to the
+        # unbracketed alternative, which would swallow `]` and the
+        # glued-on second link again.
+        ("[auto_pm:wiki:]", ["auto_pm:wiki:"]),
+        (
+            "[auto_pm:wiki:]/[auto-pm:wiki:B]",
+            ["auto_pm:wiki:", "auto-pm:wiki:B"],
+        ),
+        # ...while an empty target before a space still matches nothing.
+        ("[auto_pm:wiki: label]", []),
+    ],
+)
+def test_row148_realm_token_boundaries(text, tokens):
+    assert [
+        m.group(0) for m in _PREFIX_REALM_RE.finditer(text)
+    ] == tokens
 
 
 def test_seeded_defect_row1_pre_fix_warns_escaped_link_target():
@@ -833,8 +896,12 @@ def test_suite_balance_is_roughly_even():
     # in SILENT_ROWS gives (no instance table supplied by this suite's
     # default call) -- the defect it carries is exercised by the
     # standalone tests instead, so it counts here as one-sided too.
+    #
+    # Ticket #148 added row148_glued_bracket_both_resolved, silent. Its
+    # must-warn half (the typo'd second link) is a standalone test for
+    # the same reason as row 72: it asserts WHICH token was named.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 40
+    assert silent_count == 41
     assert warning_count == 39
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
