@@ -341,6 +341,75 @@ class TestTicketRenderCheckHandler(unittest.TestCase):
         self.assertNotIn("bare_ticket_ref", text)
         self.assertIn("Ticket refs (1): #57 defect: ", text)
 
+    def _threaded_client(self, rows):
+        """A ticket whose only HTML comment is `trac-change-5-` (the
+        page names a comment by its own number), with the changelog
+        `rows` as (oldvalue, field) pairs carrying the row05 source."""
+        client = _mock_ticket_client("row01_clean")
+        page = (
+            '<html><body><div class="description">'
+            '<div class="searchable">'
+            f"{_fixture_html_body('row01_clean')}</div></div>"
+            '<div class="change" id="trac-change-5-1000000004">'
+            '<div class="comment">'
+            f"{_fixture_html_body('row05_link_ref_in_code_span')}"
+            "</div></div></body></html>"
+        )
+        client.session.get.return_value.text = page
+        client.get_ticket_changelog.return_value = [
+            [
+                "2026-09-01T00:00:00",
+                "someone",
+                field,
+                oldvalue,
+                _fixture_tracwiki("row05_link_ref_in_code_span"),
+                True,
+            ]
+            for oldvalue, field in rows
+        ]
+        return client
+
+    def _comment_section(self, client):
+        result = self._run(
+            client, {"ticket_id": 1, "check_targets": False}
+        )
+        (section,) = [
+            s
+            for s in result.structuredContent["sections"]
+            if s["kind"] == "comment"
+        ]
+        return section
+
+    def test_threaded_changelog_row_pairs_with_its_own_html_div(self):
+        """Trac #131. The changelog's oldvalue "2.5" is comment 5; the
+        page's div is `trac-change-5-`. They used to key on different
+        strings, so the source never paired and every threaded comment
+        was reported source_not_paired."""
+        section = self._comment_section(
+            self._threaded_client([("2.5", "comment")])
+        )
+        self.assertEqual(section["ref"], "5")
+        self.assertTrue(section["source_paired"])
+        codes = [w["code"] for w in section["warnings"]]
+        self.assertNotIn("source_not_paired", codes)
+
+    def test_flat_changelog_row_still_pairs(self):
+        section = self._comment_section(
+            self._threaded_client([("5", "comment")])
+        )
+        self.assertTrue(section["source_paired"])
+
+    def test_unparseable_and_attachment_rows_pair_nothing(self):
+        for rows in (
+            [(None, "comment")],
+            [("abc", "comment")],
+            [("²", "comment")],
+            [("5", "attachment")],
+            [(None, "attachment")],
+        ):
+            section = self._comment_section(self._threaded_client(rows))
+            self.assertFalse(section["source_paired"], rows)
+
     def test_unpaired_section_notes_the_skip(self):
         """A comment whose changelog entry can't be found gets an
         explicit source_not_paired warning, never a silent pass

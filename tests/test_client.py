@@ -3125,3 +3125,59 @@ def test_put_wiki_page_readback_below_expected_is_flagged_with_none_between(
 
     assert result["possible_overwrite"] is True
     assert result["intervening_versions"] == []
+
+
+# ---------------------------------------------------------------------------
+# TracClient.parse_comment_number (Trac /trac_mcp_server #131)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("oldvalue", "cnum", "reply_to"),
+    [
+        ("5", 5, None),
+        ("2.5", 5, 2),
+        ("1.10", 10, 1),
+        (5, 5, None),
+        ("  5 ", 5, None),
+        (" 2.5\n", 5, 2),
+    ],
+)
+def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
+    from trac_mcp_server.core.client import CommentNumber
+
+    parsed = TracClient.parse_comment_number(oldvalue)
+    assert parsed == CommentNumber(cnum=cnum, reply_to=reply_to)
+    assert parsed.cnum == cnum
+    assert parsed.reply_to == reply_to
+
+
+@pytest.mark.parametrize(
+    "oldvalue",
+    [
+        None,
+        "",
+        "   ",
+        "abc",
+        "²",  # '²'.isdigit() is True; int('²') raises
+        "2.",
+        ".5",
+        "1.2.3",
+        "2..5",
+        "0",
+        "-1",
+        "2.0",
+        "2.-1",
+        "0.5",
+        "-1.5",
+        "a.5",
+        True,
+        False,
+        5.0,
+        0,
+        -3,
+        ["5"],
+    ],
+)
+def test_parse_comment_number_rejects(oldvalue):
+    assert TracClient.parse_comment_number(oldvalue) is None

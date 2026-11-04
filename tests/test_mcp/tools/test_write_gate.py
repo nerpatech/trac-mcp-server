@@ -671,6 +671,65 @@ def test_dangling_comment_ref_wired_into_ticket_update():
     assert "dangling_comment_ref" in _text(result)
 
 
+class TestKnownCommentNumbersParsing:
+    """Trac /trac_mcp_server #131. A threaded row's oldvalue is
+    ``"2.5"`` -- comment 5, a reply to 2 -- and Trac's ``comment:5``
+    link names it by the last part. Such a row used to be skipped, so a
+    ``comment:5`` link to it read as dead and ``max_cnum`` was short."""
+
+    @staticmethod
+    def _known(rows):
+        from trac_mcp_server.mcp.tools.write_gate import (
+            known_comment_numbers,
+        )
+
+        client = MagicMock()
+        client.get_ticket_changelog = MagicMock(return_value=rows)
+        return asyncio.run(known_comment_numbers(client, 1))
+
+    def test_flat_rows(self):
+        rows = [
+            ["t", "a", "comment", "1", "one", 1],
+            ["t", "a", "comment", "2", "two", 1],
+        ]
+        assert self._known(rows) == frozenset({1, 2, 3})
+
+    def test_threaded_row_is_known_under_its_own_number(self):
+        rows = [
+            ["t", "a", "comment", "1", "one", 1],
+            ["t", "a", "comment", "2", "two", 1],
+            ["t", "a", "comment", "2.5", "reply", 1],
+        ]
+        assert self._known(rows) == frozenset({1, 2, 5, 6})
+
+    def test_threaded_row_feeds_the_next_number(self):
+        rows = [["t", "a", "comment", "1.7", "reply", 1]]
+        assert self._known(rows) == frozenset({7, 8})
+
+    def test_threaded_row_without_a_body_only_raises_the_next_number(
+        self,
+    ):
+        rows = [["t", "a", "comment", "2.5", "", 1]]
+        assert self._known(rows) == frozenset({6})
+
+    def test_attachment_pseudo_row_with_none_oldvalue_is_skipped(self):
+        rows = [
+            ["t", "a", "attachment", None, "f.txt", 1],
+            ["t", "a", "comment", None, "x", 1],
+            ["t", "a", "comment", "3", "three", 1],
+        ]
+        assert self._known(rows) == frozenset({3, 4})
+
+    def test_non_numeric_oldvalue_is_skipped(self):
+        rows = [
+            ["t", "a", "comment", "abc", "x", 1],
+            ["t", "a", "comment", "\u00b2", "x", 1],
+            ["t", "a", "comment", "1.2.3", "x", 1],
+            ["t", "a", "comment", "4", "four", 1],
+        ]
+        assert self._known(rows) == frozenset({4, 5})
+
+
 def test_dangling_comment_ref_counts_the_comment_being_written():
     """A comment that references its OWN prospective number is not a
     defect -- "counting the comment being written" is the ticket's own

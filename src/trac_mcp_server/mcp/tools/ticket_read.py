@@ -255,10 +255,14 @@ def _extract_comments(changelog: list) -> list[dict[str, Any]]:
     Returns:
         One dict per comment carrying number, author, timestamp and body,
         in changelog order. Trac stores a comment's number in the entry's
-        ``oldvalue`` -- the same key ``ticket_render_check``'s ``comment``
-        parameter is keyed on -- so the number reported here is the one
-        that tool accepts. An entry without one yields ``number: None``
-        rather than a fabricated ordinal.
+        ``oldvalue``: ``"5"``, or ``"2.5"`` for comment 5 threaded as a
+        reply to comment 2. ``number`` is the comment's own number (the
+        last dotted part, ``"5"`` for both), the key
+        ``ticket_render_check``'s ``comment`` parameter is keyed on, so
+        the number reported here is the one that tool accepts. A
+        threaded comment also carries ``in_reply_to`` (``"2"``); a flat
+        one has no such key. An entry without a parseable number yields
+        ``number: None`` rather than a fabricated ordinal.
     """
     comments: list[dict[str, Any]] = []
     for entry in changelog:
@@ -269,15 +273,16 @@ def _extract_comments(changelog: list) -> list[dict[str, Any]]:
             continue
 
         body = newvalue
-        number = str(oldvalue).strip() if oldvalue else ""
-        comments.append(
-            {
-                "number": number or None,
-                "author": author,
-                "timestamp": format_timestamp(timestamp),
-                "body": body,
-            }
-        )
+        parsed = TracClient.parse_comment_number(oldvalue)
+        comment: dict[str, Any] = {
+            "number": str(parsed.cnum) if parsed else None,
+            "author": author,
+            "timestamp": format_timestamp(timestamp),
+            "body": body,
+        }
+        if parsed is not None and parsed.reply_to is not None:
+            comment["in_reply_to"] = str(parsed.reply_to)
+        comments.append(comment)
     return comments
 
 
@@ -313,11 +318,12 @@ def _cap_comments(
 def _comment_ref(comment: dict[str, Any]) -> str:
     """Render a comment's number as a reference, or flag its absence."""
     number = comment.get("number")
-    return (
-        f"comment:{number}"
-        if number
-        else "comment (number unavailable)"
-    )
+    if not number:
+        return "comment (number unavailable)"
+    ref = f"comment:{number}"
+    if comment.get("in_reply_to"):
+        ref += f" (reply to {comment['in_reply_to']})"
+    return ref
 
 
 def _omitted_notice(omitted: list[dict[str, Any]]) -> str:
