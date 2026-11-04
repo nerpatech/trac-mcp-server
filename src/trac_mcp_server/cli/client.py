@@ -48,10 +48,11 @@ EXIT_USAGE_ERROR = 2  # argparse, or a local file problem
 EXIT_CONNECT_ERROR = (
     3  # no endpoint, missing token, or transport failure
 )
-# The write was stored, but the CLI could not finish reporting it (a
-# ticket-comment whose number could not be read back). Distinct from
-# EXIT_TOOL_ERROR, which means nothing was stored: a caller that retries
-# on 1 must not retry on 4, or it posts the comment twice.
+# The write was stored, but the CLI could not finish reporting it: a
+# ticket-comment whose number could not be read back, or a wiki-push
+# whose new page version could not be read back (Trac /trac_mcp_server
+# #140). Distinct from EXIT_TOOL_ERROR, which means nothing was stored:
+# a caller that retries on 1 must not retry on 4, or it writes twice.
 EXIT_STORED_INCOMPLETE = 4
 
 DEFAULT_SERVER = "trac-http"
@@ -593,7 +594,19 @@ async def _run(
             "wiki_file_push",
             _with_instance(args, arguments),
         )
-        return _report(result)
+        rc = _report(result)
+        if rc == EXIT_OK and _sc(result).get("readback_failed"):
+            # Stored, but the new version could not be read back (Trac
+            # /trac_mcp_server #140): not 1, which means nothing was
+            # stored and invites a retry that writes the page twice.
+            print(
+                f"trac-mcp: wiki page '{args.page}' WAS stored, but its "
+                "new version could not be read back -- do not retry the "
+                f"write (exit {EXIT_STORED_INCOMPLETE})",
+                file=sys.stderr,
+            )
+            return EXIT_STORED_INCOMPLETE
+        return rc
 
     if cmd == "wiki-pull":
         _check_output_dir(args.file)

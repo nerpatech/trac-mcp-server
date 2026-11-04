@@ -1,5 +1,6 @@
 import calendar
 import socket
+import xmlrpc.client
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
@@ -15,6 +16,7 @@ from trac_mcp_server.core.client import (
     TicketUpdateConflict,
     TracClient,
     WikiPageConflict,
+    WikiPageStoredReadbackFailed,
     _keepalive_socket_options,
 )
 from trac_mcp_server.validators import (
@@ -2070,6 +2072,107 @@ def test_put_wiki_page_not_modified(mock_post, mock_config):
         client.put_wiki_page("Page", "content", "comment")
 
     assert "not modified" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# put_wiki_page: a read-back failure after a stored write (Trac
+# /trac_mcp_server #140)
+# ---------------------------------------------------------------------------
+
+
+def _rpc_putpage_then(readback):
+    """An ``_rpc_request`` stand-in: the version precheck sees version 3,
+    putPage returns True, and the read-back after it raises ``readback``
+    (an exception) or returns it (anything else)."""
+    calls: list[tuple] = []
+
+    def _rpc(namespace, method, *args):
+        calls.append((namespace, method, *args))
+        if method == "putPage":
+            return True
+        if method == "getPageInfo":
+            if any(c[1] == "putPage" for c in calls[:-1]):
+                if isinstance(readback, BaseException):
+                    raise readback
+                return readback
+            return {"name": "X", "version": 3}
+        raise AssertionError(f"unexpected RPC {method}")
+
+    return calls, _rpc
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [
+        pytest.param(
+            xmlrpc.client.Fault(1, "Page 'X' not found"),
+            id="not-found-fault",
+        ),
+        pytest.param(
+            xmlrpc.client.Fault(1, "Internal error"),
+            id="other-fault",
+        ),
+        # A "version" fault from the read-back used to be translated into
+        # "Version conflict" -- a write refused -- for a stored page.
+        pytest.param(
+            xmlrpc.client.Fault(1, "Bad version request"),
+            id="version-fault",
+        ),
+        pytest.param(
+            requests.exceptions.ConnectionError("reset"),
+            id="transport-error",
+        ),
+    ],
+)
+def test_put_wiki_page_readback_failure_says_stored(
+    mock_config, readback
+):
+    calls, rpc = _rpc_putpage_then(readback)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        with pytest.raises(WikiPageStoredReadbackFailed) as exc_info:
+            client.put_wiki_page("X", "content", "comment", version=3)
+
+    err = exc_info.value
+    # Neither a Fault nor a ValueError: no caller's "nothing stored"
+    # handler may match it.
+    assert not isinstance(err, xmlrpc.client.Fault)
+    assert not isinstance(err, ValueError)
+    assert err.page_name == "X"
+    assert err.url == "https://trac.example.com/trac/wiki/X"
+    assert err.cause is readback
+    assert err.__cause__ is readback
+    assert "was stored" in str(err)
+    assert [c[1] for c in calls].count("putPage") == 1
+
+
+def test_put_wiki_page_non_dict_readback_says_stored(mock_config):
+    """Some Trac instances answer 0 for a missing page; after a stored
+    write that is a failed read-back, not an AttributeError."""
+    calls, rpc = _rpc_putpage_then(0)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        with pytest.raises(WikiPageStoredReadbackFailed) as exc_info:
+            client.put_wiki_page("X", "content", "comment")
+
+    assert exc_info.value.cause is None
+    assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
+
+
+def test_put_wiki_page_putpage_fault_still_means_nothing_stored(
+    mock_config,
+):
+    """A fault from putPage itself keeps its old meaning (nothing
+    stored): it propagates as a Fault, not as the stored exception."""
+    import xmlrpc.client
+
+    def _rpc(namespace, method, *args):
+        raise xmlrpc.client.Fault(1, "Internal error")
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault):
+            client.put_wiki_page("X", "content", "comment")
 
 
 # ---------------------------------------------------------------------------

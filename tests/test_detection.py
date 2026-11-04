@@ -474,6 +474,35 @@ class TestProcessorTesting:
         # Verify failure
         assert result is False
 
+    def test_stored_page_with_failed_readback_is_still_checked_and_cleaned(
+        self,
+    ):
+        """The test page WAS stored when only its read-back failed (Trac
+        /trac_mcp_server #140): the probe carries on, and the page is
+        deleted rather than left behind."""
+        import xmlrpc.client
+
+        from trac_mcp_server.core.client import (
+            WikiPageStoredReadbackFailed,
+        )
+
+        mock_client = Mock()
+        mock_client.put_wiki_page.side_effect = WikiPageStoredReadbackFailed(
+            "stored, read-back failed",
+            "_test_processor_markdown_1",
+            "https://trac.example.com/wiki/_test_processor_markdown_1",
+            xmlrpc.client.Fault(1, "Internal error"),
+        )
+        mock_client.get_wiki_page_html.return_value = (
+            "<div>Test content</div>"
+        )
+
+        result = check_processor_available(mock_client, "markdown")
+
+        assert result is True
+        mock_client.put_wiki_page.assert_called_once()
+        assert mock_client.delete_wiki_page.called
+
 
 class TestDetectionOrchestration:
     """Tests for fallback chain and detection orchestration."""

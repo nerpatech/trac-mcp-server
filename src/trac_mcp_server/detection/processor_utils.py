@@ -8,6 +8,8 @@ are available by creating test pages with processor blocks and checking rendered
 import logging
 import time
 
+from ..core.client import WikiPageStoredReadbackFailed
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +53,16 @@ test
                 test_page,
                 test_content,
                 f"Testing {processor_name} processor",
+            )
+        except WikiPageStoredReadbackFailed as e:
+            # The page WAS stored; only its version could not be read
+            # back, and this probe never needs it. Carry on, so the page
+            # is rendered and cleaned up rather than left behind (Trac
+            # /trac_mcp_server #140).
+            logger.debug(
+                "Test page for processor '%s' stored; read-back failed: %s",
+                processor_name,
+                e,
             )
         except Exception as e:
             logger.debug(

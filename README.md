@@ -132,7 +132,7 @@ trac-convert --from-wiki ReleaseNotes --to md --to-clipboard
 
 Auth setup: use an existing `.trac_mcp/config.yml` (the same file `trac-mcp-server` uses) or supply ad-hoc flags — `--trac-url`, `--trac-username`, `--trac-password-file ~/.trac_pass` (prefer `--trac-password-file` to keep secrets out of shell history). See [Configuration](docs/reference/configuration.md) for the full precedence rules.
 
-Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
+Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr; with `--to-wiki`, exit `4` means nothing was stored. If `--to-wiki` stored the page but reading back its new version failed, it exits `5` -- do not retry the write. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
 
 ## File Transfer CLI
 
@@ -149,7 +149,7 @@ trac-mcp ticket-create --summary "Title" --description-file body.wiki
 trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment) back, byte for byte
 ```
 
-It connects with the nearest `.mcp.json` entry (or `--url`). See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
+It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
 ## Available Tools (44)
 

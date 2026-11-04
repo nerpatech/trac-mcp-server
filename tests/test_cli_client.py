@@ -279,6 +279,40 @@ class TestRealSubstrate:
         )
         assert "[instance:" in printed
 
+    def test_wiki_push_stored_but_readback_failed_exits_4_not_1(
+        self, tmp_path, capsys
+    ):
+        """Trac /trac_mcp_server #140: the page is stored and only the
+        read-back of its new version fails. Exit 1 means nothing was
+        stored, so this must be 4, and the page written exactly once."""
+        from trac_mcp_server.core.client import (
+            WikiPageStoredReadbackFailed,
+        )
+
+        class _ReadbackFails(FakeTrac):
+            def put_wiki_page(self, name, content, comment, version):
+                self.pages.setdefault(name, []).append(content)
+                raise WikiPageStoredReadbackFailed(
+                    f"Page '{name}' was stored, but reading back its new "
+                    "version failed: Internal error",
+                    name,
+                    f"http://fake/trac_test/wiki/{name}",
+                    xmlrpc.client.Fault(1, "Internal error"),
+                )
+
+        src = tmp_path / "page.wiki"
+        src.write_text("= Title =\n")
+        trac = _ReadbackFails()
+        with _served(trac) as url:
+            rc = _cli(url, "wiki-push", "P", str(src))
+        assert rc == cli.EXIT_STORED_INCOMPLETE
+        assert rc != cli.EXIT_TOOL_ERROR
+        assert trac.pages["P"] == ["= Title =\n"]
+        captured = capsys.readouterr()
+        assert "WAS stored" in captured.err
+        assert "do not retry" in captured.err
+        assert "Created wiki page 'P' (version unknown)" in captured.out
+
     def test_markdown_file_converted_on_push(self, tmp_path):
         src = tmp_path / "notes.md"
         src.write_text("# Notes\n\nSome **bold**.\n")

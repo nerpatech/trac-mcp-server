@@ -33,7 +33,7 @@ from ..converters.common import (
     find_code_block_indentation_loss,
 )
 from ..converters.markdown_to_tracwiki import convert_with_warnings
-from ..core.client import TracClient
+from ..core.client import TracClient, WikiPageStoredReadbackFailed
 
 # ---------------------------------------------------------------------------
 # Exit-code constants
@@ -43,6 +43,10 @@ EXIT_RUNTIME_ERROR = 1  # I/O, clipboard, mutual-exclusion
 EXIT_USAGE_ERROR = 2  # argparse default (not raised by us directly)
 EXIT_CONVERSION_ERROR = 3  # exception raised inside convert_text()
 EXIT_TRAC = 4  # Trac client errors (auth, network, protocol) — used by --check-trac and Phases 21-23
+# --to-wiki stored the page, but reading back its new version failed
+# (Trac /trac_mcp_server #140). Distinct from EXIT_TRAC, which means
+# nothing was stored: a caller that retries on 4 must not retry on 5.
+EXIT_TRAC_STORED = 5
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +376,10 @@ def _put_wiki_page(
     Returns (info, EXIT_OK) on success or (None, EXIT_TRAC) on any
     failure. info is the dict returned by put_wiki_page:
     {name, version, author, lastModified, url}. Never prints the
-    password.
+    password. When the page was stored but its read-back failed
+    (WikiPageStoredReadbackFailed), returns (None, EXIT_TRAC_STORED)
+    after saying so on stderr: EXIT_TRAC always means nothing was
+    stored.
 
     All wire errors (Fault, Timeout, SSL, ConnectionError, ValueError
     for write rejections) are routed through the shared error helper
@@ -398,6 +405,13 @@ def _put_wiki_page(
     client = TracClient(config)
     try:
         info = client.put_wiki_page(page_name, content, comment)
+    except WikiPageStoredReadbackFailed as e:
+        sys.stderr.write(
+            f"trac-convert: wiki page {page_name} WAS stored, but reading"
+            f" back its new version failed -- do not retry the write"
+            f" (exit {EXIT_TRAC_STORED}): {e}\n"
+        )
+        return None, EXIT_TRAC_STORED
     except Exception as e:
         msg = _classify_trac_error(
             e, config.trac_url, page_name=page_name, action="wiki write"
@@ -731,7 +745,11 @@ def main(argv: list[str] | None = None) -> int:
       --check-trac, --from-wiki, or --to-wiki. Sub-classified into:
       wiki-page-not-found, permission-denied, timeout, SSL error,
       network unreachable, or generic Trac fault. Password is never
-      written to stdout or stderr.
+      written to stdout or stderr. With --to-wiki, nothing was stored.
+    - 5 (EXIT_TRAC_STORED): --to-wiki stored the page, but reading back
+      its new version failed; a ``trac-convert: wiki page <PAGE> WAS
+      stored ...`` message is written to stderr. Do not retry the write
+      (Trac /trac_mcp_server #140).
 
     Note on direction-scoped flags: --heading-anchors only affects the
     md→tracwiki direction and is silently ignored for tracwiki→md (and
@@ -898,6 +916,11 @@ def main(argv: list[str] | None = None) -> int:
             args.to_wiki, result.text, args.wiki_comment, args
         )
         if info is None:
+            if write_rc == EXIT_TRAC_STORED and not args.quiet:
+                # The page WAS stored (#140): say what the converter
+                # altered, as a clean write does below.
+                for warning in result.warnings:
+                    sys.stderr.write(f"warning: {warning}\n")
             return write_rc
         if args.verbose:
             sys.stderr.write(

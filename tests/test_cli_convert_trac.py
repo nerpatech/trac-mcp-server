@@ -19,6 +19,7 @@ from trac_mcp_server.cli.convert import (
     EXIT_OK,
     EXIT_RUNTIME_ERROR,
     EXIT_TRAC,
+    EXIT_TRAC_STORED,
     EXIT_USAGE_ERROR,
     main,
 )
@@ -882,6 +883,80 @@ def test_to_wiki_permission_denied_fault_reports_and_exits_4(
     err = capsys.readouterr().err
     assert "permission denied" in err
     assert "PERMISSION_DENIED" in err
+
+
+def test_to_wiki_stored_but_readback_failed_exits_5_not_4(
+    monkeypatch, capsys
+):
+    """Trac /trac_mcp_server #140: put_wiki_page stored the page and only
+    its read-back failed. Exit 4 means nothing was stored, so this is 5,
+    and the message says the page WAS stored."""
+    from trac_mcp_server.core.client import WikiPageStoredReadbackFailed
+
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        put_wiki_page_side_effect=WikiPageStoredReadbackFailed(
+            "Page 'P' was stored, but reading back its new version "
+            "failed: Internal error",
+            "P",
+            f"{_TEST_URL}/wiki/P",
+            xmlrpc.client.Fault(1, "Internal error"),
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello"))
+
+    result = main(["--to-wiki", "P"])
+
+    assert result == EXIT_TRAC_STORED == 5
+    assert result != EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "wiki page P WAS stored" in err
+    assert "do not retry" in err
+    assert "Internal error" in err
+    mock_instance.put_wiki_page.assert_called_once()
+
+
+def test_to_wiki_stored_but_readback_failed_still_prints_the_warnings(
+    monkeypatch, capsys
+):
+    """Trac /trac_mcp_server #140 review: on exit 5 the page WAS stored, so
+    the conversion warnings (what the converter altered) must still be
+    printed, as on a clean write."""
+    import types as _types
+
+    from trac_mcp_server.core.client import WikiPageStoredReadbackFailed
+
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        put_wiki_page_side_effect=WikiPageStoredReadbackFailed(
+            "Page 'P' was stored, but reading back its new version failed",
+            "P",
+            f"{_TEST_URL}/wiki/P",
+            None,
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.convert_text",
+        lambda *a, **k: _types.SimpleNamespace(
+            text="x\n",
+            warnings=["macro [[Foo]] was dropped"],
+            source_format="markdown",
+        ),
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello"))
+
+    assert main(["--to-wiki", "P"]) == EXIT_TRAC_STORED
+    assert (
+        "warning: macro [[Foo]] was dropped" in capsys.readouterr().err
+    )
 
 
 def test_to_wiki_not_modified_value_error_reports_and_exits_4(
