@@ -997,7 +997,9 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
     text -- which is precisely what ticket #61 measured. That is fixed at
     the boundary instead: `_PREFIX_REALM_RE` no longer crosses a
     backtick, so a token that starts inside a code span now ends inside
-    it, and this helper is never asked to recover from that case."""
+    it, and this helper is never asked to recover from that case. The
+    same holds for a bracket's `]` (ticket #148): a token that starts
+    just after `[` ends before the closing `]`."""
     candidate = raw
     while candidate:
         if candidate in code_span_text:
@@ -1179,29 +1181,24 @@ def _allowed_codes(*sources: str | None) -> set[str]:
     return allowed
 
 
-def _bracket_label(
-    tracwiki: str, raw: str, token_end: int
-) -> str | None:
+def _bracket_label(tracwiki: str, token_end: int) -> str | None:
     """The label text of a `[token label]` construct whose token ends at
     `token_end`, or None if `token_end` isn't inside a bracket at all.
 
-    Handles the no-label shape (`[token]`, nothing between the target and
-    the closing bracket) as its own case: the realm regex's greedy
-    `[^\\s`]+` swallows the `]` -- and anything glued on after it, such as
-    `).` (ticket #147) -- when there's no space before it, so `token_end`
-    lands PAST the bracket and a forward search for `]` finds the wrong
-    one (or none). The caller therefore cuts `raw` at its first `]` before
-    calling this, so the no-label test is `raw.endswith("]")` on the CUT
-    token, while `token_end` is still the uncut match's end and is only
-    read on the labelled path, where nothing was cut. This warned a
-    correctly configured, label-less bracket as unconfigured until ticket #57 comment 8 caught
-    it live. Trac renders a label-less bracket's anchor text as the bare
-    resolved suffix (`wiki:Index`, not `auto_pm:wiki:Index`), which the
-    caller already computes separately -- signalled here by returning ""
-    rather than searching further, so the caller knows to compare against
-    the suffix instead of a real label."""
-    if raw.endswith("]"):
-        return ""
+    A bracketed token never contains `]`: `_PREFIX_TICKET_RE`'s `\\b`
+    stops before it, and since ticket #148 so does `_PREFIX_REALM_RE`'s
+    bracketed alternative. So the forward search from `token_end` finds
+    the bracket's own close. With nothing in between -- the no-label shape
+    `[token]` -- this returns "". Trac renders a label-less bracket's
+    anchor text as the bare resolved suffix (`wiki:Index`, not
+    `auto_pm:wiki:Index`), which the caller computes separately; the ""
+    tells it to compare against that suffix instead of a real label.
+
+    Until #148 the realm regex swallowed the `]` and anything glued on
+    behind it, so this needed a `raw.endswith("]")` shortcut (#57 comment
+    8, which caught a configured label-less bracket warned as
+    unconfigured) and the caller a cut at the first `]` (#147). Both are
+    gone, and with them this helper's `raw` parameter."""
     close = tracwiki.find("]", token_end)
     if close == -1:
         return None
@@ -1281,26 +1278,14 @@ def _check_unconfigured_intertrac_prefix(
                 match.start() > 0 and tracwiki[match.start() - 1] == "["
             )
             if bracketed:
-                # Ticket #147: the realm regex's `[^\s`]+` swallows
-                # everything after a label-less bracket's `]` too --
-                # `([p:wiki:Page]).` yields `p:wiki:Page]).`, which no
-                # longer ENDS in `]`, so the no-label branch below
-                # missed it and the forward `]` search found none.
-                # Trac's bracketed link target never contains `]`, so
-                # the first one is the bracket's close: cut there.
-                close = raw.find("]")
-                if close != -1:
-                    raw = raw[: close + 1]
-                label = _bracket_label(tracwiki, raw, match.end())
+                # Both patterns stop a bracketed token before its `]`
+                # (the realm form since ticket #148, which made #147's
+                # cut here unnecessary), so `match.end()` is where the
+                # label, if any, begins.
+                label = _bracket_label(tracwiki, match.end())
                 if label == "":
-                    # No custom label. For the realm form, `raw` includes
-                    # the closing `]` the greedy regex swallowed -- drop
-                    # it before deriving the suffix. The ticket form's
-                    # `\b` never swallows it (`_bracket_label` found ""
-                    # via the ordinary forward search instead), so only
-                    # strip when it's actually there.
-                    if raw.endswith("]"):
-                        raw = raw[:-1]
+                    # No custom label: Trac's anchor text is the
+                    # resolved suffix.
                     expected_text = raw.split(":", 1)[1]
                 else:
                     expected_text = label
