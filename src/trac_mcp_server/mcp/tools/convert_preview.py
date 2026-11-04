@@ -25,6 +25,7 @@ from ...preview.targets import (
 from .errors import build_error_response
 from .instances import local_intertrac_bases, own_intertrac_prefix
 from .registry import ToolSpec
+from .write_gate import attachment_names, known_comment_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,11 @@ CONVERT_PREVIEW_TOOLS = [
             "candidate can opt out of a named code with a "
             "'preview-checks: allow <code>' line in its source. Use this "
             "in place of the create-scratch/push/read-back/diff/delete "
-            "round trip before replacing a whole page or description."
+            "round trip before replacing a whole page or description. "
+            "Optionally name the page_name or ticket_id the draft will "
+            "be written to, so a bare attachment: link to a file the "
+            "target holds (and, for a ticket, a comment:N reference) "
+            "is checked in context instead of reported as dead."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
@@ -123,6 +128,30 @@ CONVERT_PREVIEW_TOOLS = [
                     ),
                     "default": True,
                 },
+                "page_name": {
+                    "type": "string",
+                    "description": (
+                        "The wiki page the draft will be written to. "
+                        "Clears a bare attachment: link to a file that "
+                        "page holds, as the write gate does. A failed "
+                        "attachment lookup, or a page that does not "
+                        "exist yet, keeps those links as errors. "
+                        "Mutually exclusive with ticket_id."
+                    ),
+                },
+                "ticket_id": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "The ticket the draft will be written to "
+                        "(description or comment). Clears a bare "
+                        "attachment: link to a file that ticket holds "
+                        "and also runs dangling_comment_ref against its "
+                        "comments. A failed attachment lookup keeps "
+                        "those links as errors. Mutually exclusive "
+                        "with page_name."
+                    ),
+                },
             },
             "required": ["content"],
         },
@@ -152,6 +181,34 @@ async def _handle_convert_preview(
 
     check_targets = args.get("check_targets", True)
     include_html = args.get("include_html", True)
+
+    page_name = args.get("page_name")
+    ticket_id = args.get("ticket_id")
+    if page_name is not None and ticket_id is not None:
+        return build_error_response(
+            "validation_error",
+            "page_name and ticket_id are mutually exclusive",
+            "Pass only one: page_name for a wiki page, ticket_id for a "
+            "ticket description or comment.",
+        )
+    if ticket_id is not None and (
+        isinstance(ticket_id, bool)
+        or not isinstance(ticket_id, int)
+        or ticket_id < 1
+    ):
+        return build_error_response(
+            "validation_error",
+            f"ticket_id must be an integer >= 1, got {ticket_id!r}",
+            "Provide ticket_id as a positive integer.",
+        )
+    if page_name is not None and (
+        not isinstance(page_name, str) or not page_name.strip()
+    ):
+        return build_error_response(
+            "validation_error",
+            "page_name must be a non-empty string",
+            "Provide the wiki page name the draft will be written to.",
+        )
 
     conversion_warnings: list[str] = []
     if fmt == "tracwiki":
@@ -190,6 +247,19 @@ async def _handle_convert_preview(
                 args.get("target_cap", DEFAULT_TARGET_CAP),
             )
 
+    has_target = page_name is not None or ticket_id is not None
+    attached_names: frozenset[str] | None = None
+    if has_target and "attachment:" in tracwiki:
+        attached_names = await attachment_names(
+            client,
+            wiki_page=page_name,
+            ticket_id=ticket_id,
+            new_ticket=False,
+        )
+    comment_numbers: frozenset[int] | None = None
+    if ticket_id is not None and "comment:" in tracwiki:
+        comment_numbers = await known_comment_numbers(client, ticket_id)
+
     warnings = build_warnings(
         markdown_source=content,
         tracwiki=tracwiki,
@@ -201,6 +271,8 @@ async def _handle_convert_preview(
         source_format=fmt,
         local_intertrac_bases=local_intertrac_bases(),
         own_prefix=own_intertrac_prefix(client),
+        known_comment_numbers=comment_numbers,
+        attachment_names=attached_names,
     )
     for message in conversion_warnings:
         warnings.append(
@@ -242,6 +314,24 @@ async def _handle_convert_preview(
         f"{stats['targets_checked']} cross-instance target(s) checked.",
         "",
     ]
+    target: dict | None = None
+    if has_target:
+        if ticket_id is not None:
+            target = {"realm": "ticket", "id": ticket_id}
+            label = f"ticket {ticket_id}"
+        else:
+            target = {"realm": "wiki", "id": page_name}
+            label = f"wiki page {page_name}"
+        target["attachments_checked"] = attached_names is not None
+        target["comments_checked"] = comment_numbers is not None
+        if attached_names is not None:
+            label += f" ({len(attached_names)} attachment(s))"
+        elif "attachment:" in tracwiki:
+            label += (
+                " (attachment list unavailable: bare attachment: "
+                "links stay errors)"
+            )
+        response_lines.insert(1, f"Checked against: {label}")
     if warnings:
         for w in warnings:
             response_lines.append(
@@ -273,6 +363,7 @@ async def _handle_convert_preview(
             "html_truncated": html_truncated,
             "warnings": warnings,
             "stats": stats,
+            "target": target,
         },
     )
 

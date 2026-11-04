@@ -308,6 +308,250 @@ def _twelve_distinct_dead_targets() -> str:
     )
 
 
+class TestConvertPreviewTarget(unittest.TestCase):
+    """Ticket #126: an optional page_name / ticket_id gives the preview
+    the context the write gate has, so a bare `attachment:` link to a
+    file the target holds is not reported dead and `comment:N` is
+    checked against the ticket's comments."""
+
+    # The context-free render of a bare attachment link (#113) and of a
+    # bare comment reference (#105); the same shapes the write-gate
+    # tests use.
+    ATTACHMENT_HTML = (
+        '<p>\nSee <a class="missing attachment">x</a> here.\n</p>\n'
+    )
+    ATTACHMENT_SOURCE = "See [attachment:f.txt x] here."
+    COMMENT_HTML = "<p>\nSee comment:99 for context.\n</p>\n"
+    COMMENT_SOURCE = "See comment:99 for context."
+
+    def _run(self, client, args):
+        return asyncio.run(_handle_convert_preview(client, args))
+
+    def _attachment_client(self):
+        client = _mock_client(self.ATTACHMENT_HTML)
+        client.list_ticket_attachments.return_value = [
+            ["f.txt", "desc", 3, 0, "someone"]
+        ]
+        return client
+
+    def _args(self, **extra):
+        args = {
+            "content": self.ATTACHMENT_SOURCE,
+            "format": "tracwiki",
+            "check_targets": False,
+        }
+        args.update(extra)
+        return args
+
+    def _codes(self, result):
+        return [w["code"] for w in result.structuredContent["warnings"]]
+
+    def _text(self, result):
+        return "\n".join(
+            c.text for c in result.content if hasattr(c, "text")
+        )
+
+    def _changelog_client(self):
+        client = _mock_client(self.COMMENT_HTML)
+        client.get_ticket_changelog.return_value = [
+            ("ts", "a", "comment", "1", "one"),
+            ("ts", "a", "comment", "2", "two"),
+        ]
+        return client
+
+    def test_schema_declares_both_args(self):
+        props = CONVERT_PREVIEW_TOOLS[0].inputSchema["properties"]
+        self.assertEqual(props["page_name"]["type"], "string")
+        self.assertEqual(props["ticket_id"]["type"], "integer")
+        self.assertEqual(props["ticket_id"]["minimum"], 1)
+
+    def test_ticket_target_clears_a_held_attachment(self):
+        client = self._attachment_client()
+        result = self._run(client, self._args(ticket_id=126))
+        self.assertFalse(result.isError)
+        self.assertNotIn("missing_local_target", self._codes(result))
+        client.list_ticket_attachments.assert_called_once_with(126)
+        self.assertEqual(
+            result.structuredContent["target"],
+            {
+                "realm": "ticket",
+                "id": 126,
+                "attachments_checked": True,
+                "comments_checked": False,
+            },
+        )
+        lines = self._text(result).splitlines()
+        self.assertTrue(lines[0].startswith("convert_preview:"))
+        self.assertEqual(
+            lines[1], "Checked against: ticket 126 (1 attachment(s))"
+        )
+
+    def test_no_target_keeps_the_error_and_does_no_lookup(self):
+        client = self._attachment_client()
+        result = self._run(client, self._args())
+        found = [
+            w
+            for w in result.structuredContent["warnings"]
+            if w["code"] == "missing_local_target"
+        ]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], "error")
+        self.assertIsNone(result.structuredContent["target"])
+        self.assertNotIn("Checked against", self._text(result))
+        client.list_ticket_attachments.assert_not_called()
+        client.list_wiki_attachments.assert_not_called()
+
+    def test_file_not_held_stays_an_error(self):
+        client = self._attachment_client()
+        client.list_ticket_attachments.return_value = [
+            ["other.txt", "d", 1, 0, "u"]
+        ]
+        result = self._run(client, self._args(ticket_id=126))
+        found = [
+            w
+            for w in result.structuredContent["warnings"]
+            if w["code"] == "missing_local_target"
+        ]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], "error")
+        self.assertTrue(
+            result.structuredContent["target"]["attachments_checked"]
+        )
+
+    def test_failed_lookup_stays_an_error_and_says_so(self):
+        client = self._attachment_client()
+        client.list_ticket_attachments.side_effect = RuntimeError(
+            "boom"
+        )
+        result = self._run(client, self._args(ticket_id=126))
+        self.assertFalse(result.isError)
+        found = [
+            w
+            for w in result.structuredContent["warnings"]
+            if w["code"] == "missing_local_target"
+        ]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], "error")
+        self.assertFalse(
+            result.structuredContent["target"]["attachments_checked"]
+        )
+        self.assertIn(
+            "Checked against: ticket 126 (attachment list unavailable: "
+            "bare attachment: links stay errors)",
+            self._text(result),
+        )
+
+    def test_page_target_clears_a_held_attachment(self):
+        client = _mock_client(self.ATTACHMENT_HTML)
+        client.list_wiki_attachments.return_value = ["Foo/Bar/f.txt"]
+        result = self._run(client, self._args(page_name="Foo/Bar"))
+        self.assertNotIn("missing_local_target", self._codes(result))
+        client.list_wiki_attachments.assert_called_once_with("Foo/Bar")
+        client.list_ticket_attachments.assert_not_called()
+        self.assertEqual(
+            result.structuredContent["target"],
+            {
+                "realm": "wiki",
+                "id": "Foo/Bar",
+                "attachments_checked": True,
+                "comments_checked": False,
+            },
+        )
+        self.assertIn(
+            "Checked against: wiki page Foo/Bar (1 attachment(s))",
+            self._text(result),
+        )
+
+    def test_both_targets_is_a_validation_error(self):
+        client = self._attachment_client()
+        result = self._run(
+            client, self._args(page_name="Foo", ticket_id=5)
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("validation_error", self._text(result))
+        client.wiki_to_html.assert_not_called()
+
+    def test_bad_ticket_id_is_a_validation_error(self):
+        for bad in (0, -3, True, "5", 1.5):
+            client = self._attachment_client()
+            result = self._run(client, self._args(ticket_id=bad))
+            self.assertTrue(result.isError, bad)
+            self.assertIn("validation_error", self._text(result))
+
+    def test_bad_page_name_is_a_validation_error(self):
+        for bad in ("", 5, ["Foo"]):
+            client = self._attachment_client()
+            result = self._run(client, self._args(page_name=bad))
+            self.assertTrue(result.isError, bad)
+            self.assertIn("validation_error", self._text(result))
+
+    def test_no_attachment_in_content_means_no_attachment_lookup(self):
+        client = _mock_client("<p>plain</p>")
+        result = self._run(
+            client, self._args(content="plain", ticket_id=126)
+        )
+        client.list_ticket_attachments.assert_not_called()
+        self.assertEqual(
+            result.structuredContent["target"],
+            {
+                "realm": "ticket",
+                "id": 126,
+                "attachments_checked": False,
+                "comments_checked": False,
+            },
+        )
+        self.assertIn("Checked against: ticket 126", self._text(result))
+        self.assertNotIn("attachment(s)", self._text(result))
+        self.assertNotIn("unavailable", self._text(result))
+
+    def test_ticket_target_runs_dangling_comment_ref(self):
+        client = self._changelog_client()
+        result = self._run(
+            client,
+            self._args(content=self.COMMENT_SOURCE, ticket_id=126),
+        )
+        self.assertIn("dangling_comment_ref", self._codes(result))
+        client.get_ticket_changelog.assert_called_once_with(126)
+        self.assertTrue(
+            result.structuredContent["target"]["comments_checked"]
+        )
+
+    def test_known_comment_is_not_dangling(self):
+        client = self._changelog_client()
+        result = self._run(
+            client,
+            self._args(content="See comment:2 here.", ticket_id=126),
+        )
+        self.assertNotIn("dangling_comment_ref", self._codes(result))
+
+    def test_no_target_skips_dangling_comment_ref(self):
+        client = self._changelog_client()
+        result = self._run(
+            client, self._args(content=self.COMMENT_SOURCE)
+        )
+        self.assertNotIn("dangling_comment_ref", self._codes(result))
+        client.get_ticket_changelog.assert_not_called()
+
+    def test_changelog_not_fetched_without_comment_in_content(self):
+        client = self._changelog_client()
+        self._run(
+            client, self._args(content="plain text", ticket_id=126)
+        )
+        client.get_ticket_changelog.assert_not_called()
+
+    def test_page_target_never_fetches_the_changelog(self):
+        client = self._changelog_client()
+        result = self._run(
+            client,
+            self._args(content=self.COMMENT_SOURCE, page_name="Foo"),
+        )
+        client.get_ticket_changelog.assert_not_called()
+        self.assertFalse(
+            result.structuredContent["target"]["comments_checked"]
+        )
+        self.assertNotIn("dangling_comment_ref", self._codes(result))
+
+
 @pytest.mark.live
 class TestConvertPreviewLive:
     """Re-renders the acceptance-suite rows against the real daemon, so
