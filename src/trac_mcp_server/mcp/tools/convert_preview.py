@@ -135,7 +135,8 @@ CONVERT_PREVIEW_TOOLS = [
                         "Clears a bare attachment: link to a file that "
                         "page holds, as the write gate does. A failed "
                         "attachment lookup, or a page that does not "
-                        "exist yet, keeps those links as errors. "
+                        "exist yet, keeps those links as errors "
+                        "(target.attachments_checked is false). "
                         "Mutually exclusive with ticket_id."
                     ),
                 },
@@ -148,8 +149,10 @@ CONVERT_PREVIEW_TOOLS = [
                         "attachment: link to a file that ticket holds "
                         "and also runs dangling_comment_ref against its "
                         "comments. A failed attachment lookup keeps "
-                        "those links as errors. Mutually exclusive "
-                        "with page_name."
+                        "those links as errors; a failed comment "
+                        "lookup skips dangling_comment_ref and says so "
+                        "(target.comments_checked is false). Mutually "
+                        "exclusive with page_name."
                     ),
                 },
             },
@@ -184,13 +187,8 @@ async def _handle_convert_preview(
 
     page_name = args.get("page_name")
     ticket_id = args.get("ticket_id")
-    if page_name is not None and ticket_id is not None:
-        return build_error_response(
-            "validation_error",
-            "page_name and ticket_id are mutually exclusive",
-            "Pass only one: page_name for a wiki page, ticket_id for a "
-            "ticket description or comment.",
-        )
+    # Each argument's own shape first, so a malformed value is named as
+    # such rather than reported as an exclusivity clash.
     if ticket_id is not None and (
         isinstance(ticket_id, bool)
         or not isinstance(ticket_id, int)
@@ -208,6 +206,13 @@ async def _handle_convert_preview(
             "validation_error",
             "page_name must be a non-empty string",
             "Provide the wiki page name the draft will be written to.",
+        )
+    if page_name is not None and ticket_id is not None:
+        return build_error_response(
+            "validation_error",
+            "page_name and ticket_id are mutually exclusive",
+            "Pass only one: page_name for a wiki page, ticket_id for a "
+            "ticket description or comment.",
         )
 
     conversion_warnings: list[str] = []
@@ -322,15 +327,29 @@ async def _handle_convert_preview(
         else:
             target = {"realm": "wiki", "id": page_name}
             label = f"wiki page {page_name}"
-        target["attachments_checked"] = attached_names is not None
-        target["comments_checked"] = comment_numbers is not None
+        # Tri-state: None = the lookup was not needed, True = it ran
+        # and returned a set, False = it ran and failed.
+        attachment_lookup_ran = "attachment:" in tracwiki
+        comment_lookup_ran = (
+            ticket_id is not None and "comment:" in tracwiki
+        )
+        target["attachments_checked"] = (
+            attached_names is not None
+            if attachment_lookup_ran
+            else None
+        )
+        target["comments_checked"] = (
+            comment_numbers is not None if comment_lookup_ran else None
+        )
         if attached_names is not None:
             label += f" ({len(attached_names)} attachment(s))"
-        elif "attachment:" in tracwiki:
+        elif attachment_lookup_ran:
             label += (
                 " (attachment list unavailable: bare attachment: "
                 "links stay errors)"
             )
+        if comment_lookup_ran and comment_numbers is None:
+            label += " (comment list unavailable: comment: links not checked)"
         response_lines.insert(1, f"Checked against: {label}")
     if warnings:
         for w in warnings:

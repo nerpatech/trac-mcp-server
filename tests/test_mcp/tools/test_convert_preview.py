@@ -377,7 +377,7 @@ class TestConvertPreviewTarget(unittest.TestCase):
                 "realm": "ticket",
                 "id": 126,
                 "attachments_checked": True,
-                "comments_checked": False,
+                "comments_checked": None,
             },
         )
         lines = self._text(result).splitlines()
@@ -414,8 +414,9 @@ class TestConvertPreviewTarget(unittest.TestCase):
         ]
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["severity"], "error")
-        self.assertTrue(
-            result.structuredContent["target"]["attachments_checked"]
+        self.assertIs(
+            result.structuredContent["target"]["attachments_checked"],
+            True,
         )
 
     def test_failed_lookup_stays_an_error_and_says_so(self):
@@ -432,8 +433,9 @@ class TestConvertPreviewTarget(unittest.TestCase):
         ]
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["severity"], "error")
-        self.assertFalse(
-            result.structuredContent["target"]["attachments_checked"]
+        self.assertIs(
+            result.structuredContent["target"]["attachments_checked"],
+            False,
         )
         self.assertIn(
             "Checked against: ticket 126 (attachment list unavailable: "
@@ -454,7 +456,7 @@ class TestConvertPreviewTarget(unittest.TestCase):
                 "realm": "wiki",
                 "id": "Foo/Bar",
                 "attachments_checked": True,
-                "comments_checked": False,
+                "comments_checked": None,
             },
         )
         self.assertIn(
@@ -470,6 +472,16 @@ class TestConvertPreviewTarget(unittest.TestCase):
         self.assertTrue(result.isError)
         self.assertIn("validation_error", self._text(result))
         client.wiki_to_html.assert_not_called()
+
+    def test_empty_page_name_beats_exclusivity(self):
+        client = self._attachment_client()
+        result = self._run(
+            client, self._args(page_name="", ticket_id=5)
+        )
+        self.assertTrue(result.isError)
+        text = self._text(result)
+        self.assertIn("page_name must be a non-empty string", text)
+        self.assertNotIn("mutually exclusive", text)
 
     def test_bad_ticket_id_is_a_validation_error(self):
         for bad in (0, -3, True, "5", 1.5):
@@ -496,8 +508,8 @@ class TestConvertPreviewTarget(unittest.TestCase):
             {
                 "realm": "ticket",
                 "id": 126,
-                "attachments_checked": False,
-                "comments_checked": False,
+                "attachments_checked": None,
+                "comments_checked": None,
             },
         )
         self.assertIn("Checked against: ticket 126", self._text(result))
@@ -512,8 +524,8 @@ class TestConvertPreviewTarget(unittest.TestCase):
         )
         self.assertIn("dangling_comment_ref", self._codes(result))
         client.get_ticket_changelog.assert_called_once_with(126)
-        self.assertTrue(
-            result.structuredContent["target"]["comments_checked"]
+        self.assertIs(
+            result.structuredContent["target"]["comments_checked"], True
         )
 
     def test_known_comment_is_not_dangling(self):
@@ -546,10 +558,57 @@ class TestConvertPreviewTarget(unittest.TestCase):
             self._args(content=self.COMMENT_SOURCE, page_name="Foo"),
         )
         client.get_ticket_changelog.assert_not_called()
-        self.assertFalse(
+        self.assertIsNone(
             result.structuredContent["target"]["comments_checked"]
         )
         self.assertNotIn("dangling_comment_ref", self._codes(result))
+
+    def test_failed_comment_lookup_says_so_and_is_not_clean(self):
+        client = _mock_client(self.COMMENT_HTML)
+        client.get_ticket_changelog.side_effect = RuntimeError("boom")
+        result = self._run(
+            client,
+            self._args(content=self.COMMENT_SOURCE, ticket_id=126),
+        )
+        self.assertFalse(result.isError)
+        self.assertIn("comment list unavailable", self._text(result))
+        self.assertIn(
+            "(comment list unavailable: comment: links not checked)",
+            self._text(result),
+        )
+        self.assertIs(
+            result.structuredContent["target"]["comments_checked"],
+            False,
+        )
+        self.assertNotIn("dangling_comment_ref", self._codes(result))
+
+    def test_both_lookups_failing_emit_both_clauses_in_order(self):
+        client = _mock_client(self.ATTACHMENT_HTML)
+        client.list_ticket_attachments.side_effect = RuntimeError("a")
+        client.get_ticket_changelog.side_effect = RuntimeError("c")
+        result = self._run(
+            client,
+            self._args(
+                content=self.ATTACHMENT_SOURCE + " and comment:1",
+                ticket_id=126,
+            ),
+        )
+        self.assertIn(
+            "Checked against: ticket 126 (attachment list unavailable: "
+            "bare attachment: links stay errors) (comment list "
+            "unavailable: comment: links not checked)",
+            self._text(result),
+        )
+
+    def test_unneeded_lookups_are_none_not_false(self):
+        client = _mock_client("<p>plain</p>")
+        result = self._run(
+            client, self._args(content="plain text", ticket_id=126)
+        )
+        target = result.structuredContent["target"]
+        self.assertIsNone(target["attachments_checked"])
+        self.assertIsNone(target["comments_checked"])
+        self.assertNotIn("unavailable", self._text(result))
 
 
 @pytest.mark.live

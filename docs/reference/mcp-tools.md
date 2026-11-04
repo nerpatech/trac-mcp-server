@@ -1642,7 +1642,7 @@ Trac's `wiki.wikiToHtml` has no page or ticket context, so a bare `attachment:FI
 | `page_name` | string | No | - | The wiki page the draft will be written to. A bare `attachment:` link to a file that page holds is no longer reported as `missing_local_target`. Mutually exclusive with `ticket_id` |
 | `ticket_id` | integer | No | - | The ticket the draft will be written to (description or comment; minimum: 1). Clears a bare `attachment:` link to a file that ticket holds, and also runs `dangling_comment_ref` against the ticket's comments. Mutually exclusive with `page_name` |
 
-**Success Response:** a text summary (`convert_preview: N warning(s), M cross-instance target(s) checked.`), the warnings one per line, then the TracWiki under `--- TracWiki ---`. With `page_name` or `ticket_id`, one extra line follows the summary line: `Checked against: ticket 126` or `Checked against: wiki page Foo/Bar`, with ` (2 attachment(s))` appended when the attachment lookup ran, or ` (attachment list unavailable: bare attachment: links stay errors)` when it ran and failed.
+**Success Response:** a text summary (`convert_preview: N warning(s), M cross-instance target(s) checked.`), the warnings one per line, then the TracWiki under `--- TracWiki ---`. With `page_name` or `ticket_id`, one extra line follows the summary line: `Checked against: ticket 126` or `Checked against: wiki page Foo/Bar`, with ` (2 attachment(s))` appended when the attachment lookup ran, or ` (attachment list unavailable: bare attachment: links stay errors)` when it ran and failed, and ` (comment list unavailable: comment: links not checked)` when the comment lookup ran and failed (after the attachment clause if both apply).
 ```json
 {
   "tracwiki": "See [attachment:f.txt x] here.",
@@ -1654,13 +1654,13 @@ Trac's `wiki.wikiToHtml` has no page or ticket context, so a bare `attachment:FI
 }
 ```
 
-`target` is `null` when neither `page_name` nor `ticket_id` was passed, and the response is then identical to what it was before the argument existed. Otherwise `realm` is `ticket` or `wiki`, `id` is the ticket number or the page name, `attachments_checked` is true when the attachment lookup ran and returned a list, and `comments_checked` is true when the ticket's comment numbers were fetched.
+`target` is `null` when neither `page_name` nor `ticket_id` was passed, and the response is then identical to what it was before the argument existed. Otherwise `realm` is `ticket` or `wiki`, `id` is the ticket number or the page name, `attachments_checked` and `comments_checked` are tri-state: `null` when that lookup was not needed (the target realm cannot have it, or the TracWiki lacks `attachment:` / `comment:`), `true` when it ran and returned a set, and `false` when it ran and failed. For `page_name`, `comments_checked` is always `null`.
 
-The lookups reuse the write gate's helpers and run only when the converted TracWiki contains `attachment:` (and, for `ticket_id`, `comment:`). The attachment lookup fails closed: if it fails, or the page does not exist yet, bare `attachment:` links stay errors. The comment lookup fails open: if the changelog cannot be fetched, `dangling_comment_ref` simply does not run. `page_name` never runs `dangling_comment_ref`, since a page has no comments.
+The lookups reuse the write gate's helpers and run only when the converted TracWiki contains `attachment:` (and, for `ticket_id`, `comment:`). The attachment lookup fails closed: if it fails, or the page does not exist yet, bare `attachment:` links stay errors. The comment lookup fails open: if the changelog cannot be fetched, `dangling_comment_ref` does not run, and the `Checked against:` line and `comments_checked: false` say so, so a missing finding is not mistaken for a clean result. `page_name` never runs `dangling_comment_ref`, since a page has no comments.
 
 **Error Responses:**
 
-- **validation_error:** `content` missing, `format` not `markdown`/`tracwiki`, both `page_name` and `ticket_id` passed, `ticket_id` not an integer >= 1 (a boolean is rejected), `page_name` not a non-empty string, or Markdown the converter refuses
+- **validation_error:** `content` missing, `format` not `markdown`/`tracwiki`, `ticket_id` not an integer >= 1 (a boolean is rejected), `page_name` not a non-empty string, both `page_name` and `ticket_id` passed (checked after each argument's own shape, so `page_name: ""` with a `ticket_id` reports the empty name), or Markdown the converter refuses
 
 **Example Call:**
 ```json
