@@ -1249,6 +1249,16 @@ def _check_unconfigured_intertrac_prefix(
                 match.start() > 0 and tracwiki[match.start() - 1] == "["
             )
             if bracketed:
+                # Ticket #147: the realm regex's `[^\s`]+` swallows
+                # everything after a label-less bracket's `]` too --
+                # `([p:wiki:Page]).` yields `p:wiki:Page]).`, which no
+                # longer ENDS in `]`, so the no-label branch below
+                # missed it and the forward `]` search found none.
+                # Trac's bracketed link target never contains `]`, so
+                # the first one is the bracket's close: cut there.
+                close = raw.find("]")
+                if close != -1:
+                    raw = raw[: close + 1]
                 label = _bracket_label(tracwiki, raw, match.end())
                 if label == "":
                     # No custom label. For the realm form, `raw` includes
