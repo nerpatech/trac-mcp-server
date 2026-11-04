@@ -168,6 +168,47 @@ _LIST_MARKER_RE = re.compile(
     rf"^[ \t]+(?:{_BULLET_MARKER}|{_NUMERIC_MARKER}|{_ALPHA_MARKER})(?=[ \t])"
 )
 
+# A table row as `_convert_tables` recognises it, minus the indentation.
+_TABLE_ROW_RE = re.compile(r"^\|\|.*\|\|[ \t]*$")
+
+
+def _leading_ws_len(line: str) -> int:
+    """Width of a line's leading space/tab run (a tab counts as one)."""
+    return len(line) - len(line.lstrip(" \t"))
+
+
+def _sits_in_list_item(
+    prev_lines: list[str], indent: int, *, stop_at_braces: bool = False
+) -> bool:
+    """Is a block indented `indent` wide, whose preceding lines are
+    `prev_lines`, inside a list item?
+
+    Walk back over the contiguous non-blank lines directly above the block
+    (stopping at a blank line: Trac ends a list at any blank line) until a
+    list-marker line -- by the module's own `_LIST_MARKER_RE` grammar --
+    whose marker is indented LESS than the block. Used by both the
+    `{{{#!div}}}` unwrap and the table indentation (ticket #142), which
+    must agree on what "inside a list item" means; a blockquoted table has
+    no marker line above it and is not affected.
+
+    ``stop_at_braces`` also ends the walk at a line holding ``{{{`` or
+    ``}}}``. `_convert_tables` sets it so rows inside a ``{{{#!div}}}`` the
+    unwrap declined (arguments on the opener, a non-table body) are left
+    exactly as before: that block is not a list item's table.
+    """
+    for line in reversed(prev_lines):
+        if not line.strip():
+            return False
+        if stop_at_braces and ("{{{" in line or "}}}" in line):
+            return False
+        if (
+            _LIST_MARKER_RE.match(line)
+            and _leading_ws_len(line) < indent
+        ):
+            return True
+    return False
+
+
 # The subset of the marker set above that Markdown cannot express at all
 # (ticket #74).  CommonMark's ordered-list marker is digits only, so there is
 # nothing for ``a.`` or ``iv.`` to convert TO: measured, mistune parses
@@ -931,6 +972,22 @@ class TracWikiParser:
                     and not body[nl + 1 :].strip(" \t")
                 ):
                     code = body[:nl]
+                    # Ticket #142: a bare {{{#!div}}} inside a list item
+                    # that holds nothing but `||` rows is how the write leg
+                    # keeps a table inside the <li>. Unwrap it: the rows
+                    # stay at the opener's indentation (the indentation
+                    # before the opener is already in `out`) for
+                    # `_convert_tables`, which then keeps that indent.
+                    # Anything else -- no list item above, arguments on
+                    # the opener (which the opener regex does not match
+                    # anyway), a non-row line, a nested brace -- takes the
+                    # fence branch below exactly as before.
+                    if m.group(1) == "div":
+                        rows = self._div_table_rows(text, i, code)
+                        if rows is not None:
+                            out.append(rows)
+                            i = end
+                            continue
                     fence = self._fence_for(code)
                     # Map the processor directive to a Markdown language
                     # (e.g. 'sh' -> 'bash'); a bare {{{ has none.
@@ -977,6 +1034,38 @@ class TracWikiParser:
             text,
         )
         return text
+
+    @staticmethod
+    def _div_table_rows(text: str, start: int, code: str) -> str | None:
+        """The body rows of a bare `{{{#!div}}}` that `_convert_code_blocks`
+        should unwrap (ticket #142), or None to leave it to the fence branch.
+
+        `start` is the index of the opener's `{{{`, `code` its body (the
+        text between the opener's newline and the closer's line). Unwraps
+        only when the opener starts its line, the block sits inside a list
+        item (`_sits_in_list_item`), and the body, once the opener's
+        indentation is removed, is `||` rows and nothing else (no blank
+        line, no `{{{`/`}}}` inside a cell). Returns the rows with the
+        FIRST line's indentation removed, because the caller has already
+        emitted the text before the opener.
+        """
+        line_start = text.rfind("\n", 0, start) + 1
+        indent = text[line_start:start]
+        if indent.strip(" \t"):
+            return None
+        lines = code.split("\n")
+        if not all(
+            ln.startswith(indent)
+            and _TABLE_ROW_RE.match(ln[len(indent) :])
+            for ln in lines
+        ):
+            return None
+        if "{{{" in code or "}}}" in code:
+            return None
+        above = text[:line_start].split("\n")[:-1]
+        if not _sits_in_list_item(above, len(indent)):
+            return None
+        return code[len(indent) :]
 
     @staticmethod
     def _is_backtick_wrapped(text: str, start: int, end: int) -> bool:
@@ -1359,12 +1448,14 @@ class TracWikiParser:
         result = []
         table_rows = []  # Accumulate table rows for processing
         table_alignments = []  # Track alignments from first row
+        table_indents: list[str] = []  # Leading whitespace of each row
 
         def flush_table():
             """Process accumulated table rows and add to result."""
-            nonlocal table_rows, table_alignments
+            nonlocal table_rows, table_alignments, table_indents
             if not table_rows:
                 return
+            first_line_at = len(result)
 
             # Determine number of columns from first row
             num_cols = len(table_rows[0][0]) if table_rows else 0
@@ -1400,8 +1491,25 @@ class TracWikiParser:
                 for cells, _, _ in table_rows[1:]:
                     result.append("| " + " | ".join(cells) + " |")
 
+            # Ticket #142: rows that sit inside a list item keep the
+            # group's common leading indentation on every emitted line, so
+            # the Markdown table stays part of the item (and the write leg
+            # can put it back in a {{{#!div}}}). Anything else -- a
+            # blockquoted table at top level included -- drops it as ever.
+            group_indent = min(table_indents, key=len)
+            if group_indent and _sits_in_list_item(
+                result[:first_line_at],
+                len(group_indent),
+                stop_at_braces=True,
+            ):
+                result[first_line_at:] = [
+                    group_indent + ln if ln else ln
+                    for ln in result[first_line_at:]
+                ]
+
             table_rows = []
             table_alignments = []
+            table_indents = []
 
         for line in lines:
             if re.match(r"^\s*\|\|.*\|\|\s*$", line):
@@ -1409,6 +1517,7 @@ class TracWikiParser:
                     line
                 )
                 table_rows.append((cells, aligns, is_header))
+                table_indents.append(line[: _leading_ws_len(line)])
                 # Use alignments from first row
                 if not table_alignments:
                     table_alignments = aligns

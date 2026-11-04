@@ -23,16 +23,27 @@ item) -- never a table.
 **Read leg.** ``_convert_code_blocks`` fenced a bare ``{{{#!div`` as a code
 block with info ``div`` and ``_convert_tables`` dropped a row group's
 indentation, so the div-wrapped table read back as a broken fence (or as an
-unindented table that ends the list). The read-leg rows are added with the
-second commit.
+unindented table that ends the list). The read leg unwraps a bare
+``{{{#!div}}}`` that holds only ``||`` rows and sits in a list item, and keeps
+the rows' indentation there; every other div, and every table outside a list
+item, reads back exactly as on ``master``.
 
 The negative rows (shapes that must NOT change) were computed on ``master``
 (f85cdc1) before the change and hard-coded.
 """
 
+import re
+
+import mistune
+import pytest
+
 from trac_mcp_server.converters import find_list_item_splits
 from trac_mcp_server.converters.markdown_to_tracwiki import (
+    _MISTUNE_PLUGINS,
     markdown_to_tracwiki,
+)
+from trac_mcp_server.converters.tracwiki_to_markdown import (
+    tracwiki_to_markdown,
 )
 
 TICKET_INPUT = "- a\n\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- d\n"
@@ -138,3 +149,164 @@ def test_blockquote_table_becomes_quoted_rows():
 def test_top_level_table_is_unchanged():
     md = "| x | y |\n|---|---|\n| 1 | 2 |\n"
     assert markdown_to_tracwiki(md) == "||=x=||=y=||\n||1||2||"
+
+
+# -- Read leg ---------------------------------------------------------------
+
+DIV_IN_LIST = (
+    " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n * d"
+)
+DIV_IN_LIST_MD = " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n - d"
+
+
+def _md(wiki):
+    return tracwiki_to_markdown(wiki).text
+
+
+def test_div_wrapped_table_in_a_list_item_unwraps_and_keeps_indent():
+    """Master read this as a fence: ' - a\\n   ```div\\n\\n   ||=x=||...'."""
+    assert _md(DIV_IN_LIST) == DIV_IN_LIST_MD
+
+
+def test_div_wrapped_table_in_a_nested_item_keeps_the_deeper_indent():
+    wiki = (
+        " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n"
+        "     ||3||4||\n     }}}\n * d"
+    )
+    assert _md(wiki) == (
+        " - a\n   - b\n     | 1 | 2 |\n     |---|---|\n"
+        "     | 3 | 4 |\n - d"
+    )
+
+
+def test_headerless_div_table_unwraps_too():
+    """The brief's variant ` * b` / `||1||2||` unwraps; Markdown needs a
+    header, so the first row becomes it (same as a top-level table)."""
+    wiki = " * a\n   * b\n     {{{#!div\n     ||1||2||\n     }}}\n * d"
+    assert _md(wiki) == (
+        " - a\n   - b\n     | 1 | 2 |\n     |---|---|\n - d"
+    )
+
+
+def test_bare_rows_in_a_list_item_keep_their_indent():
+    """Master dropped the group's indentation (' - a\\n| x | y |...'),
+    which ends the list on the way back."""
+    wiki = " * a\n   ||=x=||=y=||\n   ||1||2||\n * d\n"
+    assert _md(wiki) == DIV_IN_LIST_MD + "\n"
+
+
+# Negatives. Expected values were computed on master (f85cdc1) BEFORE the
+# change and hard-coded; each must stay byte-for-byte.
+@pytest.mark.parametrize(
+    ("name", "wiki", "expected"),
+    [
+        (
+            "top-level bare div",
+            "{{{#!div\n||=x=||=y=||\n||1||2||\n}}}",
+            "```div\n||=x=||=y=||\n||1||2||\n```",
+        ),
+        (
+            "div with an argument in a list item",
+            " * a\n   {{{#!div class=x\n   ||1||2||\n   }}}\n * d",
+            " - a\n   {{{#!div class=x\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
+        ),
+        (
+            "div holding a paragraph in a list item",
+            " * a\n   {{{#!div\n   hello\n   }}}\n * d",
+            " - a\n   ```div\n\n   hello\n```\n - d",
+        ),
+        (
+            "div after a blank line (outside the list)",
+            " * a\n\n   {{{#!div\n   ||1||2||\n   }}}\n * d",
+            " - a\n\n   ```div\n\n   ||1||2||\n```\n - d",
+        ),
+        (
+            "div in a blockquote",
+            "  {{{#!div\n  ||1||2||\n  }}}\n",
+            "  ```div\n  ||1||2||\n```\n",
+        ),
+        (
+            "blockquoted || rows",
+            "  ||=x=||=y=||\n  ||1||2||\n",
+            "| x | y |\n|---|---|\n| 1 | 2 |\n",
+        ),
+        (
+            "top-level rows",
+            "||=x=||=y=||\n||1||2||",
+            "| x | y |\n|---|---|\n| 1 | 2 |",
+        ),
+    ],
+)
+def test_other_shapes_read_back_exactly_as_on_master(
+    name, wiki, expected
+):
+    assert _md(wiki) == expected, name
+
+
+# -- Round trips (the acceptance criterion) ---------------------------------
+
+
+def test_round_trip_div_in_list():
+    assert markdown_to_tracwiki(_md(DIV_IN_LIST)) == DIV_IN_LIST
+
+
+def test_round_trip_div_in_nested_item():
+    """The brief's variant used a headerless `||1||2||` row, which cannot
+    round trip anywhere (Markdown needs a header, so the write leg emits
+    `||=1=||=2=||`; a top-level `||1||2||` behaves the same on master).
+    The header row makes the same shape lossless."""
+    wiki = (
+        " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n"
+        "     ||3||4||\n     }}}\n * d"
+    )
+    assert markdown_to_tracwiki(_md(wiki)) == wiki
+
+
+def test_headerless_rows_gain_a_header_as_at_top_level():
+    headerless = (
+        " * a\n   * b\n     {{{#!div\n     ||1||2||\n     }}}\n * d"
+    )
+    assert markdown_to_tracwiki(_md(headerless)) == (
+        " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n     }}}\n * d"
+    )
+    assert markdown_to_tracwiki(_md("||1||2||")) == "||=1=||=2=||"
+
+
+def test_write_then_read_gives_markdown_that_is_a_table_in_the_item():
+    md = "- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- d\n"
+    back = _md(markdown_to_tracwiki(md))
+    assert back == DIV_IN_LIST_MD
+    parse = mistune.create_markdown(
+        renderer=None, plugins=_MISTUNE_PLUGINS
+    )
+    first_item = parse(back)[0]["children"][0]
+    assert [c["type"] for c in first_item["children"]] == [
+        "block_text",
+        "table",
+    ]
+
+
+# -- Live: the real renderer on /trac_test ----------------------------------
+
+
+@pytest.mark.live
+def test_live_table_renders_inside_the_list_item():
+    """Ticket #142 acceptance, against Trac's own renderer on /trac_test:
+    the ticket's input, converted, renders ONE <ul> whose first <li> holds
+    the <table>. Read-only (wiki.wikiToHtml writes nothing)."""
+    from trac_mcp_server.config_bootstrap import bootstrap_config
+    from trac_mcp_server.core.client import TracClient
+    from trac_mcp_server.instances import InstanceRegistry
+
+    config, _ = bootstrap_config()
+    client = TracClient(
+        InstanceRegistry(config, {}).resolve("/trac_test")
+    )
+
+    html = client.wiki_to_html(markdown_to_tracwiki(TICKET_INPUT))
+
+    assert len(re.findall(r"<ul[\s>]", html)) == 1, html
+    first_li = re.search(r"<li[\s>].*?</li>", html, re.DOTALL)
+    assert first_li is not None, html
+    assert "<table" in first_li.group(0), html
+    assert html.count("<li") == 2, html
