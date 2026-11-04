@@ -132,7 +132,17 @@ def _host_root(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _single_endpoint_result(url: str) -> types.CallToolResult:
+def _write_gate_line(write_gate: bool) -> str:
+    return f"write_gate: {'true' if write_gate else 'false'}" + (
+        ""
+        if write_gate
+        else " -- OFF on this daemon: writes are NOT link-checked"
+    )
+
+
+def _single_endpoint_result(
+    url: str, write_gate: bool
+) -> types.CallToolResult:
     """list_instances under OIDC per-user auth: no registry, no outbound call."""
     structured: dict = {
         "configured": [
@@ -144,10 +154,12 @@ def _single_endpoint_result(url: str) -> types.CallToolResult:
             }
         ],
         "default": url,
+        "write_gate": write_gate,
     }
     text = "\n".join(
         [
             f"Default instance: {url}",
+            _write_gate_line(write_gate),
             "",
             "Configured:",
             f"  default: {url} (default)",
@@ -171,7 +183,9 @@ async def _handle_list_instances(
     # it. The caller's bearer token cannot stand in for the scrape's Basic
     # credentials either, so there is no discovery, only the one endpoint.
     if client is not None and client.config.bearer_token:
-        return _single_endpoint_result(client.config.trac_url)
+        return _single_endpoint_result(
+            client.config.trac_url, client.config.write_gate
+        )
 
     registry = _registry_ref
     if registry is None:
@@ -228,12 +242,7 @@ async def _handle_list_instances(
         f"Default instance: {default_config.trac_url}"
         if default_config
         else "Default instance: unavailable to this caller",
-        f"write_gate: {'true' if write_gate else 'false'}"
-        + (
-            ""
-            if write_gate
-            else " -- OFF on this daemon: writes are NOT link-checked"
-        ),
+        _write_gate_line(write_gate),
     ]
     if allowed is not None:
         lines.extend(["", "Allowed:"])

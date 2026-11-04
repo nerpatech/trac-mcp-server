@@ -63,7 +63,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   - Per-token `TracClient` cache (`mcp/oidc.py`: `OidcClientCache`), bounded to 256 most-recently-used tokens with FIFO eviction, so a session's calls reuse one connection pool instead of paying for a fresh one per call
   - New `src/trac_mcp_server/mcp/oidc.py` (`OidcClientCache`, `extract_bearer_token`); `TracClient`/`Config` gained `bearer_token`/`rpc_url_override`/`oidc_only` for the Bearer-vs-Basic-auth and RPC-URL-override split this required
   - `TRAC_MCP_OIDC_RPC_URL` is checked at startup: it must be an http(s) URL with a host, and plain `http` on a non-loopback host needs `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP=true`, since every request forwards a user's token to it. It is refused outside the http transport
-  - `list_instances` reports only the configured endpoint in this mode and makes no outbound call: its project discovery would authenticate as the shared account
+  - `list_instances` reports only the configured endpoint and the write gate status (#153) in this mode and makes no outbound call: its project discovery would authenticate as the shared account
   - The middleware and dispatch read the same one of several `Authorization` headers, the first; an evicted client's pooled connections are closed (`TracClient.close()`)
   - `ticket_update` finds a new comment's number in this mode: the lookup filtered by a username the client does not have, so every comment got a warning instead
   - `tests/test_mcp/test_oidc_no_shared_identity.py` runs every registered tool with the transport replaced and asserts that nothing but the caller's token goes out
