@@ -21,7 +21,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.client import TracClient
+from ...core.client import TracClient, WikiPageStoredReadbackFailed
 from ...core.scope import DestinationOutOfScope
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,17 @@ class ToolRegistry:
                 "instance_not_allowed",
                 str(e),
                 "Call list_instances to see what is reachable.",
+            )
+        except WikiPageStoredReadbackFailed as e:
+            # Trac /trac_mcp_server #140: every wiki write tool catches this
+            # itself and reports the page as stored. A handler that lets it
+            # escape must still not fall to server_error's "retry later" --
+            # the page WAS stored, and a retry writes it twice.
+            return build_error_response(
+                "stored_readback_failed",
+                f"{e} The page WAS stored.",
+                f"Do not retry the write; check the page with "
+                f"wiki_get(page_name='{e.page_name}').",
             )
         except ValueError as e:
             return build_error_response(

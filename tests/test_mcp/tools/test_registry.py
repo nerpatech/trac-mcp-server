@@ -535,5 +535,46 @@ class TestAllToolsCarryReadOnlyHint(unittest.TestCase):
                 )
 
 
+class TestStoredReadbackFailedIsNeverARetryableError(unittest.TestCase):
+    """Trac /trac_mcp_server #140 review: a handler that lets
+    WikiPageStoredReadbackFailed escape must not be told "retry later"
+    (server_error) for a page that was stored -- a retry writes it twice."""
+
+    def test_an_escaping_stored_readback_failure_says_do_not_retry(
+        self,
+    ):
+        from trac_mcp_server.core.client import (
+            WikiPageStoredReadbackFailed,
+        )
+
+        async def handler(client, args):
+            raise WikiPageStoredReadbackFailed(
+                "Page 'P' was stored, but reading back its new version failed",
+                "P",
+                "http://x/wiki/P",
+                None,
+            )
+
+        spec = ToolSpec(
+            tool=types.Tool(
+                name="wiki_probe",
+                description="probe",
+                inputSchema={"type": "object"},
+            ),
+            permissions=frozenset(),
+            handler=handler,
+        )
+        result = asyncio.run(
+            ToolRegistry([spec]).call_tool(
+                "wiki_probe", {}, MagicMock()
+            )
+        )
+        text = result.content[0].text
+        self.assertNotIn("server_error", text)
+        self.assertNotIn("retry later", text)
+        self.assertIn("stored_readback_failed", text)
+        self.assertIn("WAS stored", text)
+
+
 if __name__ == "__main__":
     unittest.main()

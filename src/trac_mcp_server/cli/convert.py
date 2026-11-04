@@ -916,6 +916,11 @@ def main(argv: list[str] | None = None) -> int:
             args.to_wiki, result.text, args.wiki_comment, args
         )
         if info is None:
+            if write_rc == EXIT_TRAC_STORED and not args.quiet:
+                # The page WAS stored (#140): say what the converter
+                # altered, as a clean write does below.
+                for warning in result.warnings:
+                    sys.stderr.write(f"warning: {warning}\n")
             return write_rc
         if args.verbose:
             sys.stderr.write(
