@@ -364,10 +364,12 @@ async def known_comment_numbers(
         _timestamp, _author, field, oldvalue, newvalue = entry[:5]
         if field != "comment":
             continue
-        try:
-            cnum = int(str(oldvalue).strip())
-        except (TypeError, ValueError):
+        # A threaded row's oldvalue is "2.5": comment 5, which is the
+        # number a comment:5 link names (Trac #131).
+        parsed = TracClient.parse_comment_number(oldvalue)
+        if parsed is None:
             continue
+        cnum = parsed.cnum
         max_cnum = max(max_cnum, cnum)
         if newvalue:
             known.add(cnum)

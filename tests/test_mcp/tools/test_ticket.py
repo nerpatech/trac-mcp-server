@@ -25,6 +25,7 @@ from trac_mcp_server.mcp.tools.ticket_read import (
 )
 from trac_mcp_server.mcp.tools.ticket_write import (
     TICKET_WRITE_SPECS,
+    _comment_cnum,
     _comment_mismatch,
     _handle_create,
     _handle_delete,
@@ -1216,6 +1217,101 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertTrue(result.isError)
             self.assertIn("Comment #99", result.content[0].text)
 
+    def _reply_to_run(self, changelog, reply_to):
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_changelog:
+                return changelog
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "comment": "New reply text",
+                        "reply_to": reply_to,
+                    },
+                )
+            )
+            posted = [
+                c.args[2]
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            ]
+        return result, posted
+
+    def test_update_reply_to_quotes_a_threaded_comment_by_its_number(
+        self,
+    ):
+        """Trac #131. A threaded row's oldvalue is "2.5": comment 5, a
+        reply to 2. reply_to=5 must find it, and the link names it by
+        its own number, which is what comment:5 means to Trac."""
+        changelog = [
+            (1700000000, "alice", "comment", "2", "Flat two.", 1),
+            (1700000100, "bob", "comment", "2.5", "Threaded five.", 1),
+        ]
+        for reply_to in (5, "5", "2.5"):
+            result, posted = self._reply_to_run(changelog, reply_to)
+            self.assertFalse(result.isError, reply_to)
+            self.assertEqual(len(posted), 1)
+            self.assertIn("Replying to [comment:5 bob]:", posted[0])
+            self.assertIn("> Threaded five.", posted[0])
+            self.assertNotIn("Flat two.", posted[0])
+
+    def test_update_reply_to_flat_row_still_matches(self):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        result, posted = self._reply_to_run(changelog, "3")
+        self.assertFalse(result.isError)
+        self.assertIn("Replying to [comment:3 alice]:", posted[0])
+
+    def test_update_reply_to_skips_rows_without_a_comment_number(self):
+        changelog = [
+            (1700000000, "alice", "attachment", None, "f.txt", 1),
+            (1700000010, "alice", "comment", None, "No number.", 1),
+            (1700000020, "alice", "comment", "abc", "Junk.", 1),
+            (1700000030, "bob", "comment", "4", "Four.", 1),
+        ]
+        result, posted = self._reply_to_run(changelog, 4)
+        self.assertFalse(result.isError)
+        self.assertIn("Replying to [comment:4 bob]:", posted[0])
+        self.assertIn("> Four.", posted[0])
+
+    def test_update_reply_to_unparseable_is_not_found(self):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        for reply_to in ("abc", "2.", 0, True):
+            result, posted = self._reply_to_run(changelog, reply_to)
+            self.assertTrue(result.isError, reply_to)
+            self.assertIn("not_found", result.content[0].text)
+            self.assertEqual(posted, [])
+
+    def test_update_reply_to_unparseable_never_reads_the_changelog(
+        self,
+    ):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        for reply_to in ("abc", "2.", 0, True, "1_0", "+3"):
+            self.mock_client.get_ticket_changelog.reset_mock()
+            with patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+            ) as mock_run_sync:
+                mock_run_sync.return_value = changelog
+                result = asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "ticket_id": 42,
+                            "comment": "New reply text",
+                            "reply_to": reply_to,
+                        },
+                    )
+                )
+            self.assertTrue(result.isError, reply_to)
+            self.assertIn("not_found", result.content[0].text)
+            mock_run_sync.assert_not_called()
+
     def test_update_reply_to_without_comment_errors(self):
         """reply_to without a comment is rejected -- there's nothing to
         post as the reply.
@@ -2330,6 +2426,32 @@ async def test_live_update_reports_comment_number_and_stored_bytes():
 # ---------------------------------------------------------------------------
 
 
+class TestCommentCnum(unittest.TestCase):
+    """_comment_cnum keeps its flat-only contract (Trac #131): a
+    ticket.update write is never threaded, so a dotted row is not ours,
+    and the shared parser decides what a number is."""
+
+    @staticmethod
+    def _row(oldvalue):
+        return ["t", "a", "comment", oldvalue, "x", 1]
+
+    def test_flat_row(self):
+        self.assertEqual(_comment_cnum(self._row("5")), 5)
+        self.assertEqual(_comment_cnum(self._row(5)), 5)
+
+    def test_threaded_row_is_none(self):
+        self.assertIsNone(_comment_cnum(self._row("2.5")))
+
+    def test_none_oldvalue_is_none(self):
+        # An attachment pseudo-row: str(None) is "None", still not a
+        # number, but the parser is what says so.
+        self.assertIsNone(_comment_cnum(self._row(None)))
+
+    def test_non_numeric_is_none(self):
+        for bad in ("abc", "\u00b2", "", "0", "1.2.3"):
+            self.assertIsNone(_comment_cnum(self._row(bad)), bad)
+
+
 class TestHandleTicketWriteTool(unittest.TestCase):
     """Tests for ToolRegistry dispatch of ticket write tools."""
 
@@ -3258,6 +3380,127 @@ class TestHandleTicketGet:
                 result.structuredContent["comments"][0]["number"]
                 is None
             )
+
+    def _get_comments(self, rows):
+        client = MagicMock(spec=TracClient)
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            return self._run(_handle_get(client, {"ticket_id": 7}))
+
+    def test_get_threaded_comment_reports_its_own_number(self):
+        """Trac #131. oldvalue "2.5" is comment 5, a reply to 2 -- the
+        key ticket_render_check's `comment` parameter matches, since it
+        comes from the HTML's trac-change-5- id. in_reply_to appears
+        on threaded rows only."""
+        result = self._get_comments(
+            [
+                self._comment("1", "alice", "Flat."),
+                self._comment("2.5", "bob", "Threaded."),
+            ]
+        )
+        flat, threaded = result.structuredContent["comments"]
+        assert flat["number"] == "1"
+        assert "in_reply_to" not in flat
+        assert threaded["number"] == "5"
+        assert threaded["in_reply_to"] == "2"
+        text = result.content[0].text
+        assert "### comment:5 (reply to 2) -- bob" in text
+        assert "### comment:1 -- alice" in text
+        assert (
+            "reply to 2"
+            not in text.split("### comment:1")[1].split(
+                "### comment:5"
+            )[0]
+        )
+
+    def test_get_flat_comment_dict_is_unchanged(self):
+        result = self._get_comments([self._comment("3", "a", "Body.")])
+        (comment,) = result.structuredContent["comments"]
+        assert set(comment) == {"number", "author", "timestamp", "body"}
+        assert comment["number"] == "3"
+
+    def test_get_non_numeric_and_none_oldvalue_give_no_number(self):
+        result = self._get_comments(
+            [
+                self._comment("abc", "alice", "Junk."),
+                self._comment(None, "alice", "None."),
+                self._comment("1.2.3", "alice", "Deep."),
+                self._comment("\u00b2", "alice", "Super."),
+            ]
+        )
+        comments = result.structuredContent["comments"]
+        assert [c["number"] for c in comments] == [None] * 4
+        assert all("in_reply_to" not in c for c in comments)
+
+    def test_get_attachment_pseudo_row_is_not_a_comment(self):
+        created = datetime(2026, 1, 20, 10, 0, 0)
+        result = self._get_comments(
+            [
+                [created, "alice", "attachment", None, "f.txt", 1],
+                self._comment("2.5", "bob", "Threaded."),
+            ]
+        )
+        comments = result.structuredContent["comments"]
+        assert [c["number"] for c in comments] == ["5"]
+
+    def test_get_omitted_numbers_use_the_comments_own_number(self):
+        rows = [
+            self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
+        ]
+        rows[2] = self._comment("1.3", "a", "threaded three")
+        client = MagicMock(spec=TracClient)
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 2})
+            )
+        assert result.structuredContent["omitted_comment_numbers"] == [
+            "2",
+            "3",
+            "4",
+            "5",
+        ]
+
+    def test_get_omitted_notice_is_plain_but_heading_keeps_reply_to(
+        self,
+    ):
+        """The heading of a shown threaded comment says "(reply to M)";
+        the omitted-comments notice names its range by plain
+        comment:N refs, threaded ends included."""
+        rows = [
+            self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
+        ]
+        rows[1] = self._comment("1.2", "a", "threaded two")
+        rows[4] = self._comment("3.5", "a", "threaded five")
+        rows[5] = self._comment("4.6", "a", "threaded six")
+        client = MagicMock(spec=TracClient)
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 2})
+            )
+        text = result.content[0].text
+        assert "(comment:2 through comment:5)" in text
+        assert "### comment:6 (reply to 4) -- a" in text
+        notice = next(
+            line for line in text.splitlines() if "omitted from" in line
+        )
+        assert "reply to" not in notice
 
     def test_get_reports_a_failed_comment_fetch(self):
         """A changelog failure degrades loudly: the ticket still comes

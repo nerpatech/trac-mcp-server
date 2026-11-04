@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
-from ..core.client import MAX_COMMENT_CHARS
+from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
 
 EXIT_OK = 0
@@ -391,14 +391,18 @@ def _comment_number(changelog: list, text: str) -> str | None:
     changelog (never counted: numbers have gaps after a deleted comment).
     ``--reply-to`` stores a quoted prefix ahead of the body, hence
     ``endswith``. The changelog is chronological, so the last match is the
-    newest; numbers are compared as text only, never as floats, because a
-    threaded number such as ``1.10`` is not the decimal 1.1."""
+    newest. The number is the shared parser's (Trac #131): a threaded
+    ``1.10`` is comment ``10``, so the text returned is ``"10"``; a row
+    whose number does not parse is skipped."""
     found: str | None = None
     for entry in changelog:
         if entry.get("field") != "comment":
             continue
-        if (entry.get("newvalue") or "").endswith(text):
-            found = str(entry.get("oldvalue"))
+        if not (entry.get("newvalue") or "").endswith(text):
+            continue
+        parsed = TracClient.parse_comment_number(entry.get("oldvalue"))
+        if parsed is not None:
+            found = str(parsed.cnum)
     return found
 
 
@@ -534,9 +538,12 @@ async def _ticket_pull(
             return _report(result)
         body = None
         for entry in _payload(result, "changelog"):
-            if entry.get("field") == "comment" and str(
+            if entry.get("field") != "comment":
+                continue
+            parsed = TracClient.parse_comment_number(
                 entry.get("oldvalue")
-            ) == str(args.comment):
+            )
+            if parsed is not None and parsed.cnum == args.comment:
                 body = entry.get("newvalue") or ""
         if body is None:
             raise CliError(
