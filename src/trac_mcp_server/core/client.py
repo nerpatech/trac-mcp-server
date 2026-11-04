@@ -1085,11 +1085,22 @@ class TracClient:
                 ``wiki.putPage``, so it would never refuse a stale one
                 itself (ticket #120). A narrow race between that check and
                 putPage remains -- closing it needs a Trac-side
-                precondition, which is out of scope. ``None`` (create, and
+                precondition, which is out of scope; a write that lost
+                the race is flagged in the result (``possible_overwrite``,
+                below). ``None`` (create, and
                 unversioned callers) skips the check and costs no extra RPC.
 
         Returns:
-            Dict with keys: name, version, author, lastModified, url
+            Dict with keys: name, version, author, lastModified, url,
+            possible_overwrite. ``possible_overwrite`` is ``True`` when
+            ``version`` was given and the read-back version is not
+            ``version + 1``: another write landed in the race window
+            above (and was replaced by this one) or just after it. The
+            dict then also carries ``intervening_versions``, the versions
+            ``version + 1 .. new - 1`` this call did not write (empty if
+            the read-back version is not above ``version + 1``). The page
+            is stored either way; a create never sets the flag (Trac
+            /trac_mcp_server #130).
 
         Raises:
             WikiPageConflict: If ``version`` is not the page's current
@@ -1202,13 +1213,36 @@ class TracClient:
                 None,
             )
 
-        return {
+        new_version = info.get("version")
+        stored: dict[str, Any] = {
             "name": page_name,
-            "version": info.get("version"),
+            "version": new_version,
             "author": info.get("author"),
             "lastModified": info.get("lastModified"),
             "url": page_url,
+            "possible_overwrite": False,
         }
+        # Detect, don't prevent (Trac /trac_mcp_server #130; preventing
+        # is #129). An update of version N stores N+1 when nothing else
+        # wrote the page. Any other read-back version means another write
+        # landed between the precheck above and putPage -- so putPage
+        # replaced it -- or right after putPage, before the read-back.
+        # Either way the caller is told; the write itself succeeded.
+        # A create (version=None) has no expectation to compare with.
+        if (
+            version is not None
+            and isinstance(new_version, int)
+            and not isinstance(new_version, bool)
+            and new_version != version + 1
+        ):
+            stored["possible_overwrite"] = True
+            # int(): a JSON-schema "integer" admits 3.0, which passes the
+            # precheck (3 == 3.0) but would make range() raise here --
+            # after the page was stored.
+            stored["intervening_versions"] = list(
+                range(int(version) + 1, new_version)
+            )
+        return stored
 
     def get_wiki_page_html(
         self, page_name: str, version: int | None = None

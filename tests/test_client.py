@@ -2159,6 +2159,90 @@ def test_put_wiki_page_non_dict_readback_says_stored(mock_config):
     assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
 
 
+# ---------------------------------------------------------------------------
+# put_wiki_page: flag a possible overwrite when the read-back version is
+# not version + 1 (Trac /trac_mcp_server #130)
+# ---------------------------------------------------------------------------
+
+
+def _rpc_versions(precheck, readback):
+    """An ``_rpc_request`` stand-in: the version precheck sees
+    ``precheck`` (or a not-found fault when ``None``), putPage returns
+    True, and the read-back after it sees ``readback``."""
+    calls: list[tuple] = []
+
+    def _rpc(namespace, method, *args):
+        calls.append((namespace, method, *args))
+        if method == "putPage":
+            return True
+        if method == "getPageInfo":
+            if any(c[1] == "putPage" for c in calls[:-1]):
+                return {"name": "X", "version": readback, "author": "a"}
+            if precheck is None:
+                raise xmlrpc.client.Fault(1, "Page 'X' not found")
+            return {"name": "X", "version": precheck, "author": "a"}
+        raise AssertionError(f"unexpected RPC {method}")
+
+    return calls, _rpc
+
+
+def test_put_wiki_page_flags_possible_overwrite(mock_config):
+    """By construction: the precheck sees 3, another writer stores 4,
+    this putPage stores 5. The result must say so, not report a plain
+    success."""
+    calls, rpc = _rpc_versions(precheck=3, readback=5)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["version"] == 5
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4]
+    # Detect only: no extra RPC beyond precheck, write and read-back.
+    assert [c[1] for c in calls] == [
+        "getPageInfo",
+        "putPage",
+        "getPageInfo",
+    ]
+
+
+def test_put_wiki_page_lists_every_intervening_version(mock_config):
+    _, rpc = _rpc_versions(precheck=3, readback=7)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4, 5, 6]
+
+
+def test_put_wiki_page_uncontended_update_is_not_flagged(mock_config):
+    """The normal path: version 3 in, version 4 back. It must stay
+    quiet."""
+    _, rpc = _rpc_versions(precheck=3, readback=4)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["version"] == 4
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+
+
+@pytest.mark.parametrize("readback", [1, 5])
+def test_put_wiki_page_create_is_never_flagged(mock_config, readback):
+    """A create (version=None) has nothing to compare with, whatever
+    version the read-back reports."""
+    calls, rpc = _rpc_versions(precheck=None, readback=readback)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c")
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+    assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
+
+
 def test_put_wiki_page_putpage_fault_still_means_nothing_stored(
     mock_config,
 ):
@@ -3003,3 +3087,41 @@ def test_delete_enum_rejects_invalid_type(mock_config):
     assert call_count == 0, (
         "No RPC call should be made for invalid enum_type"
     )
+
+
+def test_put_wiki_page_float_version_never_raises_after_the_write(
+    mock_config,
+):
+    """A JSON-schema "integer" admits 3.0, and the precheck accepts it
+    (3 == 3.0). The overwrite check runs after putPage stored the page,
+    so it must never raise there: a TypeError would reach the caller as
+    a generic failure for a stored write and invite a second write."""
+    _, rpc = _rpc_versions(precheck=3, readback=5)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4]
+
+    _, rpc = _rpc_versions(precheck=3, readback=4)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+
+
+def test_put_wiki_page_readback_below_expected_is_flagged_with_none_between(
+    mock_config,
+):
+    """A read-back version below version + 1 (the page was deleted and
+    recreated in between) is "not version + 1" too: flagged, with no
+    intervening versions to name."""
+    _, rpc = _rpc_versions(precheck=3, readback=2)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == []

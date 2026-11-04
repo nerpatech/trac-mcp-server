@@ -42,6 +42,7 @@ from .file_io import (
     read_text_input,
 )
 from .registry import ToolSpec
+from .wiki_write import possible_overwrite_warning
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,12 @@ WIKI_FILE_TOOLS = [
             "error result means nothing was stored. If the page was "
             "stored but its new version could not be read back, the "
             "result is not an error: structuredContent.readback_failed "
-            "is true and version is null -- do not push again."
+            "is true and version is null -- do not push again. If "
+            "structuredContent.possible_overwrite is true, the update "
+            "stored a version other than the one after the version it "
+            "was based on: another write most likely landed just before "
+            "it and was replaced (intervening_versions lists them; "
+            "inspect with wiki_diff). The page was stored."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -454,11 +460,20 @@ async def _handle_push(
         )
 
     verb = "Created" if action == "created" else "Updated"
+    # Trac /trac_mcp_server #130: only an update read back successfully
+    # can be flagged; put_wiki_page never sets it on a create.
+    possible_overwrite = bool(result.get("possible_overwrite"))
     if readback_error is None:
         new_version = result.get("version", 1)
         text_parts = [
             f"{verb} wiki page '{page_name}' (version {new_version})"
         ]
+        if possible_overwrite and version is not None:
+            overwrite = possible_overwrite_warning(
+                page_name, version, result
+            )
+            if overwrite is not None:
+                text_parts.append(overwrite)
     else:
         new_version = None
         text_parts = [
@@ -487,9 +502,18 @@ async def _handle_push(
         # Trac /trac_mcp_server #140: true when the page was stored but
         # its new version could not be read back (version is then None).
         "readback_failed": readback_error is not None,
+        # Trac /trac_mcp_server #130: true when the update stored a
+        # version other than the one after the version it was based on
+        # -- another write most likely landed just before it and was
+        # replaced. Still a success: the page was stored.
+        "possible_overwrite": possible_overwrite,
     }
     if readback_error is not None:
         structured["readback_error"] = readback_error
+    if possible_overwrite:
+        structured["intervening_versions"] = list(
+            result.get("intervening_versions") or []
+        )
 
     return types.CallToolResult(
         content=[
