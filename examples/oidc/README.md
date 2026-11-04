@@ -64,6 +64,8 @@ TRAC_MCP_OIDC_RPC_URL=http://localhost:8081/trac-api/login/xmlrpc \
 
 `service-account` then appears in the Apache log only for the self-test at startup, as one request per start to `/trac/login/rpc`.
 
+This log does not show everything: Apache has no auth on `/` and logs no user there, even for a request that carries the shared credentials. `tests/test_mcp/test_oidc_no_shared_identity.py` covers such a request offline.
+
 ## Get a token by hand
 
 ```bash

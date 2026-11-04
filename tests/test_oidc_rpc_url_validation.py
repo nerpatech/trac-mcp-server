@@ -9,6 +9,23 @@ from trac_mcp_server.config_bootstrap import bootstrap_server_config
 from trac_mcp_server.config_schema import ServerConfig
 
 
+@pytest.fixture(autouse=True)
+def _clean_server_env(monkeypatch):
+    """bootstrap_server_config() reads the real environment: a token set on the
+    host would hit the mutual exclusion with OIDC before anything tested here."""
+    for var in (
+        "TRAC_MCP_TRANSPORT",
+        "TRAC_MCP_HOST",
+        "TRAC_MCP_PORT",
+        "TRAC_MCP_PATH",
+        "TRAC_MCP_AUTH_TOKEN",
+        "TRAC_MCP_OIDC_RPC_URL",
+        "TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP",
+        "TRAC_IDENTITIES",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def _config(url, **kwargs) -> ServerConfig:
     return ServerConfig(
         transport="http", host="0.0.0.0", oidc_rpc_url=url, **kwargs
@@ -101,9 +118,6 @@ def test_opt_out_is_off_by_default(monkeypatch):
     monkeypatch.setenv("TRAC_MCP_TRANSPORT", "http")
     monkeypatch.setenv(
         "TRAC_MCP_OIDC_RPC_URL", "http://trac.example.com/trac-api"
-    )
-    monkeypatch.delenv(
-        "TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP", raising=False
     )
     with pytest.raises(ValueError, match="unencrypted"):
         bootstrap_server_config({})

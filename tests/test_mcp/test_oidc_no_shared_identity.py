@@ -129,6 +129,23 @@ def _arguments_for(schema: dict) -> dict:
     }
 
 
+# A schema cannot say that an object must not be empty, and the handler of this
+# tool returns "attributes is required" on an empty one before any request.
+_EXTRA_ARGUMENTS = {
+    "milestone_update": {"attributes": {"description": "x"}}
+}
+
+# Everything else has to reach the transport, or the tests below prove nothing
+# for it: list_instances by design, the others stop at reading a local file.
+_SENDS_NOTHING = {
+    "list_instances",
+    "ticket_attachment_put",
+    "wiki_attachment_put",
+    "wiki_file_detect_format",
+    "wiki_file_push",
+}
+
+
 def _call_tool(spec, reply: bytes) -> _Transport:
     transport = _Transport(reply)
     with patch(
@@ -139,7 +156,11 @@ def _call_tool(spec, reply: bytes) -> _Transport:
     ):
         asyncio.run(
             handle_call_tool(
-                spec.tool.name, _arguments_for(spec.tool.inputSchema)
+                spec.tool.name,
+                {
+                    **_arguments_for(spec.tool.inputSchema),
+                    **_EXTRA_ARGUMENTS.get(spec.tool.name, {}),
+                },
             )
         )
     return transport
@@ -157,6 +178,18 @@ def test_no_tool_sends_the_shared_credentials(spec, reply):
         assert authorization in (None, f"Bearer {USER_TOKEN}"), (
             f"{spec.tool.name} sent {authorization!r} to {url}"
         )
+
+
+@pytest.mark.parametrize(
+    "reply", [_FAULT, _EMPTY_ARRAY], ids=["fault", "empty"]
+)
+def test_only_the_exempt_tools_send_nothing(reply):
+    silent = {
+        spec.tool.name
+        for spec in [PING_SPEC] + ALL_SPECS
+        if not _call_tool(spec, reply).sent
+    }
+    assert silent == _SENDS_NOTHING
 
 
 def test_the_tools_do_reach_the_transport_with_the_callers_token():
