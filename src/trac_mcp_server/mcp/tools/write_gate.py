@@ -297,7 +297,7 @@ def gate_enabled(client: TracClient) -> bool:
 NEW_TICKET_COMMENT_NUMBERS: frozenset[int] = frozenset()
 
 
-async def _known_comment_numbers(
+async def known_comment_numbers(
     client: TracClient, ticket_id: int
 ) -> frozenset[int] | None:
     """Ticket #105. The comment numbers ``ticket_id`` has right now,
@@ -314,6 +314,9 @@ async def _known_comment_numbers(
     ``_extract_comments`` shows a caller, not duplicated from there
     since that helper returns display-ready dicts, not a bare set of
     ints this module can compare against.
+
+    Also used by ``convert_preview`` (#126) when the caller names the
+    ticket the draft is for.
 
     ``None`` if the changelog can't be fetched: fail OPEN, same as
     every other checker-failure path in this module -- a ticket the
@@ -354,7 +357,7 @@ async def _known_comment_numbers(
 NEW_TARGET_ATTACHMENT_NAMES: frozenset[str] = frozenset()
 
 
-async def _attachment_names(
+async def attachment_names(
     client: TracClient,
     *,
     wiki_page: str | None,
@@ -370,6 +373,9 @@ async def _attachment_names(
     above, because here a wrong answer would CLEAR a finding. A page
     that does not exist yet raises on the list call, and so lands on
     ``None`` too; its bare links are errors either way.
+
+    Also used by ``convert_preview`` (#126) when the caller names the
+    page or ticket the draft is for.
     """
     if new_ticket:
         return NEW_TARGET_ATTACHMENT_NAMES
@@ -410,9 +416,9 @@ async def _attachment_names(
 async def attachment_names_for_ticket(
     client: TracClient, ticket_id: int
 ) -> frozenset[str] | None:
-    """:func:`_attachment_names` for a caller that gates through
+    """:func:`attachment_names` for a caller that gates through
     :func:`check_write` directly (the batch tools)."""
-    return await _attachment_names(
+    return await attachment_names(
         client, wiki_page=None, ticket_id=ticket_id, new_ticket=False
     )
 
@@ -469,24 +475,22 @@ async def gate_or_refuse(
         return None, []
 
     target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
-    known_comment_numbers: frozenset[int] | None = None
+    comment_numbers: frozenset[int] | None = None
     if new_ticket:
-        known_comment_numbers = NEW_TICKET_COMMENT_NUMBERS
+        comment_numbers = NEW_TICKET_COMMENT_NUMBERS
     elif ticket_id is not None and any(
         content and "comment:" in content for content in fields.values()
     ):
-        known_comment_numbers = await _known_comment_numbers(
-            client, ticket_id
-        )
+        comment_numbers = await known_comment_numbers(client, ticket_id)
 
-    attachment_names: frozenset[str] | None = None
+    attached_names: frozenset[str] | None = None
     if (
         new_ticket or wiki_page is not None or ticket_id is not None
     ) and any(
         content and "attachment:" in content
         for content in fields.values()
     ):
-        attachment_names = await _attachment_names(
+        attached_names = await attachment_names(
             client,
             wiki_page=wiki_page,
             ticket_id=ticket_id,
@@ -501,8 +505,8 @@ async def gate_or_refuse(
             field=field,
             recheck_with=recheck_with,
             target_cap=target_cap,
-            known_comment_numbers=known_comment_numbers,
-            attachment_names=attachment_names,
+            known_comment_numbers=comment_numbers,
+            attachment_names=attached_names,
         )
         if outcome.refused:
             return outcome.refusal, []

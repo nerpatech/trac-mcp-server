@@ -1624,6 +1624,58 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 
 ---
 
+## convert_preview
+
+**Description:** Dry-run a Markdown (or TracWiki) candidate through the real converter and Trac's own renderer, with no write. Returns the TracWiki that would be stored, the HTML Trac would render for it, and structured warnings for the defects `ticket_render_check` would otherwise catch only after the fact (escaped link targets, cross-instance references stuck in a code span, dead local links, a list item that continues after its nested list, and so on). Use it in place of the create-scratch/push/read-back/diff/delete round trip before replacing a whole page or description. Read-only.
+
+Trac's `wiki.wikiToHtml` has no page or ticket context, so a bare `attachment:FILE` link renders as dead and a bare `comment:N` cannot be checked. Name the page or ticket the draft is for with `page_name` or `ticket_id` and the preview looks those up the way the write gate does (Trac /trac_mcp_server #126).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `content` | string | **Yes** | - | Candidate content to preview |
+| `format` | string | No | `markdown` | Format of `content`: `markdown` or `tracwiki`. `tracwiki` skips conversion and renders the input as-is |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets to probe (minimum: 1, maximum: 500). The cap keeps the FIRST N in document order; anything beyond it is reported as `target_check_capped` rather than checked |
+| `include_html` | boolean | No | `true` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut). Warnings are always computed from the full render |
+| `page_name` | string | No | - | The wiki page the draft will be written to. A bare `attachment:` link to a file that page holds is no longer reported as `missing_local_target`. Mutually exclusive with `ticket_id` |
+| `ticket_id` | integer | No | - | The ticket the draft will be written to (description or comment; minimum: 1). Clears a bare `attachment:` link to a file that ticket holds, and also runs `dangling_comment_ref` against the ticket's comments. Mutually exclusive with `page_name` |
+
+**Success Response:** a text summary (`convert_preview: N warning(s), M cross-instance target(s) checked.`), the warnings one per line, then the TracWiki under `--- TracWiki ---`. With `page_name` or `ticket_id`, one extra line follows the summary line: `Checked against: ticket 126` or `Checked against: wiki page Foo/Bar`, with ` (2 attachment(s))` appended when the attachment lookup ran, or ` (attachment list unavailable: bare attachment: links stay errors)` when it ran and failed, and ` (comment list unavailable: comment: links not checked)` when the comment lookup ran and failed (after the attachment clause if both apply).
+```json
+{
+  "tracwiki": "See [attachment:f.txt x] here.",
+  "rendered_html": "<p>...</p>",
+  "html_truncated": false,
+  "warnings": [],
+  "stats": {"anchors": 1, "code_spans": 0, "warnings": 0, "targets_checked": 0},
+  "target": {"realm": "ticket", "id": 126, "attachments_checked": true, "comments_checked": false}
+}
+```
+
+`target` is `null` when neither `page_name` nor `ticket_id` was passed, and the response is then identical to what it was before the argument existed. Otherwise `realm` is `ticket` or `wiki`, `id` is the ticket number or the page name, `attachments_checked` and `comments_checked` are tri-state: `null` when that lookup was not needed (the target realm cannot have it, or the TracWiki lacks `attachment:` / `comment:`), `true` when it ran and returned a set, and `false` when it ran and failed. For `page_name`, `comments_checked` is always `null`.
+
+The lookups reuse the write gate's helpers and run only when the converted TracWiki contains `attachment:` (and, for `ticket_id`, `comment:`). The attachment lookup fails closed: if it fails, or the page does not exist yet, bare `attachment:` links stay errors. The comment lookup fails open: if the changelog cannot be fetched, `dangling_comment_ref` does not run, and the `Checked against:` line and `comments_checked: false` say so, so a missing finding is not mistaken for a clean result. `page_name` never runs `dangling_comment_ref`, since a page has no comments.
+
+**Error Responses:**
+
+- **validation_error:** `content` missing, `format` not `markdown`/`tracwiki`, `ticket_id` not an integer >= 1 (a boolean is rejected), `page_name` not a non-empty string, both `page_name` and `ticket_id` passed (checked after each argument's own shape, so `page_name: ""` with a `ticket_id` reports the empty name), or Markdown the converter refuses
+
+**Example Call:**
+```json
+{
+  "name": "convert_preview",
+  "arguments": {
+    "content": "See [attachment:f.txt x] here.",
+    "format": "tracwiki",
+    "ticket_id": 126
+  }
+}
+```
+
+---
+
 ## ticket_render_check
 
 **Description:** Fetch a ticket's LIVE rendered page (description, and each comment by default) and return structured facts + warnings, replacing the curl+grep workaround `Rules/trac/RenderVerify` otherwise forces after every ticket write. Every outbound link grouped by realm (ticket/wiki/external) with its resolved target, which wiki links carry Trac's `missing` class (dead target), code block counts, and the same defect checks `convert_preview` runs (escaped link targets, a cross-instance reference stuck in a code span, an unconfigured InterTrac prefix, and -- render-only -- markup that survived as literal text instead of converting). Use this right after any `ticket_update`/`ticket_create` write to verify what Trac actually rendered, not just what was stored.
