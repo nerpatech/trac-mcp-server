@@ -1100,3 +1100,116 @@ def convert_with_warnings(
         converted=True,
         warnings=warnings,
     )
+
+
+# -- Ticket #125: a list item that continues after its nested list.
+
+# Human label for the block that follows a nested list, keyed by mistune
+# token type. Any type not named here is reported as its token type.
+_SPLIT_BLOCK_LABELS = {
+    "paragraph": "paragraph",
+    "block_text": "paragraph",
+    "block_code": "code block",
+    "block_quote": "blockquote",
+    "table": "table",
+    "thematic_break": "horizontal rule",
+    "heading": "heading",
+    "block_html": "HTML block",
+}
+
+_SPLIT_ITEM_MAX_CHARS = 60
+
+
+def _token_text(token: dict[str, Any]) -> str:
+    """Plain text of a mistune AST token; line breaks become newlines."""
+    if token.get("type") in ("softbreak", "linebreak"):
+        return "\n"
+    if "raw" in token:
+        return str(token["raw"])
+    return "".join(_token_text(c) for c in token.get("children", []))
+
+
+def find_list_item_splits(markdown_text: str) -> list[dict]:
+    """List items whose content continues after a nested list (#125).
+
+    Trac cannot continue a list item once a nested list has started: it
+    ends the list, renders the following block outside it (a paragraph
+    as a blockquote, a fenced block as a `<pre>`), and starts a new list
+    for the next item. Since #112 the converter keeps an item's children
+    in source order, so this shape converts faithfully and then renders
+    split, with nothing to tell the author.
+
+    Parses the same way `markdown_to_tracwiki` does (mistune's AST with
+    the `table` plugin, over the text after `_stash_bracket_syntax`), so
+    the detector and the converter agree on what is a list and what is
+    inside a fenced block. Nested items count too.
+
+    Returns one dict per offending item, in document order, stopping at
+    the first offending block within an item:
+    ``{"item": <first line of the item's leading text, restored and
+    truncated to 60 chars>, "block": <label>, "depth": <0 for a
+    top-level item, 1 for an item of a nested list, ...>}``.
+    """
+    stashed, placeholders = _stash_bracket_syntax(markdown_text)
+    parse = mistune.create_markdown(renderer=None, plugins=["table"])
+    tokens = parse(stashed)
+    findings: list[dict] = []
+
+    def walk(nodes: list[dict[str, Any]], depth: int) -> None:
+        for node in nodes:
+            kind = node.get("type")
+            children = node.get("children", [])
+            if kind == "list_item":
+                seen_list = False
+                for child in children:
+                    child_type = child.get("type")
+                    if child_type == "blank_line":
+                        continue
+                    if child_type == "list":
+                        seen_list = True
+                    elif seen_list:
+                        lead = next(
+                            (
+                                c
+                                for c in children
+                                if c.get("type") != "blank_line"
+                            ),
+                            {},
+                        )
+                        text = (
+                            ""
+                            if lead.get("type") == "list"
+                            else _restore_bracket_syntax(
+                                _token_text(lead), placeholders
+                            )
+                        )
+                        findings.append(
+                            {
+                                "item": text.split("\n")[0][
+                                    :_SPLIT_ITEM_MAX_CHARS
+                                ],
+                                "block": _SPLIT_BLOCK_LABELS.get(
+                                    child_type, str(child_type)
+                                ),
+                                "depth": depth,
+                            }
+                        )
+                        break
+            walk(children, depth + 1 if kind == "list" else depth)
+
+    walk(tokens, -1)
+    return findings
+
+
+def describe_list_item_split(split: dict) -> str:
+    """One-sentence message for a `find_list_item_splits` entry."""
+    block = split["block"]
+    article = "an" if block[:1].lower() in "aeiou" else "a"
+    return (
+        f'List item "{split["item"]}" continues with {article} {block} '
+        "after its nested list. Trac cannot continue a list item there: "
+        f"it ends the list, renders the {block} outside it (a paragraph "
+        "as a blockquote), and starts a new list for the next item. "
+        f"Move the {block} out of the list in the source, or accept "
+        "the split."
+    )

@@ -22,6 +22,10 @@ from ...converters.common import (
     detect_format_heuristic,
     find_code_block_indentation_loss,
 )
+from ...converters.markdown_to_tracwiki import (
+    describe_list_item_split,
+    find_list_item_splits,
+)
 from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import TracClient, WikiPageConflict
@@ -344,6 +348,14 @@ async def _handle_push(
                 "without conversion, or rewrite the block as a "
                 "Markdown fence.",
             )
+
+        # Ticket #125: advise, never refuse. The content survives; only
+        # the list structure splits where a list item continues after
+        # its nested list, which Trac cannot represent.
+        warnings.extend(
+            describe_list_item_split(split)
+            for split in find_list_item_splits(content)
+        )
     else:
         # Already TracWiki — pass through
         wiki_content = content
