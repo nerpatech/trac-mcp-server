@@ -507,6 +507,10 @@ async def _handle_push(
         # -- another write most likely landed just before it and was
         # replaced. Still a success: the page was stored.
         "possible_overwrite": possible_overwrite,
+        # Ticket #153: Claude Code shows structuredContent in preference
+        # to the text block, so the gate's note (OFF line, or the
+        # gate-on advisory lines) rides here too. Empty when none.
+        "gate_notes": list(gate_lines),
     }
     if readback_error is not None:
         structured["readback_error"] = readback_error
