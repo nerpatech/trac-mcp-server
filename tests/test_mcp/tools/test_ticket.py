@@ -1,6 +1,8 @@
 """Tests for ticket tool handlers."""
 
 import asyncio
+import calendar
+import time
 import unittest
 import xmlrpc.client
 from datetime import datetime
@@ -23,6 +25,7 @@ from trac_mcp_server.mcp.tools.ticket_read import (
 )
 from trac_mcp_server.mcp.tools.ticket_write import (
     TICKET_WRITE_SPECS,
+    _comment_mismatch,
     _handle_create,
     _handle_delete,
     _handle_update,
@@ -1232,11 +1235,13 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
     """ticket_update hands back the new _ts, so a chained write needs no
     ticket_get (ticket #127)."""
 
-    def _run(self, update_reply):
+    def _run(self, update_reply, changelog=None):
+        # The write is followed by a changelog read-back for the comment
+        # (#124); a reply with no usable change time never reaches it.
         with patch(
             "trac_mcp_server.mcp.tools.ticket_write.run_sync"
         ) as mock_run_sync:
-            mock_run_sync.return_value = update_reply
+            mock_run_sync.side_effect = [update_reply, changelog or []]
             return asyncio.run(
                 _handle_update(
                     MagicMock(),
@@ -1251,12 +1256,27 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
     def test_new_token_in_text_and_structured_content(self):
         # Trac's ticket.update reply: [id, created, changed, attrs].
         result = self._run(
-            [42, "c", "m", {"status": "new", "_ts": "1793631099000001"}]
+            [
+                42,
+                "c",
+                "m",
+                {"status": "new", "_ts": "1793631099000001"},
+            ],
+            changelog=[
+                [
+                    _trac_time(1793631099),
+                    "agent_rpc",
+                    "comment",
+                    "1",
+                    "x",
+                    1,
+                ]
+            ],
         )
 
         self.assertFalse(result.isError)
         text = result.content[0].text
-        self.assertIn("Updated ticket #42 (added comment)", text)
+        self.assertIn("Updated ticket #42 (added comment 1)", text)
         self.assertIn(
             "New change token (base_ts): 1793631099000001", text
         )
@@ -1405,6 +1425,490 @@ async def test_live_chained_update_uses_returned_token():
         )
         assert stale.isError
         assert "version_conflict" in stale.content[0].text
+    finally:
+        client.delete_ticket(ticket_id)
+
+
+# ---------------------------------------------------------------------------
+# ticket_update names the comment it posted and verifies the stored bytes
+# (ticket #124)
+# ---------------------------------------------------------------------------
+
+_EPOCH = calendar.timegm((2026, 11, 3, 10, 15, 30))  # 20261103T10:15:30
+
+
+def _trac_time(epoch):
+    """Trac's compact XML-RPC timestamp for a UTC epoch."""
+    return time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(epoch))
+
+
+def _token(epoch, micro=123456):
+    """The microsecond ``_ts`` Trac holds for a change made at ``epoch``."""
+    return str(epoch * 1_000_000 + micro)
+
+
+def _update_reply(epoch=_EPOCH, with_token=True):
+    attrs = {"status": "new"}
+    if with_token:
+        attrs["_ts"] = _token(epoch)
+    return [42, _trac_time(epoch - 600), _trac_time(epoch), attrs]
+
+
+def _comment_entry(epoch, cnum, text, field="comment"):
+    """A ticket.changeLog row: [time, author, field, old, new, perm]."""
+    return [_trac_time(epoch), "agent_rpc", field, str(cnum), text, 1]
+
+
+class TestCommentMismatch(unittest.TestCase):
+    """_comment_mismatch: where the stored text first departs from the
+    sent text."""
+
+    def test_equal_strings_have_no_mismatch(self):
+        self.assertIsNone(_comment_mismatch("same\ntext", "same\ntext"))
+        self.assertIsNone(_comment_mismatch("", ""))
+
+    def test_differs_in_the_middle(self):
+        self.assertEqual(
+            _comment_mismatch("abcdefgh", "abcXefgh"),
+            {
+                "offset": 3,
+                "sent": "abcdefgh",
+                "stored": "abcXefgh",
+                "sent_length": 8,
+                "stored_length": 8,
+            },
+        )
+
+    def test_differs_at_offset_zero(self):
+        result = _comment_mismatch("abc", "xbc")
+        self.assertEqual(result["offset"], 0)
+        self.assertEqual(result["sent"], "abc")
+        self.assertEqual(result["stored"], "xbc")
+
+    def test_prefix_case_offset_is_the_shorter_length(self):
+        stored_short = _comment_mismatch("abcdef", "abc")
+        self.assertEqual(stored_short["offset"], 3)
+        self.assertEqual(stored_short["sent"], "abcdef")
+        self.assertEqual(stored_short["stored"], "abc")
+        self.assertEqual(stored_short["sent_length"], 6)
+        self.assertEqual(stored_short["stored_length"], 3)
+
+        sent_short = _comment_mismatch("abc", "abcdef")
+        self.assertEqual(sent_short["offset"], 3)
+        self.assertEqual(sent_short["sent_length"], 3)
+        self.assertEqual(sent_short["stored_length"], 6)
+
+    def test_trailing_whitespace_stripped(self):
+        result = _comment_mismatch("body\n\n  ", "body")
+        self.assertEqual(result["offset"], 4)
+        self.assertEqual(result["sent"], "body\n\n  ")
+        self.assertEqual(result["stored"], "body")
+        self.assertEqual(result["sent_length"], 8)
+        self.assertEqual(result["stored_length"], 4)
+
+    def test_crlf_versus_lf(self):
+        result = _comment_mismatch("a\r\nb", "a\nb")
+        self.assertEqual(result["offset"], 1)
+        self.assertEqual(result["sent"], "a\r\nb")
+        self.assertEqual(result["stored"], "a\nb")
+
+    def test_context_is_forty_characters_either_side(self):
+        sent = "a" * 100 + "X" + "b" * 100
+        stored = "a" * 100 + "Y" + "b" * 100
+        result = _comment_mismatch(sent, stored)
+        self.assertEqual(result["offset"], 100)
+        self.assertEqual(result["sent"], "a" * 40 + "X" + "b" * 39)
+        self.assertEqual(result["stored"], "a" * 40 + "Y" + "b" * 39)
+        self.assertEqual(result["sent_length"], 201)
+        self.assertEqual(result["stored_length"], 201)
+
+
+class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
+    """A comment write reports its comment number and whether Trac stored
+    it byte-for-byte, with one changelog read (ticket #124)."""
+
+    def _run(self, effects, args=None, client=None):
+        base = {"ticket_id": 42, "comment": "hello"}
+        base.update(args or {})
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = effects
+            result = asyncio.run(
+                _handle_update(client or MagicMock(), base)
+            )
+        return result, mock_run_sync
+
+    def test_match_reports_number_and_byte_for_byte(self):
+        client = MagicMock()
+        result, mock = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH - 50, 4, "older"),
+                    _comment_entry(_EPOCH, 5, "hello"),
+                ],
+            ],
+            client=client,
+        )
+
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("Updated ticket #42 (added comment 5)", text)
+        self.assertIn(
+            "Stored comment 5 matches the text sent, byte-for-byte.",
+            text,
+        )
+        self.assertNotIn("WARNING", text)
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], True)
+        self.assertIsNone(sc["comment_mismatch"])
+        self.assertEqual(sc["_ts"], _token(_EPOCH))
+        self.assertEqual(sc["ticket_id"], 42)
+        self.assertEqual(sc["message"], text)
+        # One write, one changelog read.
+        self.assertEqual(mock.call_count, 2)
+        self.assertEqual(
+            mock.call_args_list[1][0],
+            (client.get_ticket_changelog, 42),
+        )
+
+    def test_lines_come_after_token_and_before_gate_lines(self):
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, "hello")]]
+        )
+        lines = result.content[0].text.split("\n")
+        self.assertTrue(lines[1].startswith("New change token"))
+        self.assertTrue(lines[2].startswith("Stored comment 5"))
+
+    def test_mismatch_reports_first_difference(self):
+        sent = "line one  \nline two"  # two trailing spaces mid-text
+        stored = "line one\nline two"
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, stored)]],
+            {"comment": sent},
+        )
+
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("(added comment 5)", text)
+        self.assertNotIn("byte-for-byte", text)
+        self.assertIn(
+            "WARNING: comment 5 was stored differently from the text "
+            "sent: first difference at offset 8 (sent 19 chars, "
+            "stored 17)",
+            text,
+        )
+        self.assertIn(f"sent ...{sent!r}...", text)
+        self.assertIn(f"stored ...{stored!r}...", text)
+        self.assertIn("ticket_comment_edit", text)
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertEqual(
+            sc["comment_mismatch"],
+            {
+                "offset": 8,
+                "sent": sent,
+                "stored": stored,
+                "sent_length": 19,
+                "stored_length": 17,
+            },
+        )
+        self.assertEqual(sc["message"], text)
+
+    def test_threaded_reply_number_is_the_last_part(self):
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, "2.5", "hello")]]
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+        self.assertIn("(added comment 5)", result.content[0].text)
+
+    def test_no_comment_makes_no_changelog_call(self):
+        result, mock = self._run(
+            [_update_reply()],
+            {"comment": "", "priority": "major"},
+        )
+
+        self.assertEqual(mock.call_count, 1)
+        text = result.content[0].text
+        self.assertIn("Updated ticket #42 (updated 1 field(s))", text)
+        self.assertNotIn("WARNING", text)
+        self.assertNotIn("Stored comment", text)
+        sc = result.structuredContent
+        for key in (
+            "comment_number",
+            "comment_stored_matches",
+            "comment_mismatch",
+        ):
+            self.assertIn(key, sc)
+            self.assertIsNone(sc[key])
+
+    def test_changelog_error_warns_but_write_succeeds(self):
+        result, _ = self._run(
+            [_update_reply(), xmlrpc.client.Fault(1, "boom")]
+        )
+
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("Updated ticket #42 (added comment)", text)
+        self.assertIn(
+            "WARNING: the comment was posted, but its number could not "
+            "be determined (changelog unreadable). Call "
+            "ticket_changelog(ticket_id=42) on the same instance to "
+            "find it.",
+            text,
+        )
+        self.assertIn("New change token", text)
+        sc = result.structuredContent
+        self.assertIsNone(sc["comment_number"])
+        self.assertIsNone(sc["comment_stored_matches"])
+        self.assertIsNone(sc["comment_mismatch"])
+        self.assertEqual(sc["_ts"], _token(_EPOCH))
+
+    def test_no_entry_at_the_update_time_warns(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH - 5, 4, "hello"),
+                    _comment_entry(_EPOCH, 5, "hello", field="status"),
+                ],
+            ]
+        )
+        text = result.content[0].text
+        self.assertIn("no comment entry at the update's time", text)
+        self.assertIn("WARNING: the comment was posted", text)
+        self.assertIsNone(result.structuredContent["comment_number"])
+
+    def test_same_second_entries_pick_the_one_matching_the_text(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, "someone else's"),
+                    _comment_entry(_EPOCH, 6, "hello"),
+                    _comment_entry(_EPOCH, 7, "another one"),
+                ],
+            ]
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 6)
+        self.assertIs(sc["comment_stored_matches"], True)
+        self.assertNotIn("WARNING", result.content[0].text)
+
+    def test_same_second_entries_all_matching_take_the_highest(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, "hello"),
+                    _comment_entry(_EPOCH, "1.7", "hello"),
+                    _comment_entry(_EPOCH, 6, "hello"),
+                ],
+            ]
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 7)
+        self.assertIs(
+            result.structuredContent["comment_stored_matches"], True
+        )
+
+    def test_same_second_entries_none_matching_is_ambiguous(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, "not it"),
+                    _comment_entry(_EPOCH, 6, "nor this"),
+                ],
+            ]
+        )
+        text = result.content[0].text
+        self.assertIn(
+            "several comment entries at that time, none matching the "
+            "text sent",
+            text,
+        )
+        sc = result.structuredContent
+        self.assertIsNone(sc["comment_number"])
+        self.assertIsNone(sc["comment_stored_matches"])
+
+    def test_no_token_falls_back_to_the_reply_change_time(self):
+        result, _ = self._run(
+            [
+                _update_reply(with_token=False),
+                [_comment_entry(_EPOCH, 5, "hello")],
+            ]
+        )
+        text = result.content[0].text
+        self.assertIn("(added comment 5)", text)
+        self.assertIn("Stored comment 5 matches", text)
+        # The missing token still warns, separately.
+        self.assertIn("carried no change token", text)
+        sc = result.structuredContent
+        self.assertIsNone(sc["_ts"])
+        self.assertEqual(sc["comment_number"], 5)
+
+    def test_token_second_is_whole_seconds_of_the_microsecond_ts(self):
+        # 999999 microseconds past the second still floors to it.
+        reply = _update_reply()
+        reply[3]["_ts"] = _token(_EPOCH, micro=999999)
+        result, _ = self._run(
+            [reply, [_comment_entry(_EPOCH, 5, "hello")]]
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_no_time_at_all_warns_without_a_changelog_read(self):
+        result, _ = self._run(
+            [[42, "c", "not-a-time", {"status": "new"}]]
+        )
+        text = result.content[0].text
+        self.assertIn("no change time in Trac's reply", text)
+        self.assertIn("WARNING: the comment was posted", text)
+        self.assertIsNone(result.structuredContent["comment_number"])
+
+    def test_unparseable_comment_number_warns(self):
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, "abc", "hello")]]
+        )
+        self.assertIn(
+            "unparseable comment number", result.content[0].text
+        )
+        self.assertIsNone(result.structuredContent["comment_number"])
+
+    def test_reply_to_compares_the_full_string_with_the_quote(self):
+        full = (
+            "Replying to [comment:3 alice]:\n> quoted text\n\nmy reply"
+        )
+        result, mock = self._run(
+            [
+                # Before the write: the changelog read for the quote.
+                [
+                    [
+                        _trac_time(_EPOCH - 60),
+                        "alice",
+                        "comment",
+                        "3",
+                        "quoted text",
+                        1,
+                    ]
+                ],
+                _update_reply(),
+                [_comment_entry(_EPOCH, 4, full)],
+            ],
+            {"comment": "my reply", "reply_to": 3},
+        )
+
+        self.assertEqual(mock.call_count, 3)
+        sent = mock.call_args_list[1][0][2]
+        self.assertEqual(sent, full)
+        text = result.content[0].text
+        self.assertIn("(added comment 4)", text)
+        self.assertIn("Stored comment 4 matches", text)
+        sc = result.structuredContent
+        self.assertIs(sc["comment_stored_matches"], True)
+
+    def test_reply_to_mismatch_measures_against_the_quote_prefix(self):
+        full = (
+            "Replying to [comment:3 alice]:\n> quoted text\n\nmy reply"
+        )
+        result, _ = self._run(
+            [
+                [
+                    [
+                        _trac_time(_EPOCH - 60),
+                        "alice",
+                        "comment",
+                        "3",
+                        "quoted text",
+                        1,
+                    ]
+                ],
+                _update_reply(),
+                [_comment_entry(_EPOCH, 4, "my reply")],
+            ],
+            {"comment": "my reply", "reply_to": 3},
+        )
+        mismatch = result.structuredContent["comment_mismatch"]
+        self.assertEqual(mismatch["sent_length"], len(full))
+        self.assertEqual(mismatch["stored_length"], len("my reply"))
+        self.assertEqual(mismatch["offset"], 0)
+
+    def test_description_advertises_the_comment_report(self):
+        tool = next(
+            t
+            for t in TICKET_WRITE_SPECS
+            if t.tool.name == "ticket_update"
+        ).tool
+        self.assertIn("comment_number", tool.description)
+        self.assertIn("comment_stored_matches", tool.description)
+
+
+@pytest.mark.live
+async def test_live_update_reports_comment_number_and_stored_bytes():
+    """Real Trac (/trac_test): a description-only edit consumes comment
+    number 1 with an empty comment, so the comment that follows is number
+    2, and the byte-for-byte verdict agrees with the changelog (ticket
+    #124)."""
+    import os
+    from urllib.parse import urlparse
+
+    parsed = urlparse(os.environ["TRAC_URL"])
+    config = Config(
+        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
+        username=os.environ["TRAC_USERNAME"],
+        password=os.environ["TRAC_PASSWORD"],
+        insecure=os.environ.get("TRAC_INSECURE", "").lower()
+        in ("1", "true", "yes"),
+    )
+    client = TracClient(config)
+    ticket_id = client.create_ticket(
+        "#124 live test: comment number",
+        "Throwaway; deleted by the test.",
+        attributes={"owner": "agent_rpc"},
+    )
+    try:
+        first_ts = client.get_ticket(ticket_id)[3]["_ts"]
+        first = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "description": "Throwaway, description rewritten.",
+                "base_ts": first_ts,
+            },
+        )
+        assert not first.isError, first.content[0].text
+        assert first.structuredContent["comment_number"] is None
+
+        body = (
+            "Café — naïve 日本語\n"
+            "{{{\n#!sh\necho 'in a block'\n}}}\n"
+            "two trailing spaces  \n"
+            "and a last line"
+        )
+        second = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": body,
+                "base_ts": first.structuredContent["_ts"],
+            },
+        )
+        assert not second.isError, second.content[0].text
+        sc = second.structuredContent
+        assert sc["comment_number"] == 2, sc["message"]
+        assert sc["comment_stored_matches"] is True, sc["message"]
+        assert sc["comment_mismatch"] is None
+
+        stored = [
+            entry
+            for entry in client.get_ticket_changelog(ticket_id)
+            if entry[2] == "comment"
+            and str(entry[3]).split(".")[-1] == "2"
+        ]
+        assert len(stored) == 1
+        assert stored[0][4] == body
     finally:
         client.delete_ticket(ticket_id)
 

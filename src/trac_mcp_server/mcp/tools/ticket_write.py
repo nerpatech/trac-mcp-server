@@ -97,7 +97,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): pass it as base_ts on your next ticket_update to the same ticket instead of calling ticket_get again. Any other write to the ticket moves _ts too without returning it (ticket_comment_reply, ticket_comment_edit, ticket_batch_update, another session), so after one of those, re-read with ticket_get. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only adds new ones.",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): pass it as base_ts on your next ticket_update to the same ticket instead of calling ticket_get again. Any other write to the ticket moves _ts too without returning it (ticket_comment_reply, ticket_comment_edit, ticket_batch_update, another session), so after one of those, re-read with ticket_get. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only ever adds new ones. When a comment is added, the result names its comment number (comment_number, for ticket_render_check comment=N or ticket_comment_edit) and whether Trac stored it byte-for-byte as sent (comment_stored_matches, with the first difference if not), so no ticket_changelog or ticket_get read-back is needed.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -527,10 +527,59 @@ async def _handle_update(
             f"with the fresh base_ts from that ticket_get response.",
         )
 
+    # Every write moves _ts, so hand the new token back: a chained write
+    # to the same ticket then needs no ticket_get just to refresh
+    # base_ts (#127). The write has already landed, so a reply without
+    # a token degrades to a warning, never to a failure.
+    new_ts = _change_token_from_update(update_result)
+
+    # Name the comment just posted and check it was stored as sent
+    # (#124). Skipped without a comment: nothing was posted to find.
+    comment_number: int | None = None
+    comment_matches: bool | None = None
+    comment_mismatch: dict[str, Any] | None = None
+    comment_lines: list[str] = []
+    if comment:
+        (
+            comment_number,
+            comment_matches,
+            comment_mismatch,
+            failure,
+        ) = await _find_posted_comment(
+            client, ticket_id, comment, update_result, new_ts
+        )
+        if failure is not None:
+            comment_lines.append(
+                f"WARNING: the comment was posted, but its number "
+                f"could not be determined ({failure}). Call "
+                f"ticket_changelog(ticket_id={ticket_id}) on the same "
+                f"instance to find it."
+            )
+        elif comment_mismatch is not None:
+            comment_lines.append(
+                f"WARNING: comment {comment_number} was stored "
+                f"differently from the text sent: first difference at "
+                f"offset {comment_mismatch['offset']} "
+                f"(sent {comment_mismatch['sent_length']} chars, "
+                f"stored {comment_mismatch['stored_length']}); "
+                f"sent ...{comment_mismatch['sent']!r}... "
+                f"stored ...{comment_mismatch['stored']!r}... "
+                f"Use ticket_comment_edit to correct it."
+            )
+        else:
+            comment_lines.append(
+                f"Stored comment {comment_number} matches the text "
+                f"sent, byte-for-byte."
+            )
+
     # Build summary of changes
     changes = []
     if comment:
-        changes.append("added comment")
+        changes.append(
+            f"added comment {comment_number}"
+            if comment_number is not None
+            else "added comment"
+        )
     if attributes:
         changes.append(f"updated {len(attributes)} field(s)")
 
@@ -538,11 +587,6 @@ async def _handle_update(
     if resolution_remap_warning:
         change_summary = f"{change_summary}; {resolution_remap_warning}"
 
-    # Every write moves _ts, so hand the new token back: a chained write
-    # to the same ticket then needs no ticket_get just to refresh
-    # base_ts (#127). The write has already landed, so a reply without
-    # a token degrades to a warning, never to a failure.
-    new_ts = _change_token_from_update(update_result)
     if new_ts is not None:
         token_line = (
             f"New change token (base_ts): {new_ts} -- pass this to "
@@ -559,6 +603,7 @@ async def _handle_update(
 
     message = "\n".join(
         [f"Updated ticket #{ticket_id} ({change_summary})", token_line]
+        + comment_lines
         + gate_lines
     )
     # Claude Code shows structuredContent in preference to the text
@@ -571,8 +616,142 @@ async def _handle_update(
         structuredContent={
             "ticket_id": ticket_id,
             "_ts": new_ts,
+            "comment_number": comment_number,
+            "comment_stored_matches": comment_matches,
+            "comment_mismatch": comment_mismatch,
             "message": message,
         },
+    )
+
+
+def _comment_mismatch(sent: str, stored: str) -> dict[str, Any] | None:
+    """Where ``stored`` first departs from ``sent``, or None if equal.
+
+    ``offset`` is the index of the first differing character (the
+    shorter length when one string is a prefix of the other), counted in
+    characters of the Python str. ``sent`` and ``stored`` are the 40
+    characters either side of it, so a stripped trailing space or CRLF
+    turned LF can be seen without dumping both texts.
+    """
+    if sent == stored:
+        return None
+    offset = 0
+    for a, b in zip(sent, stored, strict=False):
+        if a != b:
+            break
+        offset += 1
+    low = max(0, offset - 40)
+    high = offset + 40
+    return {
+        "offset": offset,
+        "sent": sent[low:high],
+        "stored": stored[low:high],
+        "sent_length": len(sent),
+        "stored_length": len(stored),
+    }
+
+
+def _update_change_epoch(
+    update_result: Any, new_ts: str | None
+) -> int | None:
+    """The whole second a ``ticket.update`` landed at, or None.
+
+    Changelog timestamps have second resolution, so the match is made on
+    whole seconds. ``new_ts`` is Trac's microsecond ``_ts``; failing
+    that, ``time_changed`` out of the ``[id, created, changed, attrs]``
+    reply is parsed.
+    """
+    if new_ts is not None:
+        try:
+            return int(new_ts) // 1_000_000
+        except ValueError:
+            pass
+    if (
+        isinstance(update_result, (list, tuple))
+        and len(update_result) >= 3
+    ):
+        changed = TracClient._parse_trac_time(update_result[2])
+        if changed is not None:
+            return int(changed)
+    return None
+
+
+def _comment_cnum(entry: Any) -> int | None:
+    """The comment number of a changeLog comment row, or None.
+
+    Trac keeps it in the row's oldvalue: ``"5"``, or ``"2.5"`` for a
+    reply threaded under comment 2.
+    """
+    tail = str(entry[3]).split(".")[-1]
+    return int(tail) if tail.isdigit() else None
+
+
+async def _find_posted_comment(
+    client: TracClient,
+    ticket_id: int,
+    comment: str,
+    update_result: Any,
+    new_ts: str | None,
+) -> tuple[int | None, bool | None, dict[str, Any] | None, str | None]:
+    """Find the comment a ``ticket.update`` just posted in the changelog.
+
+    Returns ``(comment_number, stored_matches, mismatch, failure)``;
+    ``failure`` is a short reason when the comment could not be pinned
+    down, and the other three are then None. Never raises: the write has
+    already landed, so a failed lookup is reported, not propagated.
+
+    The number cannot be counted from the changelog, because a
+    description-only edit consumes one too; it is read off the row.
+    """
+    epoch = _update_change_epoch(update_result, new_ts)
+    if epoch is None:
+        return None, None, None, "no change time in Trac's reply"
+    try:
+        changelog = await run_sync(
+            client.get_ticket_changelog, ticket_id
+        )
+        candidates = []
+        for entry in changelog or []:
+            if (
+                not isinstance(entry, (list, tuple))
+                or len(entry) < 5
+                or entry[2] != "comment"
+            ):
+                continue
+            when = TracClient._parse_trac_time(entry[0])
+            if when is not None and int(when) == epoch:
+                candidates.append(entry)
+    except Exception:
+        return None, None, None, "changelog unreadable"
+
+    if not candidates:
+        reason = "no comment entry at the update's time"
+        return None, None, None, reason
+
+    chosen = candidates[0]
+    if len(candidates) > 1:
+        # Another write landed in the same second: go by the text sent.
+        same_text = [e for e in candidates if e[4] == comment]
+        if not same_text:
+            reason = (
+                "several comment entries at that time, none matching "
+                "the text sent"
+            )
+            return None, None, None, reason
+        numbers = [_comment_cnum(e) for e in same_text]
+        if any(n is None for n in numbers):
+            return None, None, None, "unparseable comment number"
+        chosen = same_text[numbers.index(max(numbers))]
+
+    number = _comment_cnum(chosen)
+    if number is None:
+        return None, None, None, "unparseable comment number"
+    stored = chosen[4] if isinstance(chosen[4], str) else str(chosen[4])
+    return (
+        number,
+        stored == comment,
+        _comment_mismatch(comment, stored),
+        None,
     )
 
 
