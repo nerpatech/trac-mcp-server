@@ -1318,7 +1318,8 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
                 self.assertNotIn("New change token", text)
                 self.assertIsNone(result.structuredContent["_ts"])
                 self.assertIn(
-                    "WARNING", result.structuredContent["message"]
+                    "carried no change token",
+                    result.structuredContent["message"],
                 )
 
     def test_structured_content_keeps_the_remap_warning(self):
@@ -1454,9 +1455,28 @@ def _update_reply(epoch=_EPOCH, with_token=True):
     return [42, _trac_time(epoch - 600), _trac_time(epoch), attrs]
 
 
-def _comment_entry(epoch, cnum, text, field="comment"):
+_USER = "agent_rpc"
+
+
+def _comment_entry(
+    epoch, cnum, text, field="comment", author=_USER, permanent=1
+):
     """A ticket.changeLog row: [time, author, field, old, new, perm]."""
-    return [_trac_time(epoch), "agent_rpc", field, str(cnum), text, 1]
+    return [
+        _trac_time(epoch),
+        author,
+        field,
+        str(cnum),
+        text,
+        permanent,
+    ]
+
+
+def _user_client():
+    """A client whose configured Trac user is ``_USER``."""
+    client = MagicMock()
+    client.config.username = _USER
+    return client
 
 
 class TestCommentMismatch(unittest.TestCase):
@@ -1535,12 +1555,12 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         ) as mock_run_sync:
             mock_run_sync.side_effect = effects
             result = asyncio.run(
-                _handle_update(client or MagicMock(), base)
+                _handle_update(client or _user_client(), base)
             )
         return result, mock_run_sync
 
     def test_match_reports_number_and_byte_for_byte(self):
-        client = MagicMock()
+        client = _user_client()
         result, mock = self._run(
             [
                 _update_reply(),
@@ -1618,13 +1638,6 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         )
         self.assertEqual(sc["message"], text)
 
-    def test_threaded_reply_number_is_the_last_part(self):
-        result, _ = self._run(
-            [_update_reply(), [_comment_entry(_EPOCH, "2.5", "hello")]]
-        )
-        self.assertEqual(result.structuredContent["comment_number"], 5)
-        self.assertIn("(added comment 5)", result.content[0].text)
-
     def test_no_comment_makes_no_changelog_call(self):
         result, mock = self._run(
             [_update_reply()],
@@ -1656,8 +1669,8 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         self.assertIn(
             "WARNING: the comment was posted, but its number could not "
             "be determined (changelog unreadable). Call "
-            "ticket_changelog(ticket_id=42) on the same instance to "
-            "find it.",
+            "ticket_get(ticket_id=42) on the same instance; its "
+            "comments are listed with their numbers.",
             text,
         )
         self.assertIn("New change token", text)
@@ -1678,7 +1691,9 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
             ]
         )
         text = result.content[0].text
-        self.assertIn("no comment entry at the update's time", text)
+        self.assertIn(
+            f"no comment entry by {_USER} at the update's time", text
+        )
         self.assertIn("WARNING: the comment was posted", text)
         self.assertIsNone(result.structuredContent["comment_number"])
 
@@ -1704,7 +1719,7 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
                 _update_reply(),
                 [
                     _comment_entry(_EPOCH, 5, "hello"),
-                    _comment_entry(_EPOCH, "1.7", "hello"),
+                    _comment_entry(_EPOCH, 7, "hello"),
                     _comment_entry(_EPOCH, 6, "hello"),
                 ],
             ]
@@ -1768,13 +1783,365 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         self.assertIn("WARNING: the comment was posted", text)
         self.assertIsNone(result.structuredContent["comment_number"])
 
-    def test_unparseable_comment_number_warns(self):
+    def test_unparseable_comment_number_is_not_a_candidate(self):
         result, _ = self._run(
             [_update_reply(), [_comment_entry(_EPOCH, "abc", "hello")]]
         )
         self.assertIn(
-            "unparseable comment number", result.content[0].text
+            f"no comment entry by {_USER} at the update's time",
+            result.content[0].text,
         )
+        self.assertIsNone(result.structuredContent["comment_number"])
+
+    def test_superscript_digit_oldvalue_is_ignored_without_raising(
+        self,
+    ):
+        # '\u00b2'.isdigit() is True but int('\u00b2') raises.
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, "\u00b2", "hello"),
+                    _comment_entry(_EPOCH, 5, "hello"),
+                ],
+            ]
+        )
+        self.assertFalse(result.isError)
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [_comment_entry(_EPOCH, "\u00b2", "hello")],
+            ]
+        )
+        self.assertFalse(result.isError)
+        self.assertIsNone(result.structuredContent["comment_number"])
+        self.assertIn("no comment entry by", result.content[0].text)
+
+    def test_other_authors_lone_same_second_row_is_not_ours(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [_comment_entry(_EPOCH, 5, "hello", author="someone")],
+            ]
+        )
+        text = result.content[0].text
+        self.assertIn(
+            f"no comment entry by {_USER} at the update's time", text
+        )
+        sc = result.structuredContent
+        self.assertIsNone(sc["comment_number"])
+        self.assertIsNone(sc["comment_stored_matches"])
+
+    def test_author_compare_is_case_insensitive_and_stripped(self):
+        client = _user_client()
+        client.config.username = "  Agent_RPC "
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, "hello")]],
+            client=client,
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_non_string_username_skips_the_author_filter(self):
+        # A MagicMock config (or any non-str) cannot be compared.
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [_comment_entry(_EPOCH, 5, "hello", author="whoever")],
+            ],
+            client=MagicMock(),
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_attachment_pseudo_row_is_ignored(self):
+        # Trac's changelog UNIONs attachment rows in with permanent 0.
+        # With a real, mismatching row present the mismatch is reported,
+        # not an ambiguity between two candidates.
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, "hell"),
+                    _comment_entry(_EPOCH, 6, "x", permanent=0),
+                ],
+            ]
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertIn("was stored differently", result.content[0].text)
+
+    def test_dotted_row_is_someone_elses_threaded_reply(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, "2.6", "hello"),
+                    _comment_entry(_EPOCH, 5, "hello"),
+                ],
+            ]
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_lone_dotted_row_is_not_found(self):
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, "2.5", "hello")]]
+        )
+        self.assertIsNone(result.structuredContent["comment_number"])
+        self.assertIn("no comment entry by", result.content[0].text)
+
+    def test_row_without_a_permanent_column_is_skipped(self):
+        row = _comment_entry(_EPOCH, 5, "hello")[:5]
+        result, _ = self._run([_update_reply(), [row]])
+        self.assertIsNone(result.structuredContent["comment_number"])
+
+    # -- nothing stored ----------------------------------------------
+
+    def test_blank_comment_stores_nothing(self):
+        # Trac stores nothing for a comment that is empty after
+        # stripping when no field changed; tracrpc then returns the
+        # UNCHANGED _ts.
+        for blank in ("   ", "\n\t ", "\u200b", " \u200b "):
+            with self.subTest(blank=blank):
+                result, mock = self._run(
+                    [
+                        _update_reply(),
+                        [_comment_entry(_EPOCH, 1, "old")],
+                    ],
+                    {"comment": blank, "base_ts": _token(_EPOCH)},
+                )
+                self.assertEqual(mock.call_count, 1)
+                self._assert_nothing_stored(
+                    result,
+                    "Trac stored nothing: a comment that is empty after "
+                    "whitespace stripping, with no field changes, is "
+                    "not saved.",
+                )
+
+    def test_blank_comment_without_base_ts_stores_nothing(self):
+        result, mock = self._run(
+            [_update_reply(), []], {"comment": "   "}
+        )
+        self.assertEqual(mock.call_count, 1)
+        self._assert_nothing_stored(
+            result,
+            "Trac stored nothing: a comment that is empty after "
+            "whitespace stripping, with no field changes, is not saved.",
+        )
+
+    def test_unmoved_token_with_a_real_comment_stores_nothing(self):
+        result, mock = self._run(
+            [_update_reply(), []],
+            {"comment": "hello", "base_ts": _token(_EPOCH)},
+        )
+        self.assertEqual(mock.call_count, 1)
+        self._assert_nothing_stored(
+            result,
+            "Trac stored nothing: the change token did not move, so no "
+            "change was saved.",
+        )
+
+    def test_unmoved_token_with_fields_stores_nothing(self):
+        result, mock = self._run(
+            [_update_reply()],
+            {
+                "comment": "",
+                "priority": "major",
+                "base_ts": _token(_EPOCH),
+            },
+        )
+        self.assertEqual(mock.call_count, 1)
+        self._assert_nothing_stored(
+            result,
+            "Trac stored nothing: the change token did not move, so no "
+            "change was saved.",
+        )
+
+    def test_moved_token_is_a_normal_write(self):
+        result, mock = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, "hello")]],
+            {"base_ts": _token(_EPOCH - 10)},
+        )
+        self.assertEqual(mock.call_count, 2)
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_blank_comment_with_a_field_change_is_not_flagged(self):
+        # A field change is stored, so the nothing-stored branch is not
+        # taken just because the comment is blank.
+        result, _ = self._run(
+            [_update_reply()],
+            {"comment": "", "priority": "major"},
+        )
+        self.assertNotIn("stored nothing", result.content[0].text)
+
+    def _assert_nothing_stored(self, result, line):
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("Updated ticket #42 (no change stored)", text)
+        self.assertNotIn("added comment", text)
+        self.assertIn(line, text)
+        self.assertNotIn("WARNING", text)
+        self.assertNotIn("ticket_comment_edit", text)
+        self.assertNotIn("Stored comment", text)
+        sc = result.structuredContent
+        self.assertIsNone(sc["comment_number"])
+        self.assertIsNone(sc["comment_stored_matches"])
+        self.assertIsNone(sc["comment_mismatch"])
+        self.assertEqual(sc["message"], text)
+
+    # -- CR line endings ---------------------------------------------
+
+    def test_crlf_folded_to_lf_is_a_match(self):
+        for sent in ("a\r\nb", "a\rb", "a\r\nb\rc\n"):
+            with self.subTest(sent=sent):
+                stored = sent.replace("\r\n", "\n").replace("\r", "\n")
+                result, _ = self._run(
+                    [
+                        _update_reply(),
+                        [_comment_entry(_EPOCH, 5, stored)],
+                    ],
+                    {"comment": sent},
+                )
+                text = result.content[0].text
+                self.assertIn(
+                    "Stored comment 5 matches the text sent, except "
+                    "that its CR/CRLF line endings were folded to LF by "
+                    "the XML-RPC transport (Trac cannot receive CR this "
+                    "way; nothing to correct).",
+                    text,
+                )
+                self.assertNotIn("WARNING", text)
+                self.assertNotIn("byte-for-byte", text)
+                sc = result.structuredContent
+                self.assertIs(sc["comment_stored_matches"], True)
+                self.assertIs(sc["comment_line_endings_folded"], True)
+                self.assertIsNone(sc["comment_mismatch"])
+
+    def test_plain_match_is_not_folded(self):
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, "hello")]]
+        )
+        self.assertIs(
+            result.structuredContent["comment_line_endings_folded"],
+            False,
+        )
+
+    def test_no_lookup_result_has_no_folded_flag(self):
+        result, _ = self._run(
+            [_update_reply(), xmlrpc.client.Fault(1, "boom")]
+        )
+        self.assertIsNone(
+            result.structuredContent["comment_line_endings_folded"]
+        )
+        result, _ = self._run([_update_reply()], {"comment": ""})
+        self.assertIn(
+            "comment_line_endings_folded", result.structuredContent
+        )
+        self.assertIsNone(
+            result.structuredContent["comment_line_endings_folded"]
+        )
+
+    def test_real_mismatch_offsets_ignore_folded_crs(self):
+        sent = "a\r\nb  "
+        stored = "a\nb"
+        result, _ = self._run(
+            [_update_reply(), [_comment_entry(_EPOCH, 5, stored)]],
+            {"comment": sent},
+        )
+        sc = result.structuredContent
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertIs(sc["comment_line_endings_folded"], False)
+        self.assertEqual(
+            sc["comment_mismatch"],
+            {
+                "offset": 3,
+                "sent": "a\nb  ",
+                "stored": "a\nb",
+                "sent_length": 5,
+                "stored_length": 3,
+            },
+        )
+        self.assertIn("ticket_comment_edit", result.content[0].text)
+
+    def test_candidates_are_chosen_by_normalised_text(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, "other"),
+                    _comment_entry(_EPOCH, 6, "a\nb"),
+                ],
+            ],
+            {"comment": "a\r\nb"},
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 6)
+        self.assertIs(
+            result.structuredContent["comment_line_endings_folded"],
+            True,
+        )
+
+    # -- empty stored text -------------------------------------------
+
+    def test_empty_stored_text_is_not_the_string_none(self):
+        # _parse_xmlrpc_value turns an empty <string></string> into None.
+        row = _comment_entry(_EPOCH, 5, None)
+        result, _ = self._run(
+            [_update_reply(), [row]], {"comment": "None"}
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertEqual(sc["comment_mismatch"]["stored_length"], 0)
+
+    def test_empty_stored_text_among_several_candidates(self):
+        result, _ = self._run(
+            [
+                _update_reply(),
+                [
+                    _comment_entry(_EPOCH, 5, None),
+                    _comment_entry(_EPOCH, 6, "None"),
+                ],
+            ],
+            {"comment": "None"},
+        )
+        self.assertEqual(result.structuredContent["comment_number"], 6)
+        self.assertIs(
+            result.structuredContent["comment_stored_matches"], True
+        )
+
+    # -- deadline ----------------------------------------------------
+
+    def test_slow_changelog_read_times_out(self):
+        calls = []
+
+        async def effect(func, *args):
+            calls.append(func)
+            if len(calls) == 1:
+                return _update_reply()
+            await asyncio.sleep(5)
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync",
+                side_effect=effect,
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write."
+                "_COMMENT_LOOKUP_TIMEOUT",
+                0.05,
+            ),
+        ):
+            result = asyncio.run(
+                _handle_update(
+                    _user_client(),
+                    {"ticket_id": 42, "comment": "hello"},
+                )
+            )
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("(changelog read timed out)", text)
+        self.assertIn("New change token", text)
         self.assertIsNone(result.structuredContent["comment_number"])
 
     def test_reply_to_compares_the_full_string_with_the_quote(self):
@@ -1843,6 +2210,7 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         ).tool
         self.assertIn("comment_number", tool.description)
         self.assertIn("comment_stored_matches", tool.description)
+        self.assertIn("comment_line_endings_folded", tool.description)
 
 
 @pytest.mark.live
@@ -1909,6 +2277,50 @@ async def test_live_update_reports_comment_number_and_stored_bytes():
         ]
         assert len(stored) == 1
         assert stored[0][4] == body
+
+        # A blank comment stores nothing and leaves _ts where it was:
+        # no comment number, and no advice to edit a comment.
+        blank = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "   ",
+                "base_ts": sc["_ts"],
+            },
+        )
+        assert not blank.isError, blank.content[0].text
+        bsc = blank.structuredContent
+        assert bsc["comment_number"] is None, bsc["message"]
+        assert "Trac stored nothing" in bsc["message"]
+        assert "ticket_comment_edit" not in bsc["message"]
+
+        # Two writes back to back, likely in the same second: the second
+        # is told apart by its text, and its CRLF arrives as LF.
+        third = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "x",
+                "base_ts": bsc["_ts"],
+            },
+        )
+        assert not third.isError, third.content[0].text
+        assert third.structuredContent["comment_number"] == 3
+        fourth = await _handle_update(
+            client,
+            {
+                "ticket_id": ticket_id,
+                "comment": "a\r\nb",
+                "base_ts": third.structuredContent["_ts"],
+            },
+        )
+        assert not fourth.isError, fourth.content[0].text
+        fsc = fourth.structuredContent
+        assert fsc["comment_number"] == 4, fsc["message"]
+        assert fsc["comment_stored_matches"] is True, fsc["message"]
+        assert fsc["comment_line_endings_folded"] is True, fsc[
+            "message"
+        ]
     finally:
         client.delete_ticket(ticket_id)
 

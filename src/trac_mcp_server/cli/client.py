@@ -435,20 +435,24 @@ async def _ticket_update(
     # The comment is stored. Report that first, so the tool's text and the
     # gate's notes survive whatever the read-back does.
     _report(result)
-    number = None
-    try:
-        changelog = await call_tool(
-            url,
-            token,
-            "ticket_changelog",
-            _with_instance(args, {"ticket_id": args.ticket}),
-        )
-        if not changelog.isError:
-            number = _comment_number(
-                _sc(changelog).get("changelog") or [], text
+    # The server reads the number off the stored row itself; only an
+    # older daemon, which does not report it, needs the CLI's own
+    # read-back (whose text match fails on CRLF bodies).
+    number = _sc(result).get("comment_number")
+    if number is None:
+        try:
+            changelog = await call_tool(
+                url,
+                token,
+                "ticket_changelog",
+                _with_instance(args, {"ticket_id": args.ticket}),
             )
-    except Exception:  # transport failure on the read-back
-        pass
+            if not changelog.isError:
+                number = _comment_number(
+                    _sc(changelog).get("changelog") or [], text
+                )
+        except Exception:  # transport failure on the read-back
+            pass
     if number is None:
         print(
             "trac-mcp: the comment WAS stored, but trac-mcp could not "

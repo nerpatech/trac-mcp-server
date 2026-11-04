@@ -6,7 +6,9 @@ and structured error responses. Content is TracWiki and is stored
 byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
+import asyncio
 import xmlrpc.client
+from dataclasses import dataclass
 from typing import Any
 
 import mcp.types as types
@@ -22,6 +24,11 @@ from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
+
+# Deadline for the changelog read-back that names the comment just posted
+# (#124). The write has already landed by then, so a slow read costs the
+# number, never the write.
+_COMMENT_LOOKUP_TIMEOUT = 10.0
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -97,7 +104,7 @@ TICKET_WRITE_TOOLS = [
     _build_ticket_create_tool(),
     types.Tool(
         name="ticket_update",
-        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): pass it as base_ts on your next ticket_update to the same ticket instead of calling ticket_get again. Any other write to the ticket moves _ts too without returning it (ticket_comment_reply, ticket_comment_edit, ticket_batch_update, another session), so after one of those, re-read with ticket_get. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only ever adds new ones. When a comment is added, the result names its comment number (comment_number, for ticket_render_check comment=N or ticket_comment_edit) and whether Trac stored it byte-for-byte as sent (comment_stored_matches, with the first difference if not), so no ticket_changelog or ticket_get read-back is needed.",
+        description="Update ticket attributes and/or add comments. Comment and description are TracWiki and are stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. Pass base_ts (the change token returned by ticket_get) to enable optimistic locking: the update is rejected with a version_conflict error, naming what changed, if the ticket was modified since that token was read. Omitting base_ts skips conflict detection entirely -- the write always succeeds even if the ticket changed underneath you, so always read the ticket first and pass its base_ts back. The result carries the ticket's new change token (_ts, also in structuredContent): pass it as base_ts on your next ticket_update to the same ticket instead of calling ticket_get again. Any other write to the ticket moves _ts too without returning it (ticket_comment_reply, ticket_comment_edit, ticket_batch_update, another session), so after one of those, re-read with ticket_get. Set reply_to to quote an earlier comment. To correct or remove a comment you already posted, use ticket_comment_edit or ticket_comment_delete instead of posting a second comment; this tool only ever adds new ones. When a comment is added, the result names its comment number (comment_number, for ticket_render_check comment=N or ticket_comment_edit) and whether Trac stored it byte-for-byte as sent (comment_stored_matches, with the first difference if not), so no ticket_changelog or ticket_get read-back is needed. CR and CRLF line endings are folded to LF in transport before Trac stores the text; that is reported as comment_line_endings_folded, not as a mismatch. An update that stores nothing (a blank comment with no field change, or an unmoved _ts) says so and carries no comment_number.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -533,54 +540,92 @@ async def _handle_update(
     # a token degrades to a warning, never to a failure.
     new_ts = _change_token_from_update(update_result)
 
+    # Trac stores nothing for an update whose comment is empty after
+    # whitespace stripping and which changes no field, and tracrpc then
+    # returns the UNCHANGED _ts. Looking for "the comment just posted"
+    # there would find the previous one, so say nothing was stored.
+    token_unmoved = (
+        base_ts is not None
+        and new_ts is not None
+        and new_ts == str(base_ts)
+    )
+    blank_no_fields = (
+        comment.replace("\u200b", "").strip() == "" and not attributes
+    )
+    nothing_stored: str | None = None
+    if token_unmoved or (
+        base_ts is None and blank_no_fields and comment
+    ):
+        nothing_stored = (
+            "Trac stored nothing: a comment that is empty after "
+            "whitespace stripping, with no field changes, is not saved."
+            if blank_no_fields
+            else "Trac stored nothing: the change token did not move, "
+            "so no change was saved."
+        )
+
     # Name the comment just posted and check it was stored as sent
     # (#124). Skipped without a comment: nothing was posted to find.
-    comment_number: int | None = None
-    comment_matches: bool | None = None
-    comment_mismatch: dict[str, Any] | None = None
+    posted: _PostedComment | None = None
     comment_lines: list[str] = []
-    if comment:
-        (
-            comment_number,
-            comment_matches,
-            comment_mismatch,
-            failure,
-        ) = await _find_posted_comment(
+    if nothing_stored is not None:
+        comment_lines.append(nothing_stored)
+    elif comment:
+        posted = await _find_posted_comment(
             client, ticket_id, comment, update_result, new_ts
         )
-        if failure is not None:
+        if posted.failure is not None:
             comment_lines.append(
                 f"WARNING: the comment was posted, but its number "
-                f"could not be determined ({failure}). Call "
-                f"ticket_changelog(ticket_id={ticket_id}) on the same "
-                f"instance to find it."
+                f"could not be determined ({posted.failure}). Call "
+                f"ticket_get(ticket_id={ticket_id}) on the same "
+                f"instance; its comments are listed with their numbers."
             )
-        elif comment_mismatch is not None:
+        elif posted.mismatch is not None:
+            mismatch = posted.mismatch
             comment_lines.append(
-                f"WARNING: comment {comment_number} was stored "
+                f"WARNING: comment {posted.number} was stored "
                 f"differently from the text sent: first difference at "
-                f"offset {comment_mismatch['offset']} "
-                f"(sent {comment_mismatch['sent_length']} chars, "
-                f"stored {comment_mismatch['stored_length']}); "
-                f"sent ...{comment_mismatch['sent']!r}... "
-                f"stored ...{comment_mismatch['stored']!r}... "
+                f"offset {mismatch['offset']} "
+                f"(sent {mismatch['sent_length']} chars, "
+                f"stored {mismatch['stored_length']}); "
+                f"sent ...{mismatch['sent']!r}... "
+                f"stored ...{mismatch['stored']!r}... "
                 f"Use ticket_comment_edit to correct it."
+            )
+        elif posted.folded:
+            comment_lines.append(
+                f"Stored comment {posted.number} matches the text "
+                f"sent, except that its CR/CRLF line endings were "
+                f"folded to LF by the XML-RPC transport (Trac cannot "
+                f"receive CR this way; nothing to correct)."
             )
         else:
             comment_lines.append(
-                f"Stored comment {comment_number} matches the text "
+                f"Stored comment {posted.number} matches the text "
                 f"sent, byte-for-byte."
             )
+    comment_number = posted.number if posted else None
+    comment_mismatch = posted.mismatch if posted else None
+    # The verdict is derived once: no number, no verdict.
+    comment_matches: bool | None = (
+        None if comment_number is None else comment_mismatch is None
+    )
+    comment_folded: bool | None = (
+        None if comment_number is None else posted.folded
+    )
 
     # Build summary of changes
     changes = []
-    if comment:
+    if nothing_stored is not None:
+        changes.append("no change stored")
+    elif comment:
         changes.append(
             f"added comment {comment_number}"
             if comment_number is not None
             else "added comment"
         )
-    if attributes:
+    if attributes and nothing_stored is None:
         changes.append(f"updated {len(attributes)} field(s)")
 
     change_summary = ", ".join(changes) if changes else "no changes"
@@ -619,6 +664,7 @@ async def _handle_update(
             "comment_number": comment_number,
             "comment_stored_matches": comment_matches,
             "comment_mismatch": comment_mismatch,
+            "comment_line_endings_folded": comment_folded,
             "message": message,
         },
     )
@@ -630,8 +676,8 @@ def _comment_mismatch(sent: str, stored: str) -> dict[str, Any] | None:
     ``offset`` is the index of the first differing character (the
     shorter length when one string is a prefix of the other), counted in
     characters of the Python str. ``sent`` and ``stored`` are the 40
-    characters either side of it, so a stripped trailing space or CRLF
-    turned LF can be seen without dumping both texts.
+    characters either side of it, so a stripped trailing space can be
+    seen without dumping both texts.
     """
     if sent == stored:
         return None
@@ -677,13 +723,36 @@ def _update_change_epoch(
 
 
 def _comment_cnum(entry: Any) -> int | None:
-    """The comment number of a changeLog comment row, or None.
+    """The flat comment number of a changeLog comment row, or None.
 
-    Trac keeps it in the row's oldvalue: ``"5"``, or ``"2.5"`` for a
-    reply threaded under comment 2.
+    Trac keeps it in the row's oldvalue: ``"5"``. A dotted ``"2.5"`` is a
+    reply threaded under comment 2 -- never this tool's own write, since
+    tracrpc's ``ticket.update`` saves without a ``replyto``. ``int()`` is
+    the test, not ``isdigit()``: ``"\u00b2".isdigit()`` is True and
+    ``int("\u00b2")`` raises.
     """
-    tail = str(entry[3]).split(".")[-1]
-    return int(tail) if tail.isdigit() else None
+    text = str(entry[3])
+    if "." in text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class _PostedComment:
+    """What the changelog read-back found for a ``ticket.update`` comment.
+
+    ``number`` is None when the comment could not be pinned down, with
+    ``failure`` saying why; ``mismatch`` is None when the stored text is
+    the text sent (``folded``: up to CR/CRLF folded to LF in transport).
+    """
+
+    number: int | None = None
+    mismatch: dict[str, Any] | None = None
+    folded: bool = False
+    failure: str | None = None
 
 
 async def _find_posted_comment(
@@ -692,66 +761,83 @@ async def _find_posted_comment(
     comment: str,
     update_result: Any,
     new_ts: str | None,
-) -> tuple[int | None, bool | None, dict[str, Any] | None, str | None]:
+) -> _PostedComment:
     """Find the comment a ``ticket.update`` just posted in the changelog.
 
-    Returns ``(comment_number, stored_matches, mismatch, failure)``;
-    ``failure`` is a short reason when the comment could not be pinned
-    down, and the other three are then None. Never raises: the write has
-    already landed, so a failed lookup is reported, not propagated.
+    Never raises: the write has already landed, so a failed lookup is
+    reported through ``failure``, not propagated.
 
     The number cannot be counted from the changelog, because a
     description-only edit consumes one too; it is read off the row.
+    Candidates are this user's permanent, flat comment rows written in
+    the update's second; if several remain (another write of ours in the
+    same second) the text sent picks among them.
     """
     epoch = _update_change_epoch(update_result, new_ts)
     if epoch is None:
-        return None, None, None, "no change time in Trac's reply"
+        return _PostedComment(failure="no change time in Trac's reply")
     try:
-        changelog = await run_sync(
-            client.get_ticket_changelog, ticket_id
+        changelog = await asyncio.wait_for(
+            run_sync(client.get_ticket_changelog, ticket_id),
+            timeout=_COMMENT_LOOKUP_TIMEOUT,
         )
-        candidates = []
-        for entry in changelog or []:
-            if (
-                not isinstance(entry, (list, tuple))
-                or len(entry) < 5
-                or entry[2] != "comment"
-            ):
-                continue
-            when = TracClient._parse_trac_time(entry[0])
-            if when is not None and int(when) == epoch:
-                candidates.append(entry)
+    except TimeoutError:
+        return _PostedComment(failure="changelog read timed out")
     except Exception:
-        return None, None, None, "changelog unreadable"
+        return _PostedComment(failure="changelog unreadable")
+
+    username = getattr(client.config, "username", None)
+    author = (
+        username.strip().lower() if isinstance(username, str) else None
+    )
+    candidates = []
+    for entry in changelog or []:
+        if (
+            not isinstance(entry, (list, tuple))
+            or len(entry) < 6
+            or entry[2] != "comment"
+            # Attachment pseudo-rows are UNIONed in with permanent 0.
+            or not entry[5]
+            or _comment_cnum(entry) is None
+        ):
+            continue
+        if author is not None and (
+            not isinstance(entry[1], str)
+            or entry[1].strip().lower() != author
+        ):
+            continue
+        when = TracClient._parse_trac_time(entry[0])
+        if when is not None and int(when) == epoch:
+            candidates.append(entry)
 
     if not candidates:
-        reason = "no comment entry at the update's time"
-        return None, None, None, reason
+        who = f" by {username.strip()}" if author is not None else ""
+        return _PostedComment(
+            failure=f"no comment entry{who} at the update's time"
+        )
 
+    # The XML-RPC transport folds CRLF and lone CR to LF before Trac
+    # stores the text, so CR can never survive: compare against that.
+    sent_norm = comment.replace("\r\n", "\n").replace("\r", "\n")
     chosen = candidates[0]
     if len(candidates) > 1:
         # Another write landed in the same second: go by the text sent.
-        same_text = [e for e in candidates if e[4] == comment]
+        same_text = [e for e in candidates if (e[4] or "") == sent_norm]
         if not same_text:
-            reason = (
-                "several comment entries at that time, none matching "
-                "the text sent"
+            return _PostedComment(
+                failure=(
+                    "several comment entries at that time, none "
+                    "matching the text sent"
+                )
             )
-            return None, None, None, reason
-        numbers = [_comment_cnum(e) for e in same_text]
-        if any(n is None for n in numbers):
-            return None, None, None, "unparseable comment number"
-        chosen = same_text[numbers.index(max(numbers))]
+        chosen = max(same_text, key=lambda e: _comment_cnum(e) or 0)
 
-    number = _comment_cnum(chosen)
-    if number is None:
-        return None, None, None, "unparseable comment number"
-    stored = chosen[4] if isinstance(chosen[4], str) else str(chosen[4])
-    return (
-        number,
-        stored == comment,
-        _comment_mismatch(comment, stored),
-        None,
+    # An empty <string></string> arrives as None, not "".
+    stored = chosen[4] or ""
+    return _PostedComment(
+        number=_comment_cnum(chosen),
+        mismatch=_comment_mismatch(sent_norm, stored),
+        folded=stored == sent_norm and sent_norm != comment,
     )
 
 
