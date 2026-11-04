@@ -3,6 +3,7 @@ ping
 wiki_attachment_get
 wiki_attachment_list
 wiki_attachment_put
+wiki_conventions
 wiki_create
 wiki_diff
 wiki_file_detect_format
