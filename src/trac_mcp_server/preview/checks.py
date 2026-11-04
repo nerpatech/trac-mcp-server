@@ -1158,11 +1158,15 @@ def _bracket_label(
     `token_end`, or None if `token_end` isn't inside a bracket at all.
 
     Handles the no-label shape (`[token]`, nothing between the target and
-    the closing bracket) as its own case: the realm regex's greedy `\\S+`
-    swallows the `]` into `raw` itself when there's no space before it, so
-    `token_end` lands PAST the bracket and a forward search for `]` finds
-    the wrong one (or none) -- this warned a correctly configured,
-    label-less bracket as unconfigured until ticket #57 comment 8 caught
+    the closing bracket) as its own case: the realm regex's greedy
+    `[^\\s`]+` swallows the `]` -- and anything glued on after it, such as
+    `).` (ticket #147) -- when there's no space before it, so `token_end`
+    lands PAST the bracket and a forward search for `]` finds the wrong
+    one (or none). The caller therefore cuts `raw` at its first `]` before
+    calling this, so the no-label test is `raw.endswith("]")` on the CUT
+    token, while `token_end` is still the uncut match's end and is only
+    read on the labelled path, where nothing was cut. This warned a
+    correctly configured, label-less bracket as unconfigured until ticket #57 comment 8 caught
     it live. Trac renders a label-less bracket's anchor text as the bare
     resolved suffix (`wiki:Index`, not `auto_pm:wiki:Index`), which the
     caller already computes separately -- signalled here by returning ""
