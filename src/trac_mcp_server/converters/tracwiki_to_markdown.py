@@ -202,7 +202,10 @@ _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 # a new sibling block on its own, without needing a blank line, rather than
 # being read as a lazy continuation of the preceding list item's paragraph
 # (ticket #90). Measured against mistune with this project's own plugin set
-# (``plugins=["table"]``, matching ``markdown_to_tracwiki``'s parser):
+# (``plugins=["table"]``, which was ``markdown_to_tracwiki``'s whole plugin
+# set at the time; since #142 that module's ``_MISTUNE_PLUGINS`` also loads
+# ``table_in_list`` / ``table_in_quote``, and the column-zero table row
+# below is the case whose reading that changes -- see ``_convert_tables``):
 # an ATX heading, a blockquote marker, a fenced code block, and a thematic
 # break all interrupt; a GFM table row does NOT (it lazily absorbs exactly
 # like plain prose) and is deliberately left off this list so it still gets

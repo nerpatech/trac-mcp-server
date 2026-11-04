@@ -221,6 +221,19 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
 
 
+# The mistune plugin set for every parse of Markdown in this module. The
+# converter and the `list_item_split` detector (#125) must agree on what is
+# a table, so both read this one list (ticket #142). `table_in_list` and
+# `table_in_quote` let a GFM table indented under a list item or after a
+# `>` marker parse as a table instead of lazy paragraph text; they are
+# addressed by dotted path because a bare name raises ValueError.
+_MISTUNE_PLUGINS = [
+    "table",
+    "mistune.plugins.table.table_in_list",
+    "mistune.plugins.table.table_in_quote",
+]
+
+
 def _indent_nonblank(lines: list[str], indent: str) -> list[str]:
     """Prefix every non-blank line with `indent`; a blank line stays blank
     rather than picking up trailing whitespace (tickets #75, #112)."""
@@ -792,18 +805,33 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # of non-list blocks, or one nested list. Ticket #112:
                     # collecting "all non-lists, then all lists" moved a
                     # paragraph that follows a sub-list above it.
-                    runs: list[tuple[bool, list[dict[str, Any]]]] = []
+                    # Ticket #142: a GFM table child is its own run kind
+                    # ("table"): `||` rows indented under an item end the
+                    # list in Trac (measured on /trac_test), so it is
+                    # rendered as a `{{{#!div}}}` block below.
+                    runs: list[tuple[str, list[dict[str, Any]]]] = []
                     for child in children:
-                        is_list = child.get("type") == "list"
-                        # Adjacent non-lists share a run; every list is
-                        # its own run.
-                        if runs and not is_list and not runs[-1][0]:
+                        child_type = child.get("type")
+                        kind = (
+                            "list"
+                            if child_type == "list"
+                            else "table"
+                            if child_type == "table"
+                            else "text"
+                        )
+                        # Adjacent plain blocks share a run; every list
+                        # and every table is its own run.
+                        if (
+                            runs
+                            and kind == "text"
+                            and runs[-1][0] == "text"
+                        ):
                             runs[-1][1].append(child)
                         else:
-                            runs.append((is_list, [child]))
+                            runs.append((kind, [child]))
 
                     # The item's own text is the run before the first list.
-                    if runs and not runs[0][0]:
+                    if runs and runs[0][0] == "text":
                         text = self.render_tokens(runs[0][1], state)
                         runs = runs[1:]
                     else:
@@ -812,13 +840,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # Everything after it, in order. A nested list handles
                     # its own newlines; a later non-list run is a
                     # continuation paragraph that follows a sub-list.
-                    after_runs: list[tuple[bool, str]] = []
-                    for is_list, run in runs:
+                    after_runs: list[tuple[str, str]] = []
+                    for kind, run in runs:
                         rendered = self.render_tokens(run, state).strip(
                             "\n"
                         )
                         if rendered:
-                            after_runs.append((is_list, rendered))
+                            after_runs.append((kind, rendered))
                 else:
                     text = token.get("raw", "")
                     after_runs = []
@@ -859,9 +887,23 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Trac renders it as a blockquote (a Trac limit, #112), but
                 # the order is the author's.
                 parts = [f"{prefix} {text}"]
-                for is_list, rendered in after_runs:
-                    if is_list:
+                for kind, rendered in after_runs:
+                    if kind == "list":
                         parts.append(rendered)
+                    elif kind == "table":
+                        # Wrapped in a `{{{#!div}}}` so Trac keeps the
+                        # table inside the <li>, and appended with NO blank
+                        # line before it: Trac ends a list at any blank
+                        # line, so the loose-item separator used for
+                        # continuation paragraphs would split the list.
+                        parts.extend(
+                            _indent_nonblank(
+                                f"{{{{{{#!div\n{rendered}\n}}}}}}".split(
+                                    "\n"
+                                ),
+                                continuation_indent,
+                            )
+                        )
                     else:
                         parts.append("")
                         parts.extend(
@@ -1034,7 +1076,7 @@ def markdown_to_tracwiki(
         heading_anchors=heading_anchors, placeholders=placeholders
     )
     markdown = mistune.create_markdown(
-        renderer=renderer, plugins=["table"]
+        renderer=renderer, plugins=_MISTUNE_PLUGINS
     )
 
     # Parse and render
@@ -1140,7 +1182,7 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     split, with nothing to tell the author.
 
     Parses the same way `markdown_to_tracwiki` does (mistune's AST with
-    the `table` plugin, over the text after `_stash_bracket_syntax`), so
+    the same `_MISTUNE_PLUGINS`, over the text after `_stash_bracket_syntax`), so
     the detector and the converter agree on what is a list and what is
     inside a fenced block. Nested items count too.
 
@@ -1151,7 +1193,9 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     top-level item, 1 for an item of a nested list, ...>}``.
     """
     stashed, placeholders = _stash_bracket_syntax(markdown_text)
-    parse = mistune.create_markdown(renderer=None, plugins=["table"])
+    parse = mistune.create_markdown(
+        renderer=None, plugins=_MISTUNE_PLUGINS
+    )
     tokens = parse(stashed)
     findings: list[dict] = []
 
