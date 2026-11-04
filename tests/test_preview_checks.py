@@ -425,6 +425,46 @@ def test_warning_rows_produce_expected_code(name, expected_code):
     )
 
 
+# Ticket #147. A label-less bracketed realm link followed directly by
+# `).` -- `([auto_pm:wiki:Page]).`, the shape #123 comment 1 tripped on.
+# `_PREFIX_REALM_RE`'s `[^\s`]+` swallows `]).`, not just `]`, so the
+# token no longer ENDS in `]` and the no-label branch (#57 comment 8)
+# missed it. Both renders captured live on /trac_mcp_server
+# (2026-11-04): the configured prefix renders an anchor, the typo'd
+# `auto-pm` renders plain text. Both directions are asserted
+# (`Rules/testing/RecallGateEveryTightening`), and the control's token
+# must stop at the bracket, not carry `]).` into the message.
+ROW147_RESOLVED = "row147_bracket_no_label_realm_close_paren"
+ROW147_TYPO = "row147_typo_bracket_no_label_realm_close_paren"
+
+
+def _row147_prefix_warnings(name):
+    markdown_source, tracwiki, facts, source_format = _load(name)
+    return [
+        w
+        for w in build_warnings(
+            markdown_source,
+            tracwiki,
+            facts,
+            probes={},
+            check_targets=False,
+            source_format=source_format,
+        )
+        if w["code"] == "unconfigured_intertrac_prefix"
+    ]
+
+
+def test_row147_resolved_bracket_before_close_paren_is_silent():
+    assert _row147_prefix_warnings(ROW147_RESOLVED) == []
+
+
+def test_row147_unconfigured_bracket_before_close_paren_still_warns():
+    warnings = _row147_prefix_warnings(ROW147_TYPO)
+    assert [w["evidence"]["token"] for w in warnings] == [
+        "auto-pm:wiki:Rules/testing/SeededDefectFirst"
+    ]
+
+
 def test_seeded_defect_row1_pre_fix_warns_escaped_link_target():
     """Row 1's pre-fix TracWiki must trip `escaped_link_target`.
 
