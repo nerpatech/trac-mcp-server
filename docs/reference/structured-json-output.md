@@ -52,7 +52,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 | `ticket_batch_update` | `updated[]`, `failed[]`, `total`, `succeeded`, `failed_count` |
 | `wiki_get` | `name`, `content`, `version`, `author`, `lastModified` |
 | `wiki_recent_changes` | `pages[]` (each: `name`, `author`, `lastModified`, `version`), `since_days` |
-| `wiki_file_push` | `page_name`, `action`, `version`, `source_format`, `converted`, `file_path`, `warnings`, `readback_failed` (plus `readback_error` when true; `version` is then `null`) |
+| `wiki_file_push` | `page_name`, `action`, `version`, `source_format`, `converted`, `file_path`, `warnings`, `readback_failed` (plus `readback_error` when true; `version` is then `null`), `possible_overwrite` (plus `intervening_versions` when true) |
 | `wiki_file_pull` | `page_name`, `file_path`, `format`, `version`, `bytes_written`, `converted` |
 | `wiki_file_detect_format` | `file_path`, `format`, `encoding`, `size_bytes` |
 | `timeline_search` | `events[]` (each: `kind`, `date`, `author`, `title`, `description`, `url`), `total`, `showing` |
