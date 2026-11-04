@@ -24,6 +24,7 @@ from pydantic_core import Url
 
 from .. import __version__
 from ..config_bootstrap import bootstrap_server_config
+from ..config_schema import ServerConfig
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
@@ -56,6 +57,7 @@ from .tools.registry import (
     with_page_alias,
     with_strict_schema,
 )
+from .tools.write_gate import gate_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +89,21 @@ async def _handle_ping(
     """Handle ping tool -- test Trac connectivity."""
     try:
         version = await run_sync(client.validate_connection)
+        # Ticket #153: the gate's state rides along -- one attribute
+        # read, and the cheapest call a session makes.
+        write_gate = gate_enabled(client)
         return types.CallToolResult(
             content=[
                 types.TextContent(
                     type="text",
-                    text=f"Trac MCP server connected successfully. API version: {version}",
+                    text=(
+                        "Trac MCP server connected successfully. "
+                        f"API version: {version}\n"
+                        f"write_gate: {'true' if write_gate else 'false'}"
+                    ),
                 )
-            ]
+            ],
+            structuredContent={"write_gate": write_gate},
         )
     except Exception as e:
         return types.CallToolResult(
@@ -340,6 +350,28 @@ async def handle_call_tool(
 # ---------------------------------------------------------------------------
 
 
+def log_startup_settings(
+    server_config: ServerConfig, write_gate: bool
+) -> None:
+    """Log the daemon-wide settings a session cannot see for itself.
+
+    ``write_gate`` (ticket #153) sits beside ``file_access``: the Trac
+    config that carries it is only loaded by the lifespan, which is why
+    this line is written once that has run rather than straight after
+    ``bootstrap_server_config``. At WARNING when the gate is off, so a
+    switch left set after a test stands out in the journal instead of
+    reading like every other startup.
+    """
+    write_gate = bool(write_gate)
+    logger.log(
+        logging.INFO if write_gate else logging.WARNING,
+        "file_access=%s, max_inline_bytes=%d, write_gate=%s",
+        server_config.file_access,
+        server_config.max_inline_bytes,
+        "on" if write_gate else "off",
+    )
+
+
 async def main(config_overrides: dict | None = None):
     """Run the MCP server with the configured transport.
 
@@ -425,11 +457,6 @@ async def main(config_overrides: dict | None = None):
         server_config.file_access or "off",
         server_config.max_inline_bytes,
     )
-    logger.info(
-        "file_access=%s, max_inline_bytes=%d",
-        server_config.file_access,
-        server_config.max_inline_bytes,
-    )
 
     # Use lifespan manager for startup validation with config overrides.
     # NOTE: We call set_instances() directly here rather than in the lifespan
@@ -443,6 +470,8 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
+        # The registry's value, the same one list_instances reports.
+        log_startup_settings(server_config, ctx["instances"].write_gate)
         try:
             if server_config.transport == "stdio":
                 await _run_stdio()

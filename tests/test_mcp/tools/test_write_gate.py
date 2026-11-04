@@ -51,6 +51,9 @@ from trac_mcp_server.mcp.tools.ticket_write import (
 from trac_mcp_server.mcp.tools.ticket_write import (
     _handle_update as _handle_ticket_update,
 )
+from trac_mcp_server.mcp.tools.wiki_file import (
+    _handle_push as _handle_wiki_file_push,
+)
 from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_create as _handle_wiki_create,
 )
@@ -58,6 +61,7 @@ from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_update as _handle_wiki_update,
 )
 from trac_mcp_server.mcp.tools.write_gate import (
+    GATE_OFF_LINE,
     check_write,
     gate_enabled,
     gate_or_refuse,
@@ -325,7 +329,8 @@ def test_the_kill_switch_turns_the_gate_off():
             recheck_with="wiki_render_check",
         )
     )
-    assert refusal is None and lines == []
+    # Ticket #153: off, the gate checks nothing and SAYS so.
+    assert refusal is None and lines == [GATE_OFF_LINE]
     client.wiki_to_html.assert_not_called()
 
 
@@ -831,6 +836,29 @@ def _milestone_update(client, description):
         )
 
 
+def _wiki_file_push(client, content):
+    # get_wiki_page_info (the page exists, so this is an update), then
+    # put_wiki_page. format="tracwiki" so the bytes checked are the
+    # bytes given -- conversion is not what is under test here.
+    with patch(
+        "trac_mcp_server.mcp.tools.wiki_file.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            {"name": "P", "version": 1},
+            {"name": "P", "version": 2},
+        ]
+        return asyncio.run(
+            _handle_wiki_file_push(
+                client,
+                {
+                    "page_name": "P",
+                    "content": content,
+                    "format": "tracwiki",
+                },
+            )
+        )
+
+
 WRITE_PATHS = [
     ("wiki_create", _wiki_create),
     ("wiki_update", _wiki_update),
@@ -848,6 +876,9 @@ WRITE_PATHS = [
     # outside #64's gate after #87 closed the milestone gap.
     ("ticket_comment_edit", _ticket_comment_edit),
     ("ticket_comment_reply", _ticket_comment_reply),
+    # Ticket #153 named it among the paths that must report a disabled
+    # gate; it was gated by #64 but had no row here.
+    ("wiki_file_push", _wiki_file_push),
 ]
 
 
@@ -872,6 +903,125 @@ def test_every_write_path_allows_correct_content(name, call):
     content."""
     result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
     assert not result.isError, _text(result)
+
+
+# ---------------------------------------------------------------------
+# Ticket #153: a disabled gate says so on every write.
+# ---------------------------------------------------------------------
+
+
+def _gate_off_client(html=BROKEN_HTML):
+    client = _client(html)
+    client.config.write_gate = False
+    return client
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_153_every_write_path_says_so_when_the_gate_is_off(name, call):
+    """With TRAC_WRITE_GATE=0 left set, a broken link sailed through
+    the shared daemon with a response identical to a checked clean
+    write. Now the write still lands -- the switch keeps doing what
+    ticket #64 ruling 5 asked -- but the response carries the OFF line.
+
+    The seed is the BROKEN source, so a pass here cannot be the gate
+    quietly running and finding nothing: this content refuses with the
+    gate on (`test_every_write_path_refuses_a_broken_link`)."""
+    client = _gate_off_client()
+    result = call(client, BROKEN_SOURCE)
+    assert not result.isError, f"{name}: {_text(result)}"
+    assert GATE_OFF_LINE in _text(result), f"{name} did not say so"
+    client.wiki_to_html.assert_not_called()
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_153_no_off_line_when_the_gate_is_on(name, call):
+    """The other half: a line printed regardless of the switch would
+    pass the test above and report nothing."""
+    result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE not in _text(result)
+    assert "write gate is OFF" not in _text(result)
+
+
+def test_153_a_write_with_no_text_still_says_so():
+    """A field-only ticket_update carries nothing to check, but the
+    line reports the daemon, not this write's content: the cheapest
+    write is as good a place as any to notice the switch."""
+    client = _gate_off_client()
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_ticket_update(
+                client, {"ticket_id": 1, "priority": "major"}
+            )
+        )
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE in _text(result)
+
+
+def _batch_create(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = 7
+        return asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {"summary": "a", "description": description},
+                        {"summary": "b", "description": description},
+                    ]
+                },
+            )
+        )
+
+
+def _batch_update(client, comment):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": 1, "comment": comment},
+                        {"ticket_id": 2, "comment": comment},
+                    ]
+                },
+            )
+        )
+
+
+BATCH_PATHS = [
+    ("ticket_batch_create", _batch_create),
+    ("ticket_batch_update", _batch_update),
+]
+
+
+@pytest.mark.parametrize("name,call", BATCH_PATHS)
+def test_153_batch_tools_say_so_once_per_call(name, call):
+    """The batch tools gate per item through check_write, never through
+    gate_or_refuse, so they append the line themselves -- once, since
+    it describes the daemon rather than any one item."""
+    client = _gate_off_client()
+    result = call(client, BROKEN_SOURCE)
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    assert text.count(GATE_OFF_LINE) == 1, text
+    client.wiki_to_html.assert_not_called()
+
+
+@pytest.mark.parametrize("name,call", BATCH_PATHS)
+def test_153_batch_tools_say_nothing_when_the_gate_is_on(name, call):
+    result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    assert GATE_OFF_LINE not in text
 
 
 def test_reply_to_does_not_charge_the_author_for_the_quoted_comment():

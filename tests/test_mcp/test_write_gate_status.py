@@ -1,0 +1,142 @@
+"""Ticket #153: the write gate's state is visible outside the daemon.
+
+`list_instances` and the per-write OFF line are tested beside their own
+handlers (`tools/test_instances.py`, `tools/test_write_gate.py`). This
+file holds the two that live in ``server.py``: ``ping`` and the startup
+log line.
+"""
+
+import asyncio
+import dataclasses
+import logging
+from contextlib import asynccontextmanager
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from trac_mcp_server.config import Config
+from trac_mcp_server.config_schema import ServerConfig
+from trac_mcp_server.instances import InstanceRegistry
+from trac_mcp_server.mcp import server as server_module
+from trac_mcp_server.mcp.server import (
+    _handle_ping,
+    log_startup_settings,
+)
+
+LOGGER = "trac_mcp_server.mcp.server"
+
+
+def _config(**kwargs) -> Config:
+    return Config(
+        trac_url="http://192.168.10.4:8000/trac_test",
+        username="agent_rpc",
+        password="secret",
+        **kwargs,
+    )
+
+
+def _ping(write_gate: bool):
+    client = MagicMock()
+    client.config = _config(write_gate=write_gate)
+    client.validate_connection.return_value = "1.2.0"
+    return asyncio.run(_handle_ping(client, {}))
+
+
+@pytest.mark.parametrize("state", [True, False])
+def test_ping_reports_the_write_gate(state):
+    result = _ping(state)
+    assert not result.isError
+    assert result.structuredContent == {"write_gate": state}
+    text = result.content[0].text
+    assert "API version: 1.2.0" in text
+    assert f"write_gate: {'true' if state else 'false'}" in text
+
+
+# ---------------------------------------------------------------------
+# The startup log line.
+# ---------------------------------------------------------------------
+
+
+def _server_config():
+    return ServerConfig(
+        transport="http", file_access="off", max_inline_bytes=77
+    )
+
+
+def _records(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.name == LOGGER and "file_access=" in r.getMessage()
+    ]
+
+
+def test_startup_log_names_the_gate_on_at_info(caplog):
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    log_startup_settings(_server_config(), True)
+    (record,) = _records(caplog)
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == (
+        "file_access=off, max_inline_bytes=77, write_gate=on"
+    )
+
+
+def test_startup_log_names_the_gate_off_at_warning(caplog):
+    """WARNING, so a switch left set after a test stands out in the
+    journal rather than reading like every other startup."""
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    log_startup_settings(_server_config(), False)
+    (record,) = _records(caplog)
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().endswith("write_gate=off")
+
+
+@pytest.mark.parametrize(
+    "write_gate,expected",
+    [(True, "write_gate=on"), (False, "write_gate=off")],
+)
+async def test_main_logs_the_registrys_write_gate(
+    caplog, write_gate, expected
+):
+    """The wiring: ``main()`` logs the value the lifespan's registry
+    holds -- the one ``list_instances`` reports -- once it has loaded
+    the Trac config that carries it."""
+    registry = InstanceRegistry(_config(write_gate=write_gate), {})
+
+    @asynccontextmanager
+    async def _fake_lifespan(config_overrides=None):
+        yield {"instances": registry, "client": MagicMock()}
+
+    async def _fake_run_http(_server, _config):
+        return None
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    with (
+        patch.object(
+            server_module,
+            "bootstrap_server_config",
+            return_value=_server_config(),
+        ),
+        patch.object(server_module, "setup_logging"),
+        patch.object(
+            server_module,
+            "check_version_consistency",
+            return_value=(True, "ok"),
+        ),
+        patch.object(
+            server_module, "load_declared_instances", return_value=[]
+        ),
+        patch.object(server_module, "server_lifespan", _fake_lifespan),
+        patch.object(server_module, "run_http", _fake_run_http),
+    ):
+        await server_module.main()
+
+    (record,) = _records(caplog)
+    assert record.getMessage().endswith(expected)
+
+
+def test_registry_write_gate_follows_the_default_config():
+    config = _config()
+    assert InstanceRegistry(config, {}).write_gate is True
+    off = dataclasses.replace(config, write_gate=False)
+    assert InstanceRegistry(off, {}).write_gate is False

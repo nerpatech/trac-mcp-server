@@ -26,6 +26,7 @@ from .write_gate import (
     attachment_names_for_ticket,
     check_write,
     gate_enabled,
+    gate_off_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,10 @@ async def _handle_batch_create(
             lines.append(
                 f"  - [index {item.get('index', '?')}] {item.get('summary', '')}: {item['error']}"
             )
+    # Ticket #153: once per call, not per item -- it is the daemon's
+    # state, and the per-item checks never reach gate_or_refuse.
+    if off := gate_off_lines(client):
+        lines.extend(["", *off])
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text="\n".join(lines))],
@@ -438,6 +443,9 @@ async def _handle_batch_update(
         lines.append("Failed:")
         for item in failed:
             lines.append(f"  - #{item['id']}: {item['error']}")
+    # Ticket #153, as in _handle_batch_create.
+    if off := gate_off_lines(client):
+        lines.extend(["", *off])
 
     return types.CallToolResult(
         content=[types.TextContent(type="text", text="\n".join(lines))],

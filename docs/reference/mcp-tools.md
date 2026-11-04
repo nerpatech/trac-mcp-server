@@ -29,6 +29,32 @@ caller passed the argument, `server_default` when the fallback answered), in
 too -- that is where it matters most, since "ticket does not exist" and
 "wrong instance" read identically without it.
 
+## Write Gate Status
+
+Every write that stores TracWiki (`ticket_create`, `ticket_update`,
+`ticket_comment_edit`, `ticket_comment_reply`, `wiki_create`, `wiki_update`,
+`wiki_file_push`, `milestone_create`, `milestone_update`, and per item
+`ticket_batch_create` / `ticket_batch_update`) passes through the write-time
+link gate, which refuses a write carrying a broken link with
+`link_check_failed`. The gate has a daemon-wide emergency off switch,
+`TRAC_WRITE_GATE=0` (or `write_gate: false` in the YAML config); every routed
+instance inherits it.
+
+**A disabled gate says so.** With the switch off, each of those writes still
+succeeds, and its response carries this line (the batch tools add it once
+per call, not once per item):
+
+```
+NOTE: the write gate is OFF on this daemon (TRAC_WRITE_GATE=0, or write_gate: false in its config file), so this write was NOT link-checked -- not verified clean.
+```
+
+The line appears whether or not the write carried any text: it reports the
+daemon's state. With the gate on it never appears. `list_instances` and
+`ping` report the switch too, as `write_gate: true|false` (top-level in
+`structuredContent` and in the text), and the server's startup log line reads
+`file_access=..., max_inline_bytes=..., write_gate=on|off`, at `WARNING` when
+the gate is off.
+
 ---
 
 ## ping
@@ -45,9 +71,17 @@ too -- that is where it matters most, since "ticket does not exist" and
 ```json
 {
   "type": "text",
-  "text": "Trac MCP server connected successfully. API version: [1, 1, 6]"
+  "text": "Trac MCP server connected successfully. API version: [1, 1, 6]\nwrite_gate: true"
 }
 ```
+```json
+{
+  "write_gate": true
+}
+```
+
+`write_gate` is whether the write-time link gate runs on this daemon -- see
+[Write Gate Status](#write-gate-status).
 
 **Error Response:**
 ```json
@@ -1573,7 +1607,7 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
 ```json
 {
   "type": "text",
-  "text": "Default instance: http://trac.example.com:8000/main-project\n\nConfigured:\n  default: http://trac.example.com:8000/main-project (default)\n  bcs: http://trac.example.com:8000/bcs\n\nDiscovered on host:\n  /main-project: Main Project [configured]\n  /bcs: BCS [configured]\n  /other: Other Project"
+  "text": "Default instance: http://trac.example.com:8000/main-project\nwrite_gate: true\n\nConfigured:\n  default: http://trac.example.com:8000/main-project (default)\n  bcs: http://trac.example.com:8000/bcs\n\nDiscovered on host:\n  /main-project: Main Project [configured]\n  /bcs: BCS [configured]\n  /other: Other Project"
 }
 ```
 ```json
@@ -1593,6 +1627,7 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
     }
   ],
   "default": "http://trac.example.com:8000/main-project",
+  "write_gate": true,
   "discovered": [
     {
       "path": "/main-project",
@@ -1611,6 +1646,8 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
   ]
 }
 ```
+
+`write_gate` is whether the write-time link gate runs on this daemon (see [Write Gate Status](#write-gate-status)). It is a per-daemon setting every routed instance inherits, so it is reported once, at the top level, and also to a caller whose allowlist leaves out the default instance. When it is `false`, the text line reads `write_gate: false -- OFF on this daemon: writes are NOT link-checked`.
 
 The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are never included in the response. The `discovered` key is omitted when `discover` is `false` or the host's project index could not be scraped.
 
