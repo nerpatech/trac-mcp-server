@@ -389,6 +389,23 @@ class TestHandler:
         out = _run(client, _registry(other))
         assert out["style_page"]["reason"] == "permission_denied"
 
+    def test_style_page_403_without_permission_wording(self):
+        # Trac's PermissionError text names the privilege, not the word
+        # "permission"; the 403 fault code alone must classify it.
+        other = FakeClient(
+            {STYLE_PAGE: ("x", 1)},
+            faults={
+                STYLE_PAGE: xmlrpc.client.Fault(
+                    403,
+                    "WIKI_VIEW privileges are required to perform this "
+                    "operation on " + STYLE_PAGE,
+                )
+            },
+        )
+        client = FakeClient({"WikiStart": (AGENT + "\n", 1)})
+        out = _run(client, _registry(other))
+        assert out["style_page"]["reason"] == "permission_denied"
+
     def test_style_page_other_failure_is_error(self):
         other = FakeClient(
             {STYLE_PAGE: ("x", 1)},
