@@ -470,3 +470,58 @@ def test_live_any_indent_shapes_render_inside_the_list_item(name):
     assert len(re.findall(r"<(?:ul|ol)[\s>]", html)) == (
         2 if name.startswith("nested") else 1
     ), html
+
+
+# -- Round 3: a non-1 ordered list after paragraph text -------------------------
+#
+# Found by the store sweep on auto_pm comment 9 of #228. After round 2 the
+# fences sit at the item's text column, so the Markdown for the reduced input
+# below has ' 3. In that file:' directly after paragraph text. CommonMark lets
+# an ordered list interrupt a paragraph only when it starts with 1, so it was
+# paragraph text and the 4-space fence under it was paragraph continuation;
+# write-back turned each block into a one-line inline code span. (On master the
+# fences sat at column 0 and interrupted the paragraph.) The gap is older: no
+# blank line before a non-1 ordered list that follows paragraph text.
+
+REDUCED = (
+    " 2. Find:\n{{{\ngrep one\n}}}\n\n The second line prints.\n"
+    " 3. In that file:\n{{{\n  opencode:\n    token: t\n}}}\n"
+)
+
+
+def test_non_one_ordered_list_after_paragraph_keeps_both_blocks():
+    md = _md(REDUCED)
+    assert "\n\n 3. In that file:\n" in md
+    back = markdown_to_tracwiki(md)
+    assert back.count("{{{") == 2, back
+    assert back.count("}}}") == 2, back
+    assert "`" not in back, back
+    assert "grep one" in back
+    assert "  opencode:\n" in back and "    token: t\n" in back
+
+
+@pytest.mark.parametrize(
+    ("name", "wiki", "expected"),
+    [
+        ("prose then 1.", "prose\n 1. x\n", "prose\n 1. x\n"),
+        ("prose then a bullet", "prose\n * x\n", "prose\n - x\n"),
+        (
+            "3. continues an open list",
+            " 2. a\n 3. b\n",
+            " 2. a\n 3. b\n",
+        ),
+        (
+            "3. after a blank line",
+            "prose\n\n 3. x\n",
+            "prose\n\n 3. x\n",
+        ),
+        ("3. first in the text", " 3. x\n", " 3. x\n"),
+    ],
+)
+def test_other_list_shapes_read_back_exactly_as_before(
+    name, wiki, expected
+):
+    """No blank line is added before a bullet or `1.` (CommonMark lets those
+    interrupt a paragraph), before a marker that continues an open list, or
+    where a blank line already separates."""
+    assert _md(wiki) == expected, name

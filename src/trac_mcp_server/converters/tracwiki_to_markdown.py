@@ -208,6 +208,12 @@ def _enclosing_list_marker(
     return None
 
 
+# An ordered list marker (digits only, as `_LIST_MARKER_RE` writes it) whose
+# number is not 1: CommonMark does not let such a list interrupt a paragraph
+# (ticket #144; see `_separate_list_from_trailing_paragraph`).
+_NON_ONE_ORDERED_RE = re.compile(r"^(?!0*1\.$)\d+\.$")
+
+
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """The list-marker match of the innermost list item still OPEN after
     `lines`, or None (ticket #144).
@@ -1548,6 +1554,18 @@ class TracWikiParser:
           continuation of the remaining (outer) level and is left exactly
           as it is.
 
+        Ticket #144: a marker line that arrives with the stack EMPTY (no
+        open list), straight after a non-blank line, and whose marker is an
+        ORDERED number other than 1 also gets a blank line first. CommonMark
+        lets an ordered list interrupt a paragraph only when it starts with
+        1, so ``3. x`` right after paragraph text is more paragraph text --
+        and whatever is indented under it (a code fence, after #144) is its
+        continuation, which the write leg turns into an inline code span.
+        Trac renders a new list there either way (found on a store sweep:
+        auto_pm #228 comment 9). Bullets and ``1.`` interrupt a paragraph
+        already, so they get no blank line (an unmeasured stored-byte
+        change); a marker that continues an open list needs none.
+
         The pop threshold is strict ("deeper than", not "at least as
         deep") -- ticket #75's own measured boundary (section 2's
         two-space continuation under a one-space marker: continues;
@@ -1566,7 +1584,17 @@ class TracWikiParser:
             if not line.strip():
                 out.append(line)
                 continue
-            if _LIST_MARKER_RE.match(line):
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                if (
+                    not stack
+                    and out
+                    and out[-1].strip()
+                    and _NON_ONE_ORDERED_RE.match(
+                        marker.group(0).strip()
+                    )
+                ):
+                    out.append("")
                 column = len(_indent_of(line))
                 while stack and stack[-1] >= column:
                     stack.pop()
