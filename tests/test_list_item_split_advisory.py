@@ -183,3 +183,51 @@ async def test_push_without_the_shape_has_no_such_warning(tmp_path):
     assert result.isError is not True
     client.put_wiki_page.assert_called_once()
     assert result.structuredContent["warnings"] == []
+
+
+@pytest.mark.usefixtures("local_file_access")
+async def test_push_honours_the_preview_checks_pragma(tmp_path):
+    """`convert_preview` drops a code named by `preview-checks: allow`;
+    the push path must agree (#58 pragma, reviewed under #125)."""
+    result, client = await _push(
+        tmp_path,
+        "preview-checks: allow list_item_split\n\n" + TICKET_INPUT,
+    )
+    assert result.isError is not True
+    client.put_wiki_page.assert_called_once()
+    assert result.structuredContent["warnings"] == []
+
+
+def test_message_for_an_item_that_starts_with_a_nested_list():
+    text = "- - b\n\n  tail\n"
+    found = find_list_item_splits(text)
+    assert len(found) == 1
+    assert found[0]["item"] == ""
+    message = describe_list_item_split(found[0])
+    assert 'List item ""' not in message
+    assert message.startswith(
+        "A list item that starts with a nested list continues with a "
+        "paragraph"
+    )
+
+
+def test_message_holds_for_the_last_item_and_for_non_paragraph_blocks():
+    para = describe_list_item_split(
+        {"item": "X", "block": "paragraph", "depth": 0}
+    )
+    assert "as a blockquote" in para
+    assert "any later items start a new list" in para
+    assert "starts a new list for the next item" not in para
+    code = describe_list_item_split(
+        {"item": "X", "block": "code block", "depth": 0}
+    )
+    assert "blockquote" not in code
+    assert "renders the code block outside it" in code
+
+
+def test_second_sibling_sublist_is_not_a_split():
+    # Measured live on /trac_test (2026-11-03): this converts to
+    # " * a\n   * b\n   1. c\n * d" and Trac renders both sub-lists inside
+    # item a (<ul><li>a<ul>..</ul><ol>..</ol></li><li>d</li></ul>), so the
+    # list is not split and the detector must stay silent.
+    assert find_list_item_splits("- a\n  - b\n\n  1. c\n- d\n") == []

@@ -30,6 +30,7 @@ from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import TracClient, WikiPageConflict
 from ...file_handler import detect_file_format
+from ...preview.checks import _allowed_codes
 from .errors import build_error_response
 from .file_io import (
     check_output_path,
@@ -352,10 +353,15 @@ async def _handle_push(
         # Ticket #125: advise, never refuse. The content survives; only
         # the list structure splits where a list item continues after
         # its nested list, which Trac cannot represent.
-        warnings.extend(
-            describe_list_item_split(split)
-            for split in find_list_item_splits(content)
-        )
+        # `preview-checks: allow list_item_split` opts out here as it
+        # does in `build_warnings` (#58).
+        if "list_item_split" not in _allowed_codes(
+            content, wiki_content
+        ):
+            warnings.extend(
+                describe_list_item_split(split)
+                for split in find_list_item_splits(content)
+            )
     else:
         # Already TracWiki — pass through
         wiki_content = content

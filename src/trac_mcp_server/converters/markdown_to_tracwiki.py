@@ -1205,11 +1205,19 @@ def describe_list_item_split(split: dict) -> str:
     """One-sentence message for a `find_list_item_splits` entry."""
     block = split["block"]
     article = "an" if block[:1].lower() in "aeiou" else "a"
+    subject = (
+        f'List item "{split["item"]}"'
+        if split["item"]
+        else "A list item that starts with a nested list"
+    )
+    # Trac renders a paragraph left outside a list as a blockquote; the
+    # other blocks have no such aside.
+    aside = ", as a blockquote" if block == "paragraph" else ""
     return (
-        f'List item "{split["item"]}" continues with {article} {block} '
+        f"{subject} continues with {article} {block} "
         "after its nested list. Trac cannot continue a list item there: "
-        f"it ends the list, renders the {block} outside it (a paragraph "
-        "as a blockquote), and starts a new list for the next item. "
+        f"it ends the list and renders the {block} outside it{aside}; "
+        "any later items start a new list. "
         f"Move the {block} out of the list in the source, or accept "
         "the split."
     )
