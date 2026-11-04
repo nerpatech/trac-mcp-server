@@ -192,10 +192,38 @@ _INTERTRAC_REALMS = frozenset(
 # inline code span at the backtick, so ending the token there too makes
 # the two agree by construction rather than by recovery. This is the
 # same class as #59's fenced-block gap, at the other delimiter.
-_PREFIX_REALM_RE = re.compile(
-    r"\b[A-Za-z][\w.+-]*:(?:"
+#
+# A bracketed token also ends at `]` (ticket #148). The trailing class
+# used to read on past a label-less bracket's close, and since `finditer`
+# never overlaps matches, a second bracketed link glued on behind it
+# (`[p:wiki:A]/[q:wiki:B]`) was swallowed into the first token and never
+# checked on its own -- a typo'd prefix there rendered as plain text
+# with no warning. A bracketed Trac link target never contains `]`
+# (#147 relied on that already), so the bracketed alternative stops
+# there; it comes first so it wins at the position just after `[`. The
+# unbracketed alternative is unchanged on purpose: Trac's unbracketed
+# link target CAN carry a `]` mid-token, so stopping there could split a
+# configured link into a false positive.
+#
+# The bracketed target may also be EMPTY when `]` follows at once
+# (`[p:wiki:]`). With `+` alone that shape fell through to the
+# unbracketed alternative at the same position, which swallowed the `]`
+# and anything glued on behind it: the same gap, still open. The
+# lookahead closes it, so a token starting just after `[` never contains
+# `]` -- and an empty target followed by whitespace or a backtick still
+# matches nothing, exactly as before.
+_PREFIX_REALM_HEAD = (
+    r"[A-Za-z][\w.+-]*:(?:"
     + "|".join(sorted(_INTERTRAC_REALMS))
-    + r"):[^\s`]+"
+    + r"):"
+)
+_PREFIX_REALM_RE = re.compile(
+    r"(?<=\[)"
+    + _PREFIX_REALM_HEAD
+    + r"(?:[^\s`\]]+|(?=\]))"
+    + r"|\b"
+    + _PREFIX_REALM_HEAD
+    + r"[^\s`]+"
 )
 
 # Ticket #113. Trac's own qualified attachment syntax is
