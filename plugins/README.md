@@ -139,10 +139,25 @@ reconnected session must list `ticket.editComment` (and, from 1.1.0,
 `wiki.putPageIfVersion`).
 
 **Upgrading from 1.0.0** (the release without `wiki.putPageIfVersion`):
-remove `TracRpcComment-1.0.0-py3.11.egg` from the environment's `plugins/`
-directory when copying `TracRpcComment-1.1.0-py3.11.egg` in, so only one
-version of the package is on that environment's path, then reload. The
-`tracrpc_comment.*` pattern already enabled covers the new component.
+**every instance moves at once.** Install the 1.1.0 egg into every instance
+first, then send one reload; a single instance can't be upgraded on its own.
+ * **Why:** all instances run in the same uWSGI worker processes. The first
+   instance a worker opens adds its egg's version to the process-wide
+   `pkg_resources` working set. Trac's loader then skips a different version
+   of the same egg in any other instance, with
+   `Skipping "TracRpcComment 1.1.0": VersionConflict: (TracRpcComment 1.0.0 ...)`
+   in that instance's `trac.log`.
+ * **What the components are:** they are registered process-wide, so every
+   instance gets the components of whichever version loaded first. On
+   2026-11-04, `/trac_test` alone carried 1.1.0: it went on listing 85 methods
+   with no `wiki.putPageIfVersion`, served by `trac_mcp_server`'s 1.0.0 egg.
+ * **How:** in each instance's `plugins/`, swap
+   `TracRpcComment-1.0.0-py3.11.egg` for `TracRpcComment-1.1.0-py3.11.egg`,
+   then reload once. The `tracrpc_comment.*` pattern already enabled
+   covers the new component.
+
+The per-environment isolation described above holds for *enabling*, which is
+per-instance config. It doesn't hold for *versions*.
 
 Step 1's exact build command is reconstructed from the deployed artifact's
 name and Trac's own per-environment-egg convention, not a verbatim transcript
