@@ -33,6 +33,20 @@ from trac_mcp_server.mcp.tools.ticket_write import (
 )
 
 
+def _spec_client(trac_url="https://trac.example.com"):
+    """A MagicMock(spec=TracClient) carrying a real Config.
+
+    `config` is assigned in TracClient.__init__, so a spec mock refuses
+    the attribute until it is set; ticket_search/ticket_get read it for
+    the ticket's web URL.
+    """
+    client = MagicMock(spec=TracClient)
+    client.config = Config(
+        trac_url=trac_url, username="u", password="p"
+    )
+    return client
+
+
 class TestTicketDeleteSchema(unittest.TestCase):
     """Tests for ticket_delete tool schema."""
 
@@ -2827,12 +2841,7 @@ class TestHandleTicketSearch:
         Reproduces the ticket_search total/showing mismatch from ticket #22:
         total=2, showing=1 with no indication a fetch failed.
         """
-        client = MagicMock(spec=TracClient)
-        client.config = Config(
-            trac_url="https://trac.example.com",
-            username="u",
-            password="p",
-        )
+        client = _spec_client()
 
         def _get_ticket_side_effect(tid):
             if tid == 15:
@@ -2877,6 +2886,40 @@ class TestHandleTicketSearch:
             )
             assert "#15" in result.content[0].text
 
+    def test_search_url_keeps_instance_path(self):
+        """A trac_url with an instance path keeps it in each result's
+        url: https://trac.example.com/proj/ticket/10."""
+        client = _spec_client("https://trac.example.com/proj")
+
+        async def _fake_run_sync_limited(func, *args, **kwargs):
+            return [
+                args[0],
+                "20260101T00:00:00",
+                "20260101T00:00:00",
+                {
+                    "summary": "Pathed",
+                    "status": "new",
+                    "owner": "alice",
+                },
+            ]
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync_limited",
+                side_effect=_fake_run_sync_limited,
+            ),
+        ):
+            mock_run_sync.return_value = [10]
+
+            result = self._run(_handle_search(client, {}))
+
+            url = "https://trac.example.com/proj/ticket/10"
+            assert result.structuredContent["tickets"][0]["url"] == url
+            assert url in result.content[0].text
+
     def test_search_xmlrpc_fault(self):
         """XML-RPC fault during search produces structured error."""
         client = MagicMock(spec=TracClient)
@@ -2910,13 +2953,7 @@ class TestHandleTicketGet:
     def _client():
         """A TracClient mock with a Config, which ticket_get reads for the
         ticket's web URL."""
-        client = MagicMock(spec=TracClient)
-        client.config = Config(
-            trac_url="https://trac.example.com",
-            username="u",
-            password="p",
-        )
-        return client
+        return _spec_client()
 
     @staticmethod
     def _dispatch(client, ticket_data, changelog=()):
@@ -2948,12 +2985,7 @@ class TestHandleTicketGet:
 
     def test_get_success(self):
         """Get ticket returns full details with the stored description."""
-        client = MagicMock(spec=TracClient)
-        client.config = Config(
-            trac_url="https://trac.example.com",
-            username="u",
-            password="p",
-        )
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -2999,6 +3031,27 @@ class TestHandleTicketGet:
                 == "https://trac.example.com/ticket/42"
             )
 
+    def test_get_url_keeps_instance_path(self):
+        """A trac_url with an instance path (one daemon serving several
+        Trac instances) keeps it: the ticket's URL is under /proj, not
+        at the host root."""
+        client = _spec_client("https://trac.example.com/proj")
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [7, created, created, {"summary": "Pathed"}],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            url = "https://trac.example.com/proj/ticket/7"
+            assert result.structuredContent["url"] == url
+            assert f"URL: {url}" in result.content[0].text
+
     def test_get_none_description(self):
         """A ticket whose description was never set comes back from Trac
         with description None; ticket_get must still answer instead of
@@ -3029,12 +3082,7 @@ class TestHandleTicketGet:
         """ticket_get surfaces _ts as the change token callers pass back
         to ticket_update's base_ts (ticket #50) -- without this, there is
         no way for a caller to obtain a token to lock against."""
-        client = MagicMock(spec=TracClient)
-        client.config = Config(
-            trac_url="https://trac.example.com",
-            username="u",
-            password="p",
-        )
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -3424,7 +3472,7 @@ class TestHandleTicketGet:
             )
 
     def _get_comments(self, rows):
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
@@ -3495,7 +3543,7 @@ class TestHandleTicketGet:
             self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
         ]
         rows[2] = self._comment("1.3", "a", "threaded three")
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
@@ -3525,7 +3573,7 @@ class TestHandleTicketGet:
         rows[1] = self._comment("1.2", "a", "threaded two")
         rows[4] = self._comment("3.5", "a", "threaded five")
         rows[5] = self._comment("4.6", "a", "threaded six")
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
