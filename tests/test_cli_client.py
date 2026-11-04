@@ -13,6 +13,7 @@ the bytes "Trac" stored, and back.
 import base64
 import json
 import sys
+import time
 import xmlrpc.client
 from contextlib import contextmanager
 from pathlib import Path
@@ -613,6 +614,10 @@ class FakeTracTickets(FakeTrac):
         self.on_get = None
         self.omit_ts = False
         self.hide_changelog = False
+        # The real XML-RPC transport folds CR/CRLF to LF before Trac
+        # stores a comment; off by default so byte-exact round trips of
+        # the bodies below are unchanged.
+        self.fold_cr = False
 
     def _tick(self) -> int:
         self._clock += 1
@@ -625,7 +630,7 @@ class FakeTracTickets(FakeTrac):
             "description": description,
             "status": "new",
             "type": "defect",
-            "_ts": str(self._tick()),
+            "_ts": str(self._tick() * 1_000_000),
         }
         self.changelogs[ticket_id] = [
             [self._tick(), "alice", "comment", str(n), body, 1]
@@ -634,7 +639,7 @@ class FakeTracTickets(FakeTrac):
 
     def touch(self, ticket_id, who="bob"):
         """Someone else changes the ticket."""
-        self.tickets[ticket_id]["_ts"] = str(self._tick())
+        self.tickets[ticket_id]["_ts"] = str(self._tick() * 1_000_000)
         self.changelogs[ticket_id].append(
             [self._clock, who, "keywords", "", "x", 1]
         )
@@ -688,7 +693,12 @@ class FakeTracTickets(FakeTrac):
             )
         for key, value in (attributes or {}).items():
             ticket[key] = value
+        changed = self._tick()
         if comment:
+            if self.fold_cr:
+                comment = comment.replace("\r\n", "\n").replace(
+                    "\r", "\n"
+                )
             numbers = [
                 int(r[3])
                 for r in self.changelogs[ticket_id]
@@ -696,7 +706,11 @@ class FakeTracTickets(FakeTrac):
             ]
             self.changelogs[ticket_id].append(
                 [
-                    self._tick(),
+                    # Trac's compact XML-RPC time, as the real changelog
+                    # reports it.
+                    time.strftime(
+                        "%Y%m%dT%H:%M:%S", time.gmtime(changed)
+                    ),
                     "agent",
                     "comment",
                     str(max(numbers, default=0) + 1),
@@ -704,8 +718,11 @@ class FakeTracTickets(FakeTrac):
                     1,
                 ]
             )
-        ticket["_ts"] = str(self._tick())
-        return [ticket_id]
+        # Trac's _ts counts microseconds; the reply is the real
+        # [id, created, changed, attributes] shape.
+        ticket["_ts"] = str(changed * 1_000_000)
+        stamp = time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(changed))
+        return [ticket_id, stamp, stamp, {"_ts": ticket["_ts"]}]
 
     def create_ticket(
         self,
@@ -1128,6 +1145,86 @@ class TestTicketBodies:
         assert sent[1][1]["base_ts"] == "5"
 
 
+class TestTicketCommentNumberFromServer:
+    """The CLI prints the number ticket_update reports (Trac #124) and
+    only reads the changelog back when the daemon is older."""
+
+    @staticmethod
+    def _recorder(monkeypatch, update_structured):
+        sent = []
+
+        async def _record(url, token, name, arguments):
+            sent.append(name)
+            structured = {
+                "ticket_get": {"_ts": "5"},
+                "ticket_update": update_structured,
+                "ticket_changelog": {
+                    "changelog": [
+                        {
+                            "field": "comment",
+                            "oldvalue": "9",
+                            "newvalue": "hi\n",
+                        }
+                    ]
+                },
+            }[name]
+            return SimpleNamespace(
+                isError=False,
+                content=[SimpleNamespace(text="ok")],
+                structuredContent=structured,
+            )
+
+        monkeypatch.setattr(cli, "call_tool", _record)
+        return sent
+
+    def _run(self, tmp_path):
+        src = _body_file(tmp_path, "hi\n")
+        return cli.main(
+            ["--url", "http://x/mcp", "ticket-comment", "7", str(src)],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+
+    def test_server_number_means_no_changelog_call(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sent = self._recorder(monkeypatch, {"comment_number": 3})
+        assert self._run(tmp_path) == cli.EXIT_OK
+        assert sent == ["ticket_get", "ticket_update"]
+        assert "Added comment 3 to ticket #7" in capsys.readouterr().out
+
+    def test_older_daemon_without_a_number_falls_back(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sent = self._recorder(monkeypatch, {})
+        assert self._run(tmp_path) == cli.EXIT_OK
+        assert sent == [
+            "ticket_get",
+            "ticket_update",
+            "ticket_changelog",
+        ]
+        assert "Added comment 9 to ticket #7" in capsys.readouterr().out
+
+    def test_null_number_falls_back(self, tmp_path, monkeypatch):
+        sent = self._recorder(monkeypatch, {"comment_number": None})
+        assert self._run(tmp_path) == cli.EXIT_OK
+        assert sent[-1] == "ticket_changelog"
+
+    def test_crlf_body_gets_its_number_from_the_server(
+        self, tmp_path, capsys
+    ):
+        # The changelog text match is an endswith on the sent text; a
+        # CRLF body is stored with LF, so only the server's number works.
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "a")])
+        trac.fold_cr = True
+        src = tmp_path / "crlf.wiki"
+        src.write_bytes(b"one\r\ntwo\r\n")
+        with _served(trac) as url:
+            assert _cli(url, "ticket-comment", "7", str(src)) == 0
+        assert _printed_comment_number(capsys.readouterr().out) == 2
+
+
 class TestTicketBodyReview:
     """Findings of the local review of Trac #114."""
 
@@ -1143,6 +1240,9 @@ class TestTicketBodyReview:
 
         trac = FakeTracTickets()
         trac.add_ticket(7)
+        # The server cannot name the comment either, so the CLI falls
+        # back to its own read-back -- which is what drops here.
+        trac.hide_changelog = True
         src = _body_file(tmp_path)
         with _served(trac) as url:
             monkeypatch.setattr(cli, "call_tool", _flaky)
