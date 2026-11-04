@@ -214,6 +214,29 @@ def _enclosing_list_marker(
 _NON_ONE_ORDERED_RE = re.compile(r"^(?!0*1\.$)\d+\.$")
 
 
+def _lines_since_blank(pieces: list[str]) -> list[str]:
+    """The complete lines of `"".join(pieces)` after its last blank line
+    (all of them if there is none), the partial last line excluded.
+
+    `_open_list_item` depends on nothing before a blank line (it empties the
+    stack), so this is all it needs, and it is found by looking back from
+    the end in growing slices instead of joining everything for each block
+    (ticket #144 review: the join made a page with many blocks quadratic).
+    A slice's first line may be partial, so a blank line is only trusted
+    past index 0 unless the slice is the whole thing.
+    """
+    size = 256
+    while True:
+        whole = size >= len(pieces)
+        lines = "".join(pieces[-size:]).split("\n")
+        for idx in range(len(lines) - 2, -1 if whole else 0, -1):
+            if not lines[idx].strip():
+                return lines[idx + 1 : -1]
+        if whole:
+            return lines[:-1]
+        size *= 4
+
+
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """The list-marker match of the innermost list item still OPEN after
     `lines`, or None (ticket #144).
@@ -1146,11 +1169,17 @@ class TracWikiParser:
         indent = text[line_start:start]
         if indent.strip(" \t"):
             return None
-        above = "".join(emitted).split("\n")[:-1]
-        marker = _open_list_item(above)
+        marker = _open_list_item(_lines_since_blank(emitted))
         if marker is None:
             return None
         lead = _indent_of(marker.string)
+        # Declined, so the old path stands: a marker Markdown cannot express
+        # (lettered/roman, #74 -- the item is fenced away as unconverted
+        # text, and a fence under it came back as an inline span), and a
+        # TAB-indented marker line (CommonMark reads it as an indented code
+        # block, which predates #144).
+        if _ALPHA_LIST_MARKER_RE.match(marker.string) or "\t" in lead:
+            return None
         token = marker.group(0)[len(lead) :]
         out_indent = " " * (_indent_width(lead) + len(token) + 1)
         lines = code.split("\n")

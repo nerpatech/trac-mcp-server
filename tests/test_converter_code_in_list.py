@@ -525,3 +525,79 @@ def test_other_list_shapes_read_back_exactly_as_before(
     interrupt a paragraph), before a marker that continues an open list, or
     where a blank line already separates."""
     assert _md(wiki) == expected, name
+
+
+# -- Round 4: review fixes -----------------------------------------------------
+#
+# Item shapes the new path must decline, so master's behaviour stands. The
+# expected values were computed by running master (2a18cf7) before the fix.
+#  * A lettered or roman item: Markdown cannot express the marker (#74), the
+#    item is fenced away as unconverted text, and fencing a block under it
+#    turned the code into a one-line inline span on write-back.
+#  * A TAB-indented MARKER line: CommonMark reads it as an indented code
+#    block (older than #144), and the fence landed at column 10.
+DECLINED = {
+    "lettered item": (
+        " a. foo\n   {{{\n   x\n   }}}\n b. bar\n",
+        " a. foo\n   ```\n\n   x\n```\n```tracwiki-unconverted\n b. bar\n```\n",
+        "a. foo\n\n{{{\n\nx\n}}}\n\n b. bar",
+    ),
+    "roman item": (
+        " ii. foo\n    {{{\n    x\n    }}}\n iii. bar\n",
+        " ii. foo\n    ```\n\n    x\n```\n"
+        "```tracwiki-unconverted\n iii. bar\n```\n",
+        "ii. foo\n```\n\n{{{\nx\n}}}\n\n{{{\n```tracwiki-unconverted\n"
+        " iii. bar\n}}}",
+    ),
+    "TAB-indented marker line": (
+        "\t* a\n\t{{{\nx\n\t}}}\n\t* b\n",
+        "\t* a\n\n\t```\nx\n```\n\t* b\n",
+        "{{{\n* a\n\n```\n}}}\n\nx\n\n{{{\n\t* b\n}}}",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("wiki", "markdown", "written"),
+    list(DECLINED.values()),
+    ids=list(DECLINED),
+)
+def test_unexpressible_or_tab_marker_items_read_back_as_on_master(
+    wiki, markdown, written
+):
+    assert _md(wiki) == markdown
+    assert markdown_to_tracwiki(_md(wiki)) == written
+
+
+def test_lettered_item_code_stays_a_block_not_an_inline_span():
+    back = markdown_to_tracwiki(_md(DECLINED["lettered item"][0]))
+    assert "{{{" in back and "`" not in back
+
+
+def test_tab_in_the_openers_indent_under_a_space_marker_still_works():
+    wiki = " * a\n\t{{{\n\tcode\n\t}}}\n * d"
+    assert _md(wiki) == " - a\n   ```\n   code\n   ```\n - d"
+
+
+def test_code_after_a_nested_list_is_written_at_the_outer_indent():
+    """Pinned. Trac attaches a block that follows a nested list to the
+    innermost open item (`sub`; F5, measured), a Trac limit parallel to
+    #112's continuation paragraph: no TracWiki form attaches a block to the
+    outer item after a nested list. The writer keeps the author's order and
+    the outer indent."""
+    md = "- a\n  - sub\n  ```\n  x\n  ```\n- b\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   * sub\n   {{{\n   x\n   }}}\n * b"
+    )
+
+
+def test_many_blocks_each_walk_only_since_the_last_blank_line():
+    """The open-item test looks back only as far as the last blank line (a
+    blank line empties Trac's list stack), so the cost does not grow with
+    the page. A long prefix of blocks still converts, and a list opened
+    before a blank line is not seen by a later block."""
+    blocks = "{{{\nx\n}}}\n\n" * 300
+    wiki = blocks + " * a\n{{{\ny\n}}}\n * d\n"
+    md = _md(wiki)
+    assert md.endswith(" - a\n   ```\n   y\n   ```\n - d\n")
+    assert md.count("```") == 600 + 2
