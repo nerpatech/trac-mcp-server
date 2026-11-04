@@ -53,6 +53,9 @@ def possible_overwrite_warning(
     page was stored, and an error result means nothing was."""
     if not result.get("possible_overwrite"):
         return None
+    # 3.0 is a JSON-schema "integer"; the flag only fires when it equalled
+    # an int precheck, so int() is lossless and keeps "3.0" out of the text.
+    sent_version = int(sent_version)
     new_version = result.get("version")
     expected = sent_version + 1
     head = (
@@ -80,6 +83,8 @@ def possible_overwrite_warning(
         f"inspect what {others} changed with wiki_diff(page_name="
         f"'{page_name}', from_version={sent_version}, "
         f"to_version={intervening[-1]}) and re-apply anything this write "
+        "dropped. If that diff is exactly this write's own change, the "
+        "other write landed just after this one instead, and nothing was "
         "dropped."
     )
 

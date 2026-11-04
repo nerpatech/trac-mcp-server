@@ -1101,6 +1101,24 @@ class TestUpdatePossibleOverwrite:
         assert "Versions 4-6 were most likely written" in text
         assert "from_version=3, to_version=6" in text
 
+    async def test_float_version_is_worded_as_an_integer(self):
+        # A JSON-schema "integer" admits 3.0; it equals the int precheck
+        # and so reaches the flag. The warning must still say 3, not 3.0.
+        result, _ = await self._update(
+            precheck=3, readback=5, version=3.0
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Updated wiki page 'P' to version 5" in text
+        assert (
+            "based on version 3, so it should have stored version 4"
+            in text
+        )
+        assert "from_version=3, to_version=4" in text
+        assert "3.0" not in text
+        assert "nothing was dropped" in text
+
     async def test_uncontended_update_stays_quiet(self):
         result, _ = await self._update(
             precheck=3, readback=4, version=3

@@ -3087,3 +3087,41 @@ def test_delete_enum_rejects_invalid_type(mock_config):
     assert call_count == 0, (
         "No RPC call should be made for invalid enum_type"
     )
+
+
+def test_put_wiki_page_float_version_never_raises_after_the_write(
+    mock_config,
+):
+    """A JSON-schema "integer" admits 3.0, and the precheck accepts it
+    (3 == 3.0). The overwrite check runs after putPage stored the page,
+    so it must never raise there: a TypeError would reach the caller as
+    a generic failure for a stored write and invite a second write."""
+    _, rpc = _rpc_versions(precheck=3, readback=5)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4]
+
+    _, rpc = _rpc_versions(precheck=3, readback=4)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+
+
+def test_put_wiki_page_readback_below_expected_is_flagged_with_none_between(
+    mock_config,
+):
+    """A read-back version below version + 1 (the page was deleted and
+    recreated in between) is "not version + 1" too: flagged, with no
+    intervening versions to name."""
+    _, rpc = _rpc_versions(precheck=3, readback=2)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == []

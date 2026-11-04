@@ -1236,8 +1236,11 @@ class TracClient:
             and new_version != version + 1
         ):
             stored["possible_overwrite"] = True
+            # int(): a JSON-schema "integer" admits 3.0, which passes the
+            # precheck (3 == 3.0) but would make range() raise here --
+            # after the page was stored.
             stored["intervening_versions"] = list(
-                range(version + 1, new_version)
+                range(int(version) + 1, new_version)
             )
         return stored
 
