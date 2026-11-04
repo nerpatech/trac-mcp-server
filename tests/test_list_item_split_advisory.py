@@ -86,6 +86,15 @@ def test_fenced_code_after_sublist():
     ]
 
 
+def test_table_after_sublist():
+    """Ticket #142: with `table_in_list` loaded the detector sees a `table`
+    token (not lazy paragraph text) after a nested list and labels it."""
+    text = "- Item:\n  - sub\n\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- next\n"
+    assert find_list_item_splits(text) == [
+        {"item": "Item:", "block": "table", "depth": 0}
+    ]
+
+
 def test_ordered_parent():
     text = "1. Ordered:\n   1. sub\n\n   para\n2. next\n"
     found = find_list_item_splits(text)
