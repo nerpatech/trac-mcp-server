@@ -201,9 +201,9 @@ async def _handle_search(
             ]  # [id, created, modified, attributes]
             return {
                 "id": tid,
-                "summary": attrs.get("summary", ""),
-                "status": attrs.get("status", ""),
-                "owner": attrs.get("owner", ""),
+                "summary": attrs.get("summary") or "",
+                "status": attrs.get("status") or "",
+                "owner": attrs.get("owner") or "",
                 "url": _ticket_url(client, tid),
             }
         except Exception:
@@ -439,20 +439,22 @@ async def _handle_get(
     attrs = ticket_data[3]
 
     # Extract fields
-    summary = attrs.get("summary", "")
-    # Trac returns None for a ticket whose description was never set; the
-    # response lines are joined as strings, so None must become "".
+    # Trac returns the key with value None for a field that was never set
+    # (`attrs.get(name, "")` only defaults an absent key). The response
+    # lines are joined as strings and structuredContent is typed, so every
+    # string field reads as "" when unset (Trac #141).
+    summary = attrs.get("summary") or ""
     description = attrs.get("description") or ""
-    status = attrs.get("status", "")
-    owner = attrs.get("owner", "")
-    reporter = attrs.get("reporter", "")
-    ticket_type = attrs.get("type", "")
-    priority = attrs.get("priority", "")
-    component = attrs.get("component", "")
-    milestone = attrs.get("milestone", "")
-    keywords = attrs.get("keywords", "")
-    cc = attrs.get("cc", "")
-    resolution = attrs.get("resolution", "")
+    status = attrs.get("status") or ""
+    owner = attrs.get("owner") or ""
+    reporter = attrs.get("reporter") or ""
+    ticket_type = attrs.get("type") or ""
+    priority = attrs.get("priority") or ""
+    component = attrs.get("component") or ""
+    milestone = attrs.get("milestone") or ""
+    keywords = attrs.get("keywords") or ""
+    cc = attrs.get("cc") or ""
+    resolution = attrs.get("resolution") or ""
     change_token = attrs.get("_ts")
 
     # Returned as stored. Nothing converts on this leg any more, so a
