@@ -6,6 +6,7 @@ import threading
 import time
 import weakref
 import xmlrpc.client
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -227,6 +228,11 @@ WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
 # getPage).
 WIKI_FETCH_BATCH_PAGES = 50
 
+# Per-prefix BM25 indexes the wiki search keeps (least recently used
+# first out): each holds every section in its scope, and a caller can
+# make up prefixes without end.
+WIKI_SCOPE_INDEX_MAX = 16
+
 # "Since the beginning" for ``wiki.getRecentChanges``.
 _WIKI_EPOCH = "19700101T00:00:00"
 
@@ -409,16 +415,20 @@ class TracClient:
         self._ticket_change_at = _OptionalMethod(
             "ticket.getChangeAt", TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
         )
-        # The wiki search's page cache (#154). The instance pool keeps one
-        # client per instance and identity, so it only ever holds pages
-        # its caller can read. ``run_sync`` runs calls in threads, hence
-        # the lock around every refresh and index build.
+        # The wiki search's page cache (#154). It is per client, and a
+        # client is per caller: the instance pool keeps one per instance
+        # and identity, and under OIDC mcp/oidc.py keeps one per bearer
+        # token (up to 256). So a cache only ever holds pages its own
+        # caller can read, and a new token fills a cache of its own with
+        # one full read -- never worse than the old per-query full read.
+        # ``run_sync`` runs calls in threads, hence the lock around every
+        # refresh and index build.
         self._wiki_multicall = _OptionalMethod(
             "system.multicall", WIKI_MULTICALL_ABSENT_TTL_SECONDS
         )
         self._wiki_cache_lock = threading.Lock()
         self._wiki_cache: dict[str, _CachedWikiPage] = {}
-        self._wiki_scope_index: dict[str, BM25] = {}
+        self._wiki_scope_index: OrderedDict[str, BM25] = OrderedDict()
 
     @property
     def session(self) -> requests.Session:
@@ -1372,7 +1382,9 @@ class TracClient:
         with self._wiki_cache_lock:
             self._refresh_wiki_cache()
             index = self._wiki_scope_index.get(scope)
-            if index is None:
+            if index is not None:
+                self._wiki_scope_index.move_to_end(scope)
+            else:
                 index = BM25(
                     [
                         section
@@ -1382,6 +1394,10 @@ class TracClient:
                     ]
                 )
                 self._wiki_scope_index[scope] = index
+                while (
+                    len(self._wiki_scope_index) > WIKI_SCOPE_INDEX_MAX
+                ):
+                    self._wiki_scope_index.popitem(last=False)
         return search_pages(index, query)
 
     def _refresh_wiki_cache(self) -> None:

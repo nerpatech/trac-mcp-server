@@ -657,3 +657,43 @@ def test_a_missing_method_fault_must_name_the_method(fault, missing):
     assert (
         _is_missing_method_fault(fault, "system.multicall") is missing
     )
+
+
+# --------------------------------------------------------------------
+# The per-prefix index memo is bounded (review fix)
+# --------------------------------------------------------------------
+
+
+def test_the_17th_prefix_evicts_the_least_recently_used(
+    mock_config, three_pages, monkeypatch
+):
+    scopes: list[int] = []
+    real = client_module.BM25
+
+    def counting(sections, *a, **kw):
+        scopes.append(len(sections))
+        return real(sections, *a, **kw)
+
+    monkeypatch.setattr(client_module, "BM25", counting)
+    client = make_client(mock_config, three_pages)
+    for i in range(16):
+        client.search_wiki_pages("text", prefix=f"P{i}")
+    assert len(scopes) == 16
+    assert len(client._wiki_scope_index) == 16
+
+    client.search_wiki_pages(
+        "text", prefix="P0"
+    )  # P0 is now the newest
+    assert len(scopes) == 16  # served from the memo
+
+    client.search_wiki_pages("text", prefix="P16")  # evicts P1, not P0
+    assert len(scopes) == 17
+    assert len(client._wiki_scope_index) == 16
+    assert "P1" not in client._wiki_scope_index
+    assert "P0" in client._wiki_scope_index
+
+    client.search_wiki_pages("text", prefix="P0")
+    assert len(scopes) == 17
+    client.search_wiki_pages("text", prefix="P1")  # rebuilt
+    assert len(scopes) == 18
+    assert len(client._wiki_scope_index) == 16
