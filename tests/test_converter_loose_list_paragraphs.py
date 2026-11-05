@@ -319,7 +319,12 @@ def test_live_paragraphs_render_inside_the_list_item(name):
 
     html = client.wiki_to_html(markdown_to_tracwiki(LIVE[name]))
 
-    assert len(re.findall(r"<(?:ul|ol)[\s>]", html)) == 1, html
+    # The nested case opens its sub-list inside the first item, so it has
+    # two list openings; a list split by a blank line would add one more.
+    expected_lists = 2 if name == "nested" else 1
+    assert (
+        len(re.findall(r"<(?:ul|ol)[\s>]", html)) == expected_lists
+    ), html
     assert "<blockquote" not in html, html
     assert "[[BR]]" not in html, html
     first_li = re.search(r"<li[\s>].*?</li>", html, re.DOTALL)
