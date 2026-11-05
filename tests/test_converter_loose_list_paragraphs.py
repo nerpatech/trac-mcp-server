@@ -31,6 +31,9 @@ on a continuation line at the item's continuation indent. A text run after
 a code or table child gets no blank line before it. Unchanged: a paragraph
 after a nested list (a Trac limit, #112; the #125 advisory), a blockquote
 child (#145), a #63 fallback fence, and any other non-paragraph block.
+Review fixes: a paragraph with a passed-through TracWiki line (`{{{`,
+`}}}`, `||`, `=`, `----`) is never joined, and no run after a nested list
+loses its blank line.
 
 **Read leg.** A table released from a list item's ``{{{#!div}}}`` and
 followed by item text gets a blank line between them, so a GFM reader does
@@ -164,6 +167,103 @@ def test_nested_text_after_a_code_child():
     )
 
 
+# -- Write leg: passthrough TracWiki lines keep the blank line (F1) --------
+#
+# A paragraph can carry TracWiki passed through verbatim (`{{{#!html`, a
+# heading, a `||` row, a rule). Appending " [[BR]][[BR]]" to such a paragraph
+# corrupts it: `}}} [[BR]][[BR]]` never closes the block (measured on Trac:
+# it swallows the rest of the page). The pre-#143 output is kept whenever
+# either paragraph has such a line. Expected strings are `master` (28d5ccb).
+
+PASSTHROUGH = {
+    "html": "{{{#!html\n  <b>x</b>\n  }}}",
+    "heading": "= H =",
+    "row": "||x||y||",
+    "rule": "----",
+}
+PASSTHROUGH_WIKI = {
+    "html": "{{{#!html\n   <b>x</b>\n   }}}",
+    "heading": "= H =",
+    "row": "||x||y||",
+    "rule": "----",
+}
+
+
+@pytest.mark.parametrize("name", list(PASSTHROUGH))
+def test_passthrough_block_before_a_paragraph_keeps_the_blank_line(
+    name,
+):
+    md = f"- a\n\n  {PASSTHROUGH[name]}\n\n  para\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        f" * a\n\n   {PASSTHROUGH_WIKI[name]}\n\n   para\n * d"
+    )
+
+
+@pytest.mark.parametrize("name", list(PASSTHROUGH))
+def test_passthrough_block_after_a_paragraph_keeps_the_blank_line(name):
+    md = f"- para\n\n  {PASSTHROUGH[name]}\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        f" * para\n\n   {PASSTHROUGH_WIKI[name]}\n * d"
+    )
+
+
+@pytest.mark.parametrize("name", list(PASSTHROUGH))
+def test_passthrough_block_after_two_paragraphs_joins_only_the_paragraphs(
+    name,
+):
+    md = f"- a\n\n  para\n\n  {PASSTHROUGH[name]}\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        f" * a [[BR]][[BR]]\n   para\n\n   {PASSTHROUGH_WIKI[name]}\n * d"
+    )
+
+
+def test_passthrough_line_inside_a_multiline_paragraph_blocks_the_join():
+    """Any line of either paragraph counts, not only the first."""
+    md = (
+        "- a\n\n  para\n  {{{#!html\n  <b>x</b>\n  }}}\n\n  more\n- d\n"
+    )
+    out = markdown_to_tracwiki(md)
+    assert "}}} [[BR]]" not in out
+    assert out.count("[[BR]]") == 0
+
+
+def test_text_after_a_code_child_that_starts_with_passthrough_keeps_blank():
+    md = "- a\n  ```\n  c\n  ```\n\n  = H =\n\n  para\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   {{{\n   c\n   }}}\n\n   = H =\n\n   para\n * d"
+    )
+
+
+def test_table_row_after_a_code_child_keeps_the_blank_line():
+    md = "- a\n  ```\n  c\n  ```\n\n  ||x||\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   {{{\n   c\n   }}}\n\n   ||x||\n * d"
+    )
+
+
+# -- Write leg: no adjacency once a nested list has appeared (F2) -----------
+
+
+def test_text_after_code_after_a_nested_list_keeps_the_blank_line():
+    """Trac attaches `tail` to the NESTED item when it follows the block
+    with no blank line (measured), and the read leg cannot undo that. Once a
+    nested list has appeared in the item, every later run keeps `master`'s
+    output."""
+    md = "- a\n  - b\n\n  ```\n  c\n  ```\n\n  tail\n- d\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   * b\n   {{{\n   c\n   }}}\n\n   tail\n * d"
+    )
+
+
+def test_text_after_a_table_after_a_nested_list_keeps_the_blank_line():
+    md = (
+        "- a\n  - b\n\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n\n"
+        "  tail\n- d\n"
+    )
+    out = markdown_to_tracwiki(md)
+    assert out.endswith("   }}}\n\n   tail\n * d"), out
+
+
 # -- Unchanged output -------------------------------------------------------
 
 
@@ -241,6 +341,43 @@ def test_released_table_at_the_end_gets_no_blank_line():
     )
 
 
+def test_released_table_followed_by_a_fence_gets_no_blank_line():
+    """The blank line is for plain item text only: a fence opener starts
+    its own block, and GFM ends a table at it."""
+    wiki = (
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
+        "   {{{\n   c\n   }}}\n * b"
+    )
+    assert _md(wiki) == (
+        " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n"
+        "   ```\n   c\n   ```\n - b"
+    )
+
+
+# -- Read leg: text after a block in the LAST item (F3) ---------------------
+
+
+@pytest.mark.parametrize(
+    "wiki",
+    [
+        " * a\n   {{{\n   c\n   }}}\n   tail",
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\nafter",
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b",
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n   tail",
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
+        "   tail\n\nafter",
+    ],
+)
+def test_item_text_after_a_block_is_item_text_without_a_following_item(
+    wiki,
+):
+    """Not a `tracwiki-unconverted` fence: the line sits at the item's
+    continuation indent, right after the block's closing `}}}`."""
+    result = tracwiki_to_markdown(wiki)
+    assert "tracwiki-unconverted" not in result.text, result.text
+    assert result.warnings == []
+
+
 # -- TracWiki -> Markdown -> TracWiki byte stability -------------------------
 
 STABLE = {
@@ -262,6 +399,25 @@ STABLE = {
     "G nested": (
         " * a\n   * b\n     {{{#!div\n     ||=x=||=y=||\n     ||1||2||\n"
         "     }}}\n     tail\n * c"
+    ),
+    "last item code": " * a\n   {{{\n   c\n   }}}\n   tail",
+    "last item code then paragraph": (
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\nafter"
+    ),
+    "last item code ordered": " 1. a\n    {{{\n    c\n    }}}\n    tail",
+    "last item code nested": (
+        " * a\n   * b\n     {{{\n     c\n     }}}\n     tail"
+    ),
+    "last item code, blank line in the block": (
+        " * a\n   {{{\n   c\n\n   d\n   }}}\n   tail"
+    ),
+    "last item table": (
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
+        "   tail"
+    ),
+    "last item table then paragraph": (
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
+        "   tail\n\nafter"
     ),
     "H plain": (
         " * a\n   {{{\n   c\n   }}}\n   p1 [[BR]][[BR]]\n   p2\n * b"
@@ -298,7 +454,14 @@ LIVE = {
         "- a\n\n  ```\n  c\n  ```\n\n  p1\n\n  p2\n- b\n"
     ),
     "ends in a bang": "- Done!\n\n  para\n- d\n",
+    "last item code then tail then outside": (
+        "- a\n\n  ```\n  code\n  ```\n\n  tail\n\nafter\n"
+    ),
 }
+
+# Cases whose list ends with the item under test: one item, and the
+# trailing paragraph "after" sits outside the list.
+LIVE_LAST_ITEM = {"last item code then tail then outside"}
 
 
 @pytest.mark.live
@@ -329,7 +492,13 @@ def test_live_paragraphs_render_inside_the_list_item(name):
     assert "[[BR]]" not in html, html
     first_li = re.search(r"<li[\s>].*?</li>", html, re.DOTALL)
     assert first_li is not None, html
-    assert len(re.findall(r"<li[\s>]", html)) >= 2, html
+    if name in LIVE_LAST_ITEM:
+        assert len(re.findall(r"<li[\s>]", html)) == 1, html
+        outside = html[html.rindex("</ul>") :]
+        assert re.search(r"\bafter\b", outside), html
+        assert not re.search(r"\bafter\b", first_li.group(0)), html
+    else:
+        assert len(re.findall(r"<li[\s>]", html)) >= 2, html
     for word in ("para", "tail", "p1", "p2"):
         if re.search(rf"\b{word}\b", LIVE[name]):
-            assert word in first_li.group(0), html
+            assert re.search(rf"\b{word}\b", first_li.group(0)), html
