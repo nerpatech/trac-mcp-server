@@ -166,6 +166,17 @@ class TestRenderCheckToolDefinitions(unittest.TestCase):
                 ]
             )
 
+    def test_descriptions_name_the_structured_ticket_refs(self):
+        """Ticket #152: a structured-only client must learn from the
+        description that the ticket list is in `ticket_refs`."""
+        for tool in RENDER_CHECK_TOOLS:
+            self.assertIn(
+                "structuredContent.ticket_refs", tool.description
+            )
+            self.assertNotIn(
+                "for clients that only see text", tool.description
+            )
+
     def test_permissions(self):
         by_name = {s.tool.name: s for s in RENDER_CHECK_SPECS}
         self.assertEqual(
@@ -1099,16 +1110,76 @@ class TestTicketRefsStructured(unittest.TestCase):
             ],
         )
         result = _run_ticket(client)
-        line = _refs_line(result)
-        named = [
-            entry.split()[0]
-            for entry in line.split(": ", 1)[1].split("; ")
+        refs = result.structuredContent["ticket_refs"]
+        self.assertEqual(
+            [e["ref"] for e in refs], ["#30", "#10", "#20", "#5"]
+        )
+        # Summaries may contain ": " and "; ", so compare the whole
+        # line, not a parse of it.
+        self.assertEqual(
+            _refs_line(result), render_check._ticket_refs_line(refs)
+        )
+
+    def test_later_ticket_href_fills_in_the_number(self):
+        """The description's link has no `/ticket/N` in its href (so it
+        is keyed by its text `#5`); a later comment's does. One entry,
+        and its `ticket` is 5, not None."""
+        query = f'<a class="ticket" href="{BASE_URL}/query?id=5">#5</a>'
+        client = _page_with(
+            query, [_tkt_anchor(5, "#5: task: Five (new)")]
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 1, refs)
+        self.assertEqual(refs[0]["ref"], "#5")
+        self.assertEqual(refs[0]["ticket"], 5)
+        self.assertEqual(refs[0]["first_section"], "description")
+
+    def test_later_comment_link_fills_in_a_missing_summary(self):
+        """#9 is cited untitled in the description; comment 2 has only a
+        `comment:` link, whose title is no `#N: ` summary but is the
+        only one there is. `summary` is null only when no link to the
+        ticket had a title."""
+        client = _page_with(
+            _tkt_anchor(9, None),
+            [
+                "nothing",
+                _tkt_anchor(
+                    9,
+                    "Comment 1 for #9: defect: X (new)",
+                    text="comment:1:ticket:9",
+                    frag="#comment:1",
+                ),
+            ],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 1, refs)
+        self.assertEqual(refs[0]["summary"], "defect: X (new)")
+        self.assertEqual(refs[0]["first_section"], "description")
+
+    def test_long_fallback_ref_is_whole_while_the_text_line_caps(self):
+        text = "word " * 60  # 300 chars once collapsed and stripped
+        sections = [
+            {
+                "kind": "page",
+                "ref": None,
+                "links": {
+                    "ticket": [
+                        {
+                            "href": "http://h/t/query?id=3",
+                            "text": text,
+                            "title": None,
+                            "missing": False,
+                        }
+                    ]
+                },
+            }
         ]
-        structured = [
-            e["ref"] for e in result.structuredContent["ticket_refs"]
-        ]
-        self.assertEqual(structured, ["#30", "#10", "#20", "#5"])
-        self.assertEqual(named, structured)
+        refs = render_check._ticket_refs(sections)
+        self.assertEqual(refs[0]["ref"], " ".join(text.split()))
+        self.assertGreater(len(refs[0]["ref"]), 160)
+        entry = _ticket_refs_line(refs).split(": ", 1)[1]
+        self.assertTrue(entry.endswith("…"), entry)
+        self.assertLessEqual(len(entry), 161)
 
 
 @pytest.mark.live

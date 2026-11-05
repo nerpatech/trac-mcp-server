@@ -90,11 +90,12 @@ TICKET_RENDER_CHECK_TOOL = types.Tool(
         "'preview-checks: allow <code>' line in its source). Use this "
         "right after any "
         "ticket_update/ticket_create write to verify what Trac actually "
-        "rendered, not just what was stored. The text result also lists "
-        "each local ticket linked (once, with its summary, so a "
-        "mistyped number shows up as the wrong summary), each missing "
-        "link, the code blocks, and the rendered HTML when "
-        "include_html is true, for clients that only see text."
+        "rendered, not just what was stored. The local tickets linked "
+        "are listed once each with their summary (so a mistyped number "
+        "shows up as the wrong summary) in structuredContent.ticket_refs "
+        "and in the text result's 'Ticket refs' line; the text result "
+        "also lists each missing link, the code blocks, and the "
+        "rendered HTML when include_html is true."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -188,11 +189,12 @@ WIKI_RENDER_CHECK_TOOL = types.Tool(
         "instead of converting; a page can opt out of a "
         "named code with a 'preview-checks: allow <code>' line in its "
         "source). Use this right after any wiki_update/wiki_create "
-        "write. The text result also lists each local ticket linked "
-        "(once, with its summary, so a mistyped number shows up as the "
-        "wrong summary), each missing link, the code blocks, and the "
-        "rendered HTML when include_html is true, for clients that "
-        "only see text."
+        "write. The local tickets linked are listed once each with "
+        "their summary (so a mistyped number shows up as the wrong "
+        "summary) in structuredContent.ticket_refs and in the text "
+        "result's 'Ticket refs' line; the text result also lists each "
+        "missing link, the code blocks, and the rendered HTML when "
+        "include_html is true."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -431,13 +433,15 @@ def _missing_links_lines(section_results: list[dict]) -> list[str]:
     return [f"Missing links ({len(missing)}):", *missing]
 
 
-def _ticket_ref_key(link: dict) -> str:
-    """``#N`` for a link whose href names ticket N, else its text -- so
+def _ticket_ref_key(link: dict) -> tuple[str, int | None]:
+    """``(key, number)``: ``#N`` and N for a link whose href names
+    ticket N, else the link's text with whitespace collapsed (not
+    capped: the text line caps each entry itself) and ``None`` -- so
     ``#18``, ``ticket:18`` and ``[ticket:18 the bug]`` count as one."""
     match = _TICKET_HREF_RE.search(link["href"] or "")
     if match:
-        return f"#{match.group(1)}"
-    return _one_line(link["text"], _MAX_LINK_TEXT_CHARS)
+        return f"#{match.group(1)}", int(match.group(1))
+    return " ".join(link["text"].split()), None
 
 
 def _ticket_ref_summary(key: str, title: str | None) -> str | None:
@@ -469,46 +473,53 @@ def _ticket_refs(section_results: list[dict]) -> list[dict]:
     A missing ticket is left out: that stays ``missing_local_target`` at
     ``error`` and is listed by ``_missing_links_lines``.
 
-    When the same ticket is linked twice, the first link's summary wins,
-    unless it had no ``#N: ...`` title (Trac titles a ``comment:`` link
-    "Comment M for #N: <type>: <summary> (<status>)") and a later link
-    does. ``first_section`` stays the section where the ticket was first
-    seen either way.
+    When the same ticket is linked again, the first link's values win,
+    with these fill-ins from later links: ``ticket`` is set if it is
+    still ``None`` and the later link has a number; ``summary`` is set if
+    it is still ``None`` and the later link has any title (a ``comment:``
+    link's "Comment M for #N: <type>: <summary> (<status>)" included);
+    and a ``#N: ...`` shaped title replaces a summary that did not come
+    from one. ``first_section`` stays the section where the ticket was
+    first seen either way.
 
     Each entry is ``{"ticket", "ref", "summary", "first_section"}``:
-    ``ref`` is the key the text line prints (``#105``, or the link text
-    when the href has no ``/ticket/N``), ``ticket`` the number as an int
-    (``None`` in that fallback case), ``summary`` Trac's title without
-    its leading ``#N: `` / ``Comment M for #N: `` (``None`` when there
-    is no title), ``first_section`` a section name as in
+    ``ref`` is the key the text line prints (``#105``, or the
+    whitespace-collapsed link text when the href has no ``/ticket/N``),
+    ``ticket`` the number as an int (``None`` only if no link to it had
+    a ``/ticket/N`` href), ``summary`` Trac's title without its leading
+    ``#N: `` / ``Comment M for #N: `` (``None`` only if no link to it
+    had a title), ``first_section`` a section name as in
     ``_section_name``. Nothing is capped here.
     """
-    # key -> (entry, whether its summary came from a `#N: ...` title)
-    refs: dict[str, tuple[dict, bool]] = {}
+    refs: dict[str, dict] = {}
+    # keys whose summary came from a `#N: ...` title
+    shaped: set[str] = set()
     for s in section_results:
         for link in s["links"]["ticket"]:
             if link["missing"]:
                 continue
-            key = _ticket_ref_key(link)
+            key, number = _ticket_ref_key(link)
             summary = _ticket_ref_summary(key, link["title"])
-            shaped = (link["title"] or "").startswith(f"{key}: ")
-            if key not in refs:
-                match = _TICKET_HREF_RE.search(link["href"] or "")
-                refs[key] = (
-                    {
-                        "ticket": int(match.group(1))
-                        if match
-                        else None,
-                        "ref": key,
-                        "summary": summary,
-                        "first_section": _section_name(s),
-                    },
-                    shaped,
-                )
-            elif shaped and not refs[key][1]:
-                refs[key][0]["summary"] = summary
-                refs[key] = (refs[key][0], True)
-    return [entry for entry, _ in refs.values()]
+            is_shaped = (link["title"] or "").startswith(f"{key}: ")
+            entry = refs.get(key)
+            if entry is None:
+                refs[key] = {
+                    "ticket": number,
+                    "ref": key,
+                    "summary": summary,
+                    "first_section": _section_name(s),
+                }
+                if is_shaped:
+                    shaped.add(key)
+                continue
+            if entry["ticket"] is None:
+                entry["ticket"] = number
+            if is_shaped and key not in shaped:
+                entry["summary"] = summary
+                shaped.add(key)
+            elif entry["summary"] is None:
+                entry["summary"] = summary
+    return list(refs.values())
 
 
 def _ticket_refs_line(refs: list[dict]) -> str:
