@@ -34,7 +34,7 @@ from ..instances import (
     load_declared_instances,
 )
 from ..instances import caller_identity as _caller_identity
-from ..logger import setup_logging
+from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
@@ -462,10 +462,21 @@ async def main(config_overrides: dict | None = None):
     # stdio_server() uses stdout for JSON-RPC); stderr+file for http.
     # CRITICAL: This must be called BEFORE stdio_server context
     # to prevent any stdout contamination during protocol negotiation
-    setup_logging(
-        mode="mcp" if server_config.transport == "stdio" else "http",
-        log_file=log_file,
-    )
+    try:
+        setup_logging(
+            mode="mcp"
+            if server_config.transport == "stdio"
+            else "http",
+            log_file=log_file,
+        )
+    except OSError as e:
+        reason = e.strerror or str(e)
+        sys.stderr.write(
+            f"ERROR: Cannot open log file {e.filename}: {reason}\n"
+        )
+        raise RuntimeError(
+            f"Cannot open log file {e.filename}: {reason}"
+        ) from e
 
     # Version check (non-blocking warning for stale binaries)
     is_consistent, message = check_version_consistency()
@@ -651,7 +662,7 @@ must not be piped manually. This does not apply to --transport http.
         "--log-file",
         default=None,
         help="Log file path (default: the LOG_FILE env var, else "
-        "/tmp/trac-mcp-server.log for stdio and no file for http; pass an "
+        f"{DEFAULT_MCP_LOG_FILE} for stdio and no file for http; pass an "
         "empty string to disable the file)",
     )
     parser.add_argument(

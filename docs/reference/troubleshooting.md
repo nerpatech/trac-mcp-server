@@ -151,7 +151,7 @@ logging:
   level: DEBUG
 ```
 
-When enabled, the server writes detailed debug output to the log file.
+When enabled, the server writes detailed debug output to the log file (stdio) or to stderr (http, i.e. the service log), and to a file only when one is configured with `--log-file` or `LOG_FILE`.
 
 ## Log File Locations
 

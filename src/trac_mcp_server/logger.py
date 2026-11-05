@@ -34,6 +34,9 @@ class JsonFormatter(logging.Formatter):
 
 DEFAULT_MCP_LOG_FILE = "/tmp/trac-mcp-server.log"
 
+_LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
 
 def _resolve_log_file(mode: str, log_file: str | None) -> str | None:
     """Return the log file path to use, or None for "no log file".
@@ -41,13 +44,14 @@ def _resolve_log_file(mode: str, log_file: str | None) -> str | None:
     Order: the ``log_file`` argument if given, then the ``LOG_FILE``
     environment variable if it is set (even to empty), then the built-in
     default: ``/tmp/trac-mcp-server.log`` for "mcp" (stdio), none for
-    "cli"/"http". An empty value at either step means "no log file".
+    "cli"/"http". An empty or whitespace-only value at either step means
+    "no log file".
     """
     if log_file is None:
         log_file = os.environ.get("LOG_FILE")
     if log_file is None:
         log_file = DEFAULT_MCP_LOG_FILE if mode == "mcp" else None
-    return log_file or None
+    return log_file if log_file and log_file.strip() else None
 
 
 def setup_logging(
@@ -94,8 +98,8 @@ def setup_logging(
         # stdio transport uses stdout for JSON-RPC messages
         logging.basicConfig(
             level=log_level,
-            format="[%(asctime)s] [%(levelname)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            format=_LOG_FORMAT,
+            datefmt=_LOG_DATEFMT,
             filename=final_log_file,
             filemode="a",
         )
@@ -104,10 +108,7 @@ def setup_logging(
         # (stdout carries JSON-RPC; the stdio spec allows stderr logs)
         stderr_handler = logging.StreamHandler(sys.stderr)
         stderr_handler.setFormatter(
-            logging.Formatter(
-                "[%(asctime)s] [%(levelname)s] %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S",
-            )
+            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
         )
         logging.basicConfig(level=log_level, handlers=[stderr_handler])
     else:
@@ -122,10 +123,7 @@ def setup_logging(
             )
         else:
             stderr_handler.setFormatter(
-                logging.Formatter(
-                    "[%(asctime)s] [%(levelname)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
+                logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
             )
         handlers.append(stderr_handler)
 

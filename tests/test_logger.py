@@ -12,9 +12,11 @@ Strategy: Mock logging.basicConfig to verify setup_logging passes correct args,
 since pytest's log capture plugin interferes with actual basicConfig calls.
 """
 
+import asyncio
 import json
 import logging
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -23,9 +25,17 @@ from trac_mcp_server.logger import JsonFormatter, setup_logging
 from trac_mcp_server.mcp.server import (
     build_parser,
     config_overrides_from_args,
+    main,
 )
 
 DEFAULT_LOG = "/tmp/trac-mcp-server.log"
+
+
+@pytest.fixture(autouse=True)
+def _clean_log_file_env(monkeypatch):
+    """cli/http/stdio all honour LOG_FILE; keep the caller's out of the tests."""
+    monkeypatch.delenv("LOG_FILE", raising=False)
+
 
 # ---------------------------------------------------------------------------
 # setup_logging tests
@@ -172,10 +182,6 @@ def _file_handlers(handlers):
 class TestLogFileResolution:
     """--log-file, then LOG_FILE (even empty), then the per-mode default."""
 
-    @pytest.fixture(autouse=True)
-    def _clean_env(self, monkeypatch):
-        monkeypatch.delenv("LOG_FILE", raising=False)
-
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_stdio_default(self, mock_basic):
         setup_logging(mode="mcp")
@@ -272,6 +278,24 @@ class TestLogFileResolution:
         assert _file_handlers(handlers) == []
         assert handlers[0].stream is sys.stderr
 
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_http_whitespace_env_is_no_file(
+        self, mock_basic, monkeypatch
+    ):
+        monkeypatch.setenv("LOG_FILE", " ")
+        setup_logging(mode="http")
+
+        handlers = mock_basic.call_args[1]["handlers"]
+        assert _file_handlers(handlers) == []
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_stdio_whitespace_arg_logs_to_stderr(self, mock_basic):
+        setup_logging(mode="mcp", log_file="  \t")
+
+        kwargs = mock_basic.call_args[1]
+        assert "filename" not in kwargs
+        assert kwargs["handlers"][0].stream is sys.stderr
+
     def test_http_real_file_receives_records(
         self, monkeypatch, tmp_path
     ):
@@ -298,6 +322,46 @@ class TestLogFileResolution:
             for h in saved_handlers:
                 root.addHandler(h)
             root.setLevel(saved_level)
+
+
+class TestUnopenableLogFile:
+    """main() turns an unopenable log file into a clean RuntimeError."""
+
+    def test_names_the_path_and_raises_runtime_error(self, capsys):
+        err = FileNotFoundError(
+            2, "No such file or directory", "/nope/x.log"
+        )
+        with (
+            patch(
+                "trac_mcp_server.mcp.server.bootstrap_server_config",
+                return_value=SimpleNamespace(transport="http"),
+            ),
+            patch(
+                "trac_mcp_server.mcp.server.setup_logging",
+                side_effect=err,
+            ),
+            pytest.raises(RuntimeError, match="/nope/x.log") as exc,
+        ):
+            asyncio.run(
+                main(config_overrides={"log_file": "/nope/x.log"})
+            )
+
+        assert exc.value.__cause__ is err
+        stderr = capsys.readouterr().err
+        assert "ERROR: Cannot open log file /nope/x.log" in stderr
+
+    def test_real_unopenable_path(self, capsys, tmp_path):
+        path = str(tmp_path / "missing-dir" / "x.log")
+        with (
+            patch(
+                "trac_mcp_server.mcp.server.bootstrap_server_config",
+                return_value=SimpleNamespace(transport="http"),
+            ),
+            pytest.raises(RuntimeError, match="Cannot open log file"),
+        ):
+            asyncio.run(main(config_overrides={"log_file": path}))
+
+        assert path in capsys.readouterr().err
 
 
 class TestLogFileArgument:
