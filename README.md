@@ -157,10 +157,11 @@ It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the se
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 
-### Tickets (11)
+### Tickets (12)
 | Tool | Description |
 |------|-------------|
 | `ticket_search` | Search tickets with Trac query language |
+| `ticket_check_list` | Check a whole list of ticket numbers or texts against Trac in one call |
 | `ticket_get` | Get ticket details by ID |
 | `ticket_create` | Create new tickets |
 | `ticket_update` | Update existing tickets |

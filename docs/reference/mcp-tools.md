@@ -208,6 +208,74 @@ runs on this daemon -- see [Write Gate Status](#write-gate-status).
 
 ---
 
+## ticket_check_list
+
+**Description:** Check a whole list of ticket numbers, or of texts (for example keys from another system), against Trac in one call. Returns which values exist, with the requested fields, and which are missing, so a comparison needs one call instead of one `ticket_search` per value.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `values` | string | **Yes** | - | Ticket numbers or texts, separated by commas, semicolons or new lines; a JSON array of strings is accepted too. At most 1000; duplicates (ignoring case) count once |
+| `match_field` | string | No | `"id"` | `id`: the values are ticket numbers (`#12` and `12` are the same). Any other plain field name (`summary`, `keywords`, `description`, ...): the values are searched for in that field as whole words |
+| `query` | string | No | - | Trac query that narrows where to look, e.g. `status!=closed&component=Core`. It may only narrow by other fields: `max`, `page`, `order`, `desc`, `group`, `groupdesc`, `col`, `format`, `report`, `verbose`, `rows`, `row`, an `or` clause, a clause without `=`, and the field being matched (`id`, or `match_field`) are refused with a `validation_error` naming the key |
+| `fields` | string | No | `"summary,status"` | Comma-separated ticket fields to return for each match. `id` is always returned and is ignored here |
+| `only_missing` | boolean | No | `false` | Return only the values without a match (no ticket details are fetched) |
+
+**Matching.** Text matching is whole-word and case-insensitive. `-` counts as a word boundary, so `ABC-12` matches inside `ABC-12-3` but not inside `ABC-123`. The Trac query only narrows the candidates (it searches the longest word of each value, with `|` and `&` escaped); the whole-word filter on the full value decides the match.
+
+**Output keys (structured JSON):**
+
+| Key | Description |
+|-----|-------------|
+| `values_checked` | Number of distinct values received |
+| `found` | Omitted with `only_missing`. In id mode, an object keyed by the value as given; in text mode, keyed by the value, each holding a list of matching tickets. Each hit holds `id`, the requested fields (unset fields are `""`) and `url` |
+| `missing` | Values with no match |
+| `found_count`, `missing_count` | Their sizes |
+| `not_a_ticket_number` | Id mode only, omitted when empty: values that are not a ticket number (one optional leading `#`, then ASCII digits) |
+| `unsearchable` | Text mode only, omitted when empty: values with no searchable word (for example `\`, `-` or `""`); they are not queried and are not in `missing` |
+| `failed_ids` | Always present: ids of tickets that matched but could not be loaded. In id mode such an id is in neither `found` nor `missing`; in text mode it is not matched. Retry to load them |
+
+**Success Response:**
+```json
+{
+  "values_checked": 3,
+  "found": {
+    "1": {"id": 1, "summary": "First", "status": "new", "url": "https://trac.example.com/ticket/1"}
+  },
+  "missing": ["2"],
+  "found_count": 1,
+  "missing_count": 1,
+  "not_a_ticket_number": ["abc"],
+  "failed_ids": []
+}
+```
+
+**Error Responses:**
+
+- **validation_error:** Empty `values`, more than 1000 values, a `match_field` that is not a field name, or a `query` with a refused key
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): query may not contain 'max'\n\nAction: The query may only narrow by other fields, ..."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_check_list",
+  "arguments": {
+    "values": "ABC-12, ABC-13",
+    "match_field": "summary",
+    "query": "status!=closed",
+    "fields": "summary,status"
+  }
+}
+```
+
+---
+
 ## ticket_get
 
 **Description:** Get full ticket details: summary, description, field values and — by default — every comment with its number, author and timestamp, so one call covers the whole ticket. Use ticket_changelog for full field-change history.
