@@ -1777,6 +1777,17 @@ class TracWikiParser:
                 # End of table - flush accumulated rows
                 flush_table()
                 div_group = False
+                # Ticket #143: item text straight after a table released
+                # from a list item's {{{#!div}}} needs a blank line (no
+                # indent) in the Markdown, or a GFM reader takes it for one
+                # more table row (spec example 202). The next list marker
+                # and a blank line need none.
+                if (
+                    prev_div_end == len(result)
+                    and line.strip()
+                    and not _LIST_MARKER_RE.match(line)
+                ):
+                    result.append("")
                 result.append(line)
 
         # Flush any remaining table at end of document
