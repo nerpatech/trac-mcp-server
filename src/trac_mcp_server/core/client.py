@@ -6,6 +6,7 @@ import threading
 import time
 import weakref
 import xmlrpc.client
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, NamedTuple
@@ -213,6 +214,10 @@ _METHOD_NOT_FOUND_FAULT_CODE = -32601
 # picked up by a running daemon without a restart.
 WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
 
+# The same, for the plugin's ``ticket.getChangeAt`` (Trac
+# /trac_mcp_server #132).
+TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
+
 # TracXMLRPC wraps every fault from a plain TracError as
 # "'<message>' while executing '<method>()'".
 _TRACRPC_FAULT_WRAPPER = re.compile(
@@ -238,6 +243,34 @@ def _is_missing_method_fault(
         and "method" in text
         and method.lower() in text
     )
+
+
+@dataclass
+class _OptionalMethod:
+    """An RPC method only some servers have (a plugin's), and the client's
+    memory of one that was missing.
+
+    ``note_fault`` records a missing-method fault; ``available`` is False
+    for ``ttl`` seconds after that, so a burst of calls to a server
+    without the plugin pays the extra round trip once, while a plugin
+    deployed later is picked up without a restart.
+    """
+
+    name: str
+    ttl: float
+    absent_until: float = 0.0
+
+    def available(self) -> bool:
+        """Whether to call it: always, unless remembered absent."""
+        return time.monotonic() >= self.absent_until
+
+    def note_fault(self, err: xmlrpc.client.Fault) -> bool:
+        """True, and remember the absence, when ``err`` says the server
+        has no such method; False for any other fault."""
+        if not _is_missing_method_fault(err, self.name):
+            return False
+        self.absent_until = time.monotonic() + self.ttl
+        return True
 
 
 def _unwrap_tracrpc_fault(
@@ -298,9 +331,16 @@ class TracClient:
         )
         self._sessions_lock = threading.Lock()
         self.rpc_url = self._get_rpc_url()
-        # time.monotonic() until which put_wiki_page skips the conditional
-        # put plugin method, after the server said it has none (#129).
-        self._wiki_conditional_put_absent_until = 0.0
+        # Plugin methods this client skips for a while after the server
+        # said it has none: put_wiki_page's conditional put (#129) and
+        # get_ticket_change_at's lookup (#132).
+        self._wiki_conditional_put = _OptionalMethod(
+            f"wiki.{WIKI_CONDITIONAL_PUT_METHOD}",
+            WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS,
+        )
+        self._ticket_change_at = _OptionalMethod(
+            "ticket.getChangeAt", TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
+        )
 
     @property
     def session(self) -> requests.Session:
@@ -490,6 +530,40 @@ class TracClient:
         Get ticket changelog by ticket ID.
         """
         return self._rpc_request("ticket", "changeLog", ticket_id)
+
+    def get_ticket_change_at(
+        self, ticket_id: int, ts: str
+    ) -> list | None:
+        """Read the one change set stored at ``ts`` via the plugin's
+        ``ticket.getChangeAt`` (Trac /trac_mcp_server #132).
+
+        ``ts`` is the microsecond ``_ts`` a ``ticket.update`` returned,
+        as a string (XML-RPC ints are 32-bit). Returns the plugin's
+        reply: ``[cnum, author, comment]`` -- ``cnum`` as Trac stores it,
+        a string that is dotted for a threaded reply -- or ``[]`` when no
+        change, or none with a comment, is stored at that time.
+
+        Returns ``None`` when the server has no such method -- the
+        ``tracrpc_comment`` plugin (1.2.0 or later) is not installed or
+        not enabled -- and the caller falls back to reading the
+        changelog. That absence is remembered for
+        ``TICKET_CHANGE_AT_ABSENT_TTL_SECONDS``, during which ``None``
+        is returned with no RPC posted.
+
+        Raises:
+            xmlrpc.client.Fault: Any other fault (permission denied, no
+                such ticket, a malformed ``ts``), unchanged.
+        """
+        if not self._ticket_change_at.available():
+            return None
+        try:
+            return self._rpc_request(
+                "ticket", "getChangeAt", ticket_id, ts
+            )
+        except xmlrpc.client.Fault as err:
+            if self._ticket_change_at.note_fault(err):
+                return None
+            raise
 
     def edit_ticket_comment(
         self, ticket_id: int, cnum: int, comment: str
@@ -1309,7 +1383,10 @@ class TracClient:
 
         result = None
         answered_by_plugin = False
-        if version is not None and self._wiki_conditional_put_due():
+        if (
+            version is not None
+            and self._wiki_conditional_put.available()
+        ):
             # The server-side check (#129). None back means the server
             # has no such method: fall through to the precheck below.
             result = self._put_wiki_page_if_version(
@@ -1325,14 +1402,6 @@ class TracClient:
             raise ValueError(f"Failed to update page '{page_name}'")
 
         return self._read_back_stored_page(page_name, version)
-
-    def _wiki_conditional_put_due(self) -> bool:
-        """Whether to try ``wiki.putPageIfVersion``: always, unless the
-        server said it has no such method within the last
-        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``."""
-        return (
-            time.monotonic() >= self._wiki_conditional_put_absent_until
-        )
 
     def _put_wiki_page_if_version(
         self,
@@ -1379,13 +1448,7 @@ class TracClient:
                 expected,
             )
         except xmlrpc.client.Fault as err:
-            if _is_missing_method_fault(
-                err, f"wiki.{WIKI_CONDITIONAL_PUT_METHOD}"
-            ):
-                self._wiki_conditional_put_absent_until = (
-                    time.monotonic()
-                    + WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS
-                )
+            if self._wiki_conditional_put.note_fault(err):
                 return None
             conflict = (
                 _WIKI_CONFLICT_MARKER.match(err.faultString)

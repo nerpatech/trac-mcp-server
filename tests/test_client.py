@@ -3661,3 +3661,107 @@ def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
 )
 def test_parse_comment_number_rejects(oldvalue):
     assert TracClient.parse_comment_number(oldvalue) is None
+
+
+# ticket.getChangeAt (Trac /trac_mcp_server #132)
+
+
+def test_get_ticket_change_at_returns_the_plugins_list(mock_config):
+    client = TracClient(mock_config)
+    with patch.object(
+        client, "_rpc_request", return_value=["5", "alice", "text"]
+    ) as rpc:
+        result = client.get_ticket_change_at(7, "1762257600123456")
+
+    assert result == ["5", "alice", "text"]
+    rpc.assert_called_once_with(
+        "ticket", "getChangeAt", 7, "1762257600123456"
+    )
+
+
+def _missing_getchangeat(*args):
+    raise xmlrpc.client.Fault(
+        -32601, 'RPC method "ticket.getChangeAt" not found'
+    )
+
+
+def test_get_ticket_change_at_missing_method_returns_none_and_caches(
+    mock_config,
+):
+    client = TracClient(mock_config)
+    with patch.object(
+        client, "_rpc_request", side_effect=_missing_getchangeat
+    ) as rpc:
+        assert client.get_ticket_change_at(7, "1") is None
+        assert client.get_ticket_change_at(7, "1") is None
+        assert client.get_ticket_change_at(8, "2") is None
+
+    assert rpc.call_count == 1
+
+
+def test_get_ticket_change_at_tries_again_after_the_ttl(mock_config):
+    from trac_mcp_server.core import client as client_module
+
+    client = TracClient(mock_config)
+    now = [1000.0]
+    with patch.object(
+        client_module.time, "monotonic", side_effect=lambda: now[0]
+    ):
+        with patch.object(
+            client, "_rpc_request", side_effect=_missing_getchangeat
+        ) as rpc:
+            client.get_ticket_change_at(7, "1")
+            now[0] += (
+                client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS - 1
+            )
+            client.get_ticket_change_at(7, "1")
+            assert rpc.call_count == 1
+
+            now[0] += 2
+            client.get_ticket_change_at(7, "1")
+            assert rpc.call_count == 2
+
+        # The plugin arrived meanwhile: the next call gets the answer.
+        now[0] += client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS + 1
+        with patch.object(
+            client, "_rpc_request", return_value=["1", "a", "t"]
+        ):
+            assert client.get_ticket_change_at(7, "1") == [
+                "1",
+                "a",
+                "t",
+            ]
+
+
+def test_get_ticket_change_at_ttl_is_five_minutes():
+    from trac_mcp_server.core import client as client_module
+
+    assert client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS == 300.0
+
+
+def test_get_ticket_change_at_other_faults_propagate(mock_config):
+    client = TracClient(mock_config)
+    fault = xmlrpc.client.Fault(
+        1, "TICKET_VIEW privileges are required"
+    )
+    with patch.object(client, "_rpc_request", side_effect=fault):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.get_ticket_change_at(7, "1")
+
+    assert exc_info.value is fault
+    # An unrelated fault is not remembered as "plugin absent".
+    with patch.object(client, "_rpc_request", return_value=[]) as rpc:
+        assert client.get_ticket_change_at(7, "1") == []
+    rpc.assert_called_once()
+
+
+def test_get_ticket_change_at_page_not_found_is_not_a_missing_method(
+    mock_config,
+):
+    client = TracClient(mock_config)
+    fault = xmlrpc.client.Fault(
+        404, "Ticket 9 does not exist.  not found"
+    )
+    with patch.object(client, "_rpc_request", side_effect=fault):
+        with pytest.raises(xmlrpc.client.Fault):
+            client.get_ticket_change_at(9, "1")

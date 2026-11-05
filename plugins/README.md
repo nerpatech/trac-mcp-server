@@ -19,6 +19,7 @@ Adds XML-RPC methods that XmlRpcPlugin does not expose:
 | `ticket.deleteComment` | remove a comment (guarded — see below) |
 | `ticket.getCommentHistory` | read a comment's edit revisions |
 | `ticket.replyToComment` | post a **threaded** reply |
+| `ticket.getChangeAt` | the comment of the change set stored at one microsecond `_ts` (#132) |
 | `timeline.getEvents` / `timeline.getFilters` | the Trac timeline |
 | `wiki.putPageIfVersion` | a `wiki.putPage` that refuses a stale version (#129) |
 
@@ -33,7 +34,7 @@ instead: `config set components tracrpc_comment.wiki_put.* enabled`.
 `tracrpc.api.XMLRPCSystem.get_method` iterates every `IXMLRPCHandler` provider
 and matches on the full dotted name, so a second component may claim the
 existing `ticket` namespace as long as it yields names the incumbent does not.
-Stock `TicketRPC` yields none of the four above, and stock `WikiRPC` does not
+Stock `TicketRPC` yields none of the five above, and stock `WikiRPC` does not
 yield `putPageIfVersion`.
 
 The installed `tracxmlrpc` is never modified. Rollback is one `config set
@@ -103,6 +104,33 @@ The MCP server uses it for every versioned wiki write and falls back to its
 client-side precheck when the method is missing, so installing it is optional
 but closes the window.
 
+### `ticket.getChangeAt(id, ts)`
+
+`ticket.update` returns the new change token `_ts` (microseconds). Finding the
+comment that write just posted used to mean reading the whole
+`ticket.changeLog` and matching to the whole second (#124, #131, #132). This
+method returns the one change set stored at that exact microsecond.
+
+- **Arguments.** `id` is the ticket number. `ts` is a **string** of ASCII
+  digits, the `_ts` value as `ticket.update` returns it -- never an int,
+  because XML-RPC ints are 32-bit. Anything else (empty, signed, decimal,
+  non-string, or too large to be a time) raises a `TracError`.
+- **Returns** `[cnum, author, comment]`: `cnum` exactly as Trac stores it (a
+  string; dotted like `"2.5"` for a threaded reply made with
+  `replyToComment`), `author` the change's author, and `comment` the stored
+  text, unmodified. An empty comment can arrive as `None` over the wire.
+- **Returns `[]`** when nothing was changed at that microsecond, or the change
+  there has no `comment` field. An empty list is therefore "no such comment",
+  not an error.
+- **Permission.** `TICKET_VIEW` on the ticket, checked in the method like its
+  siblings (the dispatcher entry declares `None`, see the comment in
+  `xmlrpc_methods`). A missing ticket raises whatever `Ticket(env, id)` does.
+
+The MCP server asks it first on every `ticket_update` that carries a comment,
+and falls back to the old changelog scan when the method is missing (remembered
+for five minutes) or the answer is unusable, so installing it is optional but
+saves reading the changelog.
+
 ## Installing on the Trac host
 
 Requires no root: uWSGI's master runs as `user`, and `master = true` makes
@@ -125,7 +153,7 @@ ssh kpoxa 'cd /tmp/tracrpc_comment && /home/user/trac/.venv/bin/python setup.py 
 
 # 2. copy the egg into ONE environment's own plugins/ directory --
 #    /trac_test FIRST, the rest once proven -- then enable it there
-ssh kpoxa 'cp /tmp/tracrpc_comment/dist/TracRpcComment-1.1.0-py3.11.egg \
+ssh kpoxa 'cp /tmp/tracrpc_comment/dist/TracRpcComment-1.2.0-py3.11.egg \
     /home/user/trac/projects/trac_test/plugins/'
 ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/trac_test \
     config set components "tracrpc_comment.*" enabled'
@@ -135,26 +163,35 @@ ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
 ```
 
 Confirm by content, not by the install exiting 0 — `system.listMethods` from a
-reconnected session must list `ticket.editComment` (and, from 1.1.0,
-`wiki.putPageIfVersion`).
+reconnected session must list `ticket.editComment` (and, from 1.2.0,
+`wiki.putPageIfVersion` and `ticket.getChangeAt`).
 
-**Upgrading from 1.0.0** (the release without `wiki.putPageIfVersion`):
-**every instance moves at once.** Install the 1.1.0 egg into every instance
-first, then send one reload; a single instance can't be upgraded on its own.
+**Upgrading from 1.0.0** (the release with neither `wiki.putPageIfVersion` nor
+`ticket.getChangeAt`): **every instance moves at once.** Install the 1.2.0 egg
+into every instance first, then send one reload; a single instance can't be
+upgraded on its own. 1.1.0 (which had `putPageIfVersion` only) was never rolled
+out: every instance runs 1.0.0, and the upgrade goes straight to 1.2.0.
  * **Why:** all instances run in the same uWSGI worker processes. The first
    instance a worker opens adds its egg's version to the process-wide
    `pkg_resources` working set. Trac's loader then skips a different version
    of the same egg in any other instance, with
-   `Skipping "TracRpcComment 1.1.0": VersionConflict: (TracRpcComment 1.0.0 ...)`
+   `Skipping "TracRpcComment 1.2.0": VersionConflict: (TracRpcComment 1.0.0 ...)`
    in that instance's `trac.log`.
  * **What the components are:** they are registered process-wide, so every
    instance gets the components of whichever version loaded first. On
    2026-11-04, `/trac_test` alone carried 1.1.0: it went on listing 85 methods
    with no `wiki.putPageIfVersion`, served by `trac_mcp_server`'s 1.0.0 egg.
+   The jump to 1.2.0 is also what makes a stale egg (a 1.1.0 built before
+   `ticket.getChangeAt` existed, say) fail visibly with `VersionConflict`
+   instead of loading silently with the method missing.
  * **How:** in each instance's `plugins/`, swap
-   `TracRpcComment-1.0.0-py3.11.egg` for `TracRpcComment-1.1.0-py3.11.egg`,
-   then reload once. The `tracrpc_comment.*` pattern already enabled
-   covers the new component.
+   `TracRpcComment-1.0.0-py3.11.egg` for `TracRpcComment-1.2.0-py3.11.egg`,
+   then reload once. **Remove any `TracRpcComment-1.1.0-py3.11.egg` found in an
+   instance's `plugins/` too** (`/trac_test` is the known one), so each
+   instance holds exactly one egg. The `tracrpc_comment.*` pattern already
+   enabled covers the new component and method.
+ * **Until then** the MCP server works unchanged: both new methods are
+   optional, and a missing one is remembered for five minutes and bypassed.
 
 The per-environment isolation described above holds for *enabling*, which is
 per-instance config. It doesn't hold for *versions*.
