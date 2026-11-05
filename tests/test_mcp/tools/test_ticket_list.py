@@ -17,10 +17,29 @@ async def _direct(func, *args, **kwargs):
     return func(*args, **kwargs)
 
 
-def _client(tickets: dict[int, dict], search=None) -> MagicMock:
+FIELDS = [
+    {"name": "summary", "type": "text", "label": "Summary"},
+    {"name": "description", "type": "textarea", "label": "Description"},
+    {
+        "name": "keywords",
+        "type": "text",
+        "format": "list",
+        "label": "Keywords",
+    },
+    {"name": "status", "type": "select", "label": "Status"},
+]
+
+
+def _client(
+    tickets: dict[int, dict], search=None, fields=None
+) -> MagicMock:
     """A TracClient mock: search_tickets answers an id=1|2 query with the
-    ids that exist (or calls ``search``), get_ticket returns the attrs."""
+    ids that exist (or calls ``search``), get_ticket returns the attrs,
+    get_ticket_fields returns ``fields`` (default FIELDS)."""
     client = MagicMock(spec=TracClient)
+    client.get_ticket_fields.return_value = (
+        FIELDS if fields is None else fields
+    )
 
     def search_tickets(query):
         if search is not None:
@@ -184,6 +203,54 @@ def test_text_query_needle_splits_on_quotes():
     assert queries == ["keywords~=ab&max=0"]
 
 
+def test_text_query_non_list_field_searches_the_whole_phrase():
+    queries, _ = _text_queries("disk quota exceeded", "summary")
+
+    assert queries == ["summary~=disk quota exceeded&max=0"]
+
+
+def test_text_query_non_list_field_keeps_quotes_and_dashes():
+    queries, _ = _text_queries('-foo "bar"', "summary")
+
+    assert queries == ['summary~=-foo "bar"&max=0']
+
+
+def test_text_query_non_list_field_splits_only_on_a_backslash():
+    queries, _ = _text_queries("x\\y, z", "summary")
+
+    assert queries == ["summary~=x|z&max=0"]
+
+
+def test_text_query_non_list_field_escapes_separators():
+    queries, _ = _text_queries("a|b c&d", "description")
+
+    assert queries == [r"description~=a\|b c\&d&max=0"]
+
+
+@pytest.mark.parametrize(
+    ("match_field", "value", "needle"),
+    [
+        ("keywords", "ab$USERcde", "cde"),
+        ("summary", "ab$USERcde", "cde"),
+        ("summary", "ab cd$USERe", "ab cd"),
+    ],
+)
+def test_text_query_treats_user_as_a_separator(
+    match_field, value, needle
+):
+    queries, _ = _text_queries(value, match_field)
+
+    assert queries == [f"{match_field}~={needle}&max=0"]
+
+
+@pytest.mark.parametrize("match_field", ["keywords", "summary"])
+def test_a_term_that_is_only_user_is_unsearchable(match_field):
+    queries, result = _text_queries("$USER", match_field)
+
+    assert queries == []
+    assert result["unsearchable"] == ["$USER"]
+
+
 @pytest.mark.parametrize("term", ["\\", "-", '""', "- -"])
 def test_unsearchable_terms_are_reported_not_queried(term):
     queries, result = _text_queries(f"{term}")
@@ -228,7 +295,15 @@ def test_term_with_a_pipe_is_found_end_to_end():
 
 @pytest.mark.parametrize(
     "match_field",
-    ["summary~=x&owner", "a b", "1x", "x-y", "summary=", "x|y"],
+    [
+        "summary~=x&owner",
+        "a b",
+        "1x",
+        "x-y",
+        "summary=",
+        "x|y",
+        "summary\n",
+    ],
 )
 def test_match_field_must_be_a_field_name(match_field):
     client = _client({})
@@ -239,6 +314,50 @@ def test_match_field_must_be_a_field_name(match_field):
     assert "validation_error" in result.content[0].text
     assert "match_field" in result.content[0].text
     client.search_tickets.assert_not_called()
+    client.get_ticket_fields.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "match_field", ["nosuch", "status", "Summary", "id2", "SUMMARY"]
+)
+def test_match_field_must_be_a_text_field_of_the_instance(match_field):
+    client = _client({})
+
+    result = _run(client, {"values": "x", "match_field": match_field})
+
+    assert result.isError
+    text = result.content[0].text
+    assert "validation_error" in text
+    assert f"'{match_field}'" in text
+    assert "summary, description, keywords" in text
+    assert "status" not in text.split("Action:")[1]
+    client.search_tickets.assert_not_called()
+
+
+def test_match_field_accepts_a_custom_text_field():
+    fields = [*FIELDS, {"name": "ref", "type": "text", "custom": True}]
+    client = _client({}, lambda q: [], fields)
+
+    result = _run(client, {"values": "x", "match_field": "ref"})
+
+    assert not result.isError
+    client.search_tickets.assert_called_once_with("ref~=x&max=0")
+
+
+def test_get_ticket_fields_error_propagates():
+    client = _client({})
+    client.get_ticket_fields.side_effect = RuntimeError("no fields")
+
+    with pytest.raises(RuntimeError, match="no fields"):
+        _run(client, {"values": "x", "match_field": "summary"})
+
+
+def test_id_mode_does_not_load_the_field_list():
+    client = _client({1: {"summary": "One"}})
+
+    _run(client, {"values": "1"})
+
+    client.get_ticket_fields.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -335,10 +454,20 @@ def test_a_failed_get_ticket_in_id_mode_is_reported_not_raised():
     result = _run(client, {"values": "3, 2, 1, 9"}).structuredContent
 
     assert result["failed_ids"] == [2]
-    assert sorted(result["found"]) == ["1", "3"]
+    assert sorted(result["found"]) == ["1", "2", "3"]
+    assert result["found"]["2"] == {
+        "id": 2,
+        "url": "https://trac.example/proj/ticket/2",
+    }
     assert result["missing"] == ["9"]
-    assert result["found_count"] == 2
+    assert result["found_count"] == 3
     assert result["missing_count"] == 1
+
+    only_missing = _run(
+        client, {"values": "3, 2, 1, 9", "only_missing": True}
+    ).structuredContent
+    assert only_missing["found_count"] == 3
+    assert only_missing["missing"] == ["9"]
 
 
 def test_a_failed_get_ticket_in_text_mode_is_not_post_filtered():
@@ -363,6 +492,117 @@ def test_a_failed_get_ticket_in_text_mode_is_not_post_filtered():
 
     assert result["failed_ids"] == [6, 7]
     assert [hit["id"] for hit in result["found"]["login"]] == [5]
+
+
+def _batched_values(n):
+    return ",".join(f"v{i}" for i in range(n))
+
+
+def test_a_ticket_in_several_text_batches_is_fetched_once():
+    tickets = {
+        5: {"summary": "v0 and v20"},
+        6: {"summary": "v1 and v21"},
+    }
+    client = _client(tickets, lambda query: [5, 6])
+
+    result = _run(
+        client,
+        {"values": _batched_values(30), "match_field": "summary"},
+    ).structuredContent
+
+    assert client.search_tickets.call_count == 2
+    assert sorted(
+        c.args[0] for c in client.get_ticket.call_args_list
+    ) == [
+        5,
+        6,
+    ]
+    assert [hit["id"] for hit in result["found"]["v20"]] == [5]
+
+
+def test_a_failed_ticket_is_not_retried_within_the_call():
+    client = _client({5: {"summary": "x"}}, lambda query: [5])
+    client.get_ticket.side_effect = RuntimeError("boom")
+
+    result = _run(
+        client,
+        {"values": _batched_values(30), "match_field": "summary"},
+    ).structuredContent
+
+    assert client.get_ticket.call_count == 1
+    assert result["failed_ids"] == [5]
+
+
+def test_unmatched_value_with_a_failed_candidate_is_unresolved():
+    tickets = {5: {"summary": "Login fails"}, 6: {"summary": "x"}}
+    client = _client(tickets, lambda query: [5, 6])
+    good = client.get_ticket.side_effect
+
+    def get_ticket(tid):
+        if tid == 6:
+            raise RuntimeError("boom")
+        return good(tid)
+
+    client.get_ticket.side_effect = get_ticket
+
+    result = _run(
+        client, {"values": "login, export", "match_field": "summary"}
+    ).structuredContent
+
+    assert result["unresolved"] == ["export"]
+    assert result["missing"] == []
+    assert result["missing_count"] == 0
+    assert "unresolved_count" not in result
+    assert result["failed_ids"] == [6]
+    assert [hit["id"] for hit in result["found"]["login"]] == [5]
+    assert result["found_count"] == 1
+
+
+def test_unresolved_is_per_batch_and_omitted_when_empty():
+    tickets = {5: {"summary": "x"}, 6: {"summary": "y"}}
+
+    def search(query):
+        return [5] if "v0" in query else [6]
+
+    client = _client(tickets, search)
+    good = client.get_ticket.side_effect
+
+    def get_ticket(tid):
+        if tid == 5:
+            raise RuntimeError("boom")
+        return good(tid)
+
+    client.get_ticket.side_effect = get_ticket
+
+    result = _run(
+        client,
+        {"values": _batched_values(16), "match_field": "summary"},
+    ).structuredContent
+
+    assert result["unresolved"] == [f"v{i}" for i in range(15)]
+    assert result["missing"] == ["v15"]
+    assert result["missing_count"] == 1
+
+    clean = _run(
+        _client(tickets, lambda q: [6]),
+        {"values": "z", "match_field": "summary"},
+    ).structuredContent
+    assert "unresolved" not in clean
+    assert clean["missing"] == ["z"]
+
+
+def test_a_requested_url_field_cannot_replace_the_url():
+    client = _client(
+        {4: {"summary": "Four", "url": "http://evil.example/"}}
+    )
+
+    result = _run(
+        client, {"values": "4", "fields": "url,summary"}
+    ).structuredContent
+
+    hit = result["found"]["4"]
+    assert hit["url"] == "https://trac.example/proj/ticket/4"
+    assert list(hit) == ["id", "summary", "url"]
 
 
 def test_unset_fields_are_empty_strings_not_null():
@@ -409,6 +649,29 @@ def test_numbers_are_ascii_decimal_with_at_most_one_hash():
     assert out["not_a_ticket_number"] == ["²", "##5", "#", "١"]
     assert out["found_count"] == 2
     client.search_tickets.assert_called_once_with("id=1|2&max=0")
+
+
+@pytest.mark.parametrize("digits", [5000, 19])
+def test_long_digit_strings_are_not_ticket_numbers(digits):
+    client = _client({1: {"summary": "One"}})
+    long = "9" * digits
+
+    result = _run(client, {"values": f"1, {long}, #{long}"})
+
+    assert not result.isError
+    out = result.structuredContent
+    assert out["not_a_ticket_number"] == [long, f"#{long}"]
+    assert out["found_count"] == 1
+    client.search_tickets.assert_called_once_with("id=1&max=0")
+
+
+def test_eighteen_digits_is_still_a_ticket_number():
+    client = _client({}, lambda q: [])
+
+    result = _run(client, {"values": "9" * 18}).structuredContent
+
+    assert "not_a_ticket_number" not in result
+    assert result["missing"] == ["9" * 18]
 
 
 def test_empty_json_list_is_an_empty_values_error():

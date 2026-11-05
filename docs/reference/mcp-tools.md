@@ -217,12 +217,16 @@ runs on this daemon -- see [Write Gate Status](#write-gate-status).
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `values` | string | **Yes** | - | Ticket numbers or texts, separated by commas, semicolons or new lines; a JSON array of strings is accepted too. At most 1000; duplicates (ignoring case) count once |
-| `match_field` | string | No | `"id"` | `id`: the values are ticket numbers (`#12` and `12` are the same). Any other plain field name (`summary`, `keywords`, `description`, ...): the values are searched for in that field as whole words |
+| `match_field` | string | No | `"id"` | `id`: the values are ticket numbers (`#12` and `12` are the same). Otherwise the exact (case-sensitive) name of a text field of the instance, i.e. a field of type `text` or `textarea` (`summary`, `keywords`, `description`, a custom text field, ...): the values are searched for in that field as whole words. Any other name is a `validation_error` that lists the allowed fields |
 | `query` | string | No | - | Trac query that narrows where to look, e.g. `status!=closed&component=Core`. It may only narrow by other fields: `max`, `page`, `order`, `desc`, `group`, `groupdesc`, `col`, `format`, `report`, `verbose`, `rows`, `row`, an `or` clause, a clause without `=`, and the field being matched (`id`, or `match_field`) are refused with a `validation_error` naming the key |
-| `fields` | string | No | `"summary,status"` | Comma-separated ticket fields to return for each match. `id` is always returned and is ignored here |
-| `only_missing` | boolean | No | `false` | Return only the values without a match (no ticket details are fetched) |
+| `fields` | string | No | `"summary,status"` | Comma-separated ticket fields to return for each match. `id` and `url` are always present and cannot be requested as fields; they are ignored here |
+| `only_missing` | boolean | No | `false` | Return only the values without a match: no `found` and no field values. In id mode no ticket is fetched; in text mode every candidate is still fetched, because the whole-word match needs its text |
 
-**Matching.** Text matching is whole-word and case-insensitive. `-` counts as a word boundary, so `ABC-12` matches inside `ABC-12-3` but not inside `ABC-123`. The Trac query only narrows the candidates (it searches the longest word of each value, with `|` and `&` escaped); the whole-word filter on the full value decides the match.
+**Matching.** Text matching is whole-word and case-insensitive. `-` counts as a word boundary, so `ABC-12` matches inside `ABC-12-3` but not inside `ABC-123`. The Trac query only narrows the candidates; the whole-word filter on the full value decides the match. What the query searches for depends on the field: for a list field (`type` `text` with `format` `list`, such as `keywords` and `cc`) Trac splits the value on whitespace and double quotes and reads a leading `-` as NOT, so the query searches the longest word of each value (leading `-` stripped); for any other field Trac does one substring match on the whole value, so the query searches the whole value (`disk quota exceeded` as it stands), split only at a backslash, for which Trac has no escape, and at the literal `$USER`, which Trac replaces with the caller's name. In both cases `|` and `&` are escaped.
+
+**Limitation.** On a SQLite-backed Trac the substring match folds case for ASCII letters only, so a value whose non-ASCII letters differ in case from the stored text (for example `ÄRGER` against `ärger`) is not among the candidates and can be reported missing.
+
+**Loading failures.** Each ticket is fetched at most once per call, and a ticket that failed to load is not retried within the call. In text mode a value with no whole-word match among the loaded candidates is in `missing` only if every candidate of its batch loaded; if one of them failed to load, the failed ticket might have matched, so the value is in `unresolved` instead. In id mode existence comes from the query, so a ticket that exists but failed to load stays in `found` with only `id` and `url` (no field values) and its id is in `failed_ids`; `found_count` is the same with or without `only_missing`.
 
 **Output keys (structured JSON):**
 
@@ -231,10 +235,11 @@ runs on this daemon -- see [Write Gate Status](#write-gate-status).
 | `values_checked` | Number of distinct values received |
 | `found` | Omitted with `only_missing`. In id mode, an object keyed by the value as given; in text mode, keyed by the value, each holding a list of matching tickets. Each hit holds `id`, the requested fields (unset fields are `""`) and `url` |
 | `missing` | Values with no match |
-| `found_count`, `missing_count` | Their sizes |
-| `not_a_ticket_number` | Id mode only, omitted when empty: values that are not a ticket number (one optional leading `#`, then ASCII digits) |
+| `found_count`, `missing_count` | The size of `found` and of `missing` (`unresolved` is not counted) |
+| `not_a_ticket_number` | Id mode only, omitted when empty: values that are not a ticket number (one optional leading `#`, then 1 to 18 ASCII digits) |
+| `unresolved` | Text mode only, omitted when empty: values with no whole-word match among the loaded candidates while a candidate of their batch failed to load. Not in `missing`; retry them |
 | `unsearchable` | Text mode only, omitted when empty: values with no searchable word (for example `\`, `-` or `""`); they are not queried and are not in `missing` |
-| `failed_ids` | Always present: ids of tickets that matched but could not be loaded. In id mode such an id is in neither `found` nor `missing`; in text mode it is not matched. Retry to load them |
+| `failed_ids` | Always present: ids of tickets that matched but could not be loaded. In id mode such a ticket is in `found` with only `id` and `url`; in text mode it is not matched and the values it might have matched are in `unresolved` or already found. Retry to load them. Always empty in id mode with `only_missing`, which loads nothing |
 
 **Success Response:**
 ```json
@@ -253,7 +258,7 @@ runs on this daemon -- see [Write Gate Status](#write-gate-status).
 
 **Error Responses:**
 
-- **validation_error:** Empty `values`, more than 1000 values, a `match_field` that is not a field name, or a `query` with a refused key
+- **validation_error:** Empty `values`, more than 1000 values, a `match_field` that is not a field name or not a text field of the instance, or a `query` with a refused key
   ```json
   {
     "type": "text",

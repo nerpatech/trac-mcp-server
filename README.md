@@ -153,7 +153,7 @@ trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment)
 
 It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
-## Available Tools (45)
+## Available Tools (46)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 

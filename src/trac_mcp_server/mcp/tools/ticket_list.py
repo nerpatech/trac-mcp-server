@@ -52,7 +52,7 @@ TICKET_LIST_TOOLS = [
                     "type": "string",
                     "default": "id",
                     "description": (
-                        "'id' (default): values are ticket numbers. Otherwise the ticket field to "
+                        "'id' (default): values are ticket numbers. Otherwise the text field to "
                         "find the values in as whole words, e.g. 'summary', 'keywords', 'description'."
                     ),
                 },
@@ -63,7 +63,10 @@ TICKET_LIST_TOOLS = [
                 "fields": {
                     "type": "string",
                     "default": "summary,status",
-                    "description": "Comma-separated ticket fields to return for each match.",
+                    "description": (
+                        "Comma-separated ticket fields to return for each match. 'id' and 'url' "
+                        "are always returned and cannot be requested."
+                    ),
                 },
                 "only_missing": {
                     "type": "boolean",
@@ -114,7 +117,13 @@ def word_match(term: str, text: str) -> bool:
     )
 
 
-_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+# Field types a value can be searched in as text.
+_TEXT_TYPES = frozenset({"text", "textarea"})
+
+# A longer digit string is not a ticket number and never reaches int().
+_MAX_DIGITS = 18
 
 # Keys that change how Trac runs or lays out a query rather than what it selects.
 _CONTROL_KEYS = frozenset(
@@ -160,18 +169,22 @@ def _with_scope(query: str, scope: str | None) -> str:
     return f"{query}&{scope}" if scope else query
 
 
-def _needle(term: str) -> str:
+def _needle(term: str, list_field: bool) -> str:
     """The part of a term to put in the Trac query, escaped.
 
     The whole-word post-filter decides the match, so the query only has to return
     a superset of the candidates and may search for any substring of the term.
-    Trac splits a ``~=`` value on whitespace, treats a leading ``-`` as NOT and
-    has no escape for a backslash or a double quote, so the needle is the longest
-    segment between those characters.
+    Trac has no escape for a backslash, and substitutes the literal ``$USER`` in a
+    filter value with the caller's name, so both separate segments. A list field
+    (``keywords``, ``cc``) is also split by Trac on whitespace and double quotes
+    with a leading ``-`` meaning NOT, so there the needle is the longest segment
+    between those characters too. Any other field is one ``LIKE '%value%'``, so
+    its needle keeps whitespace, quotes and dashes.
     """
-    segments = [
-        segment.lstrip("-") for segment in re.split(r'[\s\\"]+', term)
-    ]
+    separator = r'[\s\\"]+|\$USER' if list_field else r"\\|\$USER"
+    segments = re.split(separator, term)
+    if list_field:
+        segments = [segment.lstrip("-") for segment in segments]
     needle = max(segments, key=len, default="")
     # "|" separates alternatives and "&" conditions in a Trac query
     return needle.replace("|", r"\|").replace("&", r"\&")
@@ -179,15 +192,21 @@ def _needle(term: str) -> str:
 
 def _ticket_number(term: str) -> int | None:
     digits = term.removeprefix("#")
-    if digits and digits.isascii() and digits.isdecimal():
+    if (
+        digits
+        and digits.isascii()
+        and digits.isdecimal()
+        and len(digits) <= _MAX_DIGITS
+    ):
         return int(digits)
     return None
 
 
-async def _fetch(
-    client: TracClient, ids: list[int]
-) -> tuple[dict[int, dict], list[int]]:
-    """Fetch the tickets; return the attributes by id and the ids that failed."""
+async def _load(
+    client: TracClient, ids: list[int], cache: dict[int, dict | None]
+) -> None:
+    """Fetch the tickets not in ``cache`` yet; a ticket that failed to load is
+    cached as None and not fetched again."""
 
     async def one(tid: int) -> tuple[int, dict | None]:
         try:
@@ -196,14 +215,9 @@ async def _fetch(
         except Exception:
             return tid, None
 
-    details: dict[int, dict] = {}
-    failed: list[int] = []
-    for tid, attrs in await gather_limited([one(tid) for tid in ids]):
-        if attrs is None:
-            failed.append(tid)
-        else:
-            details[tid] = attrs
-    return details, sorted(failed)
+    todo = [tid for tid in dict.fromkeys(ids) if tid not in cache]
+    for tid, attrs in await gather_limited([one(tid) for tid in todo]):
+        cache[tid] = attrs
 
 
 def _compact(
@@ -234,7 +248,7 @@ async def _handle_check_list(
             "Split the list.",
         )
     match_field = args.get("match_field") or "id"
-    if not _FIELD_NAME.match(match_field):
+    if not _FIELD_NAME.fullmatch(match_field):
         return _invalid(
             f"match_field {match_field!r} is not a ticket field name",
             "Pass 'id' or a field name such as 'summary' or 'keywords'.",
@@ -249,6 +263,28 @@ async def _handle_check_list(
             "'status!=closed&component=Core'; leave out paging, ordering, "
             f"layout, 'or' and the {own_key!r} field.",
         )
+    list_field = False
+    if match_field != "id":
+        definitions = await run_sync_limited(client.get_ticket_fields)
+        text_fields = [
+            field
+            for field in definitions
+            if field.get("type") in _TEXT_TYPES
+        ]
+        chosen = next(
+            (f for f in text_fields if f.get("name") == match_field),
+            None,
+        )
+        if chosen is None:
+            names = ", ".join(str(f.get("name")) for f in text_fields)
+            return _invalid(
+                f"match_field {match_field!r} is not a text field of this Trac",
+                f"Pass 'id' or one of the text fields: {names}.",
+            )
+        list_field = (
+            chosen.get("type") == "text"
+            and chosen.get("format") == "list"
+        )
     fields = [
         name
         for name in (
@@ -257,11 +293,12 @@ async def _handle_check_list(
                 ","
             )
         )
-        if name and name != "id"
+        if name and name not in ("id", "url")
     ]
     only_missing = bool(args.get("only_missing"))
     result: dict[str, Any] = {"values_checked": len(terms)}
     failed_ids: list[int] = []
+    cache: dict[int, dict | None] = {}
 
     if match_field == "id":
         numbers: dict[str, int] = {}
@@ -294,29 +331,26 @@ async def _handle_check_list(
         ]
         found: dict[str, Any] = {}
         if not only_missing and found_terms:
-            details, failed_ids = await _fetch(
-                client, sorted({numbers[t] for t in found_terms})
-            )
-            found_terms = [
-                term for term in found_terms if numbers[term] in details
-            ]
-            found = {
-                term: _compact(
-                    client,
-                    numbers[term],
-                    details[numbers[term]],
-                    fields,
+            wanted = sorted({numbers[t] for t in found_terms})
+            await _load(client, wanted, cache)
+            failed_ids = [tid for tid in wanted if cache[tid] is None]
+            for term in found_terms:
+                tid, attrs = numbers[term], cache[numbers[term]]
+                found[term] = (
+                    {"id": tid, "url": _ticket_url(client, tid)}
+                    if attrs is None
+                    else _compact(client, tid, attrs, fields)
                 )
-                for term in found_terms
-            }
         found_count = len(found_terms)
         if invalid:
             result["not_a_ticket_number"] = invalid
     else:
         hits: dict[str, list[dict]] = {}
-        needles = {term: _needle(term) for term in terms}
+        needles = {term: _needle(term, list_field) for term in terms}
         searchable = [term for term in terms if needles[term]]
         unsearchable = [term for term in terms if not needles[term]]
+        missing = []
+        unresolved: list[str] = []
         failed: set[int] = set()
         for offset in range(0, len(searchable), TEXT_CHUNK):
             chunk = searchable[offset : offset + TEXT_CHUNK]
@@ -326,12 +360,16 @@ async def _handle_check_list(
                 + "&max=0",
                 scope,
             )
-            candidates = await run_sync(client.search_tickets, query)
-            details, chunk_failed = await _fetch(
-                client, list(candidates)
+            candidates = list(
+                await run_sync(client.search_tickets, query)
             )
+            await _load(client, candidates, cache)
+            chunk_failed = {t for t in candidates if cache[t] is None}
             failed.update(chunk_failed)
-            for tid, attrs in details.items():
+            for tid in candidates:
+                attrs = cache[tid]
+                if attrs is None:
+                    continue
                 for term in chunk:
                     if word_match(
                         term, str(attrs.get(match_field) or "")
@@ -339,12 +377,18 @@ async def _handle_check_list(
                         hits.setdefault(term, []).append(
                             _compact(client, tid, attrs, fields)
                         )
+            for term in chunk:
+                if term not in hits:
+                    (unresolved if chunk_failed else missing).append(
+                        term
+                    )
         failed_ids = sorted(failed)
-        missing = [term for term in searchable if term not in hits]
         found_count = len(hits)
         found = {} if only_missing else hits
         if unsearchable:
             result["unsearchable"] = unsearchable
+        if unresolved:
+            result["unresolved"] = unresolved
 
     result.update(
         {
