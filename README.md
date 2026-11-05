@@ -37,8 +37,8 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `TRAC_URL` | Yes | -- | Trac instance URL |
-| `TRAC_USERNAME` | Yes | -- | Trac username |
-| `TRAC_PASSWORD` | Yes | -- | Trac password |
+| `TRAC_USERNAME` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac username |
+| `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
 | `TRAC_DEBUG` | No | `false` | Enable debug logging |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
@@ -49,6 +49,8 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_HOST` | No | `127.0.0.1` | Bind host for the `http` transport |
 | `TRAC_MCP_PORT` | No | `8080` | Bind port for the `http` transport |
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
+| `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
+| `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP` | No | `false` | Accept a plain `http` `TRAC_MCP_OIDC_RPC_URL` on a non-loopback host, which sends users' access tokens unencrypted. Refused at startup otherwise |
 | `TRAC_IDENTITIES` | No | -- | Path to a file mapping per-caller bearer tokens to their own Trac username/password (`http` transport only) |
 
 For YAML config file format and advanced options, see [Configuration Reference](docs/reference/configuration.md). For the `http` transport specifically, including multi-identity auth, see [HTTP Transport](docs/reference/http-transport.md).
@@ -151,7 +153,7 @@ trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment)
 
 It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
-## Available Tools (44)
+## Available Tools (45)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
 
@@ -188,7 +190,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | `ticket_enum_list` | List enum values for a given enum type |
 | `ticket_enum_delete` | Delete an enum value (requires TICKET_ADMIN) |
 
-### Wiki (8)
+### Wiki (9)
 | Tool | Description |
 |------|-------------|
 | `wiki_get` | Get wiki page content as stored (TracWiki, byte-for-byte) |
@@ -199,6 +201,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | `wiki_recent_changes` | List recent wiki changes |
 | `wiki_get_history` | Get version history for a wiki page |
 | `wiki_diff` | Unified diff between two versions of a wiki page, with the change comments in between |
+| `wiki_conventions` | An instance's declared wiki style, the style page's body, and its PageTemplates/* pages, in one call |
 
 ### Wiki Files (3)
 | Tool | Description |

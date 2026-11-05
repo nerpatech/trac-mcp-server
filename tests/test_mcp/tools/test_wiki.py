@@ -35,6 +35,13 @@ from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_update,
 )
 
+# The server has no tracrpc_comment conditional put (Trac
+# /trac_mcp_server #129): put_wiki_page falls back to its client-side
+# precheck, which is the path the stand-ins below were written for.
+_NO_PLUGIN = xmlrpc.client.Fault(
+    -32601, 'RPC method "wiki.putPageIfVersion" not found'
+)
+
 
 class TestCursorEncoding(unittest.TestCase):
     """Test cursor encoding and decoding."""
@@ -83,14 +90,14 @@ class TestCursorEncoding(unittest.TestCase):
 class TestWikiTools(unittest.TestCase):
     """Test WIKI_TOOLS definitions."""
 
-    def test_twelve_tools_defined(self):
-        """Test WIKI_TOOLS contains exactly 12 tools.
+    def test_thirteen_tools_defined(self):
+        """Test WIKI_TOOLS contains exactly 13 tools.
 
         5 read (wiki_get, wiki_search, wiki_recent_changes,
-        wiki_get_history, wiki_diff) + 3 write (create, update, delete) +
+        wiki_get_history, wiki_diff) + 1 conventions (wiki_conventions) + 3 write (create, update, delete) +
         4 attachment (put, get, list, delete).
         """
-        self.assertEqual(len(WIKI_TOOLS), 12)
+        self.assertEqual(len(WIKI_TOOLS), 13)
 
     def test_tool_names(self):
         """Test tool names are correct."""
@@ -299,14 +306,17 @@ class TestHandleSearch(unittest.TestCase):
             mock_run_sync.return_value = [
                 {
                     "name": "PageOne",
+                    "score": 2.5,
                     "snippet": "matched text in page one",
                 },
                 {
                     "name": "PageTwo",
+                    "score": 1.25,
                     "snippet": "matched text in page two",
                 },
                 {
                     "name": "PageThree",
+                    "score": 0.5,
                     "snippet": "matched text in page three",
                 },
             ]
@@ -330,17 +340,23 @@ class TestHandleSearch(unittest.TestCase):
             self.assertIn("**PageTwo**", text)
             self.assertNotIn("**PageThree**", text)
             self.assertIn("cursor", text)  # Should have next cursor
+            # the score is shown next to the snippet, to 2 decimals
+            self.assertIn(
+                "**PageOne** (score 2.50)\n  matched text in page one",
+                text,
+            )
+            self.assertIn("(score 1.25)", text)
 
     def test_handle_search_with_prefix(self):
-        """Test _handle_search filters by prefix."""
+        """Test _handle_search passes prefix down to the search."""
         with patch(
             "trac_mcp_server.mcp.tools.wiki_read.run_sync"
         ) as mock_run_sync:
-            # Return search results directly
+            # The search applies the prefix before ranking; the
+            # handler only paginates what it returns.
             mock_run_sync.return_value = [
-                {"name": "User/Alice", "snippet": "alice page"},
-                {"name": "User/Bob", "snippet": "bob page"},
-                {"name": "System/Config", "snippet": "config page"},
+                {"name": "User/Alice", "score": 2.0, "snippet": "a"},
+                {"name": "User/Bob", "score": 1.0, "snippet": "b"},
             ]
 
             # Call handler with prefix filter
@@ -361,7 +377,62 @@ class TestHandleSearch(unittest.TestCase):
             self.assertIn("Found 2 wiki pages", text)
             self.assertIn("**User/Alice**", text)
             self.assertIn("**User/Bob**", text)
-            self.assertNotIn("**System/Config**", text)
+            mock_run_sync.assert_called_once_with(
+                self.mock_client.search_wiki_pages, "test", "User/"
+            )
+
+    def test_handle_search_without_prefix_passes_none(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = []
+            result = asyncio.run(
+                _handle_search(self.mock_client, {"query": "test"})
+            )
+            mock_run_sync.assert_called_once_with(
+                self.mock_client.search_wiki_pages, "test", None
+            )
+            self.assertEqual(
+                result.content[0].text,
+                "No wiki pages found matching query.",
+            )
+
+    def test_handle_search_empty_with_prefix_names_the_prefix(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = []
+            result = asyncio.run(
+                _handle_search(
+                    self.mock_client,
+                    {"query": "test", "prefix": "User/"},
+                )
+            )
+            self.assertEqual(
+                result.content[0].text,
+                "No wiki pages found matching query with prefix"
+                " 'User/'.",
+            )
+
+    def test_handle_search_query_without_searchable_words(self):
+        """A query of stopwords and one-character words has no terms:
+        say so, rather than "No wiki pages found"."""
+        for query in ("why was the", "a", "I a", "?! --"):
+            with patch(
+                "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+            ) as mock_run_sync:
+                result = asyncio.run(
+                    _handle_search(self.mock_client, {"query": query})
+                )
+            self.assertTrue(result.isError, query)
+            text = result.content[0].text
+            self.assertIn("Error (validation_error)", text)
+            self.assertIn(
+                "The query has no searchable words: stopwords and"
+                " one-character words are ignored.",
+                text,
+            )
+            mock_run_sync.assert_not_called()
 
     def test_handle_search_missing_query(self):
         """Test _handle_search returns error when query is missing."""
@@ -983,6 +1054,8 @@ class TestWriteReadbackAfterStore:
 
         def _rpc(namespace, method, *args):
             calls.append(method)
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
             if method == "putPage":
                 return True
             if method == "getPageInfo" and "putPage" in calls[:-1]:
@@ -1033,6 +1106,208 @@ class TestWriteReadbackAfterStore:
         assert "WAS stored" in text
         assert "Internal error" in text
         assert calls.count("putPage") == 1
+
+
+class TestUpdatePossibleOverwrite:
+    """wiki_update when the read-back version is not version + 1 (Trac
+    /trac_mcp_server #130). A real TracClient with only ``_rpc_request``
+    mocked: the precheck sees ``precheck``, putPage returns True, and
+    the read-back sees ``readback``."""
+
+    @staticmethod
+    async def _update(precheck, readback, version):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(
+            Config(trac_url="http://test", username="u", password="p")
+        )
+        calls: list[str] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
+            if method == "putPage":
+                return True
+            if method == "getPageInfo":
+                seen = readback if "putPage" in calls[:-1] else precheck
+                return {"name": "P", "version": seen}
+            raise AssertionError(f"unexpected RPC {method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                "wiki_update",
+                {"page_name": "P", "content": "x", "version": version},
+                client,
+            )
+        return result, calls
+
+    async def test_skipped_version_warns(self):
+        result, calls = await self._update(
+            precheck=3, readback=5, version=3
+        )
+
+        # Still a success: the page was stored.
+        assert not result.isError
+        text = result.content[0].text
+        assert "Updated wiki page 'P' to version 5" in text
+        assert "possible overwrite" in text
+        assert (
+            "Version 4 was most likely written by someone else" in text
+        )
+        assert (
+            "wiki_diff(page_name='P', from_version=3, to_version=4)"
+            in text
+        )
+        assert calls.count("putPage") == 1
+
+    async def test_several_skipped_versions_are_named(self):
+        result, _ = await self._update(
+            precheck=3, readback=7, version=3
+        )
+
+        text = result.content[0].text
+        assert "Versions 4-6 were most likely written" in text
+        assert "from_version=3, to_version=6" in text
+
+    async def test_float_version_is_worded_as_an_integer(self):
+        # A JSON-schema "integer" admits 3.0; it equals the int precheck
+        # and so reaches the flag. The warning must still say 3, not 3.0.
+        result, _ = await self._update(
+            precheck=3, readback=5, version=3.0
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert "Updated wiki page 'P' to version 5" in text
+        assert (
+            "based on version 3, so it should have stored version 4"
+            in text
+        )
+        assert "from_version=3, to_version=4" in text
+        assert "3.0" not in text
+        assert "nothing was dropped" in text
+
+    async def test_uncontended_update_stays_quiet(self):
+        result, _ = await self._update(
+            precheck=3, readback=4, version=3
+        )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert text == "Updated wiki page 'P' to version 4"
+        assert "overwrite" not in text.lower()
+
+
+class TestUpdateThroughConditionalPut:
+    """wiki_update where the server has the tracrpc_comment plugin's
+    wiki.putPageIfVersion (Trac /trac_mcp_server #129). A real TracClient
+    with only ``_rpc_request`` mocked: the tool's existing handlers must
+    cover the plugin path with no new error path."""
+
+    @staticmethod
+    async def _update(put_outcome, readback=4):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(
+            Config(trac_url="http://test", username="u", password="p")
+        )
+        calls: list[str] = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "putPageIfVersion":
+                if isinstance(put_outcome, BaseException):
+                    raise put_outcome
+                return put_outcome
+            if method == "getPageInfo" and "putPageIfVersion" in calls:
+                return {"name": "P", "version": readback}
+            raise AssertionError(f"unexpected RPC {method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                "wiki_update",
+                {"page_name": "P", "content": "x", "version": 3},
+                client,
+            )
+        return result, calls
+
+    async def test_stores_through_the_plugin(self):
+        result, calls = await self._update(True)
+
+        assert not result.isError
+        assert (
+            result.content[0].text
+            == "Updated wiki page 'P' to version 4"
+        )
+        assert calls == ["putPageIfVersion", "getPageInfo"]
+
+    async def test_plugin_conflict_is_the_usual_version_conflict(self):
+        result, calls = await self._update(
+            xmlrpc.client.Fault(
+                409,
+                "'[wiki-version-conflict current_version=9] Version "
+                'conflict on wiki page "P"\' while executing '
+                "'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Current version is 9, you tried to update version 3"
+            in text
+        )
+        assert "retry update with version=9" in text
+        # The conflict came with the current version: no extra read.
+        assert calls == ["putPageIfVersion"]
+
+    async def test_plugin_conflict_on_a_missing_page(self):
+        result, _ = await self._update(
+            xmlrpc.client.Fault(
+                409,
+                "'[wiki-version-conflict current_version=none] ...' "
+                "while executing 'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "does not exist" in text
+        assert "wiki_create" in text
+
+    async def test_other_plugin_fault_is_not_called_a_version_conflict(
+        self,
+    ):
+        """TracXMLRPC's wrapper names "wiki.putPageIfVersion()", and the
+        tool's Fault handler reads any "version" as a conflict. The
+        client unwraps it, so an unrelated fault stays unrelated."""
+        result, calls = await self._update(
+            xmlrpc.client.Fault(
+                1,
+                "'Invalid Wiki page name \"P\"' while executing "
+                "'wiki.putPageIfVersion()'",
+            )
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "version_conflict" not in text
+        assert "Invalid Wiki page name" in text
+        assert calls == ["putPageIfVersion"]
 
 
 class TestHandleDelete(unittest.TestCase):
@@ -1240,6 +1515,107 @@ class TestWikiUpdateStaleVersionLive:
             assert client.get_wiki_page(page) == v2
         finally:
             client.delete_wiki_page(page)
+
+
+# ---------------------------------------------------------------------------
+# Live: /trac_test (ticket #154)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestWikiSearchLive:
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Writes three
+    Scratch/ pages on /trac_test and deletes them afterwards.
+
+    The offline tests run the search against a fake wiki; only a real
+    server shows that the cache sees a page created, edited and deleted
+    through ``wiki.putPage``/``wiki.deletePage`` (what ``getAllPages``,
+    ``getRecentChanges`` and ``system.multicall`` really return).
+    """
+
+    def test_search_follows_create_edit_and_delete(self):
+        import os
+        import random
+        import string
+
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        default_config = Config(
+            trac_url=os.environ["TRAC_URL"],
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
+        client = TracClient(
+            InstanceRegistry(default_config, {}).resolve("/trac_test")
+        )
+
+        # One-token nonsense words, unique to this run. Letters only: the
+        # tokenizer also indexes the parts of a name split at digits and
+        # case changes, and a part such as "12" would match other pages.
+        run = "".join(random.choices(string.ascii_lowercase, k=10))
+        shared = f"zqshared{run}"
+        scope = f"Scratch/Ticket154Search{run}/"
+        pages = {
+            f"{scope}A": f"= A =\n{shared} zqalpha{run} original text\n",
+            f"{scope}B": f"{shared} zqbeta{run} second page\n",
+            f"{scope}C": f"zqgamma{run} no shared word here\n",
+        }
+
+        def found(query, prefix=scope):
+            return [
+                h["name"]
+                for h in client.search_wiki_pages(query, prefix)
+            ]
+
+        try:
+            for name, text in pages.items():
+                client.put_wiki_page(name, text, "ticket 154 live test")
+
+            # Created pages are found, scoped by prefix, and ranked
+            assert sorted(found(shared)) == [f"{scope}A", f"{scope}B"]
+            assert found(f"zqgamma{run}") == [f"{scope}C"]
+            [hit] = [
+                h
+                for h in client.search_wiki_pages(
+                    f"zqalpha{run}", scope
+                )
+                if h["name"] == f"{scope}A"
+            ]
+            assert hit["score"] > 0
+            assert hit["snippet"] in pages[f"{scope}A"]
+
+            # The same through the handler, unscoped: the page is in the
+            # whole wiki's ranking, not only under its prefix.
+            result = asyncio.run(
+                _handle_search(
+                    client, {"query": f"zqalpha{run}", "limit": 50}
+                )
+            )
+            assert not result.isError, result.content[0].text
+            assert f"**{scope}A**" in result.content[0].text
+
+            # An edit: the new text is found and the old text is not
+            edited = f"= A =\n{shared} zqdelta{run} edited text\n"
+            client.put_wiki_page(
+                f"{scope}A", edited, "ticket 154 live test, edit"
+            )
+            assert found(f"zqdelta{run}") == [f"{scope}A"]
+            assert found(f"zqalpha{run}") == []
+            assert sorted(found(shared)) == [f"{scope}A", f"{scope}B"]
+
+            # A deletion: the page is gone from the results
+            client.delete_wiki_page(f"{scope}B")
+            assert found(shared) == [f"{scope}A"]
+            assert found(f"zqbeta{run}") == []
+        finally:
+            for name in pages:
+                try:
+                    client.delete_wiki_page(name)
+                except Exception:  # already deleted (B), or never made
+                    pass
 
 
 if __name__ == "__main__":

@@ -29,6 +29,44 @@ caller passed the argument, `server_default` when the fallback answered), in
 too -- that is where it matters most, since "ticket does not exist" and
 "wrong instance" read identically without it.
 
+## Write Gate Status
+
+Every write that stores TracWiki (`ticket_create`, `ticket_update`,
+`ticket_comment_edit`, `ticket_comment_reply`, `wiki_create`, `wiki_update`,
+`wiki_file_push`, `milestone_create`, `milestone_update`, and per item
+`ticket_batch_create` / `ticket_batch_update`) passes through the write-time
+link gate, which refuses a write carrying a broken link with
+`link_check_failed`. The gate has a daemon-wide emergency off switch,
+`TRAC_WRITE_GATE=0` (or `write_gate: false` in the YAML config); every routed
+instance inherits it.
+
+**A disabled gate says so.** With the switch off, each of those writes still
+succeeds, and its response carries this line (the batch tools add it once
+per call, not once per item):
+
+```
+NOTE: the write gate is OFF on this daemon (TRAC_WRITE_GATE=0, or write_gate: false in its config file), so this write was NOT link-checked -- not verified clean.
+```
+
+The line appears whether or not the write carried any text: it reports the
+daemon's state. With the gate on it never appears.
+
+**The note is in `structuredContent` too.** Claude Code shows a tool result's
+`structuredContent` in preference to its text block whenever the handler
+returns a dict, so a note carried only in the text is invisible there.
+`wiki_file_push`, `ticket_batch_create` and `ticket_batch_update` therefore
+carry it as `gate_notes`, a list of strings (the OFF line when the gate is
+off, empty otherwise). `wiki_file_push`'s `gate_notes` also holds the
+gate-on advisory lines the push appends to its text. The other write tools
+return text only, which Claude Code does show.
+
+`list_instances` and `ping` report the switch too, as `write_gate: true|false`
+(top-level in `structuredContent` and in the text). The server's startup log
+carries `write_gate=on` (`INFO`) or `write_gate=off` (`WARNING`) as its own
+line, written once the lifespan has loaded the Trac config; the
+`file_access=..., max_inline_bytes=...` line is separate and is written
+before the lifespan starts.
+
 ---
 
 ## ping
@@ -45,9 +83,20 @@ too -- that is where it matters most, since "ticket does not exist" and
 ```json
 {
   "type": "text",
-  "text": "Trac MCP server connected successfully. API version: [1, 1, 6]"
+  "text": "Trac MCP server connected successfully. API version: [1, 1, 6]\nwrite_gate: true"
 }
 ```
+```json
+{
+  "message": "Trac MCP server connected successfully. API version: [1, 1, 6]\nwrite_gate: true",
+  "api_version": [1, 1, 6],
+  "write_gate": true
+}
+```
+
+`message` is the full text, because Claude Code shows `structuredContent` in
+preference to the text block. `write_gate` is whether the write-time link gate
+runs on this daemon -- see [Write Gate Status](#write-gate-status).
 
 **Error Response:**
 ```json
@@ -614,9 +663,12 @@ Each ticket object:
   ],
   "total": 3,
   "succeeded": 2,
-  "failed_count": 1
+  "failed_count": 1,
+  "gate_notes": []
 }
 ```
+
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
 
 **Error Responses:**
 
@@ -768,9 +820,12 @@ Each update object:
   "failed": [],
   "total": 3,
   "succeeded": 3,
-  "failed_count": 0
+  "failed_count": 0,
+  "gate_notes": []
 }
 ```
+
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
 
 **Error Responses:**
 
@@ -862,14 +917,16 @@ Each update object:
 
 ## wiki_search
 
-**Description:** Search wiki pages by content with relevance ranking. Returns snippets showing matched text.
+**Description:** Ranked keyword search (BM25) over wiki page names and text. The query is split into words (compound and CamelCase names also into their parts); pages with more of the rarer words rank higher. It is not a phrase match. `prefix` filters before ranking. Snippets are as stored: TracWiki, byte-for-byte.
+
+Every page with a positive score is returned, best first (ties by page name), so `limit` (up to 50) and `cursor` page through the whole ranked list. Each hit shows its score to two decimals. The server keeps a cache of page text per instance and identity: the first search reads every page, later ones re-read only pages that are new or edited.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `query` | string | **Yes** | - | Search query string |
-| `prefix` | string | No | - | Filter to pages starting with this prefix (namespace filter) |
+| `query` | string | **Yes** | - | Search words; matched word by word and ranked, not a phrase |
+| `prefix` | string | No | - | Only pages whose name starts with this prefix (namespace filter); applied before ranking |
 | `limit` | integer | No | `10` | Maximum results per page (min: 1, max: 50) |
 | `cursor` | string | No | - | Pagination cursor from previous response |
 
@@ -877,7 +934,7 @@ Each update object:
 ```json
 {
   "type": "text",
-  "text": "Found 15 wiki pages (showing 1-10):\n\n**DevelopmentGuide**\n  ...follow the **coding standards** defined in this document...\n\n**API/Authentication**\n  ...use JWT tokens for **authentication**...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
+  "text": "Found 15 wiki pages (showing 1-10):\n\n**DevelopmentGuide** (score 3.41)\n  ...follow the **coding standards** defined in this document...\n\n**API/Authentication** (score 2.87)\n  ...use JWT tokens for **authentication**...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
 }
 ```
 
@@ -976,9 +1033,19 @@ Each update object:
 }
 ```
 
+**How the version is checked** (Trac /trac_mcp_server #120, #129): where the Trac instance has the [`tracrpc_comment`](../../plugins/README.md) plugin's `wiki.putPageIfVersion`, the write goes through it, and the server compares the version and saves in one database transaction, so a write by someone else can never land in between: it is refused with the same `version_conflict` as a stale version. Where the plugin is missing, the client reads the page's version immediately before a stock `wiki.putPage` and compares it itself, which leaves a window of one round trip between the two. The tool's responses are the same either way, and a `version` below 1 (versions start at 1) never reaches the plugin: the client refuses it as `version_conflict` itself, with or without the plugin. The client remembers a missing plugin for five minutes before asking again.
+
+**Possible overwrite:** without the plugin, a write that lands between the version check and `wiki.putPage` is not refused. When the page reads back afterwards as anything other than `version + 1`, the result is still a success, with a warning line after the first one naming the versions written in between and how to inspect them (Trac /trac_mcp_server #130). With the plugin, only a write that lands just after this one, before the read-back, can raise it:
+```json
+{
+  "type": "text",
+  "text": "Updated wiki page 'DevelopmentGuide' to version 7\nWarning: possible overwrite on 'DevelopmentGuide'. This update was based on version 5, so it should have stored version 6, but the page reads back as version 7. Version 6 was most likely written by someone else between the version check and this write, which replaced it without merging. The page was stored; inspect what version 6 changed with wiki_diff(page_name='DevelopmentGuide', from_version=5, to_version=6) and re-apply anything this write dropped."
+}
+```
+
 **Error Responses:**
 
-- **version_conflict:** Page was modified after you read it, or no longer exists
+- **version_conflict:** Page was modified after you read it (including, with the plugin, while this call was running), or no longer exists. Nothing was stored
   ```json
   {
     "type": "text",
@@ -1153,9 +1220,17 @@ Each update object:
   "file_path": null,
   "source": "inline content",
   "warnings": [],
-  "readback_failed": false
+  "readback_failed": false,
+  "possible_overwrite": false,
+  "gate_notes": []
 }
 ```
+
+**`gate_notes`** (list of strings, always present): the lines the write gate appended to the text -- the write-gate OFF line when the gate is off on this daemon, or the gate-on advisory ("Also reported") lines -- empty when there are none. Carried in `structuredContent` because Claude Code shows it in preference to the text block; see [Write Gate Status](#write-gate-status).
+
+**`readback_failed`** (boolean, always present): `true` when the page was stored but its new version could not be read back; see below.
+
+**`possible_overwrite`** (boolean, always present): `true` when an update stored a version other than the one after the version it was based on -- the push read version 3, so an uncontended write stores 4, but the page reads back as 5. Another write most likely landed between the version check and `putPage` and was replaced by this push without merging (or landed just after it). `intervening_versions` (present only when `true`) lists the versions between the base version and the stored one (`[4]` here), and the text carries a warning that names them and suggests `wiki_diff(page_name=..., from_version=3, to_version=4)` to inspect what they changed. The result is still a success: the page was stored. A create never sets it. Detection only, at no extra RPC (Trac /trac_mcp_server #130). Where the instance has the `tracrpc_comment` plugin's `wiki.putPageIfVersion`, an update goes through it and the window is closed: a write landing between the check and the save is refused as `version_conflict` instead (#129), so the flag can then only mean a write that landed just after this one. See [wiki_update](#wiki_update) for how the version is checked.
 
 **Stored, read-back failed:** if `wiki.putPage` succeeded but reading back the page's new version then failed, the result is **not** an error -- the page was stored, and an error result means nothing was. `readback_failed` is `true`, `version` is `null`, `readback_error` carries the read-back's error, and the text says the page WAS stored and not to push again. The push posts `putPage` exactly once: a "not found" fault from the read-back (the page was deleted just after the write) no longer triggers a second write as a create (Trac /trac_mcp_server #140).
 
@@ -1182,7 +1257,7 @@ Each update object:
 - Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
-- Creates new page if it doesn't exist, updates with optimistic locking if it does. Only the existence probe's "not found" means "create"; the write itself is never retried
+- Creates new page if it doesn't exist, updates with optimistic locking if it does (through `wiki.putPageIfVersion` where the plugin is installed, as for `wiki_update`). Only the existence probe's "not found" means "create"; the write itself is never retried
 - Handles Trac instances that return 0 (int) instead of Fault for non-existent pages
 
 **Example Call:**
@@ -1560,7 +1635,7 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
 ```json
 {
   "type": "text",
-  "text": "Default instance: http://trac.example.com:8000/main-project\n\nConfigured:\n  default: http://trac.example.com:8000/main-project (default)\n  bcs: http://trac.example.com:8000/bcs\n\nDiscovered on host:\n  /main-project: Main Project [configured]\n  /bcs: BCS [configured]\n  /other: Other Project"
+  "text": "Default instance: http://trac.example.com:8000/main-project\nwrite_gate: true\n\nConfigured:\n  default: http://trac.example.com:8000/main-project (default)\n  bcs: http://trac.example.com:8000/bcs\n\nDiscovered on host:\n  /main-project: Main Project [configured]\n  /bcs: BCS [configured]\n  /other: Other Project"
 }
 ```
 ```json
@@ -1580,6 +1655,7 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
     }
   ],
   "default": "http://trac.example.com:8000/main-project",
+  "write_gate": true,
   "discovered": [
     {
       "path": "/main-project",
@@ -1599,6 +1675,8 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
 }
 ```
 
+`write_gate` is whether the write-time link gate runs on this daemon (see [Write Gate Status](#write-gate-status)). It is a per-daemon setting every routed instance inherits, so it is reported once, at the top level, and also to a caller whose allowlist leaves out the default instance. When it is `false`, the text line reads `write_gate: false -- OFF on this daemon: writes are NOT link-checked`.
+
 The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are never included in the response. The `discovered` key is omitted when `discover` is `false` or the host's project index could not be scraped.
 
 **Example Call:**
@@ -1606,6 +1684,58 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 {
   "name": "list_instances",
   "arguments": {}
+}
+```
+
+---
+
+## convert_preview
+
+**Description:** Dry-run a Markdown (or TracWiki) candidate through the real converter and Trac's own renderer, with no write. Returns the TracWiki that would be stored, the HTML Trac would render for it, and structured warnings for the defects `ticket_render_check` would otherwise catch only after the fact (escaped link targets, cross-instance references stuck in a code span, dead local links, a list item that continues after its nested list, and so on). Use it in place of the create-scratch/push/read-back/diff/delete round trip before replacing a whole page or description. Read-only.
+
+Trac's `wiki.wikiToHtml` has no page or ticket context, so a bare `attachment:FILE` link renders as dead and a bare `comment:N` cannot be checked. Name the page or ticket the draft is for with `page_name` or `ticket_id` and the preview looks those up the way the write gate does (Trac /trac_mcp_server #126).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `content` | string | **Yes** | - | Candidate content to preview |
+| `format` | string | No | `markdown` | Format of `content`: `markdown` or `tracwiki`. `tracwiki` skips conversion and renders the input as-is |
+| `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets to probe (minimum: 1, maximum: 500). The cap keeps the FIRST N in document order; anything beyond it is reported as `target_check_capped` rather than checked |
+| `include_html` | boolean | No | `true` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut). Warnings are always computed from the full render |
+| `page_name` | string | No | - | The wiki page the draft will be written to. A bare `attachment:` link to a file that page holds is no longer reported as `missing_local_target`. Mutually exclusive with `ticket_id` |
+| `ticket_id` | integer | No | - | The ticket the draft will be written to (description or comment; minimum: 1). Clears a bare `attachment:` link to a file that ticket holds, and also runs `dangling_comment_ref` against the ticket's comments. Mutually exclusive with `page_name` |
+
+**Success Response:** a text summary (`convert_preview: N warning(s), M cross-instance target(s) checked.`), the warnings one per line, then the TracWiki under `--- TracWiki ---`. With `page_name` or `ticket_id`, one extra line follows the summary line: `Checked against: ticket 126` or `Checked against: wiki page Foo/Bar`, with ` (2 attachment(s))` appended when the attachment lookup ran, or ` (attachment list unavailable: bare attachment: links stay errors)` when it ran and failed, and ` (comment list unavailable: comment: links not checked)` when the comment lookup ran and failed (after the attachment clause if both apply).
+```json
+{
+  "tracwiki": "See [attachment:f.txt x] here.",
+  "rendered_html": "<p>...</p>",
+  "html_truncated": false,
+  "warnings": [],
+  "stats": {"anchors": 1, "code_spans": 0, "warnings": 0, "targets_checked": 0},
+  "target": {"realm": "ticket", "id": 126, "attachments_checked": true, "comments_checked": false}
+}
+```
+
+`target` is `null` when neither `page_name` nor `ticket_id` was passed, and the response is then identical to what it was before the argument existed. Otherwise `realm` is `ticket` or `wiki`, `id` is the ticket number or the page name, `attachments_checked` and `comments_checked` are tri-state: `null` when that lookup was not needed (the target realm cannot have it, or the TracWiki lacks `attachment:` / `comment:`), `true` when it ran and returned a set, and `false` when it ran and failed. For `page_name`, `comments_checked` is always `null`.
+
+The lookups reuse the write gate's helpers and run only when the converted TracWiki contains `attachment:` (and, for `ticket_id`, `comment:`). The attachment lookup fails closed: if it fails, or the page does not exist yet, bare `attachment:` links stay errors. The comment lookup fails open: if the changelog cannot be fetched, `dangling_comment_ref` does not run, and the `Checked against:` line and `comments_checked: false` say so, so a missing finding is not mistaken for a clean result. `page_name` never runs `dangling_comment_ref`, since a page has no comments.
+
+**Error Responses:**
+
+- **validation_error:** `content` missing, `format` not `markdown`/`tracwiki`, `ticket_id` not an integer >= 1 (a boolean is rejected), `page_name` not a non-empty string, both `page_name` and `ticket_id` passed (checked after each argument's own shape, so `page_name: ""` with a `ticket_id` reports the empty name), or Markdown the converter refuses
+
+**Example Call:**
+```json
+{
+  "name": "convert_preview",
+  "arguments": {
+    "content": "See [attachment:f.txt x] here.",
+    "format": "tracwiki",
+    "ticket_id": 126
+  }
 }
 ```
 
@@ -1629,7 +1759,7 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 ```json
 {
   "type": "text",
-  "text": "ticket/57: 0 error(s), 1 warning(s) across 2 section(s).\n\n[description] No warnings.\n[comment 1] [warning] unconfigured_intertrac_prefix: 'zzznotaprefix:wiki:SomePage' does not match any configured InterTrac prefix -- it will render as plain text, not a link.\n\nLinks: 1 ticket, 2 wiki, 1 external."
+  "text": "ticket/57: 0 error(s), 1 warning(s) across 2 section(s).\n\n[description] No warnings.\n[comment 1] [warning] unconfigured_intertrac_prefix: 'zzznotaprefix:wiki:SomePage' does not match any configured InterTrac prefix -- it will render as plain text, not a link.\n\nLinks: 1 ticket, 2 wiki, 1 external, 0 other.\nTicket refs (1): #3 defect: Expand DEFAULT_TICKET_TYPE docstring comment in mcp/tools/constants.py (closed: fixed)\nMissing links: none.\nCode blocks (1):\n  [description] 3 line(s), highlighted"
 }
 ```
 ```json
@@ -1664,6 +1794,8 @@ The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are
 ```
 
 Each anchor's `resolved_url` is populated only for a probed InterTrac wiki-dispatcher href (from `check_targets`'s live probe) -- it's the real page the dispatcher redirects to, not the `/intertrac/wiki%3A...` href itself. `missing: true` marks a link Trac itself rendered with the `missing` class (a dead local wiki target). Realm grouping comes from Trac's own rendered `class` attribute, never from parsing the href.
+
+The text result's `Ticket refs` line lists each local ticket the document links to once, across all sections, in the order first seen (at most 50, then `... and K more`), with Trac's own title for the link (type, summary, status), so a mistyped `#N` that happens to hit an existing ticket shows up as the wrong summary. It is not a finding and does not count toward the error or warning totals; a ticket that does not exist is left off it (that is `missing_local_target`, listed under `Missing links`). The same data is in each section's `links.ticket` entries (`text`, `title`). Before Trac /trac_mcp_server #151 this was the `bare_ticket_ref` warning, emitted once per citation; that code no longer exists.
 
 **Error Responses:**
 

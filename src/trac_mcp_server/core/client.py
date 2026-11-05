@@ -1,12 +1,16 @@
 import base64
 import calendar
+import re
 import socket
 import threading
 import time
+import weakref
 import xmlrpc.client
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, NamedTuple
 from xml.etree import ElementTree
 
 import requests
@@ -16,6 +20,7 @@ from urllib3.connection import HTTPConnection
 from ..config import Config
 from ..validators import validate_content, validate_page_name
 from .scope import ScopedSession, scope_for
+from .wiki_search import BM25, Section, search_pages, split_sections
 
 # Seconds a pooled connection may sit idle before the kernel sends a TCP
 # keepalive probe. Deliberately far below the idle timeout of any plausible
@@ -32,6 +37,17 @@ TCP_KEEPALIVE_PROBE_COUNT = 4
 # The longest ticket comment ``update_ticket`` accepts. The trac-mcp CLI
 # checks the same limit before it connects (Trac #114).
 MAX_COMMENT_CHARS = 10000
+
+
+class CommentNumber(NamedTuple):
+    """A parsed changeLog comment row's ``oldvalue``.
+
+    ``cnum`` is the comment's own number; ``reply_to`` is the comment it
+    is threaded under, or None for a flat comment.
+    """
+
+    cnum: int
+    reply_to: int | None
 
 
 def _keepalive_socket_options() -> list[tuple[int, int, int | bytes]]:
@@ -176,6 +192,177 @@ def _describe_error(err: BaseException) -> str:
     return str(err) or type(err).__name__
 
 
+# Trac /trac_mcp_server #129: the tracrpc_comment plugin's conditional put
+# (plugins/tracrpc_comment/tracrpc_comment/wiki_put.py). It makes the
+# version check and the save one database transaction on the server, which
+# closes the window between put_wiki_page's client-side precheck and putPage.
+WIKI_CONDITIONAL_PUT_METHOD = "putPageIfVersion"
+
+# The plugin's conflict fault: code 409, and a message (wrapped by
+# TracXMLRPC as "'<message>' while executing 'wiki.putPageIfVersion()'")
+# that starts with this marker. Both must match, so no other fault -- not
+# even another 409 -- can be read as a conflict.
+_WIKI_CONFLICT_FAULT_CODE = 409
+_WIKI_CONFLICT_MARKER = re.compile(
+    r"^'?\[wiki-version-conflict current_version=(\d+|none)\]"
+)
+
+# TracXMLRPC's MethodNotFound fault code (JSON-RPC's "method not found").
+_METHOD_NOT_FOUND_FAULT_CODE = -32601
+
+# How long a client remembers that the plugin method is missing before it
+# tries again. Long enough that a burst of writes to a plugin-less instance
+# pays the extra round trip once, short enough that deploying the plugin is
+# picked up by a running daemon without a restart.
+WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
+
+# The same, for the plugin's ``ticket.getChangeAt`` (Trac
+# /trac_mcp_server #132).
+TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
+
+# The same, for the stock ``system.multicall`` the wiki search fills its
+# page cache with (Trac /trac_mcp_server #154).
+WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
+
+# Pages read per ``system.multicall`` (two calls each: getPageInfo and
+# getPage).
+WIKI_FETCH_BATCH_PAGES = 50
+
+# Per-prefix BM25 indexes the wiki search keeps (least recently used
+# first out): each holds every section in its scope, and a caller can
+# make up prefixes without end.
+WIKI_SCOPE_INDEX_MAX = 16
+
+# "Since the beginning" for ``wiki.getRecentChanges``.
+_WIKI_EPOCH = "19700101T00:00:00"
+
+# TracXMLRPC wraps every fault from a plain TracError as
+# "'<message>' while executing '<method>()'".
+_TRACRPC_FAULT_WRAPPER = re.compile(
+    r"^'(?P<message>.*)' while executing '[\w.]+\(\)'$", re.DOTALL
+)
+
+
+def _is_missing_method_fault(
+    err: xmlrpc.client.Fault, method: str
+) -> bool:
+    """True when ``err`` says the server has no RPC method ``method``.
+
+    TracXMLRPC raises ``MethodNotFound('RPC method "<name>" not found')``
+    with fault code -32601. The text fallback matches the same heuristic as
+    the ticket_comment tools' ``_translate_missing_method``, narrowed to the
+    method name so that a "page not found" fault can never pass for it.
+    "No such method" (some servers' wording) counts on the same terms: the
+    text must name ``method``.
+    """
+    if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
+        return True
+    text = err.faultString.lower()
+    if method.lower() not in text:
+        return False
+    return ("not found" in text and "method" in text) or (
+        "no such method" in text
+    )
+
+
+@dataclass
+class _OptionalMethod:
+    """An RPC method only some servers have (a plugin's), and the client's
+    memory of one that was missing.
+
+    ``note_fault`` records a missing-method fault; ``available`` is False
+    for ``ttl`` seconds after that, so a burst of calls to a server
+    without the plugin pays the extra round trip once, while a plugin
+    deployed later is picked up without a restart.
+    """
+
+    name: str
+    ttl: float
+    absent_until: float = 0.0
+
+    def available(self) -> bool:
+        """Whether to call it: always, unless remembered absent."""
+        return time.monotonic() >= self.absent_until
+
+    def note_fault(self, err: xmlrpc.client.Fault) -> bool:
+        """True, and remember the absence, when ``err`` says the server
+        has no such method; False for any other fault."""
+        if not _is_missing_method_fault(err, self.name):
+            return False
+        self.absent_until = time.monotonic() + self.ttl
+        return True
+
+
+def _unwrap_tracrpc_fault(
+    err: xmlrpc.client.Fault,
+) -> xmlrpc.client.Fault:
+    """``err`` with TracXMLRPC's "while executing" wrapper removed.
+
+    The wrapper names the method, and "wiki.putPageIfVersion()" contains
+    "version" -- which ``wiki_update``'s fault handler reads as a version
+    conflict. Unwrapped, a fault from the plugin path reads the same as the
+    same fault from ``wiki.putPage`` would.
+    """
+    match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
+    if match is None:
+        return err
+    return xmlrpc.client.Fault(err.faultCode, match.group("message"))
+
+
+@dataclass
+class _CachedWikiPage:
+    """A wiki page as the search cache holds it: the version and
+    ``lastModified`` it was read at (as ``getPageInfo`` returned them),
+    and its sections tokenized once (``Section.body`` is the text)."""
+
+    version: int | None
+    modified: str | None
+    sections: list[Section]
+
+
+def _wiki_version(value: Any) -> int | None:
+    """A page version as an int, or ``None`` when it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wiki_time_key(value: Any) -> str | None:
+    """A ``lastModified`` as the ``YYYYMMDDTHH:MM:SS`` string XML-RPC
+    carries (these sort as times), or ``None`` for anything else."""
+    if isinstance(value, xmlrpc.client.DateTime):
+        value = value.value
+    return value if isinstance(value, str) and value else None
+
+
+def _multicall_value(entry: Any) -> tuple[bool, Any]:
+    """``(True, value)`` for one ``system.multicall`` result entry that
+    is a value (a one-element list), ``(False, None)`` for a fault (a
+    ``{'faultCode', 'faultString'}`` dict) or anything else."""
+    if isinstance(entry, list) and len(entry) == 1:
+        return True, entry[0]
+    return False, None
+
+
+def _wiki_page_record(
+    info: Any, text: Any
+) -> tuple[int | None, str | None, str] | None:
+    """``(version, lastModified, text)`` from a page's ``getPageInfo``
+    and ``getPage`` results, or ``None`` if they are not a page."""
+    if not isinstance(info, dict):
+        return None
+    if text is None:  # an empty page comes back as an empty <string/>
+        text = ""
+    if not isinstance(text, str):
+        return None
+    return (
+        _wiki_version(info.get("version")),
+        _wiki_time_key(info.get("lastModified")),
+        text,
+    )
+
+
 class WikiPageStoredReadbackFailed(Exception):
     """``wiki.putPage`` returned ``True`` -- the page WAS stored -- but the
     read-back that fetches its new version failed (Trac /trac_mcp_server
@@ -213,7 +400,35 @@ class TracClient:
     def __init__(self, config: Config):
         self.config = config
         self._thread_local = threading.local()
+        self._sessions: weakref.WeakSet[requests.Session] = (
+            weakref.WeakSet()
+        )
+        self._sessions_lock = threading.Lock()
         self.rpc_url = self._get_rpc_url()
+        # Plugin methods this client skips for a while after the server
+        # said it has none: put_wiki_page's conditional put (#129) and
+        # get_ticket_change_at's lookup (#132).
+        self._wiki_conditional_put = _OptionalMethod(
+            f"wiki.{WIKI_CONDITIONAL_PUT_METHOD}",
+            WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS,
+        )
+        self._ticket_change_at = _OptionalMethod(
+            "ticket.getChangeAt", TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
+        )
+        # The wiki search's page cache (#154). It is per client, and a
+        # client is per caller: the instance pool keeps one per instance
+        # and identity, and under OIDC mcp/oidc.py keeps one per bearer
+        # token (up to 256). So a cache only ever holds pages its own
+        # caller can read, and a new token fills a cache of its own with
+        # one full read -- never worse than the old per-query full read.
+        # ``run_sync`` runs calls in threads, hence the lock around every
+        # refresh and index build.
+        self._wiki_multicall = _OptionalMethod(
+            "system.multicall", WIKI_MULTICALL_ABSENT_TTL_SECONDS
+        )
+        self._wiki_cache_lock = threading.Lock()
+        self._wiki_cache: dict[str, _CachedWikiPage] = {}
+        self._wiki_scope_index: OrderedDict[str, BM25] = OrderedDict()
 
     @property
     def session(self) -> requests.Session:
@@ -221,24 +436,60 @@ class TracClient:
         return self._get_session()
 
     def _get_rpc_url(self) -> str:
-        # Construct path to XML-RPC endpoint
+        # OIDC per-user auth targets a distinct, operator-supplied endpoint
+        # (see Config.rpc_url_override) rather than the usual .../login/rpc
+        # derived from trac_url -- its URL structure is whatever the
+        # OIDC-protected Apache Location is mounted at, not necessarily the
+        # same path as the default Basic/LDAP endpoint.
+        if self.config.rpc_url_override:
+            return self.config.rpc_url_override
         return f"{self.config.trac_url.rstrip('/')}/login/rpc"
 
     def _get_session(self) -> requests.Session:
         """Get or create a thread-local requests.Session."""
         if not hasattr(self._thread_local, "session"):
-            self._thread_local.session = self._create_session()
+            session = self._create_session()
+            with self._sessions_lock:
+                self._sessions.add(session)
+            self._thread_local.session = session
         return self._thread_local.session
+
+    def close(self) -> None:
+        """Drop the pooled connections of every thread's session.
+
+        A session stays usable after close(): the next request opens a new
+        connection. So a call still running on this client, in another
+        thread, is not broken by it.
+        """
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+        for session in sessions:
+            session.close()
 
     def _create_session(self) -> requests.Session:
         # Ticket #118: the session itself decides where a request may go
         # and with what credentials -- the configured password only to
         # this client's own origin, and, under an allowlist (#110),
-        # nothing outside it. See core/scope.py.
+        # nothing outside it. See core/scope.py. Under OIDC per-user auth
+        # the credential is meant for the RPC endpoint, which
+        # rpc_url_override may place on another origin than trac_url.
         session = ScopedSession(
-            self.config.trac_url, scope_for(self.config)
+            self.rpc_url
+            if self.config.bearer_token
+            else self.config.trac_url,
+            scope_for(self.config),
         )
-        session.auth = (self.config.username, self.config.password)
+        if self.config.bearer_token:
+            # OIDC per-user auth: forward the caller's own access token
+            # verbatim. Trac's Apache layer (mod_auth_openidc) validates it
+            # and maps it to a Trac username -- this client does not decode
+            # or verify it, matching how session.auth below is likewise a
+            # blind credential pass-through.
+            session.headers["Authorization"] = (
+                f"Bearer {self.config.bearer_token}"
+            )
+        else:
+            session.auth = (self.config.username, self.config.password)
         session.verify = not self.config.insecure
 
         # Keep pooled connections alive at the TCP level. Without this a
@@ -367,6 +618,40 @@ class TracClient:
         Get ticket changelog by ticket ID.
         """
         return self._rpc_request("ticket", "changeLog", ticket_id)
+
+    def get_ticket_change_at(
+        self, ticket_id: int, ts: str
+    ) -> list | None:
+        """Read the one change set stored at ``ts`` via the plugin's
+        ``ticket.getChangeAt`` (Trac /trac_mcp_server #132).
+
+        ``ts`` is the microsecond ``_ts`` a ``ticket.update`` returned,
+        as a string (XML-RPC ints are 32-bit). Returns the plugin's
+        reply: ``[cnum, author, comment]`` -- ``cnum`` as Trac stores it,
+        a string that is dotted for a threaded reply -- or ``[]`` when no
+        change, or none with a comment, is stored at that time.
+
+        Returns ``None`` when the server has no such method -- the
+        ``tracrpc_comment`` plugin (1.2.0 or later) is not installed or
+        not enabled -- and the caller falls back to reading the
+        changelog. That absence is remembered for
+        ``TICKET_CHANGE_AT_ABSENT_TTL_SECONDS``, during which ``None``
+        is returned with no RPC posted.
+
+        Raises:
+            xmlrpc.client.Fault: Any other fault (permission denied, no
+                such ticket, a malformed ``ts``), unchanged.
+        """
+        if not self._ticket_change_at.available():
+            return None
+        try:
+            return self._rpc_request(
+                "ticket", "getChangeAt", ticket_id, ts
+            )
+        except xmlrpc.client.Fault as err:
+            if self._ticket_change_at.note_fault(err):
+                return None
+            raise
 
     def edit_ticket_comment(
         self, ticket_id: int, cnum: int, comment: str
@@ -646,6 +931,54 @@ class TracClient:
             if created is None or created >= cutoff:
                 return int(tid)
         return None
+
+    @staticmethod
+    def parse_comment_number(oldvalue: Any) -> CommentNumber | None:
+        """Parse the ``oldvalue`` of a ``ticket.changeLog`` comment row.
+
+        In a changeLog row ``[time, author, field, oldvalue, newvalue,
+        permanent]`` with ``field == "comment"``, ``oldvalue`` holds the
+        comment number. A plain comment's is ``"5"``. A reply made in the
+        web UI is threaded: ``"2.5"`` is comment 5, a reply to comment 2.
+        Trac itself takes the LAST dotted part as the comment's number
+        (``cnum``); the ``trac-change-5-...`` HTML ids, ``#comment:5``
+        anchors and ``comment:5`` links all use it. So ``"5"`` gives
+        ``CommentNumber(5, None)`` and ``"2.5"`` gives
+        ``CommentNumber(5, 2)``.
+
+        Accepts a str (surrounding whitespace ignored) or an int. Returns
+        None for anything else: None, the empty string, non-numeric text,
+        more than two dotted parts or an empty part (``"2."``, ``".5"``),
+        a non-positive number, a float, a bool. Each part must be ASCII
+        digits and is then parsed with ``int()``. Neither test alone is
+        enough: ``"²".isdigit()`` is True but ``int("²")``
+        raises, and ``int()`` alone accepts ``"1_0"``, ``"+5"`` and
+        ``"٥"``.
+        """
+        if isinstance(oldvalue, bool):
+            return None
+        if isinstance(oldvalue, int):
+            return (
+                CommentNumber(oldvalue, None) if oldvalue > 0 else None
+            )
+        if not isinstance(oldvalue, str):
+            return None
+        parts = oldvalue.strip().split(".")
+        if len(parts) > 2:
+            return None
+        # ASCII digits only: int() alone also takes "1_0", "+5" and
+        # non-ASCII digits such as "\u0665". isdigit() is only the
+        # pre-filter (it passes "\u00b2"); int() still does the parsing.
+        if not all(part.isascii() and part.isdigit() for part in parts):
+            return None
+        try:
+            numbers = [int(part) for part in parts]
+        except ValueError:
+            return None
+        if any(n <= 0 for n in numbers):
+            return None
+        reply_to = numbers[0] if len(numbers) == 2 else None
+        return CommentNumber(numbers[-1], reply_to)
 
     @staticmethod
     def _parse_trac_time(value: Any) -> float | None:
@@ -1013,57 +1346,195 @@ class TracClient:
 
         return matches
 
-    def search_wiki_pages_by_content(
-        self, query: str, max_results: int = 10
+    def search_wiki_pages(
+        self, query: str, prefix: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Search wiki pages by content (full-text search).
+        """Ranked keyword search (BM25) over wiki page names and text
+        (Trac /trac_mcp_server #154).
+
+        Every page whose name starts with ``prefix`` (all pages when it is
+        empty or ``None``) and that has a positive score is returned,
+        best first, ties broken by page name. ``prefix`` filters before
+        ranking: idf and the average section length are those of the
+        pages in scope. There is no result cap.
+
+        Page text is cached on this client. The first search reads every
+        page; a later one makes one call (``wiki.getRecentChanges`` from
+        the epoch, which lists every readable page with its version and
+        modification time) and re-reads only the pages that are new or
+        whose (version, modification time) differs from the cached pair.
 
         Args:
-            query: Search string (case-insensitive)
-            max_results: Maximum number of results to return (default: 10)
+            query: Words to look for; compound and CamelCase names are
+                also split into their parts. Not a phrase match.
+            prefix: Page-name prefix to restrict the search to.
 
         Returns:
-            List of dicts with keys: name, snippet (matching context ~100 chars)
+            List of dicts with keys: name, score, snippet. The snippet is
+            a slice of the stored TracWiki, byte-for-byte, with ``...``
+            on a cut end.
 
         Raises:
-            xmlrpc.client.Fault: If server returns error when listing pages
+            xmlrpc.client.Fault: If listing the pages fails. A page that
+                cannot be read is skipped.
         """
-        all_pages = self.list_wiki_pages()
-        query_lower = query.lower()
-        matches = []
+        scope = prefix or ""
+        with self._wiki_cache_lock:
+            self._refresh_wiki_cache()
+            index = self._wiki_scope_index.get(scope)
+            if index is not None:
+                self._wiki_scope_index.move_to_end(scope)
+            else:
+                index = BM25(
+                    [
+                        section
+                        for name, page in self._wiki_cache.items()
+                        if name.startswith(scope)
+                        for section in page.sections
+                    ]
+                )
+                self._wiki_scope_index[scope] = index
+                while (
+                    len(self._wiki_scope_index) > WIKI_SCOPE_INDEX_MAX
+                ):
+                    self._wiki_scope_index.popitem(last=False)
+        return search_pages(index, query)
 
-        for page_name in all_pages:
+    def _refresh_wiki_cache(self) -> None:
+        """Bring the page cache up to date (caller holds the lock).
+
+        One ``wiki.getRecentChanges`` from the epoch is the authority: it
+        lists every readable page with its latest version and
+        ``lastModified`` (``get_recent_wiki_changes`` falls back to
+        ``getAllPages`` + ``getPageInfo`` on a server without it). A
+        cached page that is not listed is dropped. A listed page is read
+        again when it is not cached or when its (version, lastModified)
+        pair differs from the cached one -- the pair as ``getPageInfo``
+        returned it when the page was read, so a page edited between a
+        listing and its read differs from the next listing and is read
+        again. Nothing is inferred from a time watermark: a deleted and
+        recreated page, a deleted latest version and a page without a
+        version are all seen, and so is an edit made while the cache was
+        being filled. The per-scope indexes are discarded only if
+        something changed.
+        """
+        listing = self.get_recent_wiki_changes(0)
+        current: dict[str, tuple[int | None, str | None]] = {}
+        for entry in listing if isinstance(listing, list) else []:
+            name = (
+                entry.get("name") if isinstance(entry, dict) else None
+            )
+            if isinstance(name, str):
+                current[name] = (
+                    _wiki_version(entry.get("version")),
+                    _wiki_time_key(entry.get("lastModified")),
+                )
+        changed = False
+        for gone in [n for n in self._wiki_cache if n not in current]:
+            del self._wiki_cache[gone]
+            changed = True
+
+        # Not cached: new pages, and any that could not be read last time.
+        stale = []
+        for name, key in current.items():
+            held = self._wiki_cache.get(name)
+            if held is None or (held.version, held.modified) != key:
+                stale.append(name)
+
+        fetched = self._fetch_wiki_pages(stale)
+        for name in stale:
+            record = fetched.get(name)
+            if record is None:
+                # Unreadable: skipped. Dropping a cached copy is right
+                # too -- it is either stale or no longer readable.
+                changed |= self._wiki_cache.pop(name, None) is not None
+                continue
+            version, modified, text = record
+            self._wiki_cache[name] = _CachedWikiPage(
+                version, modified, split_sections(name, text)
+            )
+            changed = True
+        if changed:
+            self._wiki_scope_index.clear()
+
+    def _fetch_wiki_pages(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """Read the version, modification time and text of ``names``.
+
+        ``system.multicall`` batches of ``WIKI_FETCH_BATCH_PAGES`` pages;
+        one call per page when the server has no multicall. A page that
+        cannot be read is left out of the result.
+        """
+        out: dict[str, tuple[int | None, str | None, str]] = {}
+        done = 0
+        if names and self._wiki_multicall.available():
+            while done < len(names):
+                batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
+                try:
+                    out.update(self._fetch_wiki_batch(batch))
+                except xmlrpc.client.Fault as err:
+                    if self._wiki_multicall.note_fault(err):
+                        break  # no multicall: the rest goes page by page
+                    out.update(self._fetch_wiki_singly(batch))
+                except Exception:
+                    # A timeout, a dropped connection, an unparseable
+                    # reply: one batch failing must not fail the search.
+                    out.update(self._fetch_wiki_singly(batch))
+                done += len(batch)
+        out.update(self._fetch_wiki_singly(names[done:]))
+        return out
+
+    def _fetch_wiki_singly(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """Read ``names`` one call per page (``getPageInfo`` then
+        ``getPage``), skipping any that cannot be read."""
+        out: dict[str, tuple[int | None, str | None, str]] = {}
+        for name in names:
             try:
-                content = self.get_wiki_page(page_name)
-                content_lower = content.lower()
-
-                if query_lower in content_lower:
-                    # Extract snippet around match (~100 chars)
-                    match_pos = content_lower.index(query_lower)
-                    snippet_start = max(0, match_pos - 50)
-                    snippet_end = min(
-                        len(content), match_pos + len(query) + 50
-                    )
-                    snippet = content[snippet_start:snippet_end].strip()
-
-                    # Add ellipsis if truncated
-                    if snippet_start > 0:
-                        snippet = "..." + snippet
-                    if snippet_end < len(content):
-                        snippet = snippet + "..."
-
-                    matches.append(
-                        {"name": page_name, "snippet": snippet}
-                    )
-
-                    if len(matches) >= max_results:
-                        break
+                record = _wiki_page_record(
+                    self.get_wiki_page_info(name),
+                    self.get_wiki_page(name),
+                )
             except Exception:
                 # Skip pages that can't be read (permission denied, etc.)
                 continue
+            if record is not None:
+                out[name] = record
+        return out
 
-        return matches
+    def _fetch_wiki_batch(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """One ``system.multicall`` reading ``names``.
+
+        Each page is a ``getPageInfo`` then a ``getPage`` (in that order,
+        so a page edited in between is cached under the older version and
+        re-read next time). A per-entry fault comes back as a
+        ``{'faultCode', 'faultString'}`` dict: that page is skipped.
+        """
+        calls = []
+        for name in names:
+            calls.append(
+                {"methodName": "wiki.getPageInfo", "params": [name]}
+            )
+            calls.append(
+                {"methodName": "wiki.getPage", "params": [name]}
+            )
+        results = self._rpc_request("system", "multicall", calls)
+        if not isinstance(results, list) or len(results) != len(calls):
+            return {}
+        out = {}
+        for i, name in enumerate(names):
+            info_ok, info = _multicall_value(results[2 * i])
+            text_ok, text = _multicall_value(results[2 * i + 1])
+            if not (info_ok and text_ok):
+                continue
+            record = _wiki_page_record(info, text)
+            if record is not None:
+                out[name] = record
+        return out
 
     def put_wiki_page(
         self,
@@ -1080,21 +1551,45 @@ class TracClient:
             content: Page content in TracWiki format
             comment: Comment describing the change
             version: Optional version the caller read (prevents concurrent
-                edits). The check is made client-side, immediately before
-                the write: Trac ignores the ``version`` attribute of
-                ``wiki.putPage``, so it would never refuse a stale one
-                itself (ticket #120). A narrow race between that check and
-                putPage remains -- closing it needs a Trac-side
-                precondition, which is out of scope. ``None`` (create, and
-                unversioned callers) skips the check and costs no extra RPC.
+                edits). Trac's stock ``wiki.putPage`` ignores its
+                ``version`` attribute, so the check is made one of two
+                ways. Where the server has the tracrpc_comment plugin's
+                ``wiki.putPageIfVersion`` (Trac /trac_mcp_server #129),
+                the write goes through it: the server compares and saves
+                in one database transaction, so no other write can land in
+                between. Where it has not (a method-not-found fault), the
+                check is made client-side, immediately before
+                ``wiki.putPage`` (ticket #120), which leaves a narrow race
+                between the two; a write that lost it is flagged in the
+                result (``possible_overwrite``, below). "No plugin" is
+                remembered for ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``.
+                ``None`` (create, and unversioned callers) skips both and
+                posts ``wiki.putPage`` with no extra RPC. Versions start
+                at 1, so a ``version`` below 1 (0 or negative) never takes
+                the plugin path: the client-side check refuses it with
+                ``WikiPageConflict``, whether or not the plugin is
+                installed, and the page is not created.
 
         Returns:
-            Dict with keys: name, version, author, lastModified, url
+            Dict with keys: name, version, author, lastModified, url,
+            possible_overwrite. ``possible_overwrite`` is ``True`` when
+            ``version`` was given and the read-back version is not
+            ``version + 1``: another write landed in the race window
+            above (and was replaced by this one) or just after it. The
+            dict then also carries ``intervening_versions``, the versions
+            ``version + 1 .. new - 1`` this call did not write (empty if
+            the read-back version is not above ``version + 1``). The page
+            is stored either way; a create never sets the flag (Trac
+            /trac_mcp_server #130). Through the plugin method only the
+            "just after" case is possible, but the check runs on both
+            paths.
 
         Raises:
             WikiPageConflict: If ``version`` is not the page's current
-                version (or the page does not exist); putPage is not
-                called. A ``ValueError`` subclass.
+                version (or the page does not exist): the client's
+                precheck found it, and putPage was not called, or the
+                plugin method refused, and stored nothing. A
+                ``ValueError`` subclass.
             ValueError: If page_name or content validation fails, or the
                 server reports a version conflict
             xmlrpc.client.Fault: If server returns error or permissions denied
@@ -1112,7 +1607,114 @@ class TracClient:
         if not is_valid:
             raise ValueError(f"Invalid content: {error_msg}")
 
-        # Build attributes dict
+        result = None
+        answered_by_plugin = False
+        if (
+            version is not None
+            and self._wiki_conditional_put.available()
+        ):
+            # The server-side check (#129). None back means the server
+            # has no such method: fall through to the precheck below.
+            result = self._put_wiki_page_if_version(
+                page_name, content, comment, version
+            )
+            answered_by_plugin = result is not None
+
+        if not answered_by_plugin:
+            result = self._put_wiki_page_checked_here(
+                page_name, content, comment, version
+            )
+        if result is not True:
+            raise ValueError(f"Failed to update page '{page_name}'")
+
+        return self._read_back_stored_page(page_name, version)
+
+    def _put_wiki_page_if_version(
+        self,
+        page_name: str,
+        content: str,
+        comment: str,
+        version: int,
+    ) -> Any:
+        """Post ``wiki.putPageIfVersion`` (Trac /trac_mcp_server #129).
+
+        Returns its result (``True`` once stored), or ``None`` when the
+        server has no such method -- the plugin is not installed or not
+        enabled -- in which case nothing was stored and the caller falls
+        back to the client-side precheck. That absence is remembered for
+        ``WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS``. Also ``None``, with
+        no RPC posted, for a ``version`` that is not a whole number or is
+        below 1: no page has such a version.
+
+        Raises:
+            WikiPageConflict: The plugin's conflict fault: ``version`` is
+                not the page's current version, checked in the same
+                transaction as the save. Nothing was stored.
+            ValueError: "Page not modified", as from ``wiki.putPage``.
+            xmlrpc.client.Fault: Any other fault, with TracXMLRPC's
+                "while executing" wrapper removed (see
+                ``_unwrap_tracrpc_fault``). Nothing was stored.
+        """
+        # A JSON-schema "integer" admits 3.0; the plugin takes an int.
+        expected = int(version)
+        if expected != version or expected < 1:
+            # Not a whole number, or below 1 (versions start at 1): no
+            # page is at that version. The plugin would read 0 as "create
+            # only if absent" and fault on a negative with a message
+            # `wiki_update` mislabels as a modified page, so let the
+            # precheck refuse it with the usual conflict.
+            return None
+        try:
+            return self._rpc_request(
+                "wiki",
+                WIKI_CONDITIONAL_PUT_METHOD,
+                page_name,
+                content,
+                {"comment": comment},
+                expected,
+            )
+        except xmlrpc.client.Fault as err:
+            if self._wiki_conditional_put.note_fault(err):
+                return None
+            conflict = (
+                _WIKI_CONFLICT_MARKER.match(err.faultString)
+                if err.faultCode == _WIKI_CONFLICT_FAULT_CODE
+                else None
+            )
+            if conflict is not None:
+                found = conflict.group(1)
+                current = None if found == "none" else int(found)
+                if current is None:
+                    detail = "the page does not exist"
+                else:
+                    detail = f"its current version is {current}"
+                raise WikiPageConflict(
+                    f"Version conflict on '{page_name}': you tried to "
+                    f"update version {version} but {detail}",
+                    page_name,
+                    version,
+                    current,
+                ) from None
+            if "not modified" in err.faultString.lower():
+                raise ValueError(
+                    "Page not modified (content identical)"
+                ) from None
+            raise _unwrap_tracrpc_fault(err) from None
+
+    def _put_wiki_page_checked_here(
+        self,
+        page_name: str,
+        content: str,
+        comment: str,
+        version: int | None,
+    ) -> Any:
+        """The ticket #120 path: compare ``version`` with a fresh
+        ``wiki.getPageInfo`` (when given), then post ``wiki.putPage``.
+
+        Used for creates and unversioned writes, and for versioned ones
+        where the server lacks ``wiki.putPageIfVersion``. Returns
+        putPage's result.
+        """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
             attrs["version"] = version
@@ -1171,9 +1773,13 @@ class TracClient:
             else:
                 # Re-raise other faults
                 raise
-        if result is not True:
-            raise ValueError(f"Failed to update page '{page_name}'")
+        return result
 
+    def _read_back_stored_page(
+        self, page_name: str, version: int | None
+    ) -> dict[str, Any]:
+        """Read back a page ``put_wiki_page`` has just stored, by either
+        path, and build its result dict (tickets #140 and #130)."""
         # The page is stored from here on. The read-back is a separate
         # step (Trac /trac_mcp_server #140): any failure in it -- a fault
         # (even "not found", if the page was deleted in between), a
@@ -1202,13 +1808,36 @@ class TracClient:
                 None,
             )
 
-        return {
+        new_version = info.get("version")
+        stored: dict[str, Any] = {
             "name": page_name,
-            "version": info.get("version"),
+            "version": new_version,
             "author": info.get("author"),
             "lastModified": info.get("lastModified"),
             "url": page_url,
+            "possible_overwrite": False,
         }
+        # Detect, don't prevent (Trac /trac_mcp_server #130; preventing
+        # is #129). An update of version N stores N+1 when nothing else
+        # wrote the page. Any other read-back version means another write
+        # landed between the precheck above and putPage -- so putPage
+        # replaced it -- or right after putPage, before the read-back.
+        # Either way the caller is told; the write itself succeeded.
+        # A create (version=None) has no expectation to compare with.
+        if (
+            version is not None
+            and isinstance(new_version, int)
+            and not isinstance(new_version, bool)
+            and new_version != version + 1
+        ):
+            stored["possible_overwrite"] = True
+            # int(): a JSON-schema "integer" admits 3.0, which passes the
+            # precheck (3 == 3.0) but would make range() raise here --
+            # after the page was stored.
+            stored["intervening_versions"] = list(
+                range(int(version) + 1, new_version)
+            )
+        return stored
 
     def get_wiki_page_html(
         self, page_name: str, version: int | None = None
@@ -1397,7 +2026,11 @@ class TracClient:
         """
         try:
             # Try getRecentChanges if available
-            dt = xmlrpc.client.DateTime(since_timestamp)
+            # DateTime(0) is "now", not the epoch: ask for everything
+            # with the epoch spelled out.
+            dt = xmlrpc.client.DateTime(
+                since_timestamp if since_timestamp else _WIKI_EPOCH
+            )
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:

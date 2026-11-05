@@ -10,11 +10,11 @@ from setuptools import setup
 
 setup(
     name='TracRpcComment',
-    version='1.0.0',
+    version='1.2.0',
     author='Oleg Mazurov',
     author_email='admin@nerpa.tech',
-    description='Ticket comment edit/delete/history and timeline access '
-                'over Trac XML-RPC.',
+    description='Ticket comment edit/delete/history/lookup, timeline access '
+                'and a version-checked wiki put over Trac XML-RPC.',
     license='MIT',
     packages=['tracrpc_comment'],
     # Declares the Trac components this egg provides. Trac reads this to
@@ -25,6 +25,7 @@ setup(
             'tracrpc_comment.ticket_comment = '
             'tracrpc_comment.ticket_comment',
             'tracrpc_comment.timeline = tracrpc_comment.timeline',
+            'tracrpc_comment.wiki_put = tracrpc_comment.wiki_put',
         ],
     },
     # Not declared as an install_requires: TracXMLRPC is a plugin of the Trac

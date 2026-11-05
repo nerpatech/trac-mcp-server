@@ -531,7 +531,7 @@ class TestUndeclaredReadIsVerbatim(unittest.TestCase):
                 {"name": "P", "snippet": READ_BAIT_LINE}
             ]
             result = asyncio.run(
-                _handle_wiki_search(self.mock_client, {"query": "q"})
+                _handle_wiki_search(self.mock_client, {"query": "bait"})
             )
             self.assertIn(READ_BAIT_LINE, result.content[0].text)
 

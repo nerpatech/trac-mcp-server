@@ -51,6 +51,9 @@ from trac_mcp_server.mcp.tools.ticket_write import (
 from trac_mcp_server.mcp.tools.ticket_write import (
     _handle_update as _handle_ticket_update,
 )
+from trac_mcp_server.mcp.tools.wiki_file import (
+    _handle_push as _handle_wiki_file_push,
+)
 from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_create as _handle_wiki_create,
 )
@@ -58,6 +61,7 @@ from trac_mcp_server.mcp.tools.wiki_write import (
     _handle_update as _handle_wiki_update,
 )
 from trac_mcp_server.mcp.tools.write_gate import (
+    GATE_OFF_LINE,
     check_write,
     gate_enabled,
     gate_or_refuse,
@@ -90,6 +94,14 @@ PR_NUMBER_HTML = (
     "\n</p>\n"
 )
 PR_NUMBER_SOURCE = "See PR #99999 for context."
+
+# Ticket #151. A bare `#99999` to a ticket that does not exist, with no
+# `PR` in front: the same `missing ticket` anchor Trac rendered for
+# `PR_NUMBER_HTML` above (no href), only the surrounding prose differs.
+DEAD_TICKET_HTML = (
+    '<p>\nSee <a class="missing ticket">#99999</a> for context.\n</p>\n'
+)
+DEAD_TICKET_SOURCE = "See #99999 for context."
 
 # `bcs:#99999` (a configured prefix) alongside a bare `#99999` in the
 # same document -- the bare form resolves to THIS instance's own
@@ -317,7 +329,8 @@ def test_the_kill_switch_turns_the_gate_off():
             recheck_with="wiki_render_check",
         )
     )
-    assert refusal is None and lines == []
+    # Ticket #153: off, the gate checks nothing and SAYS so.
+    assert refusal is None and lines == [GATE_OFF_LINE]
     client.wiki_to_html.assert_not_called()
 
 
@@ -367,6 +380,9 @@ def test_pr_number_as_ticket_refuses_and_clean_pr_mention_passes():
     )
     assert outcome.refused
     assert "pr_number_as_ticket" in outcome.refusal_text
+    # Ticket #151: the "Also reported, not blocking" list no longer
+    # repeats the same `#99999` as a `bare_ticket_ref` advisory.
+    assert "bare_ticket_ref" not in outcome.refusal_text
 
     clean = asyncio.run(
         check_write(
@@ -390,6 +406,7 @@ def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
     )
     assert outcome.refused
     assert "bare_ref_shadows_prefixed" in outcome.refusal_text
+    assert "bare_ticket_ref" not in outcome.refusal_text
 
     # The other half of #105's own scoping note: a lone bare reference
     # with no prefixed twin is NOT this check's population. An EXISTING
@@ -409,6 +426,31 @@ def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
         )
     )
     assert not lone.refused, lone.refusal_text
+    # Ticket #151: and it is not reported at all -- a correct citation
+    # of an existing ticket used to come back as a `bare_ticket_ref`
+    # advisory line on every write that cited anything.
+    assert lone.advisory == [], lone.advisory
+    assert lone.summary_lines() == []
+
+
+def test_dead_bare_ticket_ref_still_refuses_as_missing_local_target():
+    """Ticket #151's seeded control. Removing `bare_ticket_ref` must not
+    let a bare `#N` to a ticket that does not exist through: Trac renders
+    it `class="missing ticket"` (same captured shape as `PR_NUMBER_HTML`)
+    and `missing_local_target` refuses it at `error`."""
+    outcome = asyncio.run(
+        check_write(
+            _client(DEAD_TICKET_HTML),
+            DEAD_TICKET_SOURCE,
+            field="comment",
+            recheck_with="ticket_render_check",
+        )
+    )
+    assert outcome.refused
+    assert "[missing_local_target]" in outcome.refusal_text
+    assert "#99999" in outcome.refusal_text
+    assert "bare_ticket_ref" not in outcome.refusal_text
+    assert outcome.advisory == []
 
 
 def test_self_intertrac_prefix_refuses_and_clean_configured_ref_passes():
@@ -629,6 +671,65 @@ def test_dangling_comment_ref_wired_into_ticket_update():
     assert "dangling_comment_ref" in _text(result)
 
 
+class TestKnownCommentNumbersParsing:
+    """Trac /trac_mcp_server #131. A threaded row's oldvalue is
+    ``"2.5"`` -- comment 5, a reply to 2 -- and Trac's ``comment:5``
+    link names it by the last part. Such a row used to be skipped, so a
+    ``comment:5`` link to it read as dead and ``max_cnum`` was short."""
+
+    @staticmethod
+    def _known(rows):
+        from trac_mcp_server.mcp.tools.write_gate import (
+            known_comment_numbers,
+        )
+
+        client = MagicMock()
+        client.get_ticket_changelog = MagicMock(return_value=rows)
+        return asyncio.run(known_comment_numbers(client, 1))
+
+    def test_flat_rows(self):
+        rows = [
+            ["t", "a", "comment", "1", "one", 1],
+            ["t", "a", "comment", "2", "two", 1],
+        ]
+        assert self._known(rows) == frozenset({1, 2, 3})
+
+    def test_threaded_row_is_known_under_its_own_number(self):
+        rows = [
+            ["t", "a", "comment", "1", "one", 1],
+            ["t", "a", "comment", "2", "two", 1],
+            ["t", "a", "comment", "2.5", "reply", 1],
+        ]
+        assert self._known(rows) == frozenset({1, 2, 5, 6})
+
+    def test_threaded_row_feeds_the_next_number(self):
+        rows = [["t", "a", "comment", "1.7", "reply", 1]]
+        assert self._known(rows) == frozenset({7, 8})
+
+    def test_threaded_row_without_a_body_only_raises_the_next_number(
+        self,
+    ):
+        rows = [["t", "a", "comment", "2.5", "", 1]]
+        assert self._known(rows) == frozenset({6})
+
+    def test_attachment_pseudo_row_with_none_oldvalue_is_skipped(self):
+        rows = [
+            ["t", "a", "attachment", None, "f.txt", 1],
+            ["t", "a", "comment", None, "x", 1],
+            ["t", "a", "comment", "3", "three", 1],
+        ]
+        assert self._known(rows) == frozenset({3, 4})
+
+    def test_non_numeric_oldvalue_is_skipped(self):
+        rows = [
+            ["t", "a", "comment", "abc", "x", 1],
+            ["t", "a", "comment", "\u00b2", "x", 1],
+            ["t", "a", "comment", "1.2.3", "x", 1],
+            ["t", "a", "comment", "4", "four", 1],
+        ]
+        assert self._known(rows) == frozenset({4, 5})
+
+
 def test_dangling_comment_ref_counts_the_comment_being_written():
     """A comment that references its OWN prospective number is not a
     defect -- "counting the comment being written" is the ticket's own
@@ -794,6 +895,29 @@ def _milestone_update(client, description):
         )
 
 
+def _wiki_file_push(client, content):
+    # get_wiki_page_info (the page exists, so this is an update), then
+    # put_wiki_page. format="tracwiki" so the bytes checked are the
+    # bytes given -- conversion is not what is under test here.
+    with patch(
+        "trac_mcp_server.mcp.tools.wiki_file.run_sync"
+    ) as run_sync:
+        run_sync.side_effect = [
+            {"name": "P", "version": 1},
+            {"name": "P", "version": 2},
+        ]
+        return asyncio.run(
+            _handle_wiki_file_push(
+                client,
+                {
+                    "page_name": "P",
+                    "content": content,
+                    "format": "tracwiki",
+                },
+            )
+        )
+
+
 WRITE_PATHS = [
     ("wiki_create", _wiki_create),
     ("wiki_update", _wiki_update),
@@ -811,6 +935,9 @@ WRITE_PATHS = [
     # outside #64's gate after #87 closed the milestone gap.
     ("ticket_comment_edit", _ticket_comment_edit),
     ("ticket_comment_reply", _ticket_comment_reply),
+    # Ticket #153 named it among the paths that must report a disabled
+    # gate; it was gated by #64 but had no row here.
+    ("wiki_file_push", _wiki_file_push),
 ]
 
 
@@ -835,6 +962,143 @@ def test_every_write_path_allows_correct_content(name, call):
     content."""
     result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
     assert not result.isError, _text(result)
+
+
+# ---------------------------------------------------------------------
+# Ticket #153: a disabled gate says so on every write.
+# ---------------------------------------------------------------------
+
+
+def _gate_off_client(html=BROKEN_HTML):
+    client = _client(html)
+    client.config.write_gate = False
+    return client
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_153_every_write_path_says_so_when_the_gate_is_off(name, call):
+    """With TRAC_WRITE_GATE=0 left set, a broken link sailed through
+    the shared daemon with a response identical to a checked clean
+    write. Now the write still lands -- the switch keeps doing what
+    ticket #64 ruling 5 asked -- but the response carries the OFF line.
+
+    The seed is the BROKEN source, so a pass here cannot be the gate
+    quietly running and finding nothing: this content refuses with the
+    gate on (`test_every_write_path_refuses_a_broken_link`)."""
+    client = _gate_off_client()
+    result = call(client, BROKEN_SOURCE)
+    assert not result.isError, f"{name}: {_text(result)}"
+    assert GATE_OFF_LINE in _text(result), f"{name} did not say so"
+    client.wiki_to_html.assert_not_called()
+
+
+@pytest.mark.parametrize("name,call", WRITE_PATHS)
+def test_153_no_off_line_when_the_gate_is_on(name, call):
+    """The other half: a line printed regardless of the switch would
+    pass the test above and report nothing."""
+    result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE not in _text(result)
+    assert "write gate is OFF" not in _text(result)
+
+
+def test_153_wiki_file_push_carries_the_off_line_in_structured_content():
+    """Claude Code shows structuredContent in preference to the text
+    block, so the line must ride in the dict too."""
+    result = _wiki_file_push(_gate_off_client(), BROKEN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE in result.structuredContent["gate_notes"]
+
+
+def test_153_wiki_file_push_gate_notes_hold_no_off_line_when_on():
+    result = _wiki_file_push(_client(CLEAN_HTML), CLEAN_SOURCE)
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE not in result.structuredContent["gate_notes"]
+
+
+def test_153_a_write_with_no_text_still_says_so():
+    """A field-only ticket_update carries nothing to check, but the
+    line reports the daemon, not this write's content: the cheapest
+    write is as good a place as any to notice the switch."""
+    client = _gate_off_client()
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_ticket_update(
+                client, {"ticket_id": 1, "priority": "major"}
+            )
+        )
+    assert not result.isError, _text(result)
+    assert GATE_OFF_LINE in _text(result)
+
+
+def _batch_create(client, description):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = 7
+        return asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {"summary": "a", "description": description},
+                        {"summary": "b", "description": description},
+                    ]
+                },
+            )
+        )
+
+
+def _batch_update(client, comment):
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = None
+        return asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": 1, "comment": comment},
+                        {"ticket_id": 2, "comment": comment},
+                    ]
+                },
+            )
+        )
+
+
+BATCH_PATHS = [
+    ("ticket_batch_create", _batch_create),
+    ("ticket_batch_update", _batch_update),
+]
+
+
+@pytest.mark.parametrize("name,call", BATCH_PATHS)
+def test_153_batch_tools_say_so_once_per_call(name, call):
+    """The batch tools gate per item through check_write, never through
+    gate_or_refuse, so they append the line themselves -- once, since
+    it describes the daemon rather than any one item."""
+    client = _gate_off_client()
+    result = call(client, BROKEN_SOURCE)
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    assert text.count(GATE_OFF_LINE) == 1, text
+    # Claude Code shows structuredContent in preference to the text.
+    assert result.structuredContent["gate_notes"] == [GATE_OFF_LINE]
+    client.wiki_to_html.assert_not_called()
+
+
+@pytest.mark.parametrize("name,call", BATCH_PATHS)
+def test_153_batch_tools_say_nothing_when_the_gate_is_on(name, call):
+    result = call(_client(CLEAN_HTML), CLEAN_SOURCE)
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    assert GATE_OFF_LINE not in text
+    assert GATE_OFF_LINE not in result.structuredContent["gate_notes"]
+    assert result.structuredContent["gate_notes"] == []
 
 
 def test_reply_to_does_not_charge_the_author_for_the_quoted_comment():

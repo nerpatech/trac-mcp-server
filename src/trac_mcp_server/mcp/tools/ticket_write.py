@@ -356,13 +356,28 @@ async def _handle_update(
                 "comment is required when reply_to is set",
                 "Provide a comment parameter along with reply_to.",
             )
+        # Both sides go through the shared parser (Trac #131): a
+        # threaded comment 5 has oldvalue "2.5" and is quoted as
+        # reply_to=5, the number Trac's comment:5 link names it by. The
+        # caller's value is parsed once, before the changelog read; one
+        # that is no comment number cannot match, so skip the read.
+        wanted = TracClient.parse_comment_number(reply_to)
+        if wanted is None:
+            return build_error_response(
+                "not_found",
+                f"Comment #{reply_to} not found on ticket #{ticket_id}",
+                "Use ticket_changelog to see valid comment numbers.",
+            )
         changelog = await run_sync(
             client.get_ticket_changelog, ticket_id
         )
         quoted_author = None
         quoted_text = None
         for entry in changelog or []:
-            if entry[2] == "comment" and str(entry[3]) == str(reply_to):
+            if entry[2] != "comment":
+                continue
+            row = TracClient.parse_comment_number(entry[3])
+            if row is not None and row.cnum == wanted.cnum:
                 quoted_author = entry[1]
                 quoted_text = entry[4]
         if quoted_text is None:
@@ -375,7 +390,7 @@ async def _handle_update(
             f"> {line}" for line in quoted_text.strip().split("\n")
         )
         comment = (
-            f"Replying to [comment:{reply_to} {quoted_author}]:\n"
+            f"Replying to [comment:{wanted.cnum} {quoted_author}]:\n"
             f"{quote_lines}\n\n{comment}"
         )
 
@@ -727,17 +742,14 @@ def _comment_cnum(entry: Any) -> int | None:
 
     Trac keeps it in the row's oldvalue: ``"5"``. A dotted ``"2.5"`` is a
     reply threaded under comment 2 -- never this tool's own write, since
-    tracrpc's ``ticket.update`` saves without a ``replyto``. ``int()`` is
-    the test, not ``isdigit()``: ``"\u00b2".isdigit()`` is True and
-    ``int("\u00b2")`` raises.
+    tracrpc's ``ticket.update`` saves without a ``replyto``. Parsing is
+    ``TracClient.parse_comment_number``'s; this keeps the flat-only
+    contract on top of it.
     """
-    text = str(entry[3])
-    if "." in text:
+    parsed = TracClient.parse_comment_number(entry[3])
+    if parsed is None or parsed.reply_to is not None:
         return None
-    try:
-        return int(text)
-    except ValueError:
-        return None
+    return parsed.cnum
 
 
 @dataclass(frozen=True)
@@ -755,6 +767,95 @@ class _PostedComment:
     failure: str | None = None
 
 
+def _fold_line_endings(text: str) -> str:
+    """``text`` as Trac stores it: CRLF and lone CR folded to LF.
+
+    The XML-RPC transport does this before Trac stores a comment, so a CR
+    can never survive; every comparison with stored text is made against
+    the folded text sent.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _posted_comment_from_stored(
+    number: int | None, comment: str, stored: str
+) -> _PostedComment:
+    """The report for comment ``number`` whose stored text is ``stored``."""
+    sent_norm = _fold_line_endings(comment)
+    return _PostedComment(
+        number=number,
+        mismatch=_comment_mismatch(sent_norm, stored),
+        folded=stored == sent_norm and sent_norm != comment,
+    )
+
+
+def _normalised_author(username: Any) -> str | None:
+    """The configured Trac user as the author compare wants it, or None.
+
+    None under OIDC per-user auth: the client does not know the caller's
+    Trac name, its username is empty.
+    """
+    if isinstance(username, str) and username.strip():
+        return username.strip().lower()
+    return None
+
+
+async def _comment_from_plugin(
+    client: TracClient,
+    ticket_id: int,
+    comment: str,
+    new_ts: str | None,
+    timeout: float,
+) -> _PostedComment | None:
+    """The posted comment as the plugin's ``ticket.getChangeAt`` names it,
+    or None when the changelog scan has to answer instead.
+
+    ``timeout`` is what is left of the read-back's one deadline.
+
+    The answer is taken only when it is certainly this write's. tracrpc's
+    ``ticket.update`` reads ``_ts`` back from the database AFTER saving,
+    so a write landing in between makes ``_ts`` name THAT write's change
+    set, and a lookup at that microsecond returns somebody else's
+    comment. So the result must be a 3-item list with a flat comment
+    number (a dotted one is a threaded reply, never this tool's own
+    write); its author must be the configured user (no check when the
+    client has none, OIDC); and its stored text must be the text sent,
+    line endings folded. Anything else -- the plugin missing, ``[]``, a
+    malformed or foreign or different-text result, an exception, a
+    timeout -- gives None, and the scan then reports a genuine mismatch
+    itself or fails cleanly. So this path never reports a mismatch.
+    """
+    if new_ts is None or timeout <= 0:
+        return None
+    try:
+        found = await asyncio.wait_for(
+            run_sync(client.get_ticket_change_at, ticket_id, new_ts),
+            timeout=timeout,
+        )
+    except Exception:
+        return None
+    if not isinstance(found, list) or len(found) != 3:
+        return None
+    parsed = TracClient.parse_comment_number(found[0])
+    if parsed is None or parsed.reply_to is not None:
+        return None
+    author = _normalised_author(
+        getattr(client.config, "username", None)
+    )
+    if author is not None and (
+        not isinstance(found[1], str)
+        or found[1].strip().lower() != author
+    ):
+        return None
+    # An empty <string></string> arrives as None, not "".
+    stored = "" if found[2] is None else found[2]
+    if not isinstance(stored, str) or stored != _fold_line_endings(
+        comment
+    ):
+        return None
+    return _posted_comment_from_stored(parsed.cnum, comment, stored)
+
+
 async def _find_posted_comment(
     client: TracClient,
     ticket_id: int,
@@ -762,34 +863,57 @@ async def _find_posted_comment(
     update_result: Any,
     new_ts: str | None,
 ) -> _PostedComment:
-    """Find the comment a ``ticket.update`` just posted in the changelog.
+    """Find the comment a ``ticket.update`` just posted.
 
     Never raises: the write has already landed, so a failed lookup is
     reported through ``failure``, not propagated.
 
-    The number cannot be counted from the changelog, because a
+    With the ``tracrpc_comment`` plugin (1.2.0 or later) the answer is one
+    small RPC, ``ticket.getChangeAt`` at the microsecond ``new_ts``. It is
+    used only when its author and text are this write's (see
+    ``_comment_from_plugin`` for why: the ``_ts`` read-back race); in
+    every other case the whole changelog is read and scanned. Plugin and
+    scan share ONE deadline, ``_COMMENT_LOOKUP_TIMEOUT`` in all.
+
+    The scan cannot count the number from the changelog, because a
     description-only edit consumes one too; it is read off the row.
     Candidates are this user's permanent, flat comment rows written in
     the update's second; if several remain (another write of ours in the
     same second) the text sent picks among them.
     """
+    deadline = (
+        asyncio.get_running_loop().time() + _COMMENT_LOOKUP_TIMEOUT
+    )
+    via_plugin = await _comment_from_plugin(
+        client,
+        ticket_id,
+        comment,
+        new_ts,
+        deadline - asyncio.get_running_loop().time(),
+    )
+    if via_plugin is not None:
+        return via_plugin
+
     epoch = _update_change_epoch(update_result, new_ts)
     if epoch is None:
         return _PostedComment(failure="no change time in Trac's reply")
+    remaining = deadline - asyncio.get_running_loop().time()
+    if remaining <= 0:
+        return _PostedComment(failure="changelog read timed out")
     try:
         changelog = await asyncio.wait_for(
             run_sync(client.get_ticket_changelog, ticket_id),
-            timeout=_COMMENT_LOOKUP_TIMEOUT,
+            timeout=remaining,
         )
     except TimeoutError:
         return _PostedComment(failure="changelog read timed out")
     except Exception:
         return _PostedComment(failure="changelog unreadable")
 
+    # OIDC per-user auth: the client does not know the caller's Trac name,
+    # its username is empty, so the time and the text have to do.
     username = getattr(client.config, "username", None)
-    author = (
-        username.strip().lower() if isinstance(username, str) else None
-    )
+    author = _normalised_author(username)
     candidates = []
     for entry in changelog or []:
         if (
@@ -816,9 +940,7 @@ async def _find_posted_comment(
             failure=f"no comment entry{who} at the update's time"
         )
 
-    # The XML-RPC transport folds CRLF and lone CR to LF before Trac
-    # stores the text, so CR can never survive: compare against that.
-    sent_norm = comment.replace("\r\n", "\n").replace("\r", "\n")
+    sent_norm = _fold_line_endings(comment)
     chosen = candidates[0]
     if len(candidates) > 1:
         # Another write landed in the same second: go by the text sent.
@@ -833,11 +955,8 @@ async def _find_posted_comment(
         chosen = max(same_text, key=lambda e: _comment_cnum(e) or 0)
 
     # An empty <string></string> arrives as None, not "".
-    stored = chosen[4] or ""
-    return _PostedComment(
-        number=_comment_cnum(chosen),
-        mismatch=_comment_mismatch(sent_norm, stored),
-        folded=stored == sent_norm and sent_norm != comment,
+    return _posted_comment_from_stored(
+        _comment_cnum(chosen), comment, chosen[4] or ""
     )
 
 

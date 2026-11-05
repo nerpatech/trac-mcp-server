@@ -166,7 +166,11 @@ def fetch_ticket_sections(
     for entry in client.get_ticket_changelog(ticket_id):
         field, oldvalue, newvalue = entry[2], entry[3], entry[4]
         if field == "comment" and newvalue:
-            comment_source_by_number[str(oldvalue)] = newvalue
+            # The HTML's trac-change-N- id carries the comment's own
+            # number, so a threaded row ("2.5") keys on "5" (Trac #131).
+            parsed = TracClient.parse_comment_number(oldvalue)
+            if parsed is not None:
+                comment_source_by_number[str(parsed.cnum)] = newvalue
 
     for change_div in tree.xpath(_CHANGE_DIV_XPATH):
         match = _CHANGE_ID_RE.match(change_div.get("id") or "")

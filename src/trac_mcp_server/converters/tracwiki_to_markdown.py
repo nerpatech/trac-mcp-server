@@ -208,6 +208,61 @@ def _enclosing_list_marker(
     return None
 
 
+# An ordered list marker (digits only, as `_LIST_MARKER_RE` writes it) whose
+# number is not 1: CommonMark does not let such a list interrupt a paragraph
+# (ticket #144; see `_separate_list_from_trailing_paragraph`).
+_NON_ONE_ORDERED_RE = re.compile(r"^(?!0*1\.$)\d+\.$")
+
+
+def _lines_since_blank(pieces: list[str]) -> list[str]:
+    """The complete lines of `"".join(pieces)` after its last blank line
+    (all of them if there is none), the partial last line excluded.
+
+    `_open_list_item` depends on nothing before a blank line (it empties the
+    stack), so this is all it needs, and it is found by looking back from
+    the end in growing slices instead of joining everything for each block
+    (ticket #144 review: the join made a page with many blocks quadratic).
+    A slice's first line may be partial, so a blank line is only trusted
+    past index 0 unless the slice is the whole thing.
+    """
+    size = 256
+    while True:
+        whole = size >= len(pieces)
+        lines = "".join(pieces[-size:]).split("\n")
+        for idx in range(len(lines) - 2, -1 if whole else 0, -1):
+            if not lines[idx].strip():
+                return lines[idx + 1 : -1]
+        if whole:
+            return lines[:-1]
+        size *= 4
+
+
+def _open_list_item(lines: list[str]) -> re.Match[str] | None:
+    """The list-marker match of the innermost list item still OPEN after
+    `lines`, or None (ticket #144).
+
+    The stack walk `_separate_list_from_trailing_paragraph` uses, over
+    columns in Trac's tab-expanded width: a marker line pops every entry at
+    or past its own column and pushes itself; any other non-blank line pops
+    every entry at or past its column; a blank line empties the stack (Trac
+    ends a list at any blank line, #143). What is left on top is the
+    innermost open item, whose match the caller reads the marker's
+    indentation and width off (as `_enclosing_list_marker` documents).
+    """
+    stack: list[tuple[int, re.Match[str]]] = []
+    for line in lines:
+        if not line.strip():
+            stack.clear()
+            continue
+        column = _indent_width(_indent_of(line))
+        found = _LIST_MARKER_RE.match(line)
+        while stack and stack[-1][0] >= column:
+            stack.pop()
+        if found:
+            stack.append((column, found))
+    return stack[-1][1] if stack else None
+
+
 # The subset of the marker set above that Markdown cannot express at all
 # (ticket #74).  CommonMark's ordered-list marker is digits only, so there is
 # nothing for ``a.`` or ``iv.`` to convert TO: measured, mistune parses
@@ -938,6 +993,22 @@ class TracWikiParser:
         are literal text and stay inside the fence unchanged.  Same rule
         _fallback_processor_blocks applies -- only a block at top level
         is a construct of its own (ticket #51).
+
+        A block that belongs to an open list item (ticket #144) is
+        fenced at that item's text column, whatever the opener's own
+        indentation (F4-F6: Trac renders a ``{{{ }}}`` block inside the
+        innermost open item at any indent, column 0 included; flush-left
+        prose or a blank line closes the list first), so the Markdown
+        fence belongs to the item. Before, the body and closer came out at
+        column 0: the list passes saw the column-0 ``\\x00CODEn\\x00``
+        placeholder line, decided the list had ended and inserted a blank
+        line after the opener (F3), and writing that back pulled the next
+        item into a code block.  The body is what Trac shows (F2): the
+        opener's indentation is stripped from every line only if EVERY
+        non-blank line starts with it, otherwise nothing is stripped.  See
+        `_fence_in_list_item`.  A block with no open item, and any block
+        whose opener is not first on its line, take the path they always
+        did.
         """
 
         def stash(body: str) -> str:
@@ -1000,6 +1071,18 @@ class TracWikiParser:
                         if m.group(1)
                         else ""
                     )
+                    # Ticket #144: a block in an open list item is fenced at
+                    # the item's text column. Everything it declines takes
+                    # the path below.
+                    item_fence = self._fence_in_list_item(
+                        text, i, out, code, fence, info
+                    )
+                    if item_fence is not None:
+                        replacement, indent_len = item_fence
+                        del out[len(out) - indent_len :]
+                        out.append(replacement)
+                        i = end
+                        continue
                     out.append(f"{fence}{info}\n{stash(code)}\n{fence}")
                     i = end
                     continue
@@ -1038,6 +1121,80 @@ class TracWikiParser:
             text,
         )
         return text
+
+    def _fence_in_list_item(
+        self,
+        text: str,
+        start: int,
+        emitted: list[str],
+        code: str,
+        fence: str,
+        info: str,
+    ) -> tuple[str, int] | None:
+        """Fence a block that belongs to an open list item (#144).
+
+        `start` is the index of the opener's `{{{`, `emitted` the pieces
+        `_convert_code_blocks` has appended so far (the opener's own
+        indentation is the tail of the last line), `code` the block's body
+        (already known to be fenceable), `fence`/`info` the Markdown fence
+        and info string the caller would emit. Returns (replacement, length
+        of the opener's indentation already emitted by the caller), or None
+        to leave the block to the caller's ordinary path.
+
+        Takes the block when the opener is the first non-whitespace on its
+        line, at ANY indentation (column 0 included), and a list item is
+        still open there (`_open_list_item`, over the lines already
+        emitted -- earlier blocks in the item are placeholders at the
+        item's text column and keep it open). Measured on /trac_test
+        (F4-F6): a `{{{ }}}` block renders inside the innermost open item
+        whatever its indentation; flush-left prose or a blank line ends the
+        list first.
+
+        The output indent O is ALWAYS that item's text column in spaces
+        (marker indentation + marker + 1, as `_unwrap_div_table` computes
+        for a TAB), because CommonMark only puts a fence inside the item at
+        or past that column. The opener's own indentation, already in
+        `out`, is replaced by it. The body shown is what Trac shows (F2):
+        the opener's ORIGINAL indentation is stripped from every line when
+        every non-blank line starts with it (an empty one strips nothing),
+        and nothing is stripped otherwise. Fence, each non-blank shown line
+        and closer are emitted at O; a blank line stays empty. The body is
+        stashed as usual, but behind a placeholder line that is itself at
+        O, so `_separate_list_from_trailing_paragraph` and `_convert_lists`
+        read the block as the item's continuation (F3). The first shown
+        line is carried by the placeholder itself, so the stash holds it
+        without O.
+        """
+        line_start = text.rfind("\n", 0, start) + 1
+        indent = text[line_start:start]
+        if indent.strip(" \t"):
+            return None
+        marker = _open_list_item(_lines_since_blank(emitted))
+        if marker is None:
+            return None
+        lead = _indent_of(marker.string)
+        # Declined, so the old path stands: a marker Markdown cannot express
+        # (lettered/roman, #74 -- the item is fenced away as unconverted
+        # text, and a fence under it came back as an inline span), and a
+        # TAB-indented marker line (CommonMark reads it as an indented code
+        # block, which predates #144).
+        if _ALPHA_LIST_MARKER_RE.match(marker.string) or "\t" in lead:
+            return None
+        token = marker.group(0)[len(lead) :]
+        out_indent = " " * (_indent_width(lead) + len(token) + 1)
+        lines = code.split("\n")
+        if all(ln.startswith(indent) for ln in lines if ln.strip()):
+            lines = [ln[len(indent) :] for ln in lines]
+        shown = [out_indent + ln if ln.strip() else "" for ln in lines]
+        # A blank first line leaves the placeholder line whitespace-only.
+        first = shown[0][len(out_indent) :] if shown[0] else ""
+        self._code_placeholders.append("\n".join([first] + shown[1:]))
+        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
+        return (
+            f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
+            f"{out_indent}{fence}",
+            len(indent),
+        )
 
     @staticmethod
     def _div_end(text: str, start: int) -> int:
@@ -1426,6 +1583,18 @@ class TracWikiParser:
           continuation of the remaining (outer) level and is left exactly
           as it is.
 
+        Ticket #144: a marker line that arrives with the stack EMPTY (no
+        open list), straight after a non-blank line, and whose marker is an
+        ORDERED number other than 1 also gets a blank line first. CommonMark
+        lets an ordered list interrupt a paragraph only when it starts with
+        1, so ``3. x`` right after paragraph text is more paragraph text --
+        and whatever is indented under it (a code fence, after #144) is its
+        continuation, which the write leg turns into an inline code span.
+        Trac renders a new list there either way (found on a store sweep:
+        auto_pm #228 comment 9). Bullets and ``1.`` interrupt a paragraph
+        already, so they get no blank line (an unmeasured stored-byte
+        change); a marker that continues an open list needs none.
+
         The pop threshold is strict ("deeper than", not "at least as
         deep") -- ticket #75's own measured boundary (section 2's
         two-space continuation under a one-space marker: continues;
@@ -1444,7 +1613,17 @@ class TracWikiParser:
             if not line.strip():
                 out.append(line)
                 continue
-            if _LIST_MARKER_RE.match(line):
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                if (
+                    not stack
+                    and out
+                    and out[-1].strip()
+                    and _NON_ONE_ORDERED_RE.match(
+                        marker.group(0).strip()
+                    )
+                ):
+                    out.append("")
                 column = len(_indent_of(line))
                 while stack and stack[-1] >= column:
                     stack.pop()

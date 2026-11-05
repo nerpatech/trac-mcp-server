@@ -65,6 +65,51 @@ def test_session_creation_insecure():
     assert not client.session.verify
 
 
+def test_rpc_url_uses_override_when_set():
+    """rpc_url_override wins over the derived .../login/rpc path -- used
+    by OIDC per-user auth, whose endpoint is not necessarily reachable
+    at the same path as the default Basic/LDAP one (see mcp/oidc.py)."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="user",
+        password="pass",
+        rpc_url_override="https://trac.example.com/trac-api/login/xmlrpc",
+    )
+    client = TracClient(config)
+    assert (
+        client.rpc_url
+        == "https://trac.example.com/trac-api/login/xmlrpc"
+    )
+
+
+def test_session_uses_bearer_auth_when_token_set():
+    """A bearer_token config forwards Authorization: Bearer <token>
+    instead of Basic auth -- OIDC per-user auth never sends the empty
+    username/password an oidc_only Config carries."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="",
+        password="",
+        bearer_token="the-users-own-token",
+        rpc_url_override="https://trac.example.com/trac-api/login/xmlrpc",
+        oidc_only=True,
+    )
+    client = TracClient(config)
+    assert client.session.auth is None
+    assert (
+        client.session.headers["Authorization"]
+        == "Bearer the-users-own-token"
+    )
+
+
+def test_session_uses_basic_auth_when_no_bearer_token(mock_config):
+    """Regression guard: the default (non-OIDC) path is unaffected --
+    still plain Basic auth, no stray Authorization header."""
+    client = TracClient(mock_config)
+    assert client.session.auth == ("testuser", "testpass")
+    assert "Authorization" not in client.session.headers
+
+
 def test_session_mounts_keepalive_adapter(mock_config):
     """Both schemes get the keepalive adapter, not requests' default one."""
     client = TracClient(mock_config)
@@ -1500,65 +1545,90 @@ def test_search_wiki_pages_by_title(mock_post, mock_config):
         assert "name" in r
 
 
+def _rpc_result_response(value) -> Mock:
+    """A mocked HTTP response carrying ``value`` as an XML-RPC result."""
+    response = Mock()
+    response.status_code = 200
+    response.content = xmlrpc.client.dumps(
+        (value,), methodresponse=True
+    ).encode()
+    return response
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_search_wiki_pages_by_content(mock_post, mock_config):
-    """Test search_wiki_pages_by_content method."""
-    # First response for getAllPages
-    pages_response = Mock()
-    pages_response.status_code = 200
-    pages_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value>
-        <array>
-          <data>
-            <value><string>Page1</string></value>
-            <value><string>Page2</string></value>
-          </data>
-        </array>
-      </value>
-    </param>
-  </params>
-</methodResponse>"""
+def test_search_wiki_pages(mock_post, mock_config):
+    """search_wiki_pages over the real transport: getRecentChanges (the
+    listing of every page), then one system.multicall carrying getPageInfo and getPage for every page.
+    Page2's fault entry is skipped; an empty page comes back as an empty
+    <string/> and is cached without a match."""
+    stamp = xmlrpc.client.DateTime("20260101T00:00:01")
 
-    # Second response for getPage("Page1")
-    page1_response = Mock()
-    page1_response.status_code = 200
-    page1_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value><string>no match here</string></value>
-    </param>
-  </params>
-</methodResponse>"""
+    def info(name, version=1):
+        return {
+            "name": name,
+            "author": "a",
+            "version": version,
+            "lastModified": stamp,
+        }
 
-    # Third response for getPage("Page2")
-    page2_response = Mock()
-    page2_response.status_code = 200
-    page2_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value><string>found the target keyword here</string></value>
-    </param>
-  </params>
-</methodResponse>"""
-
+    fault = {"faultCode": 1, "faultString": "Page not readable"}
+    listing = [info(f"Page{i}") for i in range(1, 5)]
     mock_post.side_effect = [
-        pages_response,
-        page1_response,
-        page2_response,
+        _rpc_result_response(listing),
+        _rpc_result_response(
+            [
+                [info("Page1")],
+                ["no match here"],
+                [info("Page2")],
+                fault,
+                [info("Page3")],
+                ["found the target keyword here"],
+                [info("Page4")],
+                [""],
+            ]
+        ),
     ]
 
     client = TracClient(mock_config)
-    result = client.search_wiki_pages_by_content("target")
+    result = client.search_wiki_pages("target")
 
-    # Verify only Page2 returned
+    # Only Page3 matches: Page2 is skipped, Page4 is empty
     assert len(result) == 1
-    assert result[0]["name"] == "Page2"
+    assert result[0]["name"] == "Page3"
+    assert result[0]["score"] > 0
     assert "target" in result[0]["snippet"]
+    assert mock_post.call_count == 2
+    first_request = xmlrpc.client.loads(
+        mock_post.call_args_list[0].kwargs["data"]
+    )
+    assert first_request[1] == "wiki.getRecentChanges"
+    sent = mock_post.call_args_list[1].kwargs["data"]
+    (calls,), method = xmlrpc.client.loads(sent)
+    assert method == "system.multicall"
+    assert [c["methodName"] for c in calls[:4]] == [
+        "wiki.getPageInfo",
+        "wiki.getPage",
+        "wiki.getPageInfo",
+        "wiki.getPage",
+    ]
+    assert calls[0]["params"] == ["Page1"]
+
+    # A second search: the cache refresh is getRecentChanges and one
+    # multicall for Page2, which was unreadable and is retried.
+    mock_post.reset_mock()
+    mock_post.side_effect = [
+        _rpc_result_response(listing),
+        _rpc_result_response(
+            [[info("Page2")], ["now it has the target too"]]
+        ),
+    ]
+    again = client.search_wiki_pages("target")
+    assert sorted(h["name"] for h in again) == ["Page2", "Page3"]
+    methods = [
+        xmlrpc.client.loads(c.kwargs["data"])[1]
+        for c in mock_post.call_args_list
+    ]
+    assert methods == ["wiki.getRecentChanges", "system.multicall"]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -1803,8 +1873,10 @@ def test_put_wiki_page_update_with_version(mock_post, mock_config):
   </params>
 </methodResponse>"""
 
-    # The version precheck (ticket #120) reads the page first: v2 is current.
+    # No conditional-put plugin (#129) on this server, so the version
+    # precheck (ticket #120) reads the page first: v2 is current.
     mock_post.side_effect = [
+        _method_not_found_response(),
         _page_info_response(2),
         put_response,
         info_response,
@@ -1816,7 +1888,7 @@ def test_put_wiki_page_update_with_version(mock_post, mock_config):
     )
 
     # Verify version was passed to RPC
-    first_payload = mock_post.call_args_list[1][1]["data"]
+    first_payload = mock_post.call_args_list[2][1]["data"]
     assert "wiki.putPage" in first_payload
     assert "<int>2</int>" in first_payload
 
@@ -1872,9 +1944,14 @@ def test_put_wiki_page_version_conflict(mock_post, mock_config):
   </fault>
 </methodResponse>"""
 
-    # The precheck (ticket #120) sees a matching version, so the write is
-    # attempted and this server-side fault still maps to ValueError.
-    mock_post.side_effect = [_page_info_response(1), fault_response]
+    # No plugin (#129); the precheck (ticket #120) sees a matching
+    # version, so the write is attempted and this server-side fault still
+    # maps to ValueError.
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _page_info_response(1),
+        fault_response,
+    ]
 
     client = TracClient(mock_config)
 
@@ -1893,6 +1970,16 @@ def _xmlrpc_response(body: bytes) -> Mock:
         + b"</value></param></params></methodResponse>"
     )
     return response
+
+
+def _method_not_found_response(
+    method: str = "wiki.putPageIfVersion",
+) -> Mock:
+    """TracXMLRPC's answer for a method no component provides: the
+    server has no tracrpc_comment plugin (or has it disabled)."""
+    return _fault_response(
+        f'RPC method "{method}" not found', code=-32601
+    )
 
 
 def _page_info_response(version: int) -> Mock:
@@ -1924,8 +2011,12 @@ def test_put_wiki_page_stale_version_is_refused_before_putpage(
     mock_post, mock_config
 ):
     """Trac ignores the `version` attr of wiki.putPage (ticket #120), so
-    the client compares it itself and must never post putPage when stale."""
-    mock_post.side_effect = [_page_info_response(7)]
+    without the plugin (#129) the client compares it itself and must never
+    post putPage when stale."""
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _page_info_response(7),
+    ]
 
     client = TracClient(mock_config)
     with pytest.raises(WikiPageConflict) as exc_info:
@@ -1935,12 +2026,16 @@ def test_put_wiki_page_stale_version_is_refused_before_putpage(
     assert exc_info.value.expected_version == 5
     assert exc_info.value.current_version == 7
     assert isinstance(exc_info.value, ValueError)
-    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_put_wiki_page_matching_version_writes(mock_post, mock_config):
     mock_post.side_effect = [
+        _method_not_found_response(),
         _page_info_response(7),
         _xmlrpc_response(b"<boolean>1</boolean>"),
         _page_info_response(8),
@@ -1953,6 +2048,7 @@ def test_put_wiki_page_matching_version_writes(mock_post, mock_config):
 
     assert result["version"] == 8
     assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
         "wiki.getPageInfo",
         "wiki.putPage",
         "wiki.getPageInfo",
@@ -1983,7 +2079,10 @@ def test_put_wiki_page_versioned_missing_page_is_a_conflict(
     mock_post, mock_config
 ):
     """Some Trac instances answer 0 rather than a Fault for a missing page."""
-    mock_post.side_effect = [_xmlrpc_response(b"<int>0</int>")]
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _xmlrpc_response(b"<int>0</int>"),
+    ]
 
     client = TracClient(mock_config)
     with pytest.raises(WikiPageConflict) as exc_info:
@@ -1991,15 +2090,20 @@ def test_put_wiki_page_versioned_missing_page_is_a_conflict(
 
     assert exc_info.value.expected_version == 1
     assert exc_info.value.current_version is None
-    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
 
 
-def _fault_response(fault_string: str) -> Mock:
+def _fault_response(fault_string: str, code: int = 1) -> Mock:
     response = Mock()
     response.status_code = 200
     response.content = (
         b'<?xml version="1.0"?><methodResponse><fault><value><struct>'
-        b"<member><name>faultCode</name><value><int>1</int></value></member>"
+        b"<member><name>faultCode</name><value><int>"
+        + str(code).encode()
+        + b"</int></value></member>"
         b"<member><name>faultString</name><value><string>"
         + fault_string.encode()
         + b"</string></value></member>"
@@ -2015,7 +2119,8 @@ def test_put_wiki_page_missing_page_fault_is_a_conflict(
     """Some Trac instances raise a not-found Fault from getPageInfo
     instead of answering 0; both mean the page is missing."""
     mock_post.side_effect = [
-        _fault_response("Wiki page 'Page' does not exist")
+        _method_not_found_response(),
+        _fault_response("Wiki page 'Page' does not exist"),
     ]
 
     client = TracClient(mock_config)
@@ -2023,7 +2128,10 @@ def test_put_wiki_page_missing_page_fault_is_a_conflict(
         client.put_wiki_page("Page", "content", "comment", version=1)
 
     assert exc_info.value.current_version is None
-    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -2032,13 +2140,19 @@ def test_put_wiki_page_other_precheck_fault_propagates(
 ):
     import xmlrpc.client
 
-    mock_post.side_effect = [_fault_response("Permission denied")]
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _fault_response("Permission denied"),
+    ]
 
     client = TracClient(mock_config)
     with pytest.raises(xmlrpc.client.Fault):
         client.put_wiki_page("Page", "content", "comment", version=1)
 
-    assert _posted_methods(mock_post) == ["wiki.getPageInfo"]
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -2080,18 +2194,33 @@ def test_put_wiki_page_not_modified(mock_post, mock_config):
 # ---------------------------------------------------------------------------
 
 
-def _rpc_putpage_then(readback):
+_NO_PLUGIN = xmlrpc.client.Fault(
+    -32601, 'RPC method "wiki.putPageIfVersion" not found'
+)
+
+
+def _rpc_putpage_then(readback, plugin=False):
     """An ``_rpc_request`` stand-in: the version precheck sees version 3,
     putPage returns True, and the read-back after it raises ``readback``
-    (an exception) or returns it (anything else)."""
+    (an exception) or returns it (anything else). With ``plugin`` the
+    server has ``wiki.putPageIfVersion`` (#129), which stores; without, it
+    answers method-not-found and the client falls back."""
     calls: list[tuple] = []
+    stored = False
 
     def _rpc(namespace, method, *args):
+        nonlocal stored
         calls.append((namespace, method, *args))
+        if method == "putPageIfVersion":
+            if not plugin:
+                raise _NO_PLUGIN
+            stored = True
+            return True
         if method == "putPage":
+            stored = True
             return True
         if method == "getPageInfo":
-            if any(c[1] == "putPage" for c in calls[:-1]):
+            if stored:
                 if isinstance(readback, BaseException):
                     raise readback
                 return readback
@@ -2124,10 +2253,13 @@ def _rpc_putpage_then(readback):
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "plugin", [False, True], ids=["precheck", "plugin"]
+)
 def test_put_wiki_page_readback_failure_says_stored(
-    mock_config, readback
+    mock_config, readback, plugin
 ):
-    calls, rpc = _rpc_putpage_then(readback)
+    calls, rpc = _rpc_putpage_then(readback, plugin)
     client = TracClient(mock_config)
     with patch.object(client, "_rpc_request", side_effect=rpc):
         with pytest.raises(WikiPageStoredReadbackFailed) as exc_info:
@@ -2143,7 +2275,9 @@ def test_put_wiki_page_readback_failure_says_stored(
     assert err.cause is readback
     assert err.__cause__ is readback
     assert "was stored" in str(err)
-    assert [c[1] for c in calls].count("putPage") == 1
+    methods = [c[1] for c in calls]
+    assert methods.count("putPageIfVersion") == 1
+    assert methods.count("putPage") == (0 if plugin else 1)
 
 
 def test_put_wiki_page_non_dict_readback_says_stored(mock_config):
@@ -2156,6 +2290,116 @@ def test_put_wiki_page_non_dict_readback_says_stored(mock_config):
             client.put_wiki_page("X", "content", "comment")
 
     assert exc_info.value.cause is None
+    assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
+
+
+# ---------------------------------------------------------------------------
+# put_wiki_page: flag a possible overwrite when the read-back version is
+# not version + 1 (Trac /trac_mcp_server #130)
+# ---------------------------------------------------------------------------
+
+
+def _rpc_versions(precheck, readback, plugin=False):
+    """An ``_rpc_request`` stand-in: the version precheck sees
+    ``precheck`` (or a not-found fault when ``None``), putPage returns
+    True, and the read-back after it sees ``readback``. ``plugin`` as in
+    ``_rpc_putpage_then``: with it, ``wiki.putPageIfVersion`` stores (and
+    there is no precheck); without, it answers method-not-found."""
+    calls: list[tuple] = []
+    stored = False
+
+    def _rpc(namespace, method, *args):
+        nonlocal stored
+        calls.append((namespace, method, *args))
+        if method == "putPageIfVersion":
+            if not plugin:
+                raise _NO_PLUGIN
+            stored = True
+            return True
+        if method == "putPage":
+            stored = True
+            return True
+        if method == "getPageInfo":
+            if stored:
+                return {"name": "X", "version": readback, "author": "a"}
+            if precheck is None:
+                raise xmlrpc.client.Fault(1, "Page 'X' not found")
+            return {"name": "X", "version": precheck, "author": "a"}
+        raise AssertionError(f"unexpected RPC {method}")
+
+    return calls, _rpc
+
+
+@pytest.mark.parametrize(
+    "plugin", [False, True], ids=["precheck", "plugin"]
+)
+def test_put_wiki_page_flags_possible_overwrite(mock_config, plugin):
+    """By construction: the precheck sees 3, another writer stores 4,
+    this putPage stores 5. The result must say so, not report a plain
+    success. Through the plugin (#129) only a write landing after the
+    save can do this, but the check is kept on that path too."""
+    calls, rpc = _rpc_versions(precheck=3, readback=5, plugin=plugin)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["version"] == 5
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4]
+    # Detect only: no extra RPC beyond the write(s), precheck and read-back.
+    if plugin:
+        assert [c[1] for c in calls] == [
+            "putPageIfVersion",
+            "getPageInfo",
+        ]
+    else:
+        assert [c[1] for c in calls] == [
+            "putPageIfVersion",
+            "getPageInfo",
+            "putPage",
+            "getPageInfo",
+        ]
+
+
+def test_put_wiki_page_lists_every_intervening_version(mock_config):
+    _, rpc = _rpc_versions(precheck=3, readback=7)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4, 5, 6]
+
+
+@pytest.mark.parametrize(
+    "plugin", [False, True], ids=["precheck", "plugin"]
+)
+def test_put_wiki_page_uncontended_update_is_not_flagged(
+    mock_config, plugin
+):
+    """The normal path: version 3 in, version 4 back. It must stay
+    quiet."""
+    _, rpc = _rpc_versions(precheck=3, readback=4, plugin=plugin)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["version"] == 4
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+
+
+@pytest.mark.parametrize("readback", [1, 5])
+def test_put_wiki_page_create_is_never_flagged(mock_config, readback):
+    """A create (version=None) has nothing to compare with, whatever
+    version the read-back reports."""
+    calls, rpc = _rpc_versions(precheck=None, readback=readback)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c")
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
     assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
 
 
@@ -2173,6 +2417,341 @@ def test_put_wiki_page_putpage_fault_still_means_nothing_stored(
     with patch.object(client, "_rpc_request", side_effect=_rpc):
         with pytest.raises(xmlrpc.client.Fault):
             client.put_wiki_page("X", "content", "comment")
+
+
+# ---------------------------------------------------------------------------
+# put_wiki_page: the server-side conditional put, wiki.putPageIfVersion
+# (Trac /trac_mcp_server #129)
+# ---------------------------------------------------------------------------
+
+
+def _conflict_fault_string(current: str) -> str:
+    """The plugin's conflict message, as TracXMLRPC wraps it."""
+    return (
+        f"'[wiki-version-conflict current_version={current}] Version "
+        'conflict on wiki page "Page": you tried to update version 7 '
+        f"but ...' while executing 'wiki.putPageIfVersion()'"
+    )
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_versioned_takes_the_plugin_path(
+    mock_post, mock_config
+):
+    """With a version, the write goes through wiki.putPageIfVersion:
+    no client-side precheck, no putPage, and the read-back still runs."""
+    mock_post.side_effect = [
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(8),
+    ]
+
+    client = TracClient(mock_config)
+    result = client.put_wiki_page("Page", "new text", "why", version=7)
+
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
+    params = xmlrpc.client.loads(
+        mock_post.call_args_list[0][1]["data"]
+    )[0]
+    assert params == ("Page", "new text", {"comment": "why"}, 7)
+    assert result["version"] == 8
+    assert result["possible_overwrite"] is False
+
+
+@pytest.mark.parametrize(
+    "current, expected_current",
+    [("9", 9), ("none", None)],
+    ids=["newer", "missing"],
+)
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_plugin_conflict_becomes_wiki_page_conflict(
+    mock_post, mock_config, current, expected_current
+):
+    """The plugin's 409 conflict maps to the same WikiPageConflict the
+    precheck raises -- so the tools need no new error path -- and
+    nothing else is posted: no fallback, no putPage, no read-back."""
+    mock_post.side_effect = [
+        _fault_response(_conflict_fault_string(current), code=409)
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageConflict) as exc_info:
+        client.put_wiki_page("Page", "content", "comment", version=7)
+
+    err = exc_info.value
+    assert err.page_name == "Page"
+    assert err.expected_version == 7
+    assert err.current_version == expected_current
+    assert _posted_methods(mock_post) == ["wiki.putPageIfVersion"]
+
+
+@pytest.mark.parametrize(
+    "code, fault_string",
+    [
+        # A 409 that is not the plugin's: no marker.
+        (409, "'Conflict' while executing 'wiki.putPageIfVersion()'"),
+        # The marker without the 409, e.g. inside a page name.
+        (
+            1,
+            "'Invalid Wiki page name "
+            '"[wiki-version-conflict current_version=3]"\' '
+            "while executing 'wiki.putPageIfVersion()'",
+        ),
+    ],
+    ids=["409-without-marker", "marker-without-409"],
+)
+def test_put_wiki_page_only_the_exact_conflict_fault_is_a_conflict(
+    mock_config, code, fault_string
+):
+    calls = []
+
+    def _rpc(namespace, method, *args):
+        calls.append(method)
+        raise xmlrpc.client.Fault(code, fault_string)
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.put_wiki_page(
+                "Page", "content", "comment", version=7
+            )
+
+    assert not isinstance(exc_info.value, WikiPageConflict)
+    assert calls == ["putPageIfVersion"]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_missing_plugin_falls_back_and_precheck_refuses(
+    mock_post, mock_config
+):
+    """No plugin on the server: the ticket #120 precheck runs as before
+    and still refuses a stale version before any putPage."""
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _page_info_response(9),
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageConflict) as exc_info:
+        client.put_wiki_page("Page", "content", "comment", version=7)
+
+    assert exc_info.value.current_version == 9
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPageInfo",
+    ]
+
+
+@pytest.mark.parametrize(
+    "version, current_page, expected_current",
+    [
+        (0, None, None),
+        (0, 3, 3),
+        (-1, None, None),
+        (-1, 3, 3),
+    ],
+    ids=[
+        "zero-missing",
+        "zero-exists",
+        "negative-missing",
+        "negative-exists",
+    ],
+)
+def test_put_wiki_page_version_below_one_never_reaches_the_plugin(
+    mock_config, version, current_page, expected_current
+):
+    """Versions start at 1, so 0 and below name no page: they skip
+    wiki.putPageIfVersion (which would create a missing page for 0 and
+    fault on a negative with a message `wiki_update` mislabels as a
+    modified page) and take the precheck path, which refuses them with
+    WikiPageConflict whether or not the page exists."""
+    calls = []
+
+    def _rpc(namespace, method, *args):
+        calls.append(method)
+        assert method == "getPageInfo", method
+        if current_page is None:
+            raise xmlrpc.client.Fault(
+                1, "Wiki page 'Page' does not exist"
+            )
+        return {"name": "Page", "version": current_page}
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(WikiPageConflict) as exc_info:
+            client.put_wiki_page(
+                "Page", "content", "comment", version=version
+            )
+
+    err = exc_info.value
+    assert err.expected_version == version
+    assert err.current_version == expected_current
+    assert "putPageIfVersion" not in calls
+    assert "putPage" not in calls
+    assert calls == ["getPageInfo"]
+
+
+def test_put_wiki_page_missing_plugin_by_text_also_falls_back(
+    mock_config,
+):
+    """A server that reports a missing method with code 1 but the stock
+    text is recognised too."""
+    calls, rpc = _rpc_versions(precheck=3, readback=4)
+
+    def _rpc(namespace, method, *args):
+        if method == "putPageIfVersion":
+            calls.append((namespace, method, *args))
+            raise xmlrpc.client.Fault(
+                1, 'RPC method "wiki.putPageIfVersion" not found'
+            )
+        return rpc(namespace, method, *args)
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["version"] == 4
+    assert [c[1] for c in calls] == [
+        "putPageIfVersion",
+        "getPageInfo",
+        "putPage",
+        "getPageInfo",
+    ]
+
+
+def test_put_wiki_page_page_not_found_fault_is_not_a_missing_method(
+    mock_config,
+):
+    """ "not found" alone (a page, a resource) must not trigger the
+    fallback: only a missing method may."""
+    calls = []
+
+    def _rpc(namespace, method, *args):
+        calls.append(method)
+        raise xmlrpc.client.Fault(404, 'Wiki page "X" not found')
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert exc_info.value.faultCode == 404
+    assert calls == ["putPageIfVersion"]
+
+
+def test_put_wiki_page_remembers_a_missing_plugin_for_a_while(
+    mock_config,
+):
+    """After a method-not-found the client skips the plugin call until
+    WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS have passed, then tries it
+    again (so a plugin deployed later is picked up without a restart)."""
+    from trac_mcp_server.core import client as client_module
+
+    client = TracClient(mock_config)
+    now = [1000.0]
+    with patch.object(
+        client_module.time, "monotonic", side_effect=lambda: now[0]
+    ):
+        calls, rpc = _rpc_versions(precheck=3, readback=4)
+        with patch.object(client, "_rpc_request", side_effect=rpc):
+            client.put_wiki_page("X", "content", "c", version=3)
+        assert [c[1] for c in calls][0] == "putPageIfVersion"
+
+        now[0] += (
+            client_module.WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS - 1
+        )
+        calls, rpc = _rpc_versions(precheck=3, readback=4)
+        with patch.object(client, "_rpc_request", side_effect=rpc):
+            client.put_wiki_page("X", "content", "c", version=3)
+        assert [c[1] for c in calls] == [
+            "getPageInfo",
+            "putPage",
+            "getPageInfo",
+        ]
+
+        now[0] += 2
+        calls, rpc = _rpc_versions(precheck=3, readback=4, plugin=True)
+        with patch.object(client, "_rpc_request", side_effect=rpc):
+            client.put_wiki_page("X", "content", "c", version=3)
+        assert [c[1] for c in calls] == [
+            "putPageIfVersion",
+            "getPageInfo",
+        ]
+
+
+@pytest.mark.parametrize("readback", [1, 5])
+def test_put_wiki_page_create_never_calls_the_plugin(
+    mock_config, readback
+):
+    """version=None keeps today's path exactly: putPage, read-back."""
+    calls, rpc = _rpc_versions(
+        precheck=None, readback=readback, plugin=True
+    )
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        client.put_wiki_page("X", "content", "c")
+
+    assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
+
+
+def test_put_wiki_page_plugin_not_modified_is_the_usual_value_error(
+    mock_config,
+):
+    def _rpc(namespace, method, *args):
+        raise xmlrpc.client.Fault(
+            1,
+            "'Page not modified' while executing 'wiki.putPageIfVersion()'",
+        )
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(ValueError) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert not isinstance(exc_info.value, WikiPageConflict)
+    assert "not modified" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "code, raw, unwrapped",
+    [
+        (
+            1,
+            "'Invalid Wiki page name \"a//b\"' while executing "
+            "'wiki.putPageIfVersion()'",
+            'Invalid Wiki page name "a//b"',
+        ),
+        # Permission faults carry no wrapper; they pass through as-is.
+        (
+            403,
+            "WIKI_MODIFY privileges are required to perform this "
+            "operation on X",
+            "WIKI_MODIFY privileges are required to perform this "
+            "operation on X",
+        ),
+    ],
+    ids=["wrapped", "unwrapped"],
+)
+def test_put_wiki_page_other_plugin_faults_propagate_unwrapped(
+    mock_config, code, raw, unwrapped
+):
+    """Any other fault propagates as a Fault (nothing stored), without
+    TracXMLRPC's "while executing 'wiki.putPageIfVersion()'" suffix --
+    whose "version" wiki_update would otherwise read as a conflict."""
+
+    def _rpc(namespace, method, *args):
+        raise xmlrpc.client.Fault(code, raw)
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert exc_info.value.faultCode == code
+    assert exc_info.value.faultString == unwrapped
+    assert "version" not in exc_info.value.faultString.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -3003,3 +3582,228 @@ def test_delete_enum_rejects_invalid_type(mock_config):
     assert call_count == 0, (
         "No RPC call should be made for invalid enum_type"
     )
+
+
+@pytest.mark.parametrize(
+    "plugin", [False, True], ids=["precheck", "plugin"]
+)
+def test_put_wiki_page_float_version_never_raises_after_the_write(
+    mock_config, plugin
+):
+    """A JSON-schema "integer" admits 3.0, and the precheck accepts it
+    (3 == 3.0). The overwrite check runs after putPage stored the page,
+    so it must never raise there: a TypeError would reach the caller as
+    a generic failure for a stored write and invite a second write."""
+    calls, rpc = _rpc_versions(precheck=3, readback=5, plugin=plugin)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [4]
+    # The plugin takes an int: 3.0 is sent as 3.
+    assert calls[0][1] == "putPageIfVersion"
+    assert calls[0][-1] == 3 and type(calls[0][-1]) is int
+
+    _, rpc = _rpc_versions(precheck=3, readback=4, plugin=plugin)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3.0)
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
+
+
+def test_put_wiki_page_readback_below_expected_is_flagged_with_none_between(
+    mock_config,
+):
+    """A read-back version below version + 1 (the page was deleted and
+    recreated in between) is "not version + 1" too: flagged, with no
+    intervening versions to name."""
+    _, rpc = _rpc_versions(precheck=3, readback=2)
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        result = client.put_wiki_page("X", "content", "c", version=3)
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == []
+
+
+# ---------------------------------------------------------------------------
+# TracClient.parse_comment_number (Trac /trac_mcp_server #131)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("oldvalue", "cnum", "reply_to"),
+    [
+        ("5", 5, None),
+        ("2.5", 5, 2),
+        ("1.10", 10, 1),
+        (5, 5, None),
+        ("  5 ", 5, None),
+        (" 2.5\n", 5, 2),
+    ],
+)
+def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
+    from trac_mcp_server.core.client import CommentNumber
+
+    parsed = TracClient.parse_comment_number(oldvalue)
+    assert parsed == CommentNumber(cnum=cnum, reply_to=reply_to)
+    assert parsed.cnum == cnum
+    assert parsed.reply_to == reply_to
+
+
+@pytest.mark.parametrize(
+    "oldvalue",
+    [
+        None,
+        "",
+        "   ",
+        "abc",
+        "²",  # '²'.isdigit() is True; int('²') raises
+        "2.",
+        ".5",
+        "1.2.3",
+        "2..5",
+        "0",
+        "-1",
+        "2.0",
+        "2.-1",
+        "0.5",
+        "-1.5",
+        "a.5",
+        "1_0",
+        "+5",
+        "\u0665",  # Arabic-Indic five: int() accepts it
+        "2.\u0665",
+        True,
+        False,
+        5.0,
+        0,
+        -3,
+        ["5"],
+    ],
+)
+def test_parse_comment_number_rejects(oldvalue):
+    assert TracClient.parse_comment_number(oldvalue) is None
+
+
+# ticket.getChangeAt (Trac /trac_mcp_server #132)
+
+
+def test_get_ticket_change_at_returns_the_plugins_list(mock_config):
+    client = TracClient(mock_config)
+    with patch.object(
+        client, "_rpc_request", return_value=["5", "alice", "text"]
+    ) as rpc:
+        result = client.get_ticket_change_at(7, "1762257600123456")
+
+    assert result == ["5", "alice", "text"]
+    rpc.assert_called_once_with(
+        "ticket", "getChangeAt", 7, "1762257600123456"
+    )
+
+
+def _missing_getchangeat(*args):
+    raise xmlrpc.client.Fault(
+        -32601, 'RPC method "ticket.getChangeAt" not found'
+    )
+
+
+def test_get_ticket_change_at_missing_method_returns_none_and_caches(
+    mock_config,
+):
+    client = TracClient(mock_config)
+    with patch.object(
+        client, "_rpc_request", side_effect=_missing_getchangeat
+    ) as rpc:
+        assert client.get_ticket_change_at(7, "1") is None
+        assert client.get_ticket_change_at(7, "1") is None
+        assert client.get_ticket_change_at(8, "2") is None
+
+    assert rpc.call_count == 1
+
+
+def test_get_ticket_change_at_tries_again_after_the_ttl(mock_config):
+    from trac_mcp_server.core import client as client_module
+
+    client = TracClient(mock_config)
+    now = [1000.0]
+    with patch.object(
+        client_module.time, "monotonic", side_effect=lambda: now[0]
+    ):
+        with patch.object(
+            client, "_rpc_request", side_effect=_missing_getchangeat
+        ) as rpc:
+            client.get_ticket_change_at(7, "1")
+            now[0] += (
+                client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS - 1
+            )
+            client.get_ticket_change_at(7, "1")
+            assert rpc.call_count == 1
+
+            now[0] += 2
+            client.get_ticket_change_at(7, "1")
+            assert rpc.call_count == 2
+
+        # The plugin arrived meanwhile: the next call gets the answer.
+        now[0] += client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS + 1
+        with patch.object(
+            client, "_rpc_request", return_value=["1", "a", "t"]
+        ):
+            assert client.get_ticket_change_at(7, "1") == [
+                "1",
+                "a",
+                "t",
+            ]
+
+
+def test_get_ticket_change_at_ttl_is_five_minutes():
+    from trac_mcp_server.core import client as client_module
+
+    assert client_module.TICKET_CHANGE_AT_ABSENT_TTL_SECONDS == 300.0
+
+
+def test_get_ticket_change_at_other_faults_propagate(mock_config):
+    client = TracClient(mock_config)
+    fault = xmlrpc.client.Fault(
+        1, "TICKET_VIEW privileges are required"
+    )
+    with patch.object(client, "_rpc_request", side_effect=fault):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.get_ticket_change_at(7, "1")
+
+    assert exc_info.value is fault
+    # An unrelated fault is not remembered as "plugin absent".
+    with patch.object(client, "_rpc_request", return_value=[]) as rpc:
+        assert client.get_ticket_change_at(7, "1") == []
+    rpc.assert_called_once()
+
+
+def test_get_ticket_change_at_page_not_found_is_not_a_missing_method(
+    mock_config,
+):
+    client = TracClient(mock_config)
+    fault = xmlrpc.client.Fault(
+        404, "Ticket 9 does not exist.  not found"
+    )
+    with patch.object(client, "_rpc_request", side_effect=fault):
+        with pytest.raises(xmlrpc.client.Fault):
+            client.get_ticket_change_at(9, "1")
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_recent_wiki_changes_zero_asks_from_the_epoch(
+    mock_post, mock_config
+):
+    """``xmlrpc.client.DateTime(0)`` is "now" (a falsy value means the
+    current time), so the documented default of 0, "all changes", asked
+    for nothing. The wiki search lists every page this way."""
+    mock_post.return_value = _rpc_result_response([])
+    client = TracClient(mock_config)
+    assert client.get_recent_wiki_changes(0) == []
+    (params,), method = xmlrpc.client.loads(
+        mock_post.call_args.kwargs["data"]
+    )
+    assert method == "wiki.getRecentChanges"
+    assert params.value == "19700101T00:00:00"

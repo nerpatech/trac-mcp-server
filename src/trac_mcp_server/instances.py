@@ -563,6 +563,19 @@ class InstanceRegistry:
         with self._lock:
             self._clients[key] = client
 
+    @property
+    def write_gate(self) -> bool:
+        """Whether the write gate is on for this daemon (ticket #153).
+
+        Read from the default config because every routed instance's
+        config is a ``dataclasses.replace`` of it (``_synthesize``,
+        ticket #117), so this is the value every write through this
+        daemon sees -- and, unlike a resolved client, it exists for a
+        caller scoped away from the default instance. Same default and
+        same ``getattr`` tolerance as ``write_gate.gate_enabled``.
+        """
+        return bool(getattr(self._default, "write_gate", True))
+
     def describe(self) -> list[dict]:
         """Describe configured instances. Never includes passwords.
 
