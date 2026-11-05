@@ -798,9 +798,13 @@ async def _find_posted_comment(
     except Exception:
         return _PostedComment(failure="changelog unreadable")
 
+    # OIDC per-user auth: the client does not know the caller's Trac name,
+    # its username is empty, so the time and the text have to do.
     username = getattr(client.config, "username", None)
     author = (
-        username.strip().lower() if isinstance(username, str) else None
+        username.strip().lower()
+        if isinstance(username, str) and username.strip()
+        else None
     )
     candidates = []
     for entry in changelog or []:
