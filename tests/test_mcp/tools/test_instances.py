@@ -1,6 +1,7 @@
 """Tests for the list_instances MCP tool handler and tool definition."""
 
 import asyncio
+import dataclasses
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -191,6 +192,46 @@ class TestListInstancesHandler(unittest.TestCase):
         self.assertEqual(
             credentials, (self.config.username, self.config.password)
         )
+
+    # Ticket #153: the write gate's switch, which nothing a session
+    # could reach used to report.
+
+    def _list(self, config):
+        set_instance_registry(InstanceRegistry(config, {}))
+        return asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {"discover": False}, self.client
+            )
+        )
+
+    def test_153_reports_the_write_gate_on(self):
+        result = self._list(self.config)
+        self.assertIs(result.structuredContent["write_gate"], True)
+        text = result.content[0].text
+        self.assertIn("write_gate: true", text.splitlines())
+
+    def test_153_reports_the_write_gate_off(self):
+        config = dataclasses.replace(self.config, write_gate=False)
+        result = self._list(config)
+        self.assertIs(result.structuredContent["write_gate"], False)
+        text = result.content[0].text
+        self.assertIn("write_gate: false", text)
+        self.assertIn("NOT link-checked", text)
+
+    def test_153_reads_the_daemon_setting_not_the_resolved_client(self):
+        """A caller scoped away from the default instance reaches this
+        handler with no client at all (ticket #110), and must still be
+        told -- the setting is the daemon's, inherited by every routed
+        instance (ticket #117)."""
+        config = dataclasses.replace(self.config, write_gate=False)
+        set_instance_registry(InstanceRegistry(config, {}))
+        result = asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {"discover": False}, None
+            )
+        )
+        self.assertFalse(result.isError, result.content[0].text)
+        self.assertIs(result.structuredContent["write_gate"], False)
 
 
 if __name__ == "__main__":

@@ -22,10 +22,8 @@
     "tracwiki": "auto_pm:wiki:ThisDefinitelyDoesNotExist999888"
   },
   "row04_bare_ticket_ref": {
-    "must_warn": [
-      "bare_ticket_ref"
-    ],
-    "note": "Bare #N auto-links to this instance's own ticket.",
+    "must_warn": [],
+    "note": "Bare #N auto-linking to an existing ticket on this instance: silent since ticket #151 removed bare_ticket_ref. The resolved summary is in links.ticket and on render_check's 'Ticket refs' line, not a warning.",
     "requires_check_targets": false,
     "tracwiki": "See #57 for details."
   },

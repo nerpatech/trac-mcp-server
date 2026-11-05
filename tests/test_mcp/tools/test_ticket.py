@@ -25,11 +25,26 @@ from trac_mcp_server.mcp.tools.ticket_read import (
 )
 from trac_mcp_server.mcp.tools.ticket_write import (
     TICKET_WRITE_SPECS,
+    _comment_cnum,
     _comment_mismatch,
     _handle_create,
     _handle_delete,
     _handle_update,
 )
+
+
+def _spec_client(trac_url="https://trac.example.com"):
+    """A MagicMock(spec=TracClient) carrying a real Config.
+
+    `config` is assigned in TracClient.__init__, so a spec mock refuses
+    the attribute until it is set; ticket_search/ticket_get read it for
+    the ticket's web URL.
+    """
+    client = MagicMock(spec=TracClient)
+    client.config = Config(
+        trac_url=trac_url, username="u", password="p"
+    )
+    return client
 
 
 class TestTicketDeleteSchema(unittest.TestCase):
@@ -1216,6 +1231,101 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertTrue(result.isError)
             self.assertIn("Comment #99", result.content[0].text)
 
+    def _reply_to_run(self, changelog, reply_to):
+        def run_sync_side_effect(func, *args, **kwargs):
+            if func is self.mock_client.get_ticket_changelog:
+                return changelog
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = run_sync_side_effect
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 42,
+                        "comment": "New reply text",
+                        "reply_to": reply_to,
+                    },
+                )
+            )
+            posted = [
+                c.args[2]
+                for c in mock_run_sync.call_args_list
+                if c.args[0] is self.mock_client.update_ticket
+            ]
+        return result, posted
+
+    def test_update_reply_to_quotes_a_threaded_comment_by_its_number(
+        self,
+    ):
+        """Trac #131. A threaded row's oldvalue is "2.5": comment 5, a
+        reply to 2. reply_to=5 must find it, and the link names it by
+        its own number, which is what comment:5 means to Trac."""
+        changelog = [
+            (1700000000, "alice", "comment", "2", "Flat two.", 1),
+            (1700000100, "bob", "comment", "2.5", "Threaded five.", 1),
+        ]
+        for reply_to in (5, "5", "2.5"):
+            result, posted = self._reply_to_run(changelog, reply_to)
+            self.assertFalse(result.isError, reply_to)
+            self.assertEqual(len(posted), 1)
+            self.assertIn("Replying to [comment:5 bob]:", posted[0])
+            self.assertIn("> Threaded five.", posted[0])
+            self.assertNotIn("Flat two.", posted[0])
+
+    def test_update_reply_to_flat_row_still_matches(self):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        result, posted = self._reply_to_run(changelog, "3")
+        self.assertFalse(result.isError)
+        self.assertIn("Replying to [comment:3 alice]:", posted[0])
+
+    def test_update_reply_to_skips_rows_without_a_comment_number(self):
+        changelog = [
+            (1700000000, "alice", "attachment", None, "f.txt", 1),
+            (1700000010, "alice", "comment", None, "No number.", 1),
+            (1700000020, "alice", "comment", "abc", "Junk.", 1),
+            (1700000030, "bob", "comment", "4", "Four.", 1),
+        ]
+        result, posted = self._reply_to_run(changelog, 4)
+        self.assertFalse(result.isError)
+        self.assertIn("Replying to [comment:4 bob]:", posted[0])
+        self.assertIn("> Four.", posted[0])
+
+    def test_update_reply_to_unparseable_is_not_found(self):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        for reply_to in ("abc", "2.", 0, True):
+            result, posted = self._reply_to_run(changelog, reply_to)
+            self.assertTrue(result.isError, reply_to)
+            self.assertIn("not_found", result.content[0].text)
+            self.assertEqual(posted, [])
+
+    def test_update_reply_to_unparseable_never_reads_the_changelog(
+        self,
+    ):
+        changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
+        for reply_to in ("abc", "2.", 0, True, "1_0", "+3"):
+            self.mock_client.get_ticket_changelog.reset_mock()
+            with patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+            ) as mock_run_sync:
+                mock_run_sync.return_value = changelog
+                result = asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "ticket_id": 42,
+                            "comment": "New reply text",
+                            "reply_to": reply_to,
+                        },
+                    )
+                )
+            self.assertTrue(result.isError, reply_to)
+            self.assertIn("not_found", result.content[0].text)
+            mock_run_sync.assert_not_called()
+
     def test_update_reply_to_without_comment_errors(self):
         """reply_to without a comment is rejected -- there's nothing to
         post as the reply.
@@ -2330,6 +2440,32 @@ async def test_live_update_reports_comment_number_and_stored_bytes():
 # ---------------------------------------------------------------------------
 
 
+class TestCommentCnum(unittest.TestCase):
+    """_comment_cnum keeps its flat-only contract (Trac #131): a
+    ticket.update write is never threaded, so a dotted row is not ours,
+    and the shared parser decides what a number is."""
+
+    @staticmethod
+    def _row(oldvalue):
+        return ["t", "a", "comment", oldvalue, "x", 1]
+
+    def test_flat_row(self):
+        self.assertEqual(_comment_cnum(self._row("5")), 5)
+        self.assertEqual(_comment_cnum(self._row(5)), 5)
+
+    def test_threaded_row_is_none(self):
+        self.assertIsNone(_comment_cnum(self._row("2.5")))
+
+    def test_none_oldvalue_is_none(self):
+        # An attachment pseudo-row: str(None) is "None", still not a
+        # number, but the parser is what says so.
+        self.assertIsNone(_comment_cnum(self._row(None)))
+
+    def test_non_numeric_is_none(self):
+        for bad in ("abc", "\u00b2", "", "0", "1.2.3"):
+            self.assertIsNone(_comment_cnum(self._row(bad)), bad)
+
+
 class TestHandleTicketWriteTool(unittest.TestCase):
     """Tests for ToolRegistry dispatch of ticket write tools."""
 
@@ -2512,18 +2648,21 @@ class TestHandleTicketSearch:
                 "summary": "Bug A",
                 "status": "new",
                 "owner": "alice",
+                "url": "https://trac.example.com/ticket/1",
             },
             {
                 "id": 2,
                 "summary": "Bug B",
                 "status": "assigned",
                 "owner": "bob",
+                "url": "https://trac.example.com/ticket/2",
             },
             {
                 "id": 3,
                 "summary": "Bug C",
                 "status": "new",
                 "owner": "charlie",
+                "url": "https://trac.example.com/ticket/3",
             },
         ]
 
@@ -2567,30 +2706,35 @@ class TestHandleTicketSearch:
                 "summary": "T10",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/10",
             },
             {
                 "id": 20,
                 "summary": "T20",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/20",
             },
             {
                 "id": 30,
                 "summary": "T30",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/30",
             },
             {
                 "id": 40,
                 "summary": "T40",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/40",
             },
             {
                 "id": 50,
                 "summary": "T50",
                 "status": "closed",
                 "owner": "x",
+                "url": "https://trac.example.com/ticket/50",
             },
         ]
 
@@ -2654,12 +2798,14 @@ class TestHandleTicketSearch:
                 "summary": "Feature request",
                 "status": "new",
                 "owner": "dev1",
+                "url": "https://trac.example.com/ticket/7",
             },
             {
                 "id": 8,
                 "summary": "Enhancement",
                 "status": "accepted",
                 "owner": "dev2",
+                "url": "https://trac.example.com/ticket/8",
             },
         ]
 
@@ -2695,7 +2841,7 @@ class TestHandleTicketSearch:
         Reproduces the ticket_search total/showing mismatch from ticket #22:
         total=2, showing=1 with no indication a fetch failed.
         """
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
 
         def _get_ticket_side_effect(tid):
             if tid == 15:
@@ -2740,6 +2886,40 @@ class TestHandleTicketSearch:
             )
             assert "#15" in result.content[0].text
 
+    def test_search_url_keeps_instance_path(self):
+        """A trac_url with an instance path keeps it in each result's
+        url: https://trac.example.com/proj/ticket/10."""
+        client = _spec_client("https://trac.example.com/proj")
+
+        async def _fake_run_sync_limited(func, *args, **kwargs):
+            return [
+                args[0],
+                "20260101T00:00:00",
+                "20260101T00:00:00",
+                {
+                    "summary": "Pathed",
+                    "status": "new",
+                    "owner": "alice",
+                },
+            ]
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync_limited",
+                side_effect=_fake_run_sync_limited,
+            ),
+        ):
+            mock_run_sync.return_value = [10]
+
+            result = self._run(_handle_search(client, {}))
+
+            url = "https://trac.example.com/proj/ticket/10"
+            assert result.structuredContent["tickets"][0]["url"] == url
+            assert url in result.content[0].text
+
     def test_search_xmlrpc_fault(self):
         """XML-RPC fault during search produces structured error."""
         client = MagicMock(spec=TracClient)
@@ -2768,6 +2948,12 @@ class TestHandleTicketGet:
 
     def _run(self, coro):
         return asyncio.run(coro)
+
+    @staticmethod
+    def _client():
+        """A TracClient mock with a Config, which ticket_get reads for the
+        ticket's web URL."""
+        return _spec_client()
 
     @staticmethod
     def _dispatch(client, ticket_data, changelog=()):
@@ -2799,7 +2985,7 @@ class TestHandleTicketGet:
 
     def test_get_success(self):
         """Get ticket returns full details with the stored description."""
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -2834,17 +3020,43 @@ class TestHandleTicketGet:
             assert "= Problem =" in text  # stored, not converted
             assert "new" in text
             assert "alice" in text
+            assert "https://trac.example.com/ticket/42" in text
             # Structured content
             assert result.structuredContent["id"] == 42
             assert (
                 result.structuredContent["summary"] == "Fix login bug"
             )
+            assert (
+                result.structuredContent["url"]
+                == "https://trac.example.com/ticket/42"
+            )
+
+    def test_get_url_keeps_instance_path(self):
+        """A trac_url with an instance path (one daemon serving several
+        Trac instances) keeps it: the ticket's URL is under /proj, not
+        at the host root."""
+        client = _spec_client("https://trac.example.com/proj")
+        created = datetime(2026, 1, 10, 9, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [7, created, created, {"summary": "Pathed"}],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 7}))
+
+            url = "https://trac.example.com/proj/ticket/7"
+            assert result.structuredContent["url"] == url
+            assert f"URL: {url}" in result.content[0].text
 
     def test_get_none_description(self):
         """A ticket whose description was never set comes back from Trac
         with description None; ticket_get must still answer instead of
         failing to join its response lines."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -2870,7 +3082,7 @@ class TestHandleTicketGet:
         """ticket_get surfaces _ts as the change token callers pass back
         to ticket_update's base_ts (ticket #50) -- without this, there is
         no way for a caller to obtain a token to lock against."""
-        client = MagicMock(spec=TracClient)
+        client = _spec_client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -2900,7 +3112,7 @@ class TestHandleTicketGet:
     def test_get_returns_stored_tracwiki(self):
         """The description comes back as stored, with no `raw` argument
         to ask for it -- the Markdown read path is gone (ticket #69)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -2934,7 +3146,7 @@ class TestHandleTicketGet:
 
     def test_get_missing_ticket_id(self):
         """Missing ticket_id returns validation error."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         result = self._run(_handle_get(client, {}))
 
@@ -2945,7 +3157,7 @@ class TestHandleTicketGet:
 
     def test_get_not_found(self):
         """Ticket not found returns structured error via dispatcher."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
 
         with patch(
             "trac_mcp_server.mcp.tools.ticket_read.run_sync"
@@ -2984,7 +3196,7 @@ class TestHandleTicketGet:
         """One ticket_get is the whole ticket: comments come back with
         no flag set, which is the point of ticket #60 -- the operator's
         answer in a comment must not be invisible to a default read."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         modified = datetime(2026, 1, 15, 14, 30, 0)
 
@@ -3021,7 +3233,7 @@ class TestHandleTicketGet:
         same key ticket_render_check's `comment` parameter is keyed on,
         so it is usable without guessing. Numbering skips field-only
         entries, so it is not the comment's ordinal position."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -3050,7 +3262,7 @@ class TestHandleTicketGet:
         """Field changes never reach the response, so a description edit
         does not drag two full copies of the description along with it
         (the cost that ruled out proxying ticket_changelog wholesale)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         big = "x" * 5000
 
@@ -3075,7 +3287,7 @@ class TestHandleTicketGet:
     def test_get_include_comments_false_skips_the_fetch(self):
         """The documented opt-out makes no changelog call at all, and
         says plainly that the response is not the whole ticket."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         calls = []
 
@@ -3107,7 +3319,7 @@ class TestHandleTicketGet:
         they reach the response by a different route (the changelog), so
         a fix applied only to the description would pass a
         description-only test (ticket #69)."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -3128,7 +3340,7 @@ class TestHandleTicketGet:
         """Seeded-defect check for the cap itself: a thread ABOVE the cap
         must produce a visible truncation notice and an exact total. A
         silent cut would recreate ticket #60 in miniature."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -3162,7 +3374,7 @@ class TestHandleTicketGet:
     def test_get_cap_keeps_head_and_tail(self):
         """Head+tail retention: a long thread usually has its scope set
         in the earliest comments and corrected in the latest."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -3189,7 +3401,7 @@ class TestHandleTicketGet:
     def test_get_cap_of_one_still_shows_the_notice(self):
         """max_comments=1 leaves no tail half; the omitted-middle notice
         must still be emitted rather than silently dropped."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -3213,7 +3425,7 @@ class TestHandleTicketGet:
 
     def test_get_thread_at_the_cap_is_not_truncated(self):
         """Exactly at the cap: everything shown, no notice."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
         changelog = [
             self._comment(str(n), "alice", f"Comment {n}.", minute=n)
@@ -3239,7 +3451,7 @@ class TestHandleTicketGet:
     def test_get_comment_without_a_number_says_so(self):
         """An entry carrying no comment number reports that, rather than
         inventing an ordinal that ticket_render_check would reject."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -3259,10 +3471,131 @@ class TestHandleTicketGet:
                 is None
             )
 
+    def _get_comments(self, rows):
+        client = _spec_client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            return self._run(_handle_get(client, {"ticket_id": 7}))
+
+    def test_get_threaded_comment_reports_its_own_number(self):
+        """Trac #131. oldvalue "2.5" is comment 5, a reply to 2 -- the
+        key ticket_render_check's `comment` parameter matches, since it
+        comes from the HTML's trac-change-5- id. in_reply_to appears
+        on threaded rows only."""
+        result = self._get_comments(
+            [
+                self._comment("1", "alice", "Flat."),
+                self._comment("2.5", "bob", "Threaded."),
+            ]
+        )
+        flat, threaded = result.structuredContent["comments"]
+        assert flat["number"] == "1"
+        assert "in_reply_to" not in flat
+        assert threaded["number"] == "5"
+        assert threaded["in_reply_to"] == "2"
+        text = result.content[0].text
+        assert "### comment:5 (reply to 2) -- bob" in text
+        assert "### comment:1 -- alice" in text
+        assert (
+            "reply to 2"
+            not in text.split("### comment:1")[1].split(
+                "### comment:5"
+            )[0]
+        )
+
+    def test_get_flat_comment_dict_is_unchanged(self):
+        result = self._get_comments([self._comment("3", "a", "Body.")])
+        (comment,) = result.structuredContent["comments"]
+        assert set(comment) == {"number", "author", "timestamp", "body"}
+        assert comment["number"] == "3"
+
+    def test_get_non_numeric_and_none_oldvalue_give_no_number(self):
+        result = self._get_comments(
+            [
+                self._comment("abc", "alice", "Junk."),
+                self._comment(None, "alice", "None."),
+                self._comment("1.2.3", "alice", "Deep."),
+                self._comment("\u00b2", "alice", "Super."),
+            ]
+        )
+        comments = result.structuredContent["comments"]
+        assert [c["number"] for c in comments] == [None] * 4
+        assert all("in_reply_to" not in c for c in comments)
+
+    def test_get_attachment_pseudo_row_is_not_a_comment(self):
+        created = datetime(2026, 1, 20, 10, 0, 0)
+        result = self._get_comments(
+            [
+                [created, "alice", "attachment", None, "f.txt", 1],
+                self._comment("2.5", "bob", "Threaded."),
+            ]
+        )
+        comments = result.structuredContent["comments"]
+        assert [c["number"] for c in comments] == ["5"]
+
+    def test_get_omitted_numbers_use_the_comments_own_number(self):
+        rows = [
+            self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
+        ]
+        rows[2] = self._comment("1.3", "a", "threaded three")
+        client = _spec_client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 2})
+            )
+        assert result.structuredContent["omitted_comment_numbers"] == [
+            "2",
+            "3",
+            "4",
+            "5",
+        ]
+
+    def test_get_omitted_notice_is_plain_but_heading_keeps_reply_to(
+        self,
+    ):
+        """The heading of a shown threaded comment says "(reply to M)";
+        the omitted-comments notice names its range by plain
+        comment:N refs, threaded ends included."""
+        rows = [
+            self._comment(str(n), "a", f"c{n}") for n in range(1, 7)
+        ]
+        rows[1] = self._comment("1.2", "a", "threaded two")
+        rows[4] = self._comment("3.5", "a", "threaded five")
+        rows[5] = self._comment("4.6", "a", "threaded six")
+        client = _spec_client()
+        created = datetime(2026, 1, 10, 9, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client, self._ticket(created, created), rows
+            )
+            result = self._run(
+                _handle_get(client, {"ticket_id": 7, "max_comments": 2})
+            )
+        text = result.content[0].text
+        assert "(comment:2 through comment:5)" in text
+        assert "### comment:6 (reply to 4) -- a" in text
+        notice = next(
+            line for line in text.splitlines() if "omitted from" in line
+        )
+        assert "reply to" not in notice
+
     def test_get_reports_a_failed_comment_fetch(self):
         """A changelog failure degrades loudly: the ticket still comes
         back, but the response says the comments are missing."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(
@@ -3287,7 +3620,7 @@ class TestHandleTicketGet:
 
     def test_get_ticket_without_comments(self):
         """A ticket with no comments says so explicitly."""
-        client = MagicMock(spec=TracClient)
+        client = self._client()
         created = datetime(2026, 1, 10, 9, 0, 0)
 
         with patch(

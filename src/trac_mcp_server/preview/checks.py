@@ -192,10 +192,38 @@ _INTERTRAC_REALMS = frozenset(
 # inline code span at the backtick, so ending the token there too makes
 # the two agree by construction rather than by recovery. This is the
 # same class as #59's fenced-block gap, at the other delimiter.
-_PREFIX_REALM_RE = re.compile(
-    r"\b[A-Za-z][\w.+-]*:(?:"
+#
+# A bracketed token also ends at `]` (ticket #148). The trailing class
+# used to read on past a label-less bracket's close, and since `finditer`
+# never overlaps matches, a second bracketed link glued on behind it
+# (`[p:wiki:A]/[q:wiki:B]`) was swallowed into the first token and never
+# checked on its own -- a typo'd prefix there rendered as plain text
+# with no warning. A bracketed Trac link target never contains `]`
+# (#147 relied on that already), so the bracketed alternative stops
+# there; it comes first so it wins at the position just after `[`. The
+# unbracketed alternative is unchanged on purpose: Trac's unbracketed
+# link target CAN carry a `]` mid-token, so stopping there could split a
+# configured link into a false positive.
+#
+# The bracketed target may also be EMPTY when `]` follows at once
+# (`[p:wiki:]`). With `+` alone that shape fell through to the
+# unbracketed alternative at the same position, which swallowed the `]`
+# and anything glued on behind it: the same gap, still open. The
+# lookahead closes it, so a token starting just after `[` never contains
+# `]` -- and an empty target followed by whitespace or a backtick still
+# matches nothing, exactly as before.
+_PREFIX_REALM_HEAD = (
+    r"[A-Za-z][\w.+-]*:(?:"
     + "|".join(sorted(_INTERTRAC_REALMS))
-    + r"):[^\s`]+"
+    + r"):"
+)
+_PREFIX_REALM_RE = re.compile(
+    r"(?<=\[)"
+    + _PREFIX_REALM_HEAD
+    + r"(?:[^\s`\]]+|(?=\]))"
+    + r"|\b"
+    + _PREFIX_REALM_HEAD
+    + r"[^\s`]+"
 )
 
 # Ticket #113. Trac's own qualified attachment syntax is
@@ -726,42 +754,18 @@ def _check_missing_local_target(
     return warnings
 
 
-def _check_bare_ticket_ref(facts: PreviewFacts) -> list[dict]:
-    """A bare `#N` auto-links to *this* instance's own ticket N -- name
-    the resolved summary so the author can see whether that's actually
-    what was meant (row 14). Restricted to local ticket anchors: an
-    InterTrac ticket reference (`auto_pm:#87`) also carries a `ticket`-
-    adjacent target but renders as `class="ext-link"`, not `class="...
-    ticket"` -- see row 6, which must stay silent."""
-    warnings = []
-    for anchor in facts.anchors:
-        if (
-            "ticket" in anchor.classes
-            and "ext-link" not in anchor.classes
-        ):
-            warnings.append(
-                _warning(
-                    "bare_ticket_ref",
-                    "warning",
-                    f"'{anchor.text}' resolves to: "
-                    f"{anchor.title or '(no title)'}",
-                    {"href": anchor.href, "title": anchor.title},
-                )
-            )
-    return warnings
-
-
 def _check_pr_number_as_ticket(
     tracwiki: str, facts: PreviewFacts
 ) -> list[dict]:
     """Ticket #105. `PR #100`, `pull request #100`, `merge request #100`
     outside a code span -- `#100` autolinks to THIS instance's ticket
     100 regardless of whether that ticket exists, so the sentence reads
-    as a Trac reference it never meant to make. `bare_ticket_ref` does
-    already fire here, but it fires on every legitimate ticket citation
-    too (598 lines in one week's write responses, per the ticket), so
-    in practice nobody reads it before the write lands. This is its own
-    code specifically so this one shape can block.
+    as a Trac reference it never meant to make. The old `bare_ticket_ref`
+    warning did fire here, but it fired on every legitimate ticket
+    citation too (598 lines in one week's write responses, per the
+    ticket), so in practice nobody read it before the write landed --
+    and ticket #151 removed it for that reason. This is its own code
+    specifically so this one shape can block.
 
     Verified against `facts.anchors`, not source alone: a source-only
     match cannot tell a live `PR #100` from one somebody had already
@@ -827,7 +831,10 @@ def _check_bare_ref_shadows_prefixed(
     document is NOT caught -- there is nothing here to shadow it, and
     telling that case apart from an ordinary same-instance reference
     would need knowing what the author meant, not just what they wrote.
-    That population stays a `bare_ticket_ref` render-check-only concern.
+    That population is not a finding at all: ``render_check``'s text
+    output lists every resolved local ticket once, with its summary, on
+    its ``Ticket refs`` line (ticket #151), which is where a mistyped
+    number that hit an existing ticket shows up.
     """
     scan_text = blank_code_fences(tracwiki)
     code_span_texts = list(facts.code_spans)
@@ -969,7 +976,9 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
     text -- which is precisely what ticket #61 measured. That is fixed at
     the boundary instead: `_PREFIX_REALM_RE` no longer crosses a
     backtick, so a token that starts inside a code span now ends inside
-    it, and this helper is never asked to recover from that case."""
+    it, and this helper is never asked to recover from that case. The
+    same holds for a bracket's `]` (ticket #148): a token that starts
+    just after `[` ends before the closing `]`."""
     candidate = raw
     while candidate:
         if candidate in code_span_text:
@@ -1151,25 +1160,24 @@ def _allowed_codes(*sources: str | None) -> set[str]:
     return allowed
 
 
-def _bracket_label(
-    tracwiki: str, raw: str, token_end: int
-) -> str | None:
+def _bracket_label(tracwiki: str, token_end: int) -> str | None:
     """The label text of a `[token label]` construct whose token ends at
     `token_end`, or None if `token_end` isn't inside a bracket at all.
 
-    Handles the no-label shape (`[token]`, nothing between the target and
-    the closing bracket) as its own case: the realm regex's greedy `\\S+`
-    swallows the `]` into `raw` itself when there's no space before it, so
-    `token_end` lands PAST the bracket and a forward search for `]` finds
-    the wrong one (or none) -- this warned a correctly configured,
-    label-less bracket as unconfigured until ticket #57 comment 8 caught
-    it live. Trac renders a label-less bracket's anchor text as the bare
-    resolved suffix (`wiki:Index`, not `auto_pm:wiki:Index`), which the
-    caller already computes separately -- signalled here by returning ""
-    rather than searching further, so the caller knows to compare against
-    the suffix instead of a real label."""
-    if raw.endswith("]"):
-        return ""
+    A bracketed token never contains `]`: `_PREFIX_TICKET_RE`'s `\\b`
+    stops before it, and since ticket #148 so does `_PREFIX_REALM_RE`'s
+    bracketed alternative. So the forward search from `token_end` finds
+    the bracket's own close. With nothing in between -- the no-label shape
+    `[token]` -- this returns "". Trac renders a label-less bracket's
+    anchor text as the bare resolved suffix (`wiki:Index`, not
+    `auto_pm:wiki:Index`), which the caller computes separately; the ""
+    tells it to compare against that suffix instead of a real label.
+
+    Until #148 the realm regex swallowed the `]` and anything glued on
+    behind it, so this needed a `raw.endswith("]")` shortcut (#57 comment
+    8, which caught a configured label-less bracket warned as
+    unconfigured) and the caller a cut at the first `]` (#147). Both are
+    gone, and with them this helper's `raw` parameter."""
     close = tracwiki.find("]", token_end)
     if close == -1:
         return None
@@ -1249,16 +1257,14 @@ def _check_unconfigured_intertrac_prefix(
                 match.start() > 0 and tracwiki[match.start() - 1] == "["
             )
             if bracketed:
-                label = _bracket_label(tracwiki, raw, match.end())
+                # Both patterns stop a bracketed token before its `]`
+                # (the realm form since ticket #148, which made #147's
+                # cut here unnecessary), so `match.end()` is where the
+                # label, if any, begins.
+                label = _bracket_label(tracwiki, match.end())
                 if label == "":
-                    # No custom label. For the realm form, `raw` includes
-                    # the closing `]` the greedy regex swallowed -- drop
-                    # it before deriving the suffix. The ticket form's
-                    # `\b` never swallows it (`_bracket_label` found ""
-                    # via the ordinary forward search instead), so only
-                    # strip when it's actually there.
-                    if raw.endswith("]"):
-                        raw = raw[:-1]
+                    # No custom label: Trac's anchor text is the
+                    # resolved suffix.
                     expected_text = raw.split(":", 1)[1]
                 else:
                     expected_text = label
@@ -1803,7 +1809,6 @@ def build_warnings(
     warnings.extend(
         _check_missing_local_target(facts, tracwiki, attachment_names)
     )
-    warnings.extend(_check_bare_ticket_ref(facts))
     warnings.extend(_check_captured_punctuation(facts))
     warnings.extend(
         _check_unconfigured_intertrac_prefix(

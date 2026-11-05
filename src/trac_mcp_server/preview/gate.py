@@ -75,10 +75,11 @@ BLOCKING_CODES = frozenset(
         #
         # `pr_number_as_ticket`: `PR #100`/`pull request #100`/`merge
         # request #100` always autolinks to THIS instance's own ticket
-        # 100, which is never what the sentence meant. `bare_ticket_ref`
-        # already fires here but on every legitimate citation too (598
-        # lines in one week's write responses), so in practice nobody
-        # reads it before the write lands.
+        # 100, which is never what the sentence meant. The old
+        # `bare_ticket_ref` warning fired here too, but on every
+        # legitimate citation as well (598 lines in one week's write
+        # responses), so in practice nobody read it before the write
+        # landed; ticket #151 removed that code outright.
         "pr_number_as_ticket",
         # `bare_ref_shadows_prefixed`: a bare `#N` alongside a configured
         # `<prefix>:#N` for the same N almost always means the SAME
@@ -111,9 +112,16 @@ BLOCKING_CODES = frozenset(
 #: Advisory codes, listed for the same reason as the blocking ones: so
 #: the split is reviewable in one place. Not consulted at runtime.
 #:
-#: * `bare_ticket_ref` -- fired 10 times on one correct ticket
-#:   (auto_pm:#89); blocking it would refuse essentially every ticket
-#:   that cites another ticket.
+#: `bare_ticket_ref` is gone from this list because it is gone
+#: altogether (ticket #151). It fired at `warning` on every local
+#: ticket link -- 8258 emitted lines in 30 days, 10 on one correct
+#: ticket (auto_pm:#89) -- so nobody read the column it sat in. Every
+#: way a bare `#N` can be wrong already has its own code: a dead target
+#: is `missing_local_target`, `PR #N` is `pr_number_as_ticket`, and a
+#: bare twin of `<prefix>:#N` is `bare_ref_shadows_prefixed`. The one
+#: case left, a mistyped number that hits a real ticket, is served by
+#: `render_check`'s `Ticket refs` line, which is not a finding.
+#:
 #: * `link_ref_in_code_span` -- DEMOTED from `error` by #64: section 4
 #:   puts it advisory, and a page documenting link syntax is its
 #:   legitimate population.
@@ -135,7 +143,6 @@ BLOCKING_CODES = frozenset(
 #:   links to a disallowed one.
 ADVISORY_CODES = frozenset(
     {
-        "bare_ticket_ref",
         "link_ref_in_code_span",
         "unconfigured_intertrac_prefix",
         "incidental_wiki_autolink",

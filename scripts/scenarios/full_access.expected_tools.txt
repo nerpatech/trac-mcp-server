@@ -30,6 +30,7 @@ wiki_attachment_delete
 wiki_attachment_get
 wiki_attachment_list
 wiki_attachment_put
+wiki_conventions
 wiki_create
 wiki_delete
 wiki_diff

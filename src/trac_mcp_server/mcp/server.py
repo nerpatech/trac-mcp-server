@@ -24,6 +24,7 @@ from pydantic_core import Url
 
 from .. import __version__
 from ..config_bootstrap import bootstrap_server_config
+from ..config_schema import ServerConfig
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
@@ -57,6 +58,7 @@ from .tools.registry import (
     with_page_alias,
     with_strict_schema,
 )
+from .tools.write_gate import gate_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +95,24 @@ async def _handle_ping(
     """Handle ping tool -- test Trac connectivity."""
     try:
         version = await run_sync(client.validate_connection)
+        # Ticket #153: the gate's state rides along -- one attribute
+        # read, and the cheapest call a session makes.
+        write_gate = gate_enabled(client)
+        text = (
+            "Trac MCP server connected successfully. "
+            f"API version: {version}\n"
+            f"write_gate: {'true' if write_gate else 'false'}"
+        )
+        # Claude Code shows structuredContent in preference to the text
+        # block when a handler returns a dict (see instance_echo.py), so
+        # the dict carries everything the text does.
         return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text=f"Trac MCP server connected successfully. API version: {version}",
-                )
-            ]
+            content=[types.TextContent(type="text", text=text)],
+            structuredContent={
+                "message": text,
+                "api_version": version,
+                "write_gate": write_gate,
+            },
         )
     except Exception as e:
         return types.CallToolResult(
@@ -403,6 +416,25 @@ async def handle_call_tool(
 # ---------------------------------------------------------------------------
 
 
+def log_startup_settings(
+    server_config: ServerConfig, write_gate: bool
+) -> None:
+    """Log the write gate's state (ticket #153).
+
+    The Trac config that carries ``write_gate`` is only loaded by the
+    lifespan, which is why this line is written once that has run. The
+    ``file_access`` line is not here: it needs no Trac config and stays
+    in ``main()`` straight after ``set_file_access``, so it reaches the
+    journal even when lifespan validation fails. At WARNING when the
+    gate is off, so a switch left set after a test stands out in the
+    journal instead of reading like every other startup.
+    """
+    if write_gate:
+        logger.info("write_gate=on")
+    else:
+        logger.warning("write_gate=off")
+
+
 async def main(config_overrides: dict | None = None):
     """Run the MCP server with the configured transport.
 
@@ -510,6 +542,8 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
+        # The registry's value, the same one list_instances reports.
+        log_startup_settings(server_config, ctx["instances"].write_gate)
         oidc_rpc_url = (
             server_config.oidc_rpc_url
             if server_config.transport == "http"
