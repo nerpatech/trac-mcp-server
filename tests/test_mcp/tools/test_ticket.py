@@ -4089,6 +4089,52 @@ class TestHandleTicketChangelog:
             text = result.content[0].text
             assert "= Wiki heading =" in text
 
+    def _changelog_text(self, newvalue):
+        """The text line(s) and structured row for one comment entry."""
+        client = MagicMock(spec=TracClient)
+        ts = datetime(2026, 1, 20, 10, 0, 0)
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = [
+                [ts, "alice", "comment", "3", newvalue, 1],
+            ]
+            result = self._run(
+                _handle_changelog(client, {"ticket_id": 5})
+            )
+        return (
+            result.content[0].text,
+            result.structuredContent["changelog"][0],
+        )
+
+    def test_changelog_keeps_leading_whitespace_of_a_comment(self):
+        """Leading whitespace is TracWiki markup (a list item), so the
+        text block keeps it under the 4-space block indent (#155)."""
+        text, row = self._changelog_text(" * step one\n * step two")
+        assert "comment:\n     * step one\n     * step two" in text
+        assert row["newvalue"] == " * step one\n * step two"
+
+    def test_changelog_single_line_leading_whitespace_uses_block(self):
+        """A one-line comment that starts with whitespace goes in the
+        indented block, where its own indent stays readable (#155)."""
+        text, _ = self._changelog_text(" * only item")
+        assert "comment:\n     * only item" in text
+        assert "comment:  * only item" not in text
+
+    def test_changelog_drops_trailing_newlines_only(self):
+        text, row = self._changelog_text("Fixed it\r\n\n")
+        assert text.rstrip().endswith("comment: Fixed it")
+        assert row["newvalue"] == "Fixed it\r\n\n"
+
+    def test_changelog_whitespace_only_comment_is_like_empty(self):
+        """A whitespace-only comment prints like an empty one, not as a
+        bare `comment: ` line; the structured row keeps the stored
+        bytes (#155)."""
+        text, row = self._changelog_text("\n")
+        assert "comment added" in text
+        assert "comment: \n" not in text + "\n"
+        assert row["newvalue"] == "\n"
+
     def test_changelog_empty(self):
         """Empty changelog returns appropriate message."""
         client = MagicMock(spec=TracClient)
