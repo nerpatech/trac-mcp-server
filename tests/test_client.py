@@ -1545,65 +1545,90 @@ def test_search_wiki_pages_by_title(mock_post, mock_config):
         assert "name" in r
 
 
+def _rpc_result_response(value) -> Mock:
+    """A mocked HTTP response carrying ``value`` as an XML-RPC result."""
+    response = Mock()
+    response.status_code = 200
+    response.content = xmlrpc.client.dumps(
+        (value,), methodresponse=True
+    ).encode()
+    return response
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_search_wiki_pages_by_content(mock_post, mock_config):
-    """Test search_wiki_pages_by_content method."""
-    # First response for getAllPages
-    pages_response = Mock()
-    pages_response.status_code = 200
-    pages_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value>
-        <array>
-          <data>
-            <value><string>Page1</string></value>
-            <value><string>Page2</string></value>
-          </data>
-        </array>
-      </value>
-    </param>
-  </params>
-</methodResponse>"""
+def test_search_wiki_pages(mock_post, mock_config):
+    """search_wiki_pages over the real transport: getRecentChanges (the
+    listing of every page), then one system.multicall carrying getPageInfo and getPage for every page.
+    Page2's fault entry is skipped; an empty page comes back as an empty
+    <string/> and is cached without a match."""
+    stamp = xmlrpc.client.DateTime("20260101T00:00:01")
 
-    # Second response for getPage("Page1")
-    page1_response = Mock()
-    page1_response.status_code = 200
-    page1_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value><string>no match here</string></value>
-    </param>
-  </params>
-</methodResponse>"""
+    def info(name, version=1):
+        return {
+            "name": name,
+            "author": "a",
+            "version": version,
+            "lastModified": stamp,
+        }
 
-    # Third response for getPage("Page2")
-    page2_response = Mock()
-    page2_response.status_code = 200
-    page2_response.content = b"""<?xml version="1.0"?>
-<methodResponse>
-  <params>
-    <param>
-      <value><string>found the target keyword here</string></value>
-    </param>
-  </params>
-</methodResponse>"""
-
+    fault = {"faultCode": 1, "faultString": "Page not readable"}
+    listing = [info(f"Page{i}") for i in range(1, 5)]
     mock_post.side_effect = [
-        pages_response,
-        page1_response,
-        page2_response,
+        _rpc_result_response(listing),
+        _rpc_result_response(
+            [
+                [info("Page1")],
+                ["no match here"],
+                [info("Page2")],
+                fault,
+                [info("Page3")],
+                ["found the target keyword here"],
+                [info("Page4")],
+                [""],
+            ]
+        ),
     ]
 
     client = TracClient(mock_config)
-    result = client.search_wiki_pages_by_content("target")
+    result = client.search_wiki_pages("target")
 
-    # Verify only Page2 returned
+    # Only Page3 matches: Page2 is skipped, Page4 is empty
     assert len(result) == 1
-    assert result[0]["name"] == "Page2"
+    assert result[0]["name"] == "Page3"
+    assert result[0]["score"] > 0
     assert "target" in result[0]["snippet"]
+    assert mock_post.call_count == 2
+    first_request = xmlrpc.client.loads(
+        mock_post.call_args_list[0].kwargs["data"]
+    )
+    assert first_request[1] == "wiki.getRecentChanges"
+    sent = mock_post.call_args_list[1].kwargs["data"]
+    (calls,), method = xmlrpc.client.loads(sent)
+    assert method == "system.multicall"
+    assert [c["methodName"] for c in calls[:4]] == [
+        "wiki.getPageInfo",
+        "wiki.getPage",
+        "wiki.getPageInfo",
+        "wiki.getPage",
+    ]
+    assert calls[0]["params"] == ["Page1"]
+
+    # A second search: the cache refresh is getRecentChanges and one
+    # multicall for Page2, which was unreadable and is retried.
+    mock_post.reset_mock()
+    mock_post.side_effect = [
+        _rpc_result_response(listing),
+        _rpc_result_response(
+            [[info("Page2")], ["now it has the target too"]]
+        ),
+    ]
+    again = client.search_wiki_pages("target")
+    assert sorted(h["name"] for h in again) == ["Page2", "Page3"]
+    methods = [
+        xmlrpc.client.loads(c.kwargs["data"])[1]
+        for c in mock_post.call_args_list
+    ]
+    assert methods == ["wiki.getRecentChanges", "system.multicall"]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -3765,3 +3790,20 @@ def test_get_ticket_change_at_page_not_found_is_not_a_missing_method(
     with patch.object(client, "_rpc_request", side_effect=fault):
         with pytest.raises(xmlrpc.client.Fault):
             client.get_ticket_change_at(9, "1")
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_recent_wiki_changes_zero_asks_from_the_epoch(
+    mock_post, mock_config
+):
+    """``xmlrpc.client.DateTime(0)`` is "now" (a falsy value means the
+    current time), so the documented default of 0, "all changes", asked
+    for nothing. The wiki search lists every page this way."""
+    mock_post.return_value = _rpc_result_response([])
+    client = TracClient(mock_config)
+    assert client.get_recent_wiki_changes(0) == []
+    (params,), method = xmlrpc.client.loads(
+        mock_post.call_args.kwargs["data"]
+    )
+    assert method == "wiki.getRecentChanges"
+    assert params.value == "19700101T00:00:00"

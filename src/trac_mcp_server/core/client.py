@@ -6,6 +6,7 @@ import threading
 import time
 import weakref
 import xmlrpc.client
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -19,6 +20,7 @@ from urllib3.connection import HTTPConnection
 from ..config import Config
 from ..validators import validate_content, validate_page_name
 from .scope import ScopedSession, scope_for
+from .wiki_search import BM25, Section, search_pages, split_sections
 
 # Seconds a pooled connection may sit idle before the kernel sends a TCP
 # keepalive probe. Deliberately far below the idle timeout of any plausible
@@ -218,6 +220,22 @@ WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
 # /trac_mcp_server #132).
 TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
 
+# The same, for the stock ``system.multicall`` the wiki search fills its
+# page cache with (Trac /trac_mcp_server #154).
+WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
+
+# Pages read per ``system.multicall`` (two calls each: getPageInfo and
+# getPage).
+WIKI_FETCH_BATCH_PAGES = 50
+
+# Per-prefix BM25 indexes the wiki search keeps (least recently used
+# first out): each holds every section in its scope, and a caller can
+# make up prefixes without end.
+WIKI_SCOPE_INDEX_MAX = 16
+
+# "Since the beginning" for ``wiki.getRecentChanges``.
+_WIKI_EPOCH = "19700101T00:00:00"
+
 # TracXMLRPC wraps every fault from a plain TracError as
 # "'<message>' while executing '<method>()'".
 _TRACRPC_FAULT_WRAPPER = re.compile(
@@ -234,14 +252,16 @@ def _is_missing_method_fault(
     with fault code -32601. The text fallback matches the same heuristic as
     the ticket_comment tools' ``_translate_missing_method``, narrowed to the
     method name so that a "page not found" fault can never pass for it.
+    "No such method" (some servers' wording) counts on the same terms: the
+    text must name ``method``.
     """
     if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
         return True
     text = err.faultString.lower()
-    return (
-        "not found" in text
-        and "method" in text
-        and method.lower() in text
+    if method.lower() not in text:
+        return False
+    return ("not found" in text and "method" in text) or (
+        "no such method" in text
     )
 
 
@@ -287,6 +307,60 @@ def _unwrap_tracrpc_fault(
     if match is None:
         return err
     return xmlrpc.client.Fault(err.faultCode, match.group("message"))
+
+
+@dataclass
+class _CachedWikiPage:
+    """A wiki page as the search cache holds it: the version and
+    ``lastModified`` it was read at (as ``getPageInfo`` returned them),
+    and its sections tokenized once (``Section.body`` is the text)."""
+
+    version: int | None
+    modified: str | None
+    sections: list[Section]
+
+
+def _wiki_version(value: Any) -> int | None:
+    """A page version as an int, or ``None`` when it is not one."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _wiki_time_key(value: Any) -> str | None:
+    """A ``lastModified`` as the ``YYYYMMDDTHH:MM:SS`` string XML-RPC
+    carries (these sort as times), or ``None`` for anything else."""
+    if isinstance(value, xmlrpc.client.DateTime):
+        value = value.value
+    return value if isinstance(value, str) and value else None
+
+
+def _multicall_value(entry: Any) -> tuple[bool, Any]:
+    """``(True, value)`` for one ``system.multicall`` result entry that
+    is a value (a one-element list), ``(False, None)`` for a fault (a
+    ``{'faultCode', 'faultString'}`` dict) or anything else."""
+    if isinstance(entry, list) and len(entry) == 1:
+        return True, entry[0]
+    return False, None
+
+
+def _wiki_page_record(
+    info: Any, text: Any
+) -> tuple[int | None, str | None, str] | None:
+    """``(version, lastModified, text)`` from a page's ``getPageInfo``
+    and ``getPage`` results, or ``None`` if they are not a page."""
+    if not isinstance(info, dict):
+        return None
+    if text is None:  # an empty page comes back as an empty <string/>
+        text = ""
+    if not isinstance(text, str):
+        return None
+    return (
+        _wiki_version(info.get("version")),
+        _wiki_time_key(info.get("lastModified")),
+        text,
+    )
 
 
 class WikiPageStoredReadbackFailed(Exception):
@@ -341,6 +415,20 @@ class TracClient:
         self._ticket_change_at = _OptionalMethod(
             "ticket.getChangeAt", TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
         )
+        # The wiki search's page cache (#154). It is per client, and a
+        # client is per caller: the instance pool keeps one per instance
+        # and identity, and under OIDC mcp/oidc.py keeps one per bearer
+        # token (up to 256). So a cache only ever holds pages its own
+        # caller can read, and a new token fills a cache of its own with
+        # one full read -- never worse than the old per-query full read.
+        # ``run_sync`` runs calls in threads, hence the lock around every
+        # refresh and index build.
+        self._wiki_multicall = _OptionalMethod(
+            "system.multicall", WIKI_MULTICALL_ABSENT_TTL_SECONDS
+        )
+        self._wiki_cache_lock = threading.Lock()
+        self._wiki_cache: dict[str, _CachedWikiPage] = {}
+        self._wiki_scope_index: OrderedDict[str, BM25] = OrderedDict()
 
     @property
     def session(self) -> requests.Session:
@@ -1258,57 +1346,195 @@ class TracClient:
 
         return matches
 
-    def search_wiki_pages_by_content(
-        self, query: str, max_results: int = 10
+    def search_wiki_pages(
+        self, query: str, prefix: str | None = None
     ) -> list[dict[str, Any]]:
-        """
-        Search wiki pages by content (full-text search).
+        """Ranked keyword search (BM25) over wiki page names and text
+        (Trac /trac_mcp_server #154).
+
+        Every page whose name starts with ``prefix`` (all pages when it is
+        empty or ``None``) and that has a positive score is returned,
+        best first, ties broken by page name. ``prefix`` filters before
+        ranking: idf and the average section length are those of the
+        pages in scope. There is no result cap.
+
+        Page text is cached on this client. The first search reads every
+        page; a later one makes one call (``wiki.getRecentChanges`` from
+        the epoch, which lists every readable page with its version and
+        modification time) and re-reads only the pages that are new or
+        whose (version, modification time) differs from the cached pair.
 
         Args:
-            query: Search string (case-insensitive)
-            max_results: Maximum number of results to return (default: 10)
+            query: Words to look for; compound and CamelCase names are
+                also split into their parts. Not a phrase match.
+            prefix: Page-name prefix to restrict the search to.
 
         Returns:
-            List of dicts with keys: name, snippet (matching context ~100 chars)
+            List of dicts with keys: name, score, snippet. The snippet is
+            a slice of the stored TracWiki, byte-for-byte, with ``...``
+            on a cut end.
 
         Raises:
-            xmlrpc.client.Fault: If server returns error when listing pages
+            xmlrpc.client.Fault: If listing the pages fails. A page that
+                cannot be read is skipped.
         """
-        all_pages = self.list_wiki_pages()
-        query_lower = query.lower()
-        matches = []
+        scope = prefix or ""
+        with self._wiki_cache_lock:
+            self._refresh_wiki_cache()
+            index = self._wiki_scope_index.get(scope)
+            if index is not None:
+                self._wiki_scope_index.move_to_end(scope)
+            else:
+                index = BM25(
+                    [
+                        section
+                        for name, page in self._wiki_cache.items()
+                        if name.startswith(scope)
+                        for section in page.sections
+                    ]
+                )
+                self._wiki_scope_index[scope] = index
+                while (
+                    len(self._wiki_scope_index) > WIKI_SCOPE_INDEX_MAX
+                ):
+                    self._wiki_scope_index.popitem(last=False)
+        return search_pages(index, query)
 
-        for page_name in all_pages:
+    def _refresh_wiki_cache(self) -> None:
+        """Bring the page cache up to date (caller holds the lock).
+
+        One ``wiki.getRecentChanges`` from the epoch is the authority: it
+        lists every readable page with its latest version and
+        ``lastModified`` (``get_recent_wiki_changes`` falls back to
+        ``getAllPages`` + ``getPageInfo`` on a server without it). A
+        cached page that is not listed is dropped. A listed page is read
+        again when it is not cached or when its (version, lastModified)
+        pair differs from the cached one -- the pair as ``getPageInfo``
+        returned it when the page was read, so a page edited between a
+        listing and its read differs from the next listing and is read
+        again. Nothing is inferred from a time watermark: a deleted and
+        recreated page, a deleted latest version and a page without a
+        version are all seen, and so is an edit made while the cache was
+        being filled. The per-scope indexes are discarded only if
+        something changed.
+        """
+        listing = self.get_recent_wiki_changes(0)
+        current: dict[str, tuple[int | None, str | None]] = {}
+        for entry in listing if isinstance(listing, list) else []:
+            name = (
+                entry.get("name") if isinstance(entry, dict) else None
+            )
+            if isinstance(name, str):
+                current[name] = (
+                    _wiki_version(entry.get("version")),
+                    _wiki_time_key(entry.get("lastModified")),
+                )
+        changed = False
+        for gone in [n for n in self._wiki_cache if n not in current]:
+            del self._wiki_cache[gone]
+            changed = True
+
+        # Not cached: new pages, and any that could not be read last time.
+        stale = []
+        for name, key in current.items():
+            held = self._wiki_cache.get(name)
+            if held is None or (held.version, held.modified) != key:
+                stale.append(name)
+
+        fetched = self._fetch_wiki_pages(stale)
+        for name in stale:
+            record = fetched.get(name)
+            if record is None:
+                # Unreadable: skipped. Dropping a cached copy is right
+                # too -- it is either stale or no longer readable.
+                changed |= self._wiki_cache.pop(name, None) is not None
+                continue
+            version, modified, text = record
+            self._wiki_cache[name] = _CachedWikiPage(
+                version, modified, split_sections(name, text)
+            )
+            changed = True
+        if changed:
+            self._wiki_scope_index.clear()
+
+    def _fetch_wiki_pages(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """Read the version, modification time and text of ``names``.
+
+        ``system.multicall`` batches of ``WIKI_FETCH_BATCH_PAGES`` pages;
+        one call per page when the server has no multicall. A page that
+        cannot be read is left out of the result.
+        """
+        out: dict[str, tuple[int | None, str | None, str]] = {}
+        done = 0
+        if names and self._wiki_multicall.available():
+            while done < len(names):
+                batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
+                try:
+                    out.update(self._fetch_wiki_batch(batch))
+                except xmlrpc.client.Fault as err:
+                    if self._wiki_multicall.note_fault(err):
+                        break  # no multicall: the rest goes page by page
+                    out.update(self._fetch_wiki_singly(batch))
+                except Exception:
+                    # A timeout, a dropped connection, an unparseable
+                    # reply: one batch failing must not fail the search.
+                    out.update(self._fetch_wiki_singly(batch))
+                done += len(batch)
+        out.update(self._fetch_wiki_singly(names[done:]))
+        return out
+
+    def _fetch_wiki_singly(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """Read ``names`` one call per page (``getPageInfo`` then
+        ``getPage``), skipping any that cannot be read."""
+        out: dict[str, tuple[int | None, str | None, str]] = {}
+        for name in names:
             try:
-                content = self.get_wiki_page(page_name)
-                content_lower = content.lower()
-
-                if query_lower in content_lower:
-                    # Extract snippet around match (~100 chars)
-                    match_pos = content_lower.index(query_lower)
-                    snippet_start = max(0, match_pos - 50)
-                    snippet_end = min(
-                        len(content), match_pos + len(query) + 50
-                    )
-                    snippet = content[snippet_start:snippet_end].strip()
-
-                    # Add ellipsis if truncated
-                    if snippet_start > 0:
-                        snippet = "..." + snippet
-                    if snippet_end < len(content):
-                        snippet = snippet + "..."
-
-                    matches.append(
-                        {"name": page_name, "snippet": snippet}
-                    )
-
-                    if len(matches) >= max_results:
-                        break
+                record = _wiki_page_record(
+                    self.get_wiki_page_info(name),
+                    self.get_wiki_page(name),
+                )
             except Exception:
                 # Skip pages that can't be read (permission denied, etc.)
                 continue
+            if record is not None:
+                out[name] = record
+        return out
 
-        return matches
+    def _fetch_wiki_batch(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """One ``system.multicall`` reading ``names``.
+
+        Each page is a ``getPageInfo`` then a ``getPage`` (in that order,
+        so a page edited in between is cached under the older version and
+        re-read next time). A per-entry fault comes back as a
+        ``{'faultCode', 'faultString'}`` dict: that page is skipped.
+        """
+        calls = []
+        for name in names:
+            calls.append(
+                {"methodName": "wiki.getPageInfo", "params": [name]}
+            )
+            calls.append(
+                {"methodName": "wiki.getPage", "params": [name]}
+            )
+        results = self._rpc_request("system", "multicall", calls)
+        if not isinstance(results, list) or len(results) != len(calls):
+            return {}
+        out = {}
+        for i, name in enumerate(names):
+            info_ok, info = _multicall_value(results[2 * i])
+            text_ok, text = _multicall_value(results[2 * i + 1])
+            if not (info_ok and text_ok):
+                continue
+            record = _wiki_page_record(info, text)
+            if record is not None:
+                out[name] = record
+        return out
 
     def put_wiki_page(
         self,
@@ -1800,7 +2026,11 @@ class TracClient:
         """
         try:
             # Try getRecentChanges if available
-            dt = xmlrpc.client.DateTime(since_timestamp)
+            # DateTime(0) is "now", not the epoch: ask for everything
+            # with the epoch spelled out.
+            dt = xmlrpc.client.DateTime(
+                since_timestamp if since_timestamp else _WIKI_EPOCH
+            )
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:

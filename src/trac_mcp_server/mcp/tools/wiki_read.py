@@ -17,6 +17,7 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
+from ...core.wiki_search import tokenize
 from .errors import (
     build_error_response,
     format_timestamp,
@@ -57,7 +58,7 @@ WIKI_READ_TOOLS = [
     ),
     types.Tool(
         name="wiki_search",
-        description="Search wiki pages by content with relevance ranking. Returns snippets showing matched text, as stored: TracWiki, byte-for-byte.",
+        description="Ranked keyword search (BM25) over wiki page names and text. The query is split into words (compound and CamelCase names also into their parts); pages with more of the rarer words rank higher. It is not a phrase match. `prefix` filters before ranking. Snippets are as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -69,11 +70,11 @@ WIKI_READ_TOOLS = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query string (required)",
+                    "description": "Search words (required). Matched word by word, ranked; not a phrase",
                 },
                 "prefix": {
                     "type": "string",
-                    "description": "Filter to pages starting with this prefix (namespace filter, optional)",
+                    "description": "Only pages whose name starts with this prefix (namespace filter, optional); applied before ranking",
                 },
                 "limit": {
                     "type": "integer",
@@ -328,6 +329,17 @@ async def _handle_search(
     # Ensure limit is within bounds
     limit = min(max(1, limit), 50)
 
+    # Stopwords and one-character words are not searched: a query of
+    # nothing else has no terms, which is not "no page matches".
+    if not tokenize(query):
+        return build_error_response(
+            "validation_error",
+            "The query has no searchable words: stopwords and "
+            "one-character words are ignored.",
+            "Use at least one distinctive word of two or more "
+            "characters.",
+        )
+
     # Decode cursor or start at offset 0
     if cursor:
         try:
@@ -341,34 +353,20 @@ async def _handle_search(
     else:
         offset = 0
 
-    # Search wiki pages
-    results = await run_sync(client.search_wiki_pages_by_content, query)
+    # Search wiki pages: every page that scores above zero within the
+    # prefix, ranked; the paging below slices that list.
+    results = await run_sync(
+        client.search_wiki_pages, query, prefix or None
+    )
 
     if not results:
+        if prefix:
+            message = f"No wiki pages found matching query with prefix '{prefix}'."
+        else:
+            message = "No wiki pages found matching query."
         return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text="No wiki pages found matching query.",
-                )
-            ]
+            content=[types.TextContent(type="text", text=message)]
         )
-
-    # Apply prefix filter if provided
-    if prefix:
-        results = [
-            r for r in results if r.get("name", "").startswith(prefix)
-        ]
-
-        if not results:
-            return types.CallToolResult(
-                content=[
-                    types.TextContent(
-                        type="text",
-                        text=f"No wiki pages found matching query with prefix '{prefix}'.",
-                    )
-                ]
-            )
 
     # Calculate pagination
     total = len(results)
@@ -389,7 +387,8 @@ async def _handle_search(
     for result in results_page:
         name = result.get("name", "")
         snippet = result.get("snippet", "")
-        formatted.append(f"**{name}**\n  ...{snippet}...")
+        score = result.get("score", 0.0)
+        formatted.append(f"**{name}** (score {score:.2f})\n  {snippet}")
 
     # Build response
     response_lines = [f"Found {total} wiki pages"]

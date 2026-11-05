@@ -917,14 +917,16 @@ Each update object:
 
 ## wiki_search
 
-**Description:** Search wiki pages by content with relevance ranking. Returns snippets showing matched text.
+**Description:** Ranked keyword search (BM25) over wiki page names and text. The query is split into words (compound and CamelCase names also into their parts); pages with more of the rarer words rank higher. It is not a phrase match. `prefix` filters before ranking. Snippets are as stored: TracWiki, byte-for-byte.
+
+Every page with a positive score is returned, best first (ties by page name), so `limit` (up to 50) and `cursor` page through the whole ranked list. Each hit shows its score to two decimals. The server keeps a cache of page text per instance and identity: the first search reads every page, later ones re-read only pages that are new or edited.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `query` | string | **Yes** | - | Search query string |
-| `prefix` | string | No | - | Filter to pages starting with this prefix (namespace filter) |
+| `query` | string | **Yes** | - | Search words; matched word by word and ranked, not a phrase |
+| `prefix` | string | No | - | Only pages whose name starts with this prefix (namespace filter); applied before ranking |
 | `limit` | integer | No | `10` | Maximum results per page (min: 1, max: 50) |
 | `cursor` | string | No | - | Pagination cursor from previous response |
 
@@ -932,7 +934,7 @@ Each update object:
 ```json
 {
   "type": "text",
-  "text": "Found 15 wiki pages (showing 1-10):\n\n**DevelopmentGuide**\n  ...follow the **coding standards** defined in this document...\n\n**API/Authentication**\n  ...use JWT tokens for **authentication**...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
+  "text": "Found 15 wiki pages (showing 1-10):\n\n**DevelopmentGuide** (score 3.41)\n  ...follow the **coding standards** defined in this document...\n\n**API/Authentication** (score 2.87)\n  ...use JWT tokens for **authentication**...\n\nUse cursor 'eyJvZmZzZXQiOjEwLCJ0b3RhbCI6MTV9' to get next page."
 }
 ```
 
