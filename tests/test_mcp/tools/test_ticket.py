@@ -3227,6 +3227,43 @@ class TestHandleTicketSearch:
             assert result.structuredContent["tickets"][0]["url"] == url
             assert url in result.content[0].text
 
+    def test_search_unset_fields_show_empty_not_none(self):
+        """Trac returns the key with value None for a field never set;
+        the line and structuredContent show "" (Trac #141)."""
+        client = _spec_client()
+
+        async def _fake_run_sync_limited(func, *args, **kwargs):
+            return [
+                args[0],
+                "20260101T00:00:00",
+                "20260101T00:00:00",
+                {"summary": None, "status": None, "owner": None},
+            ]
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync_limited",
+                side_effect=_fake_run_sync_limited,
+            ),
+        ):
+            mock_run_sync.return_value = [10]
+
+            result = self._run(_handle_search(client, {}))
+
+            text = result.content[0].text
+            assert "None" not in text
+            # The shape, not just the token: labels kept, slots empty.
+            assert (
+                "- #10:  (status: , owner: ) - "
+                "https://trac.example.com/ticket/10"
+            ) in text.splitlines()
+            ticket = result.structuredContent["tickets"][0]
+            for name in ("summary", "status", "owner"):
+                assert ticket[name] == "", name
+
     def test_search_xmlrpc_fault(self):
         """XML-RPC fault during search produces structured error."""
         client = MagicMock(spec=TracClient)
@@ -3450,6 +3487,59 @@ class TestHandleTicketGet:
             assert isinstance(result, types.CallToolResult)
             text = result.content[0].text
             assert "= TracWiki heading =" in text
+
+    def test_get_unset_fields_show_empty_not_none(self):
+        """Trac returns the key with value None for a field never set;
+        the text shows nothing and structuredContent carries "" -- not
+        the text "None", not null (Trac #141). _ts is left as is."""
+        client = self._client()
+        fields = (
+            "summary",
+            "description",
+            "status",
+            "owner",
+            "reporter",
+            "type",
+            "priority",
+            "component",
+            "milestone",
+            "keywords",
+            "cc",
+            "resolution",
+        )
+        attrs = dict.fromkeys(fields)
+        attrs["_ts"] = "1788093861682305"
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = self._dispatch(
+                client,
+                [
+                    5,
+                    datetime(2026, 1, 10, 9, 0, 0),
+                    datetime(2026, 1, 15, 14, 30, 0),
+                    attrs,
+                ],
+            )
+
+            result = self._run(_handle_get(client, {"ticket_id": 5}))
+
+            text = result.content[0].text
+            assert "None" not in text
+            # The shape, not just the token: labels kept, slots empty,
+            # and an empty resolution leaves its slot out entirely.
+            lines = text.splitlines()
+            for expected in (
+                "Ticket #5: ",
+                "Status:  | Owner:  | Reporter:  | Type: ",
+                "Priority:  | Component:  | Milestone: ",
+                "Keywords:  | Cc: ",
+            ):
+                assert expected in lines, expected
+            for name in fields:
+                assert result.structuredContent[name] == "", name
+            assert result.structuredContent["_ts"] == "1788093861682305"
 
     def test_get_missing_ticket_id(self):
         """Missing ticket_id returns validation error."""
