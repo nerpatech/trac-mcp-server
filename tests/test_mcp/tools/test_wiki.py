@@ -306,14 +306,17 @@ class TestHandleSearch(unittest.TestCase):
             mock_run_sync.return_value = [
                 {
                     "name": "PageOne",
+                    "score": 2.5,
                     "snippet": "matched text in page one",
                 },
                 {
                     "name": "PageTwo",
+                    "score": 1.25,
                     "snippet": "matched text in page two",
                 },
                 {
                     "name": "PageThree",
+                    "score": 0.5,
                     "snippet": "matched text in page three",
                 },
             ]
@@ -337,17 +340,23 @@ class TestHandleSearch(unittest.TestCase):
             self.assertIn("**PageTwo**", text)
             self.assertNotIn("**PageThree**", text)
             self.assertIn("cursor", text)  # Should have next cursor
+            # the score is shown next to the snippet, to 2 decimals
+            self.assertIn(
+                "**PageOne** (score 2.50)\n  matched text in page one",
+                text,
+            )
+            self.assertIn("(score 1.25)", text)
 
     def test_handle_search_with_prefix(self):
-        """Test _handle_search filters by prefix."""
+        """Test _handle_search passes prefix down to the search."""
         with patch(
             "trac_mcp_server.mcp.tools.wiki_read.run_sync"
         ) as mock_run_sync:
-            # Return search results directly
+            # The search applies the prefix before ranking; the
+            # handler only paginates what it returns.
             mock_run_sync.return_value = [
-                {"name": "User/Alice", "snippet": "alice page"},
-                {"name": "User/Bob", "snippet": "bob page"},
-                {"name": "System/Config", "snippet": "config page"},
+                {"name": "User/Alice", "score": 2.0, "snippet": "a"},
+                {"name": "User/Bob", "score": 1.0, "snippet": "b"},
             ]
 
             # Call handler with prefix filter
@@ -368,7 +377,42 @@ class TestHandleSearch(unittest.TestCase):
             self.assertIn("Found 2 wiki pages", text)
             self.assertIn("**User/Alice**", text)
             self.assertIn("**User/Bob**", text)
-            self.assertNotIn("**System/Config**", text)
+            mock_run_sync.assert_called_once_with(
+                self.mock_client.search_wiki_pages, "test", "User/"
+            )
+
+    def test_handle_search_without_prefix_passes_none(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = []
+            result = asyncio.run(
+                _handle_search(self.mock_client, {"query": "test"})
+            )
+            mock_run_sync.assert_called_once_with(
+                self.mock_client.search_wiki_pages, "test", None
+            )
+            self.assertEqual(
+                result.content[0].text,
+                "No wiki pages found matching query.",
+            )
+
+    def test_handle_search_empty_with_prefix_names_the_prefix(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = []
+            result = asyncio.run(
+                _handle_search(
+                    self.mock_client,
+                    {"query": "test", "prefix": "User/"},
+                )
+            )
+            self.assertEqual(
+                result.content[0].text,
+                "No wiki pages found matching query with prefix"
+                " 'User/'.",
+            )
 
     def test_handle_search_missing_query(self):
         """Test _handle_search returns error when query is missing."""
@@ -1451,6 +1495,107 @@ class TestWikiUpdateStaleVersionLive:
             assert client.get_wiki_page(page) == v2
         finally:
             client.delete_wiki_page(page)
+
+
+# ---------------------------------------------------------------------------
+# Live: /trac_test (ticket #154)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.live
+class TestWikiSearchLive:
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Writes three
+    Scratch/ pages on /trac_test and deletes them afterwards.
+
+    The offline tests run the search against a fake wiki; only a real
+    server shows that the cache sees a page created, edited and deleted
+    through ``wiki.putPage``/``wiki.deletePage`` (what ``getAllPages``,
+    ``getRecentChanges`` and ``system.multicall`` really return).
+    """
+
+    def test_search_follows_create_edit_and_delete(self):
+        import os
+        import random
+        import string
+
+        from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
+
+        default_config = Config(
+            trac_url=os.environ["TRAC_URL"],
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
+        client = TracClient(
+            InstanceRegistry(default_config, {}).resolve("/trac_test")
+        )
+
+        # One-token nonsense words, unique to this run. Letters only: the
+        # tokenizer also indexes the parts of a name split at digits and
+        # case changes, and a part such as "12" would match other pages.
+        run = "".join(random.choices(string.ascii_lowercase, k=10))
+        shared = f"zqshared{run}"
+        scope = f"Scratch/Ticket154Search{run}/"
+        pages = {
+            f"{scope}A": f"= A =\n{shared} zqalpha{run} original text\n",
+            f"{scope}B": f"{shared} zqbeta{run} second page\n",
+            f"{scope}C": f"zqgamma{run} no shared word here\n",
+        }
+
+        def found(query, prefix=scope):
+            return [
+                h["name"]
+                for h in client.search_wiki_pages(query, prefix)
+            ]
+
+        try:
+            for name, text in pages.items():
+                client.put_wiki_page(name, text, "ticket 154 live test")
+
+            # Created pages are found, scoped by prefix, and ranked
+            assert sorted(found(shared)) == [f"{scope}A", f"{scope}B"]
+            assert found(f"zqgamma{run}") == [f"{scope}C"]
+            [hit] = [
+                h
+                for h in client.search_wiki_pages(
+                    f"zqalpha{run}", scope
+                )
+                if h["name"] == f"{scope}A"
+            ]
+            assert hit["score"] > 0
+            assert hit["snippet"] in pages[f"{scope}A"]
+
+            # The same through the handler, unscoped: the page is in the
+            # whole wiki's ranking, not only under its prefix.
+            result = asyncio.run(
+                _handle_search(
+                    client, {"query": f"zqalpha{run}", "limit": 50}
+                )
+            )
+            assert not result.isError, result.content[0].text
+            assert f"**{scope}A**" in result.content[0].text
+
+            # An edit: the new text is found and the old text is not
+            edited = f"= A =\n{shared} zqdelta{run} edited text\n"
+            client.put_wiki_page(
+                f"{scope}A", edited, "ticket 154 live test, edit"
+            )
+            assert found(f"zqdelta{run}") == [f"{scope}A"]
+            assert found(f"zqalpha{run}") == []
+            assert sorted(found(shared)) == [f"{scope}A", f"{scope}B"]
+
+            # A deletion: the page is gone from the results
+            client.delete_wiki_page(f"{scope}B")
+            assert found(shared) == [f"{scope}A"]
+            assert found(f"zqbeta{run}") == []
+        finally:
+            for name in pages:
+                try:
+                    client.delete_wiki_page(name)
+                except Exception:  # already deleted (B), or never made
+                    pass
 
 
 if __name__ == "__main__":
