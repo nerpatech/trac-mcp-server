@@ -11,7 +11,7 @@ from .common import (
     ConversionResult,
     markdown_to_tracwiki_lang,
 )
-from .tracwiki_to_markdown import FALLBACK_FENCE_INFO
+from .tracwiki_to_markdown import _LIST_MARKER_RE, FALLBACK_FENCE_INFO
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -276,6 +276,18 @@ def _has_passthrough_line(
     return False
 
 
+def _starts_a_block_in_trac(text: str) -> bool:
+    """True when the first line of `text`, stripped, starts a Trac block of
+    its own: a ``>`` citation line, or a list marker (``*``, ``-``, ``1.``,
+    ``a.``, ``ii.``; the grammar of the read leg's `_LIST_MARKER_RE`).
+    Directly under a citation either would join the quote or open a nested
+    item (#145 review F3, e.g. a Markdown ``\\>`` or ``1\\.``)."""
+    first = text.lstrip().split("\n", 1)[0].strip()
+    return first.startswith(">") or bool(
+        _LIST_MARKER_RE.match(" " + first)
+    )
+
+
 def _item_block_separator(
     prev_kind: str,
     next_kind: str,
@@ -307,8 +319,16 @@ def _item_block_separator(
     innermost nested item, #112/#125), and after a run with a passthrough
     line (F1 below).
 
+    Review fixes (#145): a ``quote`` is also ``"blank"`` after a run whose
+    text already holds a blank line, and a paragraph after a quote is
+    ``"blank"`` when its first line starts a block of its own in Trac
+    (``_starts_a_block_in_trac``: ``>`` would join the quote, a list marker
+    would open a nested item). ``plain_quote`` is the kind of a quote that
+    kept the pre-#145 form; whatever follows it is ``"blank"``, as before.
+
     Kinds are ``para`` (a paragraph, or a run starting with one), ``code``,
-    ``table``, ``quote``, ``list`` and ``text`` (any other block). The texts
+    ``table``, ``quote``, ``plain_quote``, ``list`` and ``text`` (any other
+    block). The texts
     are the rendered TracWiki on either side of the boundary (`prev_text` may be
     empty for a ``code``/``table`` child, which cannot hold a passthrough
     line at its end).
@@ -328,16 +348,22 @@ def _item_block_separator(
             return "quote_gap"
         if prev_kind in ("code", "table"):
             return "adjacent"
-        if prev_kind in ("para", "text") and not _has_passthrough_line(
-            prev_text
+        if (
+            prev_kind in ("para", "text")
+            and not _has_passthrough_line(prev_text)
+            and "\n\n" not in prev_text
         ):
             return "adjacent"
+        # A list, a quote that kept the pre-#145 form, or a run that
+        # already holds a blank line (the list ended there; unmeasured).
         return "blank"
     if next_kind != "para":
         return "blank"
     if prev_kind == "quote":
-        if list_seen or _has_passthrough_line(
-            next_text, first_only=True
+        if (
+            list_seen
+            or _has_passthrough_line(next_text, first_only=True)
+            or _starts_a_block_in_trac(next_text)
         ):
             return "blank"
         return "adjacent"
@@ -967,6 +993,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
             # For list items, we need to determine depth and type
             case "list_item":
+                # Ticket #145 review (F2): an item's children are not in
+                # the citation of a quote this item sits in. Only the
+                # item's own quote runs are (`_render_item_quote`); a first-
+                # child quote of a nested item keeps the pre-#145 form.
+                outer_citation = self._citation
+                self._citation = False
+
                 # Track list depth from state
                 depth = getattr(state, "list_depth", 0)
 
@@ -1006,7 +1039,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # it is the item's first non-blank child: no Trac form
                     # exists for a quote with no item text before it (` *`
                     # alone is not an item, ` * > q` renders a literal
-                    # ">"), so it stays in the text run, as before.
+                    # ">"), so it stays in the text run, as before. Nor
+                    # when it is empty: nothing to cite.
                     runs: list[tuple[str, list[dict[str, Any]]]] = []
                     content_seen = False
                     for child in children:
@@ -1019,6 +1053,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             else "quote"
                             if child_type == "block_quote"
                             and content_seen
+                            and any(
+                                c.get("type") != "blank_line"
+                                for c in child.get("children") or []
+                            )
                             else "code"
                             if child_type == "block_code"
                             and not _is_fallback_fence(
@@ -1052,21 +1090,19 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # Ticket #143: a text run that starts with a paragraph
                     # is marked "para" so the combine step below can leave
                     # out the blank line after a code or table run.
-                    # A quote run also carries its citation form (#145);
-                    # `rendered` is the pre-#145 form, used where the
-                    # separator says "blank".
-                    after_runs: list[tuple[str, str, str]] = []
+                    # A quote run is rendered in the combine step below
+                    # (#145), once its separator has said which form it
+                    # takes; its entry carries the tokens, not the text.
+                    after_runs: list[
+                        tuple[str, str, list[dict[str, Any]]]
+                    ] = []
                     for kind, run in runs:
+                        if kind == "quote":
+                            after_runs.append((kind, "", run))
+                            continue
                         rendered = self._render_text_run(
                             run, state
                         ).strip("\n")
-                        citation = (
-                            self._render_item_quote(run, state).strip(
-                                "\n"
-                            )
-                            if kind == "quote"
-                            else ""
-                        )
                         if rendered:
                             first = next(
                                 (
@@ -1080,9 +1116,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                                 first
                             ):
                                 kind = "para"
-                            after_runs.append(
-                                (kind, rendered, citation)
-                            )
+                            after_runs.append((kind, rendered, run))
                 else:
                     text = token.get("raw", "")
                     after_runs = []
@@ -1126,8 +1160,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 prev_kind = "para" if text.strip() else ""
                 prev_text = text
                 list_seen = False
-                plain_quote = False
-                for kind, rendered, citation in after_runs:
+                for kind, rendered, run in after_runs:
+                    emitted_kind = kind
                     if kind == "list":
                         list_seen = True
                         parts.append(rendered)
@@ -1136,32 +1170,25 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         # continuation indent, directly under what came
                         # before; `_item_block_separator` says when Trac
                         # cannot take them, and the pre-#145 form stays.
-                        # After a quote that kept the pre-#145 form, a
-                        # quote or paragraph keeps it too: its blank line
-                        # is what `master` wrote, and the text after it
-                        # would otherwise sit directly under the indented
-                        # quote.
-                        separator = (
-                            "blank"
-                            if plain_quote
-                            else _item_block_separator(
-                                prev_kind,
-                                kind,
-                                list_seen,
-                                prev_text,
-                                rendered,
-                            )
+                        # Rendered once, in the form chosen.
+                        separator = _item_block_separator(
+                            prev_kind, kind, list_seen, prev_text, ""
                         )
                         if separator == "blank":
                             parts.append("")
-                            quote_lines = rendered
+                            rendered = self._render_text_run(
+                                run, state
+                            ).strip("\n")
+                            emitted_kind = "plain_quote"
                         else:
                             if separator == "quote_gap":
                                 parts.append(continuation_indent + ">")
-                            quote_lines = citation
+                            rendered = self._render_item_quote(
+                                run, state
+                            ).strip("\n")
                         parts.extend(
                             _indent_nonblank(
-                                quote_lines.split("\n"),
+                                rendered.split("\n"),
                                 continuation_indent,
                             )
                         )
@@ -1211,12 +1238,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
                                 continuation_indent,
                             )
                         )
-                    plain_quote = (
-                        kind == "quote" and separator == "blank"
-                    )
-                    prev_kind = "text" if plain_quote else kind
+                    prev_kind = emitted_kind
                     prev_text = rendered
                 result = "\n".join(parts) + "\n"
+                self._citation = outer_citation
 
             # Default rendering: extract text from raw, text, or children, pass attrs
             case _:

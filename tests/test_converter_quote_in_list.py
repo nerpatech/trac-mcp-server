@@ -302,6 +302,88 @@ def test_tight_item_is_unchanged():
     assert markdown_to_tracwiki("- a\n- b\n") == " * a\n * b"
 
 
+# -- Review fixes -----------------------------------------------------------
+
+
+def test_quote_in_a_nested_item_in_a_quote_follows_the_first_child_rule():
+    """F2: citation mode applies to an item's OWN quote runs only. The
+    nested item's first-child quote keeps master's form (` *   x`), as for
+    `- > q`; ` * > x` would render the literal text `> x` (measured)."""
+    assert markdown_to_tracwiki("- a\n  > - > x\n- b\n") == (
+        " * a\n   >  *   x\n * b"
+    )
+
+
+def test_quote_in_a_nested_item_in_a_quote_after_text_is_a_citation():
+    md = "- a\n  > - b\n  >   > q\n- c\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   >  * b\n   >    > q\n * c"
+    )
+
+
+@pytest.mark.parametrize(
+    ("md", "wiki"),
+    [
+        # F3: text that would join the quote or open a nested item keeps
+        # master's blank line before it (the quote itself is a citation)
+        (
+            "- a\n  > q\n\n  \\> not\n- b\n",
+            " * a\n   > q\n\n   > not\n * b",
+        ),
+        (
+            "- a\n  > q\n\n  1\\. not\n- b\n",
+            " * a\n   > q\n\n   1. not\n * b",
+        ),
+        (
+            "- a\n  > q\n\n  a\\. not\n- b\n",
+            " * a\n   > q\n\n   a. not\n * b",
+        ),
+        # F5, master 8702a5c bytes: a run that already holds a blank line
+        # (the list has ended there; unmeasured), here raw HTML and a #63
+        # fallback fence
+        (
+            "- a\n\n  <div>x</div>\n\n  > q\n- b\n",
+            " * a\n\n   <div>x</div>\n\n     q\n * b",
+        ),
+        (
+            "- a\n\n  ```tracwiki-unconverted\n  plain words\n  ```\n\n"
+            "  > q\n- b\n",
+            " * a\n\n   plain words\n\n     q\n * b",
+        ),
+    ],
+)
+def test_review_cases_keep_the_blank_line(md, wiki):
+    assert markdown_to_tracwiki(md) == wiki
+
+
+def test_empty_quote_is_unchanged():
+    """No content to cite; master's bytes (trailing spaces included)."""
+    assert markdown_to_tracwiki("- a\n  >\n- b\n") == " * a  \n * b"
+
+
+def test_nested_quote_list_quote_renders_each_quote_once(monkeypatch):
+    """F9: a quote run used to render twice (the pre-#145 form was kept to
+    pick from), which doubles per level of quote -> list -> quote nesting."""
+    from trac_mcp_server.converters.markdown_to_tracwiki import (
+        TracWikiRenderer,
+    )
+
+    calls = []
+    original = TracWikiRenderer.block_quote
+
+    def counting(self, text):
+        calls.append(text)
+        return original(self, text)
+
+    monkeypatch.setattr(TracWikiRenderer, "block_quote", counting)
+    levels = 8
+    lines = ["- a0"]
+    for i in range(1, levels):
+        lines.append("  " + ">   " * (i - 1) + f"> - a{i}")
+    markdown_to_tracwiki("\n".join(lines) + "\n")
+    assert len(calls) == levels - 1
+
+
 # -- Read leg ----------------------------------------------------------------
 
 
@@ -321,6 +403,39 @@ def test_ordered_citation_then_item_text_gets_a_blank_line():
 
 def test_citation_then_item_text_in_the_last_item():
     assert _md(" * a\n   > q\n   tail") == " - a\n   > q\n\n   tail"
+
+
+def test_text_between_the_marker_and_text_columns_is_reindented():
+    """Measured on /trac_test: ` * a` / `   > q` / `  d` renders `d`
+    INSIDE the <li> (after the blockquote). At column 2 it would sit below
+    the Markdown item's content column and leave the list, so it gets the
+    blank line and the text column (3)."""
+    assert (
+        _md(" * a\n   > q\n  d\n * e") == " - a\n   > q\n\n   d\n - e"
+    )
+    assert _md(" 1. a\n    > q\n   d\n 2. e") == (
+        " 1. a\n    > q\n\n    d\n 2. e"
+    )
+    assert _md(" * a\n   * b\n     > q\n    d\n * e") == (
+        " - a\n   - b\n     > q\n\n     d\n - e"
+    )
+
+
+def test_text_between_the_marker_and_text_columns_round_trips():
+    wiki = " * a\n   > q\n  d\n * e"
+    assert markdown_to_tracwiki(_md(wiki)) == " * a\n   > q\n   d\n * e"
+
+
+def test_text_deeper_than_the_text_column_is_unchanged():
+    """Measured: ` * a` / `   > q` / `       deeper` renders OUTSIDE the
+    list (a double blockquote), so no item text to separate. master's
+    read-leg output (8702a5c), no blank line."""
+    assert _md(" * a\n   > q\n       deeper\n * b") == (
+        " - a\n   > q\n       deeper\n - b"
+    )
+    assert _md(" * a\n   > q\n    d\n * e") == (
+        " - a\n   > q\n    d\n - e"
+    )
 
 
 def test_citation_followed_by_the_next_item_gets_no_blank_line():
@@ -406,6 +521,44 @@ def test_table_in_the_quote_survives_the_round_trip_as_cells():
 
 # -- Live: the real renderer on /trac_test ----------------------------------
 
+
+def _first_top_level_li(html):
+    """The first ``<li>`` ... matching ``</li>`` of `html` (nested lists
+    counted by depth), and what follows it; ``(None, html)`` if none. A
+    non-greedy ``<li>.*?</li>`` would stop at an inner item's close."""
+    tags = re.compile(r"<li(?:[\s>])|</li>")
+    start = None
+    depth = 0
+    for m in tags.finditer(html):
+        if m.group(0) == "</li>":
+            if start is None:
+                continue
+            depth -= 1
+            if depth == 0:
+                return html[start : m.end()], html[m.end() :]
+        else:
+            if start is None:
+                start = m.start()
+            depth += 1
+    return None, html
+
+
+def test_first_top_level_li_counts_nesting():
+    """Unit test of the live test's helper, with hand-made HTML. The case
+    that matters: `d` is inside the OUTER item, after an inner item."""
+    inside = "<ul><li>a<ul><li>sub</li></ul>d</li><li>e</li></ul>"
+    li, rest = _first_top_level_li(inside)
+    assert li == "<li>a<ul><li>sub</li></ul>d</li>"
+    assert rest == "<li>e</li></ul>"
+    assert re.search(r"\bd\b", li)
+    sibling = "<ul><li>a<ul><li>sub</li></ul></li><li>d</li></ul>"
+    li, rest = _first_top_level_li(sibling)
+    assert li == "<li>a<ul><li>sub</li></ul></li>"
+    assert not re.search(r"\bd\b", li)
+    assert re.search(r"\bd\b", rest)
+    assert _first_top_level_li("<p>x</p>") == (None, "<p>x</p>")
+
+
 LIVE = {
     "tight": "- a\n  > q\n- d\n",
     "loose": "- a\n\n  > q\n- d\n",
@@ -448,13 +601,12 @@ def test_live_quote_renders_inside_the_list_item(name):
     assert len(re.findall(r"<(?:ul|ol)[\s>]", html)) == 1 + sub_lists, (
         html
     )
-    first_li = re.search(r"<li[\s>].*?</li>", html, re.DOTALL)
+    first_li, rest = _first_top_level_li(html)
     assert first_li is not None, html
-    assert "<blockquote" in first_li.group(0), html
-    # Everything before the last item's text belongs to the first item;
-    # the last item `d` is a sibling after it.
-    assert re.search(r"\bd\b", html[html.index("</li>") :]), html
-    assert not re.search(r"\bd\b", first_li.group(0)), html
+    assert "<blockquote" in first_li, html
+    # The last item `d` is a sibling after the first item, not inside it.
+    assert re.search(r"\bd\b", rest), html
+    assert not re.search(r"\bd\b", first_li), html
     for word in ("q", "r", "p1", "p2", "x", "l1", "tail", "para"):
         if re.search(rf"\b{word}\b", LIVE[name]):
-            assert re.search(rf"\b{word}\b", first_li.group(0)), html
+            assert re.search(rf"\b{word}\b", first_li), html
