@@ -1031,7 +1031,9 @@ Each update object:
 }
 ```
 
-**Possible overwrite:** the version check runs just before `wiki.putPage`, and a write that lands between the two is not refused. When the page reads back afterwards as anything other than `version + 1`, the result is still a success, with a warning line after the first one naming the versions written in between and how to inspect them (Trac /trac_mcp_server #130):
+**How the version is checked** (Trac /trac_mcp_server #120, #129): where the Trac instance has the [`tracrpc_comment`](../../plugins/README.md) plugin's `wiki.putPageIfVersion`, the write goes through it, and the server compares the version and saves in one database transaction, so a write by someone else can never land in between: it is refused with the same `version_conflict` as a stale version. Where the plugin is missing, the client reads the page's version immediately before a stock `wiki.putPage` and compares it itself, which leaves a window of one round trip between the two. The tool's responses are the same either way, and a `version` below 1 (versions start at 1) never reaches the plugin: the client refuses it as `version_conflict` itself, with or without the plugin. The client remembers a missing plugin for five minutes before asking again.
+
+**Possible overwrite:** without the plugin, a write that lands between the version check and `wiki.putPage` is not refused. When the page reads back afterwards as anything other than `version + 1`, the result is still a success, with a warning line after the first one naming the versions written in between and how to inspect them (Trac /trac_mcp_server #130). With the plugin, only a write that lands just after this one, before the read-back, can raise it:
 ```json
 {
   "type": "text",
@@ -1041,7 +1043,7 @@ Each update object:
 
 **Error Responses:**
 
-- **version_conflict:** Page was modified after you read it, or no longer exists
+- **version_conflict:** Page was modified after you read it (including, with the plugin, while this call was running), or no longer exists. Nothing was stored
   ```json
   {
     "type": "text",
@@ -1226,7 +1228,7 @@ Each update object:
 
 **`readback_failed`** (boolean, always present): `true` when the page was stored but its new version could not be read back; see below.
 
-**`possible_overwrite`** (boolean, always present): `true` when an update stored a version other than the one after the version it was based on -- the push read version 3, so an uncontended write stores 4, but the page reads back as 5. Another write most likely landed between the version check and `putPage` and was replaced by this push without merging (or landed just after it). `intervening_versions` (present only when `true`) lists the versions between the base version and the stored one (`[4]` here), and the text carries a warning that names them and suggests `wiki_diff(page_name=..., from_version=3, to_version=4)` to inspect what they changed. The result is still a success: the page was stored. A create never sets it. Detection only, at no extra RPC: closing the window itself needs a Trac-side precondition (Trac /trac_mcp_server #129, #130).
+**`possible_overwrite`** (boolean, always present): `true` when an update stored a version other than the one after the version it was based on -- the push read version 3, so an uncontended write stores 4, but the page reads back as 5. Another write most likely landed between the version check and `putPage` and was replaced by this push without merging (or landed just after it). `intervening_versions` (present only when `true`) lists the versions between the base version and the stored one (`[4]` here), and the text carries a warning that names them and suggests `wiki_diff(page_name=..., from_version=3, to_version=4)` to inspect what they changed. The result is still a success: the page was stored. A create never sets it. Detection only, at no extra RPC (Trac /trac_mcp_server #130). Where the instance has the `tracrpc_comment` plugin's `wiki.putPageIfVersion`, an update goes through it and the window is closed: a write landing between the check and the save is refused as `version_conflict` instead (#129), so the flag can then only mean a write that landed just after this one. See [wiki_update](#wiki_update) for how the version is checked.
 
 **Stored, read-back failed:** if `wiki.putPage` succeeded but reading back the page's new version then failed, the result is **not** an error -- the page was stored, and an error result means nothing was. `readback_failed` is `true`, `version` is `null`, `readback_error` carries the read-back's error, and the text says the page WAS stored and not to push again. The push posts `putPage` exactly once: a "not found" fault from the read-back (the page was deleted just after the write) no longer triggers a second write as a create (Trac /trac_mcp_server #140).
 
@@ -1253,7 +1255,7 @@ Each update object:
 - Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
-- Creates new page if it doesn't exist, updates with optimistic locking if it does. Only the existence probe's "not found" means "create"; the write itself is never retried
+- Creates new page if it doesn't exist, updates with optimistic locking if it does (through `wiki.putPageIfVersion` where the plugin is installed, as for `wiki_update`). Only the existence probe's "not found" means "create"; the write itself is never retried
 - Handles Trac instances that return 0 (int) instead of Fault for non-existent pages
 
 **Example Call:**
