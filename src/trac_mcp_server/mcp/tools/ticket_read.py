@@ -5,6 +5,7 @@ All tools use async handlers with run_sync() to bridge synchronous TracClient ca
 automatic Markdown conversion, and structured error responses.
 """
 
+import re
 import xmlrpc.client
 from typing import Any
 
@@ -617,11 +618,24 @@ async def _handle_changelog(
 
         if field == "comment":
             # Comment content is in newvalue, returned as stored (#69)
-            if newvalue:
+            # A whitespace-only comment has nothing to show: print it like
+            # an empty one, not as a bare "comment: " line (#155).
+            if newvalue and not newvalue.isspace():
                 comment_text = newvalue
-                # Indent multiline comments for readability
-                comment_lines = comment_text.strip().split("\n")
-                if len(comment_lines) > 1:
+                # Indent multiline comments for readability. Only trailing
+                # whitespace goes (rstrip, so a "\n \n" tail too): leading
+                # whitespace is TracWiki markup (` * item` is a list item),
+                # so stripping it would print something other than what is
+                # stored (#69, #155). Lines split on LF or CRLF so a CRLF
+                # comment leaves no stray "\r"; not splitlines(), which
+                # also splits on \x0b, \x0c, U+2028 and so changes the
+                # text. A comment that starts with whitespace takes the
+                # block form too, where its own indent stays visible under
+                # the 4-space one.
+                comment_lines = re.split(
+                    r"\r?\n", comment_text.rstrip()
+                )
+                if len(comment_lines) > 1 or comment_text[0].isspace():
                     indented_comment = "\n    ".join(comment_lines)
                     entries.append(
                         f"- {timestamp_str} by {author}: comment:\n    {indented_comment}"
@@ -635,7 +649,9 @@ async def _handle_changelog(
                 entries.append(
                     f"- {timestamp_str} by {author}: comment added"
                 )
-                newvalue_text = ""
+                # The structured row keeps the stored bytes (#69), so a
+                # whitespace-only comment stays "\n" there.
+                newvalue_text = newvalue or ""
         else:
             newvalue_text = newvalue
             if oldvalue and newvalue:
