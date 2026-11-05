@@ -38,6 +38,8 @@ class FakeWiki:
         self.multicall_enabled = multicall
         self.multicall_fault = multicall_fault
         self.unreadable: set[str] = set()
+        self.recent_enabled = True
+        self.no_version = False  # leave `version` out of every info
         self.calls: list[str] = []  # top-level methods, in order
         self.fetched: list[str] = []  # names read with getPage
         self.infos: list[str] = []  # names read with getPageInfo
@@ -96,6 +98,17 @@ class FakeWiki:
             return out
         return self._dispatch(full, *params)
 
+    def _info(self, name: str) -> dict:
+        page = self.pages[name]
+        info = {
+            "name": name,
+            "author": "tester",
+            "lastModified": page["lastModified"],
+        }
+        if not self.no_version:
+            info["version"] = page["version"]
+        return info
+
     def _dispatch(self, full: str, *params):
         if full == "wiki.getAllPages":
             return list(self.order)
@@ -106,13 +119,7 @@ class FakeWiki:
                 raise xmlrpc.client.Fault(
                     1, f"Page {name} not readable"
                 )
-            page = self.pages[name]
-            return {
-                "name": name,
-                "author": "tester",
-                "version": page["version"],
-                "lastModified": page["lastModified"],
-            }
+            return self._info(name)
         if full == "wiki.getPage":
             name = params[0]
             self.fetched.append(name)
@@ -122,14 +129,14 @@ class FakeWiki:
                 )
             return self.pages[name]["text"]
         if full == "wiki.getRecentChanges":
+            if not self.recent_enabled:
+                raise xmlrpc.client.Fault(
+                    -32601,
+                    'RPC method "wiki.getRecentChanges" not found',
+                )
             since = params[0].value
             return [
-                {
-                    "name": n,
-                    "author": "tester",
-                    "version": p["version"],
-                    "lastModified": p["lastModified"],
-                }
+                self._info(n)
                 for n, p in self.pages.items()
                 if p["lastModified"] >= since
             ]
@@ -305,7 +312,10 @@ def test_first_search_reads_every_page_once_in_multicall_batches(
         wiki.put(f"P/{i:03d}", f"word{i} common\n")
     client = make_client(mock_config, wiki)
     assert len(client.search_wiki_pages("common")) == 120
-    assert wiki.calls == ["wiki.getAllPages"] + ["system.multicall"] * 3
+    assert (
+        wiki.calls
+        == ["wiki.getRecentChanges"] + ["system.multicall"] * 3
+    )
     assert sorted(wiki.fetched) == sorted(wiki.pages)
 
 
@@ -319,10 +329,7 @@ def test_an_unchanged_page_is_not_fetched_again(
     assert names(hits) == ["Beta"]
     assert three_pages.fetched == []
     assert three_pages.infos == []
-    assert three_pages.calls == [
-        "wiki.getAllPages",
-        "wiki.getRecentChanges",
-    ]
+    assert three_pages.calls == ["wiki.getRecentChanges"]
 
 
 def test_an_edited_page_is_fetched_again_and_the_old_text_is_gone(
@@ -471,7 +478,7 @@ def test_concurrent_first_searches_fill_the_cache_once(
     assert sorted(three_pages.fetched) == ["Alpha", "Beta", "Gamma"]
 
 
-def test_a_getallpages_fault_propagates(mock_config):
+def test_a_listing_fault_propagates(mock_config):
 
     def failing(service, method, *params):
         raise xmlrpc.client.Fault(403, "permission denied")
@@ -480,3 +487,91 @@ def test_a_getallpages_fault_propagates(mock_config):
     client._rpc_request = failing  # type: ignore[method-assign]
     with pytest.raises(xmlrpc.client.Fault):
         client.search_wiki_pages("x")
+
+
+# --------------------------------------------------------------------
+# The refresh is a full metadata snapshot (review fix)
+# --------------------------------------------------------------------
+
+
+def test_an_edit_made_during_the_fill_is_caught_on_the_next_search(
+    mock_config,
+):
+    """A watermark taken from the pages read later in the same fill hid
+    an edit to a page read earlier in it."""
+    wiki = FakeWiki()
+    for i in range(60):
+        wiki.put(f"P{i:02d}", "alpha filler text\n")
+    real = wiki.rpc
+    multicalls = []
+
+    def rpc(service, method, *params):
+        out = real(service, method, *params)
+        if method == "multicall":
+            multicalls.append(1)
+            if len(multicalls) == 1:  # between batch 1 and batch 2
+                wiki.put("P00", "zebra now\n")  # read in batch 1
+                wiki.put("P55", "alpha again\n")  # read in batch 2
+        return out
+
+    wiki.rpc = rpc  # type: ignore[method-assign]
+    client = make_client(mock_config, wiki)
+    client.search_wiki_pages("alpha")
+    assert names(client.search_wiki_pages("zebra")) == ["P00"]
+    assert wiki.pages["P00"]["version"] == 2
+    assert client._wiki_cache["P00"].version == 2
+
+
+def test_a_page_recreated_at_the_same_version_is_read_again(
+    mock_config, three_pages
+):
+    client = make_client(mock_config, three_pages)
+    assert names(client.search_wiki_pages("banana")) == ["Beta"]
+    three_pages.delete("Beta")
+    three_pages.put("Beta", "beta quince text\n")  # version 1 again
+    assert three_pages.pages["Beta"]["version"] == 1
+    assert names(client.search_wiki_pages("quince")) == ["Beta"]
+    assert client.search_wiki_pages("banana") == []
+
+
+def test_a_deleted_latest_version_is_read_again(
+    mock_config, three_pages
+):
+    """Deleting the latest version leaves the page at an older, lower
+    version with an older time: before any `since` a watermark asks."""
+    client = make_client(mock_config, three_pages)
+    three_pages.put("Beta", "beta mango text\n")  # version 2
+    assert names(client.search_wiki_pages("mango")) == ["Beta"]
+    older = "20260101T00:00:00"
+    three_pages.pages["Beta"] = {
+        "version": 1,
+        "text": "beta banana text\n",
+        "lastModified": older,
+    }
+    assert names(client.search_wiki_pages("banana")) == ["Beta"]
+    assert client.search_wiki_pages("mango") == []
+
+
+def test_without_a_version_pages_are_compared_by_time(mock_config):
+    wiki = FakeWiki()
+    wiki.no_version = True
+    wiki.put("Alpha", "alpha apple text\n")
+    client = make_client(mock_config, wiki)
+    assert names(client.search_wiki_pages("apple")) == ["Alpha"]
+    wiki.forget_calls()
+    assert names(client.search_wiki_pages("apple")) == ["Alpha"]
+    assert wiki.fetched == []  # unchanged: not read again
+    wiki.put("Alpha", "alpha pear text\n")
+    assert names(client.search_wiki_pages("pear")) == ["Alpha"]
+    assert client.search_wiki_pages("apple") == []
+
+
+def test_the_listing_falls_back_without_getrecentchanges(
+    mock_config, three_pages
+):
+    three_pages.recent_enabled = False
+    client = make_client(mock_config, three_pages)
+    assert len(client.search_wiki_pages("text")) == 3
+    three_pages.put("Beta", "beta mango text\n")
+    assert names(client.search_wiki_pages("mango")) == ["Beta"]
+    assert client.search_wiki_pages("banana") == []

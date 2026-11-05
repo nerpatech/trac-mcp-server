@@ -227,8 +227,7 @@ WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
 # getPage).
 WIKI_FETCH_BATCH_PAGES = 50
 
-# What ``wiki.getRecentChanges`` is asked from when the cache holds no
-# modification time yet.
+# "Since the beginning" for ``wiki.getRecentChanges``.
 _WIKI_EPOCH = "19700101T00:00:00"
 
 # TracXMLRPC wraps every fault from a plain TracError as
@@ -304,10 +303,12 @@ def _unwrap_tracrpc_fault(
 
 @dataclass
 class _CachedWikiPage:
-    """A wiki page as the search cache holds it: the version it was read
-    at, and its sections tokenized once (``Section.body`` is the text)."""
+    """A wiki page as the search cache holds it: the version and
+    ``lastModified`` it was read at (as ``getPageInfo`` returned them),
+    and its sections tokenized once (``Section.body`` is the text)."""
 
     version: int | None
+    modified: str | None
     sections: list[Section]
 
 
@@ -415,7 +416,6 @@ class TracClient:
         )
         self._wiki_cache_lock = threading.Lock()
         self._wiki_cache: dict[str, _CachedWikiPage] = {}
-        self._wiki_newest: str | None = None
         self._wiki_scope_index: dict[str, BM25] = {}
 
     @property
@@ -1347,9 +1347,10 @@ class TracClient:
         pages in scope. There is no result cap.
 
         Page text is cached on this client. The first search reads every
-        page; a later one makes two calls (``wiki.getAllPages`` and
-        ``wiki.getRecentChanges``) and re-reads only the pages that are
-        new or whose version differs from the cached one.
+        page; a later one makes one call (``wiki.getRecentChanges`` from
+        the epoch, which lists every readable page with its version and
+        modification time) and re-reads only the pages that are new or
+        whose (version, modification time) differs from the cached pair.
 
         Args:
             query: Words to look for; compound and CamelCase names are
@@ -1362,9 +1363,8 @@ class TracClient:
             on a cut end.
 
         Raises:
-            xmlrpc.client.Fault: If listing the pages, or asking for the
-                recent changes, fails. A page that cannot be read is
-                skipped.
+            xmlrpc.client.Fault: If listing the pages fails. A page that
+                cannot be read is skipped.
         """
         scope = prefix or ""
         with self._wiki_cache_lock:
@@ -1385,42 +1385,44 @@ class TracClient:
     def _refresh_wiki_cache(self) -> None:
         """Bring the page cache up to date (caller holds the lock).
 
-        Pages gone from ``getAllPages`` are dropped, pages not yet cached
-        are read, and ``getRecentChanges`` -- asked from the newest
-        modification time seen -- names the pages to re-read: those whose
-        version differs from the cached one. Versions are compared, not
-        times, so the range's boundary and clock skew do not matter. The
-        per-scope indexes are discarded only if something changed.
+        One ``wiki.getRecentChanges`` from the epoch is the authority: it
+        lists every readable page with its latest version and
+        ``lastModified`` (``get_recent_wiki_changes`` falls back to
+        ``getAllPages`` + ``getPageInfo`` on a server without it). A
+        cached page that is not listed is dropped. A listed page is read
+        again when it is not cached or when its (version, lastModified)
+        pair differs from the cached one -- the pair as ``getPageInfo``
+        returned it when the page was read, so a page edited between a
+        listing and its read differs from the next listing and is read
+        again. Nothing is inferred from a time watermark: a deleted and
+        recreated page, a deleted latest version and a page without a
+        version are all seen, and so is an edit made while the cache was
+        being filled. The per-scope indexes are discarded only if
+        something changed.
         """
-        names = self.list_wiki_pages()
-        live = set(names)
+        listing = self.get_recent_wiki_changes(0)
+        current: dict[str, tuple[int | None, str | None]] = {}
+        for entry in listing if isinstance(listing, list) else []:
+            name = (
+                entry.get("name") if isinstance(entry, dict) else None
+            )
+            if isinstance(name, str):
+                current[name] = (
+                    _wiki_version(entry.get("version")),
+                    _wiki_time_key(entry.get("lastModified")),
+                )
         changed = False
-        for gone in [n for n in self._wiki_cache if n not in live]:
+        for gone in [n for n in self._wiki_cache if n not in current]:
             del self._wiki_cache[gone]
             changed = True
 
-        # Pages not cached: new ones, and any that could not be read last
-        # time.
-        stale = [n for n in names if n not in self._wiki_cache]
-        if self._wiki_cache:
-            recent = self._rpc_request(
-                "wiki",
-                "getRecentChanges",
-                xmlrpc.client.DateTime(
-                    self._wiki_newest or _WIKI_EPOCH
-                ),
-            )
-            for entry in recent if isinstance(recent, list) else []:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name")
-                held = self._wiki_cache.get(name)
-                if held is not None and held.version != _wiki_version(
-                    entry.get("version")
-                ):
-                    stale.append(name)
+        # Not cached: new pages, and any that could not be read last time.
+        stale = []
+        for name, key in current.items():
+            held = self._wiki_cache.get(name)
+            if held is None or (held.version, held.modified) != key:
+                stale.append(name)
 
-        stale = list(dict.fromkeys(stale))
         fetched = self._fetch_wiki_pages(stale)
         for name in stale:
             record = fetched.get(name)
@@ -1431,13 +1433,8 @@ class TracClient:
                 continue
             version, modified, text = record
             self._wiki_cache[name] = _CachedWikiPage(
-                version, split_sections(name, text)
+                version, modified, split_sections(name, text)
             )
-            if modified is not None and (
-                self._wiki_newest is None
-                or modified > self._wiki_newest
-            ):
-                self._wiki_newest = modified
             changed = True
         if changed:
             self._wiki_scope_index.clear()
@@ -2009,7 +2006,11 @@ class TracClient:
         """
         try:
             # Try getRecentChanges if available
-            dt = xmlrpc.client.DateTime(since_timestamp)
+            # DateTime(0) is "now", not the epoch: ask for everything
+            # with the epoch spelled out.
+            dt = xmlrpc.client.DateTime(
+                since_timestamp if since_timestamp else _WIKI_EPOCH
+            )
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:
