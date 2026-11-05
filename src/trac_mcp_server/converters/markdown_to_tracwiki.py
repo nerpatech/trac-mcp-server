@@ -1,7 +1,7 @@
 """Markdown to TracWiki conversion using mistune AST rendering."""
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 import mistune
 
@@ -247,6 +247,86 @@ def _is_fallback_fence(info: str | None) -> bool:
     return bool(info) and info.strip() == FALLBACK_FENCE_INFO
 
 
+def _is_paragraph_token(token: dict[str, Any]) -> bool:
+    """True for a paragraph-like block token (``paragraph``/``block_text``)."""
+    return token.get("type") in ("paragraph", "block_text")
+
+
+# A line that starts like this is TracWiki passed through verbatim (a
+# `{{{#!html` block, a heading, a `||` row, a rule). Ticket #143 review
+# (F1): " [[BR]][[BR]]" appended to such a paragraph lands on its last line,
+# and `}}} [[BR]][[BR]]` never closes the block (measured on Trac: it
+# swallows the rest of the page).
+_PASSTHROUGH_LINE_PREFIXES = ("{{{", "}}}", "||", "=", "----")
+
+
+def _has_passthrough_line(
+    text: str, *, first_only: bool = False
+) -> bool:
+    """True when a line of `text` (only its first non-blank one with
+    `first_only`) starts, stripped, like passed-through TracWiki."""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_PASSTHROUGH_LINE_PREFIXES):
+            return True
+        if first_only:
+            return False
+    return False
+
+
+def _item_block_separator(
+    prev_kind: str,
+    next_kind: str,
+    list_seen: bool,
+    prev_text: str,
+    next_text: str,
+) -> Literal["br", "adjacent", "blank"]:
+    """How two neighbouring blocks of a list item are separated (#143).
+
+    Trac ends a list at any blank line, so the pre-#143 "blank" is the
+    fallback and the other two keep the block inside the ``<li>``:
+
+    * ``"br"``: the earlier paragraph's last line ends ``" [[BR]][[BR]]"``
+      and the next paragraph follows on the next line. Kinds ``para`` then
+      ``para``.
+    * ``"adjacent"``: the next paragraph goes on the line after a ``code``
+      or ``table`` child, no blank line.
+    * ``"blank"``: everything else (blockquote, #63 fallback fence, a text
+      run after a nested list, ...).
+
+    Kinds are ``para`` (a paragraph, or a run starting with one), ``code``,
+    ``table``, ``list`` and ``text`` (any other block). The texts are the
+    rendered TracWiki on either side of the boundary (`prev_text` may be
+    empty for a ``code``/``table`` child, which cannot hold a passthrough
+    line at its end).
+
+    Review fixes: a boundary with a passthrough line (`_has_passthrough_line`;
+    ANY line of either paragraph for ``"br"``, the first line of the next run
+    for ``"adjacent"``) stays ``"blank"`` (F1). `list_seen` says a nested list
+    came earlier in the item: ``"adjacent"`` then becomes ``"blank"``, since
+    Trac attaches a block with no blank line to the innermost open item, the
+    nested one (F2). ``"br"`` inside one run is unaffected: the run itself is
+    already where it is.
+    """
+    if next_kind != "para":
+        return "blank"
+    if prev_kind == "para":
+        if _has_passthrough_line(prev_text) or _has_passthrough_line(
+            next_text
+        ):
+            return "blank"
+        return "br"
+    if prev_kind in ("code", "table"):
+        if list_seen or _has_passthrough_line(
+            next_text, first_only=True
+        ):
+            return "blank"
+        return "adjacent"
+    return "blank"
+
+
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -429,6 +509,43 @@ class TracWikiRenderer(mistune.BaseRenderer):
         if slug:
             return f"{marker} {text} {marker} #{slug}\n"
         return f"{marker} {text} {marker}\n"
+
+    def _render_text_run(
+        self, children: list[dict[str, Any]], state: Any
+    ) -> str:
+        """Render a list item's run of plain blocks (ticket #143).
+
+        Concatenates the children exactly as ``render_tokens`` does, except
+        at a paragraph-to-paragraph boundary: the blank line between them
+        would end the Trac list (Trac ends a list at any blank line), so the
+        earlier paragraph's last line ends ``" [[BR]][[BR]]"`` and the next
+        paragraph follows on the next line. The leading space is always
+        there: ``Done![[BR]]`` is Trac's ``!`` escape of the first macro,
+        and ``wiki:Foo[[BR]]`` reads as one link target (#29). Any other
+        neighbour of a paragraph (blockquote, heading, #63 fallback fence)
+        keeps today's blank line, and so does a paragraph with a line of
+        passed-through TracWiki (``_item_block_separator``, review F1).
+        """
+        pieces: list[str] = []
+        prev_paragraph = False
+        for child in children:
+            if child.get("type") == "blank_line":
+                continue  # renders as "" and must not split two paragraphs
+            rendered = self.render_tokens([child], state)
+            is_paragraph = _is_paragraph_token(child)
+            if (
+                is_paragraph
+                and prev_paragraph
+                and pieces
+                and _item_block_separator(
+                    "para", "para", False, pieces[-1], rendered
+                )
+                == "br"
+            ):
+                pieces[-1] = pieces[-1].rstrip() + " [[BR]][[BR]]\n"
+            pieces.append(rendered)
+            prev_paragraph = is_paragraph and bool(rendered.strip())
+        return "".join(pieces)
 
     def paragraph(self, text: str) -> str:
         """Render paragraph."""
@@ -851,7 +968,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                     # The item's own text is the run before the first list.
                     if runs and runs[0][0] == "text":
-                        text = self.render_tokens(runs[0][1], state)
+                        text = self._render_text_run(runs[0][1], state)
                         runs = runs[1:]
                     else:
                         text = ""
@@ -859,12 +976,27 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # Everything after it, in order. A nested list handles
                     # its own newlines; a later non-list run is a
                     # continuation paragraph that follows a sub-list.
+                    # Ticket #143: a text run that starts with a paragraph
+                    # is marked "para" so the combine step below can leave
+                    # out the blank line after a code or table run.
                     after_runs: list[tuple[str, str]] = []
                     for kind, run in runs:
-                        rendered = self.render_tokens(run, state).strip(
-                            "\n"
-                        )
+                        rendered = self._render_text_run(
+                            run, state
+                        ).strip("\n")
                         if rendered:
+                            first = next(
+                                (
+                                    c
+                                    for c in run
+                                    if c.get("type") != "blank_line"
+                                ),
+                                {},
+                            )
+                            if kind == "text" and _is_paragraph_token(
+                                first
+                            ):
+                                kind = "para"
                             after_runs.append((kind, rendered))
                 else:
                     text = token.get("raw", "")
@@ -906,8 +1038,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Trac renders it as a blockquote (a Trac limit, #112), but
                 # the order is the author's.
                 parts = [f"{prefix} {text}"]
+                prev_kind = ""
+                list_seen = False
                 for kind, rendered in after_runs:
                     if kind == "list":
+                        list_seen = True
                         parts.append(rendered)
                     elif kind == "code":
                         # Ticket #144. Appended at THIS item's continuation
@@ -938,13 +1073,24 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             )
                         )
                     else:
-                        parts.append("")
+                        # Ticket #143: the blank line (or its absence)
+                        # before a text run is `_item_block_separator`'s
+                        # call, in one place for this and for the join
+                        # inside a run.
+                        if (
+                            _item_block_separator(
+                                prev_kind, kind, list_seen, "", rendered
+                            )
+                            != "adjacent"
+                        ):
+                            parts.append("")
                         parts.extend(
                             _indent_nonblank(
                                 rendered.split("\n"),
                                 continuation_indent,
                             )
                         )
+                    prev_kind = kind
                 result = "\n".join(parts) + "\n"
 
             # Default rendering: extract text from raw, text, or children, pass attrs

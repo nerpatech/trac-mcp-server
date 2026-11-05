@@ -281,12 +281,12 @@ def test_loose_item():
     assert markdown_to_tracwiki(LOOSE_MD) == WRITTEN
 
 
-def test_loose_item_paragraph_child_is_still_open_in_143():
-    """Unchanged: a paragraph after the block keeps the existing
-    blank-line continuation treatment (the half of #143 this ticket leaves)."""
+def test_loose_item_paragraph_after_the_block_stays_in_the_item():
+    """Ticket #143 closed what #144 left open: a paragraph after the block
+    goes on the next line with no blank line, so it stays in the item."""
     md = "- a\n\n  ```\n  code\n  ```\n\n  more\n- d\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   {{{\n   code\n   }}}\n\n   more\n * d"
+        " * a\n   {{{\n   code\n   }}}\n   more\n * d"
     )
 
 
