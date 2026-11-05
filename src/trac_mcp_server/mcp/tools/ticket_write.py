@@ -767,6 +767,58 @@ class _PostedComment:
     failure: str | None = None
 
 
+def _posted_comment_from_stored(
+    number: int | None, comment: str, stored: str
+) -> _PostedComment:
+    """The report for comment ``number`` whose stored text is ``stored``.
+
+    The XML-RPC transport folds CRLF and lone CR to LF before Trac
+    stores the text, so CR can never survive: compare against that.
+    """
+    sent_norm = comment.replace("\r\n", "\n").replace("\r", "\n")
+    return _PostedComment(
+        number=number,
+        mismatch=_comment_mismatch(sent_norm, stored),
+        folded=stored == sent_norm and sent_norm != comment,
+    )
+
+
+async def _comment_from_plugin(
+    client: TracClient,
+    ticket_id: int,
+    comment: str,
+    new_ts: str | None,
+) -> _PostedComment | None:
+    """The posted comment as the plugin's ``ticket.getChangeAt`` names it,
+    or None when the changelog scan has to answer instead.
+
+    None for: no ``new_ts``; the plugin missing or answering ``[]``; a
+    result that is not a 3-item list whose comment number parses to a
+    flat one (a dotted number is a threaded reply, never this tool's
+    own write); any exception; a timeout. There is no author filter: the
+    change stored at that microsecond is this write.
+    """
+    if new_ts is None:
+        return None
+    try:
+        found = await asyncio.wait_for(
+            run_sync(client.get_ticket_change_at, ticket_id, new_ts),
+            timeout=_COMMENT_LOOKUP_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if not isinstance(found, list) or len(found) != 3:
+        return None
+    parsed = TracClient.parse_comment_number(found[0])
+    if parsed is None or parsed.reply_to is not None:
+        return None
+    # An empty <string></string> arrives as None, not "".
+    stored = "" if found[2] is None else found[2]
+    if not isinstance(stored, str):
+        return None
+    return _posted_comment_from_stored(parsed.cnum, comment, stored)
+
+
 async def _find_posted_comment(
     client: TracClient,
     ticket_id: int,
@@ -774,17 +826,28 @@ async def _find_posted_comment(
     update_result: Any,
     new_ts: str | None,
 ) -> _PostedComment:
-    """Find the comment a ``ticket.update`` just posted in the changelog.
+    """Find the comment a ``ticket.update`` just posted.
 
     Never raises: the write has already landed, so a failed lookup is
     reported through ``failure``, not propagated.
 
-    The number cannot be counted from the changelog, because a
+    With the ``tracrpc_comment`` plugin (1.2.0 or later) the answer is one
+    small RPC, ``ticket.getChangeAt`` at the microsecond ``new_ts``. Where
+    that is missing or gives no usable answer (see
+    ``_comment_from_plugin``) the whole changelog is read and scanned.
+
+    The scan cannot count the number from the changelog, because a
     description-only edit consumes one too; it is read off the row.
     Candidates are this user's permanent, flat comment rows written in
     the update's second; if several remain (another write of ours in the
     same second) the text sent picks among them.
     """
+    via_plugin = await _comment_from_plugin(
+        client, ticket_id, comment, new_ts
+    )
+    if via_plugin is not None:
+        return via_plugin
+
     epoch = _update_change_epoch(update_result, new_ts)
     if epoch is None:
         return _PostedComment(failure="no change time in Trac's reply")
@@ -832,8 +895,7 @@ async def _find_posted_comment(
             failure=f"no comment entry{who} at the update's time"
         )
 
-    # The XML-RPC transport folds CRLF and lone CR to LF before Trac
-    # stores the text, so CR can never survive: compare against that.
+    # The same-second tie-break compares against the transport-folded text.
     sent_norm = comment.replace("\r\n", "\n").replace("\r", "\n")
     chosen = candidates[0]
     if len(candidates) > 1:
@@ -849,11 +911,8 @@ async def _find_posted_comment(
         chosen = max(same_text, key=lambda e: _comment_cnum(e) or 0)
 
     # An empty <string></string> arrives as None, not "".
-    stored = chosen[4] or ""
-    return _PostedComment(
-        number=_comment_cnum(chosen),
-        mismatch=_comment_mismatch(sent_norm, stored),
-        folded=stored == sent_norm and sent_norm != comment,
+    return _posted_comment_from_stored(
+        _comment_cnum(chosen), comment, chosen[4] or ""
     )
 
 

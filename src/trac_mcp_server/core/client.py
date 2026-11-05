@@ -213,6 +213,10 @@ _METHOD_NOT_FOUND_FAULT_CODE = -32601
 # picked up by a running daemon without a restart.
 WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
 
+# The same, for the plugin's ``ticket.getChangeAt`` (Trac
+# /trac_mcp_server #132).
+TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
+
 # TracXMLRPC wraps every fault from a plain TracError as
 # "'<message>' while executing '<method>()'".
 _TRACRPC_FAULT_WRAPPER = re.compile(
@@ -301,6 +305,8 @@ class TracClient:
         # time.monotonic() until which put_wiki_page skips the conditional
         # put plugin method, after the server said it has none (#129).
         self._wiki_conditional_put_absent_until = 0.0
+        # The same for get_ticket_change_at and ticket.getChangeAt (#132).
+        self._ticket_change_at_absent_until = 0.0
 
     @property
     def session(self) -> requests.Session:
@@ -490,6 +496,44 @@ class TracClient:
         Get ticket changelog by ticket ID.
         """
         return self._rpc_request("ticket", "changeLog", ticket_id)
+
+    def get_ticket_change_at(
+        self, ticket_id: int, ts: str
+    ) -> list | None:
+        """Read the one change set stored at ``ts`` via the plugin's
+        ``ticket.getChangeAt`` (Trac /trac_mcp_server #132).
+
+        ``ts`` is the microsecond ``_ts`` a ``ticket.update`` returned,
+        as a string (XML-RPC ints are 32-bit). Returns the plugin's
+        reply: ``[cnum, author, comment]`` -- ``cnum`` as Trac stores it,
+        a string that is dotted for a threaded reply -- or ``[]`` when no
+        change, or none with a comment, is stored at that time.
+
+        Returns ``None`` when the server has no such method -- the
+        ``tracrpc_comment`` plugin (1.2.0 or later) is not installed or
+        not enabled -- and the caller falls back to reading the
+        changelog. That absence is remembered for
+        ``TICKET_CHANGE_AT_ABSENT_TTL_SECONDS``, during which ``None``
+        is returned with no RPC posted.
+
+        Raises:
+            xmlrpc.client.Fault: Any other fault (permission denied, no
+                such ticket, a malformed ``ts``), unchanged.
+        """
+        if time.monotonic() < self._ticket_change_at_absent_until:
+            return None
+        try:
+            return self._rpc_request(
+                "ticket", "getChangeAt", ticket_id, ts
+            )
+        except xmlrpc.client.Fault as err:
+            if _is_missing_method_fault(err, "ticket.getChangeAt"):
+                self._ticket_change_at_absent_until = (
+                    time.monotonic()
+                    + TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
+                )
+                return None
+            raise
 
     def edit_ticket_comment(
         self, ticket_id: int, cnum: int, comment: str

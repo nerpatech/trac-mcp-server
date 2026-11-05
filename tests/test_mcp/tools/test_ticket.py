@@ -1348,13 +1348,23 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
     def _run(self, update_reply, changelog=None):
         # The write is followed by a changelog read-back for the comment
         # (#124); a reply with no usable change time never reaches it.
+        client = MagicMock()
+        mock_run_sync = AsyncMock(
+            side_effect=[update_reply, changelog or []]
+        )
+
+        async def routed(func, *a, **kw):
+            # The plugin is absent (#132): the scan is what this drives.
+            if func is client.get_ticket_change_at:
+                return None
+            return await mock_run_sync(func, *a, **kw)
+
         with patch(
-            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-        ) as mock_run_sync:
-            mock_run_sync.side_effect = [update_reply, changelog or []]
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync", routed
+        ):
             return asyncio.run(
                 _handle_update(
-                    MagicMock(),
+                    client,
                     {
                         "ticket_id": 42,
                         "comment": "x",
@@ -1660,13 +1670,21 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
     def _run(self, effects, args=None, client=None):
         base = {"ticket_id": 42, "comment": "hello"}
         base.update(args or {})
+        client = client or _user_client()
+        mock_run_sync = AsyncMock(side_effect=effects)
+
+        async def routed(func, *a, **kw):
+            # The plugin lookup is not among the scripted effects:
+            # these tests drive the changelog scan, so the plugin is
+            # absent (None) and the call is not counted.
+            if func is client.get_ticket_change_at:
+                return None
+            return await mock_run_sync(func, *a, **kw)
+
         with patch(
-            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
-        ) as mock_run_sync:
-            mock_run_sync.side_effect = effects
-            result = asyncio.run(
-                _handle_update(client or _user_client(), base)
-            )
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync", routed
+        ):
+            result = asyncio.run(_handle_update(client, base))
         return result, mock_run_sync
 
     def test_match_reports_number_and_byte_for_byte(self):
@@ -2321,6 +2339,175 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
         self.assertIn("comment_number", tool.description)
         self.assertIn("comment_stored_matches", tool.description)
         self.assertIn("comment_line_endings_folded", tool.description)
+
+
+class TestCommentLookupViaPlugin(unittest.TestCase):
+    """ticket_update finds its comment with the plugin's
+    ticket.getChangeAt and falls back to the changelog scan (Trac
+    /trac_mcp_server #132)."""
+
+    def _go(
+        self, change_at, args=None, update_reply=None, changelog=None
+    ):
+        """Run ticket_update; ``change_at`` is the stub's result, an
+        exception to raise, or an async callable to await."""
+        client = _user_client()
+        calls = []
+        if changelog is None:
+            changelog = [_comment_entry(_EPOCH, 7, "hello")]
+
+        async def fake_run_sync(func, *a, **kw):
+            calls.append((func, a))
+            if func is client.update_ticket:
+                return update_reply or _update_reply()
+            if func is client.get_ticket_change_at:
+                if callable(change_at):
+                    return await change_at()
+                if isinstance(change_at, BaseException):
+                    raise change_at
+                return change_at
+            if func is client.get_ticket_changelog:
+                return changelog
+            return None
+
+        base = {"ticket_id": 42, "comment": "hello"}
+        base.update(args or {})
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync",
+            side_effect=fake_run_sync,
+        ):
+            result = asyncio.run(_handle_update(client, base))
+        return result, client, [c[0] for c in calls], calls
+
+    def test_plugin_path_gives_number_and_match_without_the_changelog(
+        self,
+    ):
+        result, client, funcs, calls = self._go(
+            ["5", "someone_else", "hello"]
+        )
+
+        self.assertFalse(result.isError)
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], True)
+        self.assertIsNone(sc["comment_mismatch"])
+        self.assertIn(
+            "Stored comment 5 matches the text sent, byte-for-byte.",
+            result.content[0].text,
+        )
+        self.assertNotIn(client.get_ticket_changelog, funcs)
+        # Asked for the microsecond token, not the whole second.
+        change_at = [
+            c for c in calls if c[0] is client.get_ticket_change_at
+        ]
+        self.assertEqual(change_at[0][1], (42, _token(_EPOCH)))
+
+    def test_plugin_path_has_no_author_filter(self):
+        # The configured user is agent_rpc; the change at that exact
+        # microsecond is this write whoever the stored author is (OIDC
+        # per-user auth).
+        result, *_ = self._go(["5", "another_name", "hello"])
+        self.assertEqual(result.structuredContent["comment_number"], 5)
+
+    def test_plugin_text_mismatch_is_reported(self):
+        result, *_ = self._go(["5", "u", "hell"])
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertEqual(sc["comment_mismatch"]["offset"], 4)
+        self.assertEqual(sc["comment_mismatch"]["sent_length"], 5)
+        self.assertEqual(sc["comment_mismatch"]["stored_length"], 4)
+        self.assertIn("was stored differently", result.content[0].text)
+
+    def test_plugin_path_folds_line_endings_like_the_scan(self):
+        result, *_ = self._go(
+            ["6", "u", "a\nb\nc"], {"comment": "a\r\nb\rc"}
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 6)
+        self.assertIs(sc["comment_stored_matches"], True)
+        self.assertIs(sc["comment_line_endings_folded"], True)
+
+    def test_plugin_path_empty_stored_text_is_not_the_string_none(self):
+        result, *_ = self._go(["5", "u", None], {"comment": "None"})
+        sc = result.structuredContent
+        self.assertEqual(sc["comment_number"], 5)
+        self.assertIs(sc["comment_stored_matches"], False)
+        self.assertEqual(sc["comment_mismatch"]["stored_length"], 0)
+
+    def _assert_fell_back(self, result, funcs, client):
+        self.assertFalse(result.isError)
+        self.assertIn(client.get_ticket_changelog, funcs)
+        sc = result.structuredContent
+        # The changelog fixture holds comment 7; the plugin stub's
+        # answers, where it gave one, said 5 or 2.5.
+        self.assertEqual(sc["comment_number"], 7)
+        self.assertIs(sc["comment_stored_matches"], True)
+
+    def test_falls_back_to_the_scan_when_the_plugin_is_absent(self):
+        result, client, funcs, _ = self._go(None)
+        self._assert_fell_back(result, funcs, client)
+
+    def test_falls_back_to_the_scan_on_an_empty_list(self):
+        result, client, funcs, _ = self._go([])
+        self._assert_fell_back(result, funcs, client)
+
+    def test_falls_back_to_the_scan_on_a_dotted_cnum(self):
+        result, client, funcs, _ = self._go(["2.5", "u", "hello"])
+        self._assert_fell_back(result, funcs, client)
+
+    def test_falls_back_to_the_scan_on_a_malformed_result(self):
+        for bad in (
+            ["5", "u"],
+            ["5", "u", "hello", "extra"],
+            ["abc", "u", "hello"],
+            ["", "u", "hello"],
+            ["0", "u", "hello"],
+            [None, "u", "hello"],
+            "5",
+            {"cnum": "5"},
+            5,
+            ("5", "u", "hello"),
+        ):
+            with self.subTest(bad=bad):
+                result, client, funcs, _ = self._go(bad)
+                self._assert_fell_back(result, funcs, client)
+
+    def test_falls_back_to_the_scan_on_an_exception(self):
+        for err in (
+            xmlrpc.client.Fault(1, "TICKET_VIEW required"),
+            RuntimeError("boom"),
+            OSError("network"),
+        ):
+            with self.subTest(err=err):
+                result, client, funcs, _ = self._go(err)
+                self._assert_fell_back(result, funcs, client)
+
+    def test_falls_back_to_the_scan_on_a_timeout(self):
+        async def slow():
+            await asyncio.sleep(5)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write."
+            "_COMMENT_LOOKUP_TIMEOUT",
+            0.05,
+        ):
+            result, client, funcs, _ = self._go(slow)
+        self._assert_fell_back(result, funcs, client)
+
+    def test_no_token_means_no_plugin_call(self):
+        result, client, funcs, _ = self._go(
+            ["5", "u", "hello"],
+            update_reply=_update_reply(with_token=False),
+        )
+        self.assertNotIn(client.get_ticket_change_at, funcs)
+        self._assert_fell_back(result, funcs, client)
+
+    def test_fallback_failure_is_still_reported_not_raised(self):
+        result, *_ = self._go(RuntimeError("boom"), changelog=[])
+        self.assertFalse(result.isError)
+        self.assertIsNone(result.structuredContent["comment_number"])
+        self.assertIn("no comment entry", result.content[0].text)
 
 
 @pytest.mark.live
