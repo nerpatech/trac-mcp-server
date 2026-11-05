@@ -1686,6 +1686,25 @@ class TracWikiParser:
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
 
+        Ticket #145: a continuation line (non-empty stack) that follows a
+        citation line, i.e. a line starting with ``>``, also gets a blank
+        line first, unless it is itself a ``>`` line or one of
+        ``_LAZY_CONTINUATION_INTERRUPT_RE``'s shapes (a fence, ...). Plain
+        text straight after ``> q`` is a lazy continuation of the quote to
+        CommonMark, but Trac renders it after the blockquote, inside the
+        item (measured on /trac_test); the blank line makes the Markdown
+        mean what Trac renders, and the write leg takes it back out
+        (``_item_block_separator``'s ``"adjacent"``). The next list marker
+        needs none, and neither does the end of the text. The line must sit
+        deeper than the item's marker and no deeper than its text column
+        (measured: Trac keeps it in the item there, and renders a deeper
+        one outside the list); it is then re-indented to the text column,
+        which is where a Markdown item's content starts. Any other indent is
+        left exactly as before. The inserted blank line makes the Markdown
+        list loose (CommonMark renders every item with ``<p>``); that is the
+        accepted trade-off of this design, the write leg reads a loose item
+        the same as a tight one.
+
         The pop threshold is strict ("deeper than", not "at least as
         deep") -- ticket #75's own measured boundary (section 2's
         two-space continuation under a one-space marker: continues;
@@ -1700,6 +1719,7 @@ class TracWikiParser:
         lines = text.split("\n")
         out: list[str] = []
         stack: list[int] = []
+        text_column: dict[int, int] = {}  # marker column -> text column
         for line in lines:
             if not line.strip():
                 out.append(line)
@@ -1719,6 +1739,11 @@ class TracWikiParser:
                 while stack and stack[-1] >= column:
                     stack.pop()
                 stack.append(column)
+                after = line[marker.end() :]
+                gap = len(after) - len(after.lstrip(" \t"))
+                text_column[column] = marker.end() + (
+                    gap if 1 <= gap <= 4 and after.strip() else 1
+                )
                 out.append(line)
                 continue
             if stack:
@@ -1732,6 +1757,19 @@ class TracWikiParser:
                     and not _LAZY_CONTINUATION_INTERRUPT_RE.match(line)
                 ):
                     out.append("")
+                elif (
+                    stack
+                    and out
+                    and out[-1].lstrip(" \t").startswith(">")
+                    and column <= text_column[stack[-1]]
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                        line.lstrip(" \t")
+                    )
+                ):
+                    out.append("")
+                    line = " " * text_column[stack[-1]] + line.lstrip(
+                        " \t"
+                    )
             out.append(line)
         return "\n".join(out)
 

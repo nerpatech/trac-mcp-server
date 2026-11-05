@@ -29,8 +29,9 @@ its ``<li>`` and the next item in the same list):
 paragraph's last line ends ``" [[BR]][[BR]]"`` and the next paragraph sits
 on a continuation line at the item's continuation indent. A text run after
 a code or table child gets no blank line before it. Unchanged: a paragraph
-after a nested list (a Trac limit, #112; the #125 advisory), a blockquote
-child (#145), a #63 fallback fence, and any other non-paragraph block.
+after a nested list (a Trac limit, #112; the #125 advisory), a #63 fallback
+fence, and any other non-paragraph block. (A blockquote child was unchanged
+here and moved to a citation inside the item on #145.)
 Review fixes: a paragraph with a passed-through TracWiki line (`{{{`,
 `}}}`, `||`, `=`, `----`) is never joined, and no run after a nested list
 loses its blank line.
@@ -285,22 +286,27 @@ def test_two_paragraphs_after_a_nested_list_separate_by_br():
     )
 
 
-def test_blockquote_child_is_unchanged():
+# The three tests below pinned the pre-#145 blockquote output as #143's
+# deferral. #145 moves them to the citation form (see
+# tests/test_converter_quote_in_list.py, which covers the rest).
+
+
+def test_blockquote_child_is_a_citation_inside_the_item():
     md = "- a\n\n  > q\n- b\n"
-    assert markdown_to_tracwiki(md) == " * a\n\n     q\n * b"
+    assert markdown_to_tracwiki(md) == " * a\n   > q\n * b"
 
 
-def test_paragraph_then_blockquote_keeps_its_blank_line():
+def test_paragraph_then_blockquote_is_adjacent():
     md = "- a\n\n  para\n\n  > q\n- b\n"
     assert markdown_to_tracwiki(md) == (
-        " * a [[BR]][[BR]]\n   para\n\n     q\n * b"
+        " * a [[BR]][[BR]]\n   para\n   > q\n * b"
     )
 
 
-def test_code_then_blockquote_keeps_its_blank_line():
+def test_code_then_blockquote_is_adjacent():
     md = "- a\n  ```\n  code\n  ```\n\n  > q\n- b\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   {{{\n   code\n   }}}\n\n     q\n * b"
+        " * a\n   {{{\n   code\n   }}}\n   > q\n * b"
     )
 
 
