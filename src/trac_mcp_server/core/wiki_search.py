@@ -36,7 +36,15 @@ SNIPPET_RADIUS = 50
 # Snippet length when no query word occurs literally in the section.
 SNIPPET_FALLBACK_CHARS = 2 * SNIPPET_RADIUS
 
-HEADING = re.compile(r"^\s*(=+)\s*(.+?)\s*=*\s*(#\S+)?\s*$")
+# Trac's own heading and code-block rules (trac/wiki/parser.py and
+# formatter.py, Trac 1.6), as auto_pm:#268 applies them to the splitter
+# the measured arm used: a heading is one to six "=" and whitespace, then
+# its text; a line inside a {{{ }}} block is never a heading.
+HEADING = re.compile(
+    r"^\s*(?P<hdepth>={1,6})\s(?P<htext>.*?)"
+    r"(?P<hanchor>#[\w:](?<!\d)[\w:.-]*?)?\s*$"
+)
+_STARTBLOCK = re.compile(r"^\s*\{\{\{(?:(\s*)#!([\w+-][\w+-/]*)|\s*$)")
 
 _TOKEN = re.compile(r"[A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)*")
 _CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
@@ -133,18 +141,35 @@ def _parts(body: str, max_chars: int) -> list[str]:
     return parts
 
 
+def _heading_name(m: re.Match[str]) -> str:
+    """The heading's text: stripped, and without a closing run of the
+    same ``=`` as the opening one (Trac's ``htext`` rule)."""
+    name = m.group("htext").strip()
+    hdepth = m.group("hdepth")
+    if name.endswith(hdepth):
+        name = name[: -len(hdepth)].strip()
+    return name
+
+
 def split_sections(
     page: str, text: str, max_chars: int = MAX_SECTION_CHARS
 ) -> list[Section]:
-    """Cut a page at its heading lines (any level); drop empty
-    sections."""
+    """Cut a page at its heading lines (any level, Trac's pattern);
+    drop empty sections. Lines inside ``{{{ }}}`` blocks, which nest,
+    are body text, never headings."""
     raw: list[tuple[str, list[str]]] = [("", [])]
+    depth = 0
     for line in text.splitlines(keepends=True):
-        m = HEADING.match(line.rstrip("\r\n"))
+        bare = line.rstrip("\r\n")
+        m = HEADING.match(bare) if depth == 0 else None
         if m:
-            raw.append((m.group(2), []))
-        else:
-            raw[-1][1].append(line)
+            raw.append((_heading_name(m), []))
+            continue
+        raw[-1][1].append(line)
+        if "}}}" not in bare and _STARTBLOCK.match(bare):
+            depth += 1
+        elif bare.strip() == "}}}" and depth > 0:
+            depth -= 1
     out: list[Section] = []
     for heading, lines in raw:
         body = "".join(lines).strip()

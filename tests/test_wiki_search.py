@@ -8,6 +8,8 @@ scores as its best section). Nothing here touches a client.
 
 import math
 
+import pytest
+
 from trac_mcp_server.core.wiki_search import (
     BM25,
     STOPWORDS,
@@ -283,3 +285,100 @@ def test_make_snippet_is_case_insensitive_and_about_50_chars_each_side():
     sec = split_sections("P", body)[0]
     snippet = make_snippet(sec, ["needle"])
     assert snippet == "..." + "a" * 50 + "NEEDLE" + "b" * 50 + "..."
+
+
+# --------------------------------------------------------------------
+# split_sections follows Trac's own rules (auto_pm:#268)
+# --------------------------------------------------------------------
+
+
+def _headings(text: str) -> list[str]:
+    return [s.heading for s in split_sections("P", text)]
+
+
+@pytest.mark.parametrize(
+    "block_open",
+    ["{{{", "{{{#!sh", "{{{#!python", "  {{{", "{{{ "],
+)
+def test_a_heading_shaped_line_inside_a_code_block_does_not_split(
+    block_open,
+):
+    text = (
+        f"= Real =\nbefore\n{block_open}\n= not a heading =\n"
+        "== nor this ==\n}}}\nafter\n"
+    )
+    secs = split_sections("P", text)
+    assert [s.heading for s in secs] == ["Real"]
+    # the block lines stay body text, and are indexed
+    assert "= not a heading =" in secs[0].body
+    assert "heading" in secs[0].counts
+
+
+def test_a_heading_shaped_line_in_a_nested_block_does_not_split():
+    text = (
+        "= Real =\n{{{\nouter\n{{{#!sh\n= inner =\n}}}\n"
+        "= still inside =\n}}}\n= After =\nlast\n"
+    )
+    assert _headings(text) == ["Real", "After"]
+
+
+def test_a_heading_after_the_block_closes_splits_again():
+    text = "{{{\n= in =\n}}}\n= Out =\nbody\n"
+    secs = split_sections("P", text)
+    assert [s.heading for s in secs] == ["", "Out"]
+    assert "= in =" in secs[0].body
+
+
+def test_a_one_line_block_does_not_open_a_block():
+    # "}}}" on the opening line: Trac's _startblock test refuses it
+    text = "{{{ inline }}}\n= Heading =\nbody\n"
+    assert _headings(text) == ["", "Heading"]
+
+
+def test_an_unclosed_block_swallows_the_rest_of_the_page():
+    assert _headings("= A =\nx\n{{{\n= B =\ny\n") == ["A"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "======",
+        "=",
+        "=foo",
+        "==NoSpace==",
+        "======= seven =======",
+        "==",
+    ],
+)
+def test_lines_that_are_not_trac_headings_do_not_split(line):
+    text = f"= Real =\nbody\n{line}\nmore\n"
+    secs = split_sections("P", text)
+    assert [s.heading for s in secs] == ["Real"]
+    assert line in secs[0].body
+
+
+@pytest.mark.parametrize(
+    "line,name",
+    [
+        ("= One =", "One"),
+        ("== Two ==", "Two"),
+        ("=== Three ===", "Three"),
+        ("==== Four ====", "Four"),
+        ("===== Five =====", "Five"),
+        ("====== Six ======", "Six"),
+        ("== No closing run", "No closing run"),
+        ("== Mixed ===", "Mixed ="),
+        ("== Anchored == #the-anchor", "Anchored"),
+        ("== Anchored ==#frag", "Anchored"),
+        ("== Anchored #frag", "Anchored"),
+        ("  == Indented ==", "Indented"),
+    ],
+)
+def test_ordinary_headings_still_split_with_the_same_names(line, name):
+    secs = split_sections("P", f"lead\n{line}\nbody\n")
+    assert [s.heading for s in secs] == ["", name]
+
+
+def test_a_crlf_heading_splits():
+    secs = split_sections("P", "= One =\r\nbody\r\n")
+    assert [s.heading for s in secs] == ["One"]
