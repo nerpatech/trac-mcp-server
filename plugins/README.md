@@ -114,7 +114,7 @@ method returns the one change set stored at that exact microsecond.
 - **Arguments.** `id` is the ticket number. `ts` is a **string** of ASCII
   digits, the `_ts` value as `ticket.update` returns it -- never an int,
   because XML-RPC ints are 32-bit. Anything else (empty, signed, decimal,
-  non-string) raises a `TracError`.
+  non-string, or too large to be a time) raises a `TracError`.
 - **Returns** `[cnum, author, comment]`: `cnum` exactly as Trac stores it (a
   string; dotted like `"2.5"` for a threaded reply made with
   `replyToComment`), `author` the change's author, and `comment` the stored

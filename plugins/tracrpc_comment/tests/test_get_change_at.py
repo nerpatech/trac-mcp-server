@@ -126,6 +126,14 @@ class GetChangeAtTestCase(unittest.TestCase):
             with self.assertRaises(TracError, msg=repr(bad)):
                 self.rpc.getChangeAt(self._req(), ticket.id, bad)
 
+    def test_over_long_digit_string_raises_tracerror(self):
+        """All digits, but no timestamp: must be the documented TracError,
+        not an OverflowError/OSError out of the datetime conversion."""
+        ticket = self._ticket()
+        for huge in ('9' * 25, '9' * 400, '1' + '0' * 30):
+            with self.assertRaises(TracError, msg=huge):
+                self.rpc.getChangeAt(self._req(), ticket.id, huge)
+
     def test_non_string_ts_raises_tracerror(self):
         ticket = self._ticket()
         with self.assertRaises(TracError):

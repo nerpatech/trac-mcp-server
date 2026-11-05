@@ -214,7 +214,13 @@ class TicketCommentRPC(Component):
         if not (isinstance(ts, str) and ts.isascii() and ts.isdigit()):
             raise TracError(
                 "ts must be a string of integer microseconds, got %r" % (ts,))
-        change = ticket.get_change(cdate=from_utimestamp(int(ts)))
+        try:
+            when = from_utimestamp(int(ts))
+        except (OverflowError, ValueError, OSError):
+            raise TracError(
+                "ts must be a string of integer microseconds, got %r"
+                % (ts,))
+        change = ticket.get_change(cdate=when)
         if not change or 'comment' not in change['fields']:
             return []
         comment = change['fields']['comment']
