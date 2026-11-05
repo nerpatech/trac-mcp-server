@@ -246,14 +246,16 @@ def _is_missing_method_fault(
     with fault code -32601. The text fallback matches the same heuristic as
     the ticket_comment tools' ``_translate_missing_method``, narrowed to the
     method name so that a "page not found" fault can never pass for it.
+    "No such method" (some servers' wording) counts on the same terms: the
+    text must name ``method``.
     """
     if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
         return True
     text = err.faultString.lower()
-    return (
-        "not found" in text
-        and "method" in text
-        and method.lower() in text
+    if method.lower() not in text:
+        return False
+    return ("not found" in text and "method" in text) or (
+        "no such method" in text
     )
 
 
@@ -1451,15 +1453,29 @@ class TracClient:
         out: dict[str, tuple[int | None, str | None, str]] = {}
         done = 0
         if names and self._wiki_multicall.available():
-            try:
-                while done < len(names):
-                    batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
+            while done < len(names):
+                batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
+                try:
                     out.update(self._fetch_wiki_batch(batch))
-                    done += len(batch)
-            except xmlrpc.client.Fault as err:
-                if not self._wiki_multicall_missing(err):
-                    raise
-        for name in names[done:]:
+                except xmlrpc.client.Fault as err:
+                    if self._wiki_multicall.note_fault(err):
+                        break  # no multicall: the rest goes page by page
+                    out.update(self._fetch_wiki_singly(batch))
+                except Exception:
+                    # A timeout, a dropped connection, an unparseable
+                    # reply: one batch failing must not fail the search.
+                    out.update(self._fetch_wiki_singly(batch))
+                done += len(batch)
+        out.update(self._fetch_wiki_singly(names[done:]))
+        return out
+
+    def _fetch_wiki_singly(
+        self, names: list[str]
+    ) -> dict[str, tuple[int | None, str | None, str]]:
+        """Read ``names`` one call per page (``getPageInfo`` then
+        ``getPage``), skipping any that cannot be read."""
+        out: dict[str, tuple[int | None, str | None, str]] = {}
+        for name in names:
             try:
                 record = _wiki_page_record(
                     self.get_wiki_page_info(name),
@@ -1503,18 +1519,6 @@ class TracClient:
             if record is not None:
                 out[name] = record
         return out
-
-    def _wiki_multicall_missing(self, err: xmlrpc.client.Fault) -> bool:
-        """True, and remember it, when ``err`` says the server has no
-        ``system.multicall``."""
-        if self._wiki_multicall.note_fault(err):
-            return True
-        if "no such method" in err.faultString.lower():
-            self._wiki_multicall.absent_until = (
-                time.monotonic() + self._wiki_multicall.ttl
-            )
-            return True
-        return False
 
     def put_wiki_page(
         self,

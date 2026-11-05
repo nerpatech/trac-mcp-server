@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pytest
+import requests
 
 from trac_mcp_server.core import client as client_module
 from trac_mcp_server.core.client import TracClient
@@ -575,3 +576,84 @@ def test_the_listing_falls_back_without_getrecentchanges(
     three_pages.put("Beta", "beta mango text\n")
     assert names(client.search_wiki_pages("mango")) == ["Beta"]
     assert client.search_wiki_pages("banana") == []
+
+
+# --------------------------------------------------------------------
+# A failed multicall batch does not fail the search (review fix)
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ReadTimeout("timed out"),
+        xmlrpc.client.Fault(1, "internal error"),
+        OSError("connection reset"),
+    ],
+    ids=["timeout", "fault", "oserror"],
+)
+def test_a_failed_batch_is_read_page_by_page_and_the_search_goes_on(
+    mock_config, error
+):
+    wiki = FakeWiki()
+    for i in range(120):
+        wiki.put(f"P/{i:03d}", f"word{i} common\n")
+    real = wiki.rpc
+    multicalls: list[int] = []
+    singles: list[str] = []
+
+    def rpc(service, method, *params):
+        full = f"{service}.{method}"
+        if full == "system.multicall":
+            multicalls.append(1)
+            if len(multicalls) == 2:
+                raise error
+        elif full == "wiki.getPage":
+            singles.append(params[0])
+        return real(service, method, *params)
+
+    wiki.rpc = rpc  # type: ignore[method-assign]
+    client = make_client(mock_config, wiki)
+    assert len(client.search_wiki_pages("common")) == 120
+    assert len(multicalls) == 3  # batch 3 still went by multicall
+    assert singles == [f"P/{i:03d}" for i in range(50, 100)]
+    # the multicall stays available: the failure was not a missing method
+    wiki.put("P/new", "common again\n")
+    wiki.forget_calls()
+    assert "P/new" in names(client.search_wiki_pages("common"))
+    assert wiki.calls[-1] == "system.multicall"
+
+
+@pytest.mark.parametrize(
+    "fault,missing",
+    [
+        (xmlrpc.client.Fault(-32601, "anything at all"), True),
+        (
+            xmlrpc.client.Fault(1, "no such method: system.multicall"),
+            True,
+        ),
+        (
+            xmlrpc.client.Fault(1, "No Such Method 'system.multicall'"),
+            True,
+        ),
+        (
+            xmlrpc.client.Fault(
+                1, 'method "system.multicall" not found'
+            ),
+            True,
+        ),
+        # the guarantee: the text must name the method
+        (xmlrpc.client.Fault(1, "no such method: wiki.getPage"), False),
+        (
+            xmlrpc.client.Fault(1, "no such page: system.multicall"),
+            False,
+        ),
+        (xmlrpc.client.Fault(1, "internal error"), False),
+    ],
+)
+def test_a_missing_method_fault_must_name_the_method(fault, missing):
+    from trac_mcp_server.core.client import _is_missing_method_fault
+
+    assert (
+        _is_missing_method_fault(fault, "system.multicall") is missing
+    )
