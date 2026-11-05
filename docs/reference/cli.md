@@ -20,7 +20,7 @@ trac-mcp-server --transport http --port 8080   # streamable HTTP instead of stdi
 | `--username USER` | -- | Override Trac username (takes precedence over `TRAC_USERNAME` env var) |
 | `--password PASS` | -- | Override Trac password (takes precedence over `TRAC_PASSWORD` env var) |
 | `--insecure` | `false` | Skip SSL certificate verification (development only) |
-| `--log-file PATH` | `/tmp/trac-mcp-server.log` | Log file location |
+| `--log-file PATH` | `LOG_FILE`, else `/tmp/trac-mcp-server.log` (stdio) / none (http); `""` disables | Log file location. An empty value (`--log-file ""` or `LOG_FILE=`) means no log file: stdio then logs to stderr, http to stderr only |
 | `--permissions-file PATH` | -- | Restrict available tools by Trac permissions (see [Tool Architecture](tool-architecture.md#permission-filtering)) |
 | `--transport {stdio,http}` | `stdio` | MCP transport to serve (also settable via `TRAC_MCP_TRANSPORT` or `config.yaml` `server.transport`) |
 | `--host HOST` | `127.0.0.1` | Bind host for `--transport http` |

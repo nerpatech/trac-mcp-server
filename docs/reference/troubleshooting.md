@@ -157,7 +157,10 @@ When enabled, the server writes detailed debug output to the log file.
 
 | Mode | Default Location |
 |------|------------------|
-| MCP Server | `/tmp/trac-mcp-server.log` |
+| MCP Server (stdio) | `/tmp/trac-mcp-server.log` |
+| MCP Server (http) | none; logs to stderr (a file only with `--log-file` or `LOG_FILE`) |
+
+`--log-file` wins over the `LOG_FILE` environment variable. An empty value (`--log-file ""` or `LOG_FILE=`) disables the file; stdio then logs to stderr.
 
 **Custom MCP log location:**
 ```bash

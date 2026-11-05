@@ -110,6 +110,7 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
+| `LOG_FILE` | No | `/tmp/trac-mcp-server.log` (stdio) / none (http) | Log file path, used when `--log-file` is not given. Set it to an empty string for no log file (stdio then logs to stderr). Read by the logger, not by the config file; `logging.file` above does not set it |
 
 Boolean variables (`TRAC_INSECURE`, `TRAC_DEBUG`) accept `true`, `1`, `yes`, or `on` (case-insensitive). Any other value is treated as `false`.
 

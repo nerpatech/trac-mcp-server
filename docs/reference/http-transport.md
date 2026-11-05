@@ -248,7 +248,7 @@ Browser-based MCP clients need CORS support -- an `Access-Control-Allow-Origin` 
 
 ## Logging
 
-Unlike stdio (which must keep stdout clean for JSON-RPC and logs to a file only), the http transport logs to stderr (plus an optional file via `--log-file`), like the CLI. `uvicorn` and `uvicorn.access` are silenced to `WARNING` unless `LOG_LEVEL=DEBUG`.
+Unlike stdio (which must keep stdout clean for JSON-RPC and logs to a file only), the http transport logs to stderr, plus a file only when `--log-file` or the `LOG_FILE` environment variable names one (there is no default file), like the CLI. `uvicorn` and `uvicorn.access` are silenced to `WARNING` unless `LOG_LEVEL=DEBUG`.
 
 ## Verifying
 

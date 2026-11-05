@@ -336,5 +336,5 @@ For common issues and solutions, see [Troubleshooting Reference](reference/troub
 1. Verify Python version: `python --version` (must be 3.10+)
 2. Verify installation: `trac-mcp-server --version`
 3. Enable debug logging: set `TRAC_DEBUG=true` in your environment or `.env` file
-4. Check log file: `/tmp/trac-mcp-server.log` (default location)
+4. Check log file: `/tmp/trac-mcp-server.log` (default location for stdio; the http transport has no log file unless `LOG_FILE` or `--log-file` is set)
 5. Check MCP client logs for connection or startup errors
