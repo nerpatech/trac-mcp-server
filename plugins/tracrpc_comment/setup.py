@@ -10,11 +10,11 @@ from setuptools import setup
 
 setup(
     name='TracRpcComment',
-    version='1.1.0',
+    version='1.2.0',
     author='Oleg Mazurov',
     author_email='admin@nerpa.tech',
-    description='Ticket comment edit/delete/history, timeline access and '
-                'a version-checked wiki put over Trac XML-RPC.',
+    description='Ticket comment edit/delete/history/lookup, timeline access '
+                'and a version-checked wiki put over Trac XML-RPC.',
     license='MIT',
     packages=['tracrpc_comment'],
     # Declares the Trac components this egg provides. Trac reads this to

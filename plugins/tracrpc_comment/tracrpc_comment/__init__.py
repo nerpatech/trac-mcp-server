@@ -6,7 +6,8 @@ dispatcher (``tracrpc.api.XMLRPCSystem.get_method``) iterates every
 ``IXMLRPCHandler`` provider and matches on the full dotted method name, so a
 second component may claim an existing namespace as long as it yields method
 names the incumbent does not. ``tracrpc.ticket.TicketRPC`` never yields
-``editComment``, ``deleteComment`` or ``getCommentHistory``,
+``editComment``, ``deleteComment``, ``getCommentHistory``,
+``replyToComment`` or ``getChangeAt``,
 ``tracrpc.wiki.WikiRPC`` never yields ``putPageIfVersion``, and nothing
 yields a ``timeline`` namespace at all.
 
@@ -21,4 +22,4 @@ from tracrpc_comment.wiki_put import WikiConditionalPutRPC
 
 __all__ = ['TicketCommentRPC', 'TimelineRPC', 'WikiConditionalPutRPC']
 
-__version__ = '1.1.0'
+__version__ = '1.2.0'

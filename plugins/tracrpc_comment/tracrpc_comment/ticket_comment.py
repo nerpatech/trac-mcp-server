@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Comment-level ticket operations over XML-RPC: edit, delete, history.
+"""Comment-level ticket operations over XML-RPC.
 
-Trac 1.6 already implements all three in ``trac.ticket.model.Ticket``
-(``modify_comment``, ``delete_change``, ``get_comment_history``). The only
-thing missing is RPC exposure, which is what this module adds.
+Trac 1.6 already implements edit, delete and history in
+``trac.ticket.model.Ticket`` (``modify_comment``, ``delete_change``,
+``get_comment_history``). The only thing missing is RPC exposure, which is
+what this module adds. ``getChangeAt`` is the exception: a lookup of the
+one change set stored at a microsecond timestamp.
 """
 
 from trac.core import Component, TracError, implements
 from trac.resource import Resource
 from trac.ticket.model import Ticket
+from trac.util.datefmt import from_utimestamp
 
 from tracrpc.api import IXMLRPCHandler
 
@@ -90,6 +93,7 @@ class TicketCommentRPC(Component):
         yield (None, ((list, int, int),), self.getCommentHistory)
         yield (None, ((int, int, int, str), (int, int, int, str, bool)),
                self.replyToComment)
+        yield (None, ((list, int, str),), self.getChangeAt)
 
     # Exported methods
 
@@ -185,3 +189,33 @@ class TicketCommentRPC(Component):
         if quote:
             body = _quote_of(parent, cnum) + comment
         return ticket.save_changes(req.authname, body, replyto=cnum)
+
+    def getChangeAt(self, req, id, ts):
+        """Return the comment of the change set stored at `ts` on ticket `id`.
+
+        `ts` is the microsecond time as a STRING of digits -- the `_ts`
+        value `ticket.update` returns. It is never an int because XML-RPC
+        ints are 32-bit.
+
+        Returns `[cnum, author, comment]` for the change at exactly that
+        microsecond: `cnum` is the comment number as Trac stores it (a
+        string, dotted like "2.5" for a threaded reply), `author` the
+        change's author and `comment` the stored text, unmodified. Returns
+        `[]` when nothing was changed at that time or that change carries no
+        comment field, so a caller can tell "not found" from an error.
+
+        Lets a client find the comment it just posted without reading the
+        whole changelog.
+
+        Requires TICKET_VIEW on the ticket.
+        """
+        ticket = Ticket(self.env, id)
+        req.perm(ticket.resource).require('TICKET_VIEW')
+        if not (isinstance(ts, str) and ts.isascii() and ts.isdigit()):
+            raise TracError(
+                "ts must be a string of integer microseconds, got %r" % (ts,))
+        change = ticket.get_change(cdate=from_utimestamp(int(ts)))
+        if not change or 'comment' not in change['fields']:
+            return []
+        comment = change['fields']['comment']
+        return [comment['old'], change['author'], comment['new']]
