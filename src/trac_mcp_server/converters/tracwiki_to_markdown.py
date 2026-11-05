@@ -1686,6 +1686,17 @@ class TracWikiParser:
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
 
+        Ticket #145: a continuation line (non-empty stack) that follows a
+        citation line, i.e. a line starting with ``>``, also gets a blank
+        line first, unless it is itself a ``>`` line or one of
+        ``_LAZY_CONTINUATION_INTERRUPT_RE``'s shapes (a fence, ...). Plain
+        text straight after ``> q`` is a lazy continuation of the quote to
+        CommonMark, but Trac renders it after the blockquote, inside the
+        item (measured on /trac_test); the blank line makes the Markdown
+        mean what Trac renders, and the write leg takes it back out
+        (``_item_block_separator``'s ``"adjacent"``). The next list marker
+        needs none, and neither does the end of the text.
+
         The pop threshold is strict ("deeper than", not "at least as
         deep") -- ticket #75's own measured boundary (section 2's
         two-space continuation under a one-space marker: continues;
@@ -1730,6 +1741,15 @@ class TracWikiParser:
                     and out
                     and out[-1].strip()
                     and not _LAZY_CONTINUATION_INTERRUPT_RE.match(line)
+                ):
+                    out.append("")
+                elif (
+                    stack
+                    and out
+                    and out[-1].lstrip(" \t").startswith(">")
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                        line.lstrip(" \t")
+                    )
                 ):
                     out.append("")
             out.append(line)
