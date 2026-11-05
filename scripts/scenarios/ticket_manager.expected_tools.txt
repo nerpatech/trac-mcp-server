@@ -14,6 +14,7 @@ ticket_batch_create
 ticket_batch_delete
 ticket_batch_update
 ticket_changelog
+ticket_check_list
 ticket_component_create
 ticket_component_delete
 ticket_component_list
