@@ -4126,6 +4126,24 @@ class TestHandleTicketChangelog:
         assert text.rstrip().endswith("comment: Fixed it")
         assert row["newvalue"] == "Fixed it\r\n\n"
 
+    def test_changelog_drops_trailing_whitespace_only_lines(self):
+        """`rstrip("\\r\\n")` stopped at a space, so "Fixed it\\n \\n"
+        printed a trailing blank-indented line; all trailing whitespace
+        goes, so it prints in the one-line form (#155)."""
+        text, row = self._changelog_text("Fixed it\n \n")
+        assert text.rstrip().endswith("comment: Fixed it")
+        assert "comment:\n" not in text
+        assert row["newvalue"] == "Fixed it\n \n"
+
+    def test_changelog_crlf_comment_lines_carry_no_cr(self):
+        """A CRLF multi-line comment is split on CRLF, so no block line
+        ends in a stray \\r; the structured row keeps the stored bytes
+        (#155)."""
+        text, row = self._changelog_text(" * a\r\n * b")
+        assert "comment:\n     * a\n     * b" in text
+        assert "\r" not in text
+        assert row["newvalue"] == " * a\r\n * b"
+
     def test_changelog_whitespace_only_comment_is_like_empty(self):
         """A whitespace-only comment prints like an empty one, not as a
         bare `comment: ` line; the structured row keeps the stored

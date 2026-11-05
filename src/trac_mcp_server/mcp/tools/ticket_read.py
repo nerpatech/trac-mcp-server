@@ -5,6 +5,7 @@ All tools use async handlers with run_sync() to bridge synchronous TracClient ca
 automatic Markdown conversion, and structured error responses.
 """
 
+import re
 import xmlrpc.client
 from typing import Any
 
@@ -619,16 +620,21 @@ async def _handle_changelog(
             # Comment content is in newvalue, returned as stored (#69)
             # A whitespace-only comment has nothing to show: print it like
             # an empty one, not as a bare "comment: " line (#155).
-            if newvalue and newvalue.strip():
+            if newvalue and not newvalue.isspace():
                 comment_text = newvalue
                 # Indent multiline comments for readability. Only trailing
-                # line breaks go: leading whitespace is TracWiki markup
-                # (` * item` is a list item), so stripping it would print
-                # something other than what is stored (#69, #155). A
-                # comment that starts with whitespace takes the block form
-                # too, where its own indent stays visible under the 4-space
-                # one.
-                comment_lines = comment_text.rstrip("\r\n").split("\n")
+                # whitespace goes (rstrip, so a "\n \n" tail too): leading
+                # whitespace is TracWiki markup (` * item` is a list item),
+                # so stripping it would print something other than what is
+                # stored (#69, #155). Lines split on LF or CRLF so a CRLF
+                # comment leaves no stray "\r"; not splitlines(), which
+                # also splits on \x0b, \x0c, U+2028 and so changes the
+                # text. A comment that starts with whitespace takes the
+                # block form too, where its own indent stays visible under
+                # the 4-space one.
+                comment_lines = re.split(
+                    r"\r?\n", comment_text.rstrip()
+                )
                 if len(comment_lines) > 1 or comment_text[0].isspace():
                     indented_comment = "\n    ".join(comment_lines)
                     entries.append(
