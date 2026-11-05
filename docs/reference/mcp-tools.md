@@ -1855,6 +1855,9 @@ The lookups reuse the write gate's helpers and run only when the converted TracW
       "html_truncated": false
     }
   ],
+  "ticket_refs": [
+    {"ticket": 3, "ref": "#3", "summary": "defect: Expand DEFAULT_TICKET_TYPE docstring comment in mcp/tools/constants.py (closed: fixed)", "first_section": "comment 1"}
+  ],
   "stats": {
     "sections": 2,
     "anchors": 4,
@@ -1869,6 +1872,8 @@ The lookups reuse the write gate's helpers and run only when the converted TracW
 Each anchor's `resolved_url` is populated only for a probed InterTrac wiki-dispatcher href (from `check_targets`'s live probe) -- it's the real page the dispatcher redirects to, not the `/intertrac/wiki%3A...` href itself. `missing: true` marks a link Trac itself rendered with the `missing` class (a dead local wiki target). Realm grouping comes from Trac's own rendered `class` attribute, never from parsing the href.
 
 The text result's `Ticket refs` line lists each local ticket the document links to once, across all sections, in the order first seen (at most 50, then `... and K more`), with Trac's own title for the link (type, summary, status), so a mistyped `#N` that happens to hit an existing ticket shows up as the wrong summary. It is not a finding and does not count toward the error or warning totals; a ticket that does not exist is left off it (that is `missing_local_target`, listed under `Missing links`). The same data is in each section's `links.ticket` entries (`text`, `title`). Before Trac /trac_mcp_server #151 this was the `bare_ticket_ref` warning, emitted once per citation; that code no longer exists.
+
+The structured result carries the same list as the top-level `ticket_refs` key (Trac /trac_mcp_server #152), because clients that read only `structuredContent` never see the text line. Each entry is `{"ticket", "ref", "summary", "first_section"}`: `ticket` is the ticket number as an integer (`null` only when no link to it had a `/ticket/N` href), `ref` the key the text line prints (`#105`, or the whitespace-collapsed link text when the href has no `/ticket/N`, uncapped), `summary` Trac's title for the link without its leading `#N: ` or `Comment M for #N: ` (`null` only when no link to that ticket had a title), and `first_section` the section where the ticket was first seen (`description`, `comment 3`, `page`), even when a later link supplied the summary. The list is complete and its entries are not shortened: the 50-entry cap and the per-entry length cap apply to the text line only, whose overflow tail points here. It is in first-seen order, a ticket cited twice appears once (the first link's values win; later links fill in a still-null `ticket` or `summary`, and a `#N: ` titled link replaces a summary that did not come from one), and a ticket that does not exist is absent. One helper builds both, so the text line and `ticket_refs` cannot disagree. `wiki_render_check` returns `ticket_refs` too, with `first_section` `page`.
 
 **Error Responses:**
 

@@ -60,7 +60,8 @@ _MAX_TICKET_REF_CHARS = 160
 # capped by `_MAX_TICKET_REF_CHARS`, but the number of entries is not
 # otherwise bounded: a document citing 300 distinct tickets would give a
 # single ~49K-character line. Past the cap the line ends with a count of
-# the rest; every ticket is still in `structuredContent` `links.ticket`.
+# the rest; every ticket is still in `structuredContent` `ticket_refs`,
+# which is neither capped nor shortened (ticket #152).
 _MAX_TICKET_REFS = 50
 
 # The ticket number a local ticket link points at, from its href. Trac
@@ -89,11 +90,12 @@ TICKET_RENDER_CHECK_TOOL = types.Tool(
         "'preview-checks: allow <code>' line in its source). Use this "
         "right after any "
         "ticket_update/ticket_create write to verify what Trac actually "
-        "rendered, not just what was stored. The text result also lists "
-        "each local ticket linked (once, with its summary, so a "
-        "mistyped number shows up as the wrong summary), each missing "
-        "link, the code blocks, and the rendered HTML when "
-        "include_html is true, for clients that only see text."
+        "rendered, not just what was stored. The local tickets linked "
+        "are listed once each with their summary (so a mistyped number "
+        "shows up as the wrong summary) in structuredContent.ticket_refs "
+        "and in the text result's 'Ticket refs' line; the text result "
+        "also lists each missing link, the code blocks, and the "
+        "rendered HTML when include_html is true."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -187,11 +189,12 @@ WIKI_RENDER_CHECK_TOOL = types.Tool(
         "instead of converting; a page can opt out of a "
         "named code with a 'preview-checks: allow <code>' line in its "
         "source). Use this right after any wiki_update/wiki_create "
-        "write. The text result also lists each local ticket linked "
-        "(once, with its summary, so a mistyped number shows up as the "
-        "wrong summary), each missing link, the code blocks, and the "
-        "rendered HTML when include_html is true, for clients that "
-        "only see text."
+        "write. The local tickets linked are listed once each with "
+        "their summary (so a mistyped number shows up as the wrong "
+        "summary) in structuredContent.ticket_refs and in the text "
+        "result's 'Ticket refs' line; the text result also lists each "
+        "missing link, the code blocks, and the rendered HTML when "
+        "include_html is true."
     ),
     annotations=types.ToolAnnotations(
         readOnlyHint=True,
@@ -383,12 +386,18 @@ async def _probe_all_sections(
     return await run_sync(probe_targets, client, probeable, target_cap)
 
 
+def _section_name(section: dict) -> str:
+    """``page`` / ``description`` / ``comment 3`` -- a section's name
+    without the brackets ``_section_label`` puts around it."""
+    if section["ref"] is None:
+        return section["kind"]
+    return f"{section['kind']} {section['ref']}"
+
+
 def _section_label(section: dict) -> str:
     """``[page]`` / ``[description]`` / ``[comment 3]`` -- the one label
     every part of the text block uses for a section."""
-    if section["ref"] is None:
-        return f"[{section['kind']}]"
-    return f"[{section['kind']} {section['ref']}]"
+    return f"[{_section_name(section)}]"
 
 
 def _one_line(value: str, limit: int) -> str:
@@ -424,13 +433,15 @@ def _missing_links_lines(section_results: list[dict]) -> list[str]:
     return [f"Missing links ({len(missing)}):", *missing]
 
 
-def _ticket_ref_key(link: dict) -> str:
-    """``#N`` for a link whose href names ticket N, else its text -- so
+def _ticket_ref_key(link: dict) -> tuple[str, int | None]:
+    """``(key, number)``: ``#N`` and N for a link whose href names
+    ticket N, else the link's text with whitespace collapsed (not
+    capped: the text line caps each entry itself) and ``None`` -- so
     ``#18``, ``ticket:18`` and ``[ticket:18 the bug]`` count as one."""
     match = _TICKET_HREF_RE.search(link["href"] or "")
     if match:
-        return f"#{match.group(1)}"
-    return _one_line(link["text"], _MAX_LINK_TEXT_CHARS)
+        return f"#{match.group(1)}", int(match.group(1))
+    return " ".join(link["text"].split()), None
 
 
 def _ticket_ref_summary(key: str, title: str | None) -> str | None:
@@ -450,52 +461,94 @@ def _ticket_ref_summary(key: str, title: str | None) -> str | None:
     return summary or None
 
 
-def _ticket_refs_line(section_results: list[dict]) -> str:
+def _ticket_refs(section_results: list[dict]) -> list[dict]:
     """Every local ticket the document links to, listed once, in the
     order first seen across all sections, with Trac's own summary for it
-    (ticket #151).
+    (tickets #151, #152).
 
-    This replaces the ``bare_ticket_ref`` warning, which fired once per
-    citation and drowned the real findings. It is NOT a finding: it does
-    not count toward the error or warning totals. It is here for the one
-    case no check can catch -- a mistyped number that happens to hit a
-    real ticket -- which only the summary next to the number reveals.
+    This is the one place that de-duplicates: the text ``Ticket refs``
+    line (``_ticket_refs_line``) and ``structuredContent`` ``ticket_refs``
+    are both built from its result, so they cannot drift apart.
 
     A missing ticket is left out: that stays ``missing_local_target`` at
-    ``error`` and is listed by ``_missing_links_lines``. The data comes
-    from ``links.ticket`` (``_link_entry``), which the structured result
-    already carries; this line adds nothing a structured client lacks.
+    ``error`` and is listed by ``_missing_links_lines``.
 
-    When the same ticket is linked twice, the first link's summary wins,
-    unless it had no ``#N: ...`` title (Trac titles a ``comment:`` link
-    "Comment M for #N: <type>: <summary> (<status>)") and a later link
-    does.
+    When the same ticket is linked again, the first link's values win,
+    with these fill-ins from later links: ``ticket`` is set if it is
+    still ``None`` and the later link has a number; ``summary`` is set if
+    it is still ``None`` and the later link has any title (a ``comment:``
+    link's "Comment M for #N: <type>: <summary> (<status>)" included);
+    and a ``#N: ...`` shaped title replaces a summary that did not come
+    from one. ``first_section`` stays the section where the ticket was
+    first seen either way.
+
+    Each entry is ``{"ticket", "ref", "summary", "first_section"}``:
+    ``ref`` is the key the text line prints (``#105``, or the
+    whitespace-collapsed link text when the href has no ``/ticket/N``),
+    ``ticket`` the number as an int (``None`` only if no link to it had
+    a ``/ticket/N`` href), ``summary`` Trac's title without its leading
+    ``#N: `` / ``Comment M for #N: `` (``None`` only if no link to it
+    had a title), ``first_section`` a section name as in
+    ``_section_name``. Nothing is capped here.
     """
-    # key -> (summary, whether it came from a `#N: ...` title)
-    refs: dict[str, tuple[str | None, bool]] = {}
+    refs: dict[str, dict] = {}
+    # keys whose summary came from a `#N: ...` title
+    shaped: set[str] = set()
     for s in section_results:
         for link in s["links"]["ticket"]:
             if link["missing"]:
                 continue
-            key = _ticket_ref_key(link)
+            key, number = _ticket_ref_key(link)
             summary = _ticket_ref_summary(key, link["title"])
-            shaped = (link["title"] or "").startswith(f"{key}: ")
-            if key not in refs or (shaped and not refs[key][1]):
-                refs[key] = (summary, shaped)
+            is_shaped = (link["title"] or "").startswith(f"{key}: ")
+            entry = refs.get(key)
+            if entry is None:
+                refs[key] = {
+                    "ticket": number,
+                    "ref": key,
+                    "summary": summary,
+                    "first_section": _section_name(s),
+                }
+                if is_shaped:
+                    shaped.add(key)
+                continue
+            if entry["ticket"] is None:
+                entry["ticket"] = number
+            if is_shaped and key not in shaped:
+                entry["summary"] = summary
+                shaped.add(key)
+            elif entry["summary"] is None:
+                entry["summary"] = summary
+    return list(refs.values())
+
+
+def _ticket_refs_line(refs: list[dict]) -> str:
+    """The ``Ticket refs`` text line for ``_ticket_refs``' list.
+
+    It is NOT a finding: it does not count toward the error or warning
+    totals. It is here for the one case no check can catch -- a mistyped
+    number that happens to hit a real ticket -- which only the summary
+    next to the number reveals.
+
+    Only the line is capped: at ``_MAX_TICKET_REFS`` entries, each at
+    ``_MAX_TICKET_REF_CHARS``. The complete list is in
+    ``structuredContent`` ``ticket_refs``, which the line names when it
+    leaves entries off.
+    """
     if not refs:
         return "Ticket refs: none."
     entries = [
         _one_line(
-            f"{key} {summary}" if summary else key,
+            f"{r['ref']} {r['summary']}" if r["summary"] else r["ref"],
             _MAX_TICKET_REF_CHARS,
         )
-        for key, (summary, _) in list(refs.items())[:_MAX_TICKET_REFS]
+        for r in refs[:_MAX_TICKET_REFS]
     ]
     line = f"Ticket refs ({len(refs)}): {'; '.join(entries)}"
     if len(refs) > _MAX_TICKET_REFS:
         line += (
             f"; ... and {len(refs) - _MAX_TICKET_REFS} more "
-            "(all in structuredContent links.ticket)"
+            "(all in structuredContent ticket_refs)"
         )
     return line
 
@@ -569,6 +622,8 @@ def _document_response(
         del entry["_facts"]
         sections_out.append(entry)
 
+    ticket_refs = _ticket_refs(section_results)
+
     response_lines = [
         f"{target}: {total_errors} error(s), {total_warnings} warning(s) "
         f"across {len(section_results)} section(s).",
@@ -592,7 +647,7 @@ def _document_response(
         "external, "
         f"{sum(len(s['links']['other']) for s in section_results)} other."
     )
-    response_lines.append(_ticket_refs_line(section_results))
+    response_lines.append(_ticket_refs_line(ticket_refs))
     response_lines.extend(_missing_links_lines(section_results))
     response_lines.extend(_code_block_lines(section_results))
     response_lines.extend(_html_lines(section_results))
@@ -606,6 +661,7 @@ def _document_response(
         structuredContent={
             "target": target,
             "sections": sections_out,
+            "ticket_refs": ticket_refs,
             "stats": {
                 "sections": len(section_results),
                 "anchors": total_anchors,
