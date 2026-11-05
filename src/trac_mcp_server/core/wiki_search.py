@@ -240,23 +240,28 @@ class BM25:
 
 def make_snippet(section: Section, terms: Sequence[str]) -> str:
     """A slice of the section's ``body`` around the first place any of
-    ``terms`` occurs in it (case-insensitively), about
-    ``SNIPPET_RADIUS`` characters each side, with ``...`` on a cut end.
+    ``terms`` occurs in it, about ``SNIPPET_RADIUS`` characters each
+    side, with ``...`` on a cut end.
 
-    When no term occurs literally (a CamelCase part, say), the start of
-    the body. Always cut from the body, never from the synthetic head
-    line, so the text between the ellipses is in the stored page.
+    The anchor is the first whole-word occurrence (case-insensitive, and
+    neither neighbour a letter or digit of any script; an underscore
+    does not count as one), so ``ci`` anchors on ``ci.sh`` rather than
+    inside ``decision``. Failing that, the first occurrence of any
+    kind; failing that (a CamelCase part, say), the start of the body.
+    Always cut from the body, never from the synthetic head line, so the
+    text between the ellipses is in the stored page.
     """
     body = section.body
-    pattern = None
+    m = None
     if terms:
         # Longest first, so at one position the longest term wins.
         alt = "|".join(
             re.escape(t)
             for t in sorted(set(terms), key=len, reverse=True)
         )
-        pattern = re.compile(alt, re.IGNORECASE)
-    m = pattern.search(body) if pattern else None
+        m = re.search(
+            rf"(?<![^\W_])(?:{alt})(?![^\W_])", body, re.IGNORECASE
+        ) or re.search(alt, body, re.IGNORECASE)
     if m is not None:
         start = max(0, m.start() - SNIPPET_RADIUS)
         end = min(len(body), m.end() + SNIPPET_RADIUS)

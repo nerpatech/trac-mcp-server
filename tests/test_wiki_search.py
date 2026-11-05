@@ -453,3 +453,50 @@ def _ascii_reference_tokenize(text: str) -> list[str]:
 )
 def test_ascii_text_tokenizes_as_it_always_did(text):
     assert tokenize(text) == _ascii_reference_tokenize(text)
+
+
+# --------------------------------------------------------------------
+# The snippet anchors on a whole word first (review fix)
+# --------------------------------------------------------------------
+
+
+def test_snippet_prefers_a_whole_word_over_a_substring_of_another():
+    # "ci" occurs first inside "decision"; the word "ci" is in "ci.sh"
+    body = (
+        "A decision was taken. "
+        + "filler words go here. " * 8
+        + "Run ci.sh before you push the branch. "
+        + "more filler text. " * 8
+    )
+    sec = split_sections("P", body)[0]
+    snippet = make_snippet(sec, ["ci"])
+    assert "ci.sh" in snippet
+    assert "decision" not in snippet
+    assert snippet.startswith("...")
+    assert _strip_ellipsis(snippet) in body
+    hits = search_pages(BM25(_sections({"P": body})), "ci")
+    assert "ci.sh" in hits[0]["snippet"]
+    assert "decision" not in hits[0]["snippet"]
+
+
+def test_snippet_whole_word_match_is_case_insensitive_and_unicode_aware():
+    body = "x" * 120 + " Café ouvert " + "y" * 120
+    sec = split_sections("P", body)[0]
+    assert "Café" in make_snippet(sec, ["café"])
+    # an underscore is not a word character here: "ci" in "ci_value"
+    # is a whole word, as the tokenizer splits it there
+    body = "decision " + "z" * 150 + " run ci_value now " + "w" * 20
+    sec = split_sections("P", body)[0]
+    snippet = make_snippet(sec, ["ci"])
+    assert "ci_value" in snippet
+    assert "decision" not in snippet
+
+
+def test_snippet_falls_back_to_a_substring_then_to_the_start():
+    # no whole-word "ci": the first raw occurrence anchors it
+    body = "q" * 120 + " decision " + "r" * 120
+    sec = split_sections("P", body)[0]
+    assert "decision" in make_snippet(sec, ["ci"])
+    # no occurrence at all: the start of the body
+    sec = split_sections("P", "Body start. " + "x" * 200)[0]
+    assert make_snippet(sec, ["zzz"]).startswith("Body start.")
