@@ -3253,7 +3253,13 @@ class TestHandleTicketSearch:
 
             result = self._run(_handle_search(client, {}))
 
-            assert "None" not in result.content[0].text
+            text = result.content[0].text
+            assert "None" not in text
+            # The shape, not just the token: labels kept, slots empty.
+            assert (
+                "- #10:  (status: , owner: ) - "
+                "https://trac.example.com/ticket/10"
+            ) in text.splitlines()
             ticket = result.structuredContent["tickets"][0]
             for name in ("summary", "status", "owner"):
                 assert ticket[name] == "", name
@@ -3519,7 +3525,18 @@ class TestHandleTicketGet:
 
             result = self._run(_handle_get(client, {"ticket_id": 5}))
 
-            assert "None" not in result.content[0].text
+            text = result.content[0].text
+            assert "None" not in text
+            # The shape, not just the token: labels kept, slots empty,
+            # and an empty resolution leaves its slot out entirely.
+            lines = text.splitlines()
+            for expected in (
+                "Ticket #5: ",
+                "Status:  | Owner:  | Reporter:  | Type: ",
+                "Priority:  | Component:  | Milestone: ",
+                "Keywords:  | Cc: ",
+            ):
+                assert expected in lines, expected
             for name in fields:
                 assert result.structuredContent[name] == "", name
             assert result.structuredContent["_ts"] == "1788093861682305"
