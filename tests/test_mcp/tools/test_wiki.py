@@ -414,6 +414,26 @@ class TestHandleSearch(unittest.TestCase):
                 " 'User/'.",
             )
 
+    def test_handle_search_query_without_searchable_words(self):
+        """A query of stopwords and one-character words has no terms:
+        say so, rather than "No wiki pages found"."""
+        for query in ("why was the", "a", "I a", "?! --"):
+            with patch(
+                "trac_mcp_server.mcp.tools.wiki_read.run_sync"
+            ) as mock_run_sync:
+                result = asyncio.run(
+                    _handle_search(self.mock_client, {"query": query})
+                )
+            self.assertTrue(result.isError, query)
+            text = result.content[0].text
+            self.assertIn("Error (validation_error)", text)
+            self.assertIn(
+                "The query has no searchable words: stopwords and"
+                " one-character words are ignored.",
+                text,
+            )
+            mock_run_sync.assert_not_called()
+
     def test_handle_search_missing_query(self):
         """Test _handle_search returns error when query is missing."""
         result = asyncio.run(_handle_search(self.mock_client, {}))

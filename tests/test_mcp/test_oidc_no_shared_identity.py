@@ -131,8 +131,11 @@ def _arguments_for(schema: dict) -> dict:
 
 # A schema cannot say that an object must not be empty, and the handler of this
 # tool returns "attributes is required" on an empty one before any request.
+# Nor can it say that a query needs a word of two or more characters:
+# wiki_search refuses "x" ("no searchable words") before any request.
 _EXTRA_ARGUMENTS = {
-    "milestone_update": {"attributes": {"description": "x"}}
+    "milestone_update": {"attributes": {"description": "x"}},
+    "wiki_search": {"query": "xyz"},
 }
 
 # Everything else has to reach the transport, or the tests below prove nothing

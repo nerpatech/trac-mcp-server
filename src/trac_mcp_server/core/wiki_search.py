@@ -46,7 +46,10 @@ HEADING = re.compile(
 )
 _STARTBLOCK = re.compile(r"^\s*\{\{\{(?:(\s*)#!([\w+-][\w+-/]*)|\s*$)")
 
-_TOKEN = re.compile(r"[A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)*")
+# A word is letters and digits of any script (``[^\W_]``): Cyrillic
+# and accented words are indexed, ``café`` is one token. Only the
+# CamelCase split below stays ASCII.
+_TOKEN = re.compile(r"[^\W_]+(?:[._/-][^\W_]+)*")
 _CAMEL = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+")
 _SPLIT = re.compile(r"[._/-]")
 _PARAGRAPH_BREAK = re.compile(r"\r?\n[ \t]*\r?\n")
@@ -73,7 +76,9 @@ def tokenize(text: str) -> list[str]:
         if len(subs) > 1:
             out.extend(s.lower() for s in subs)
         for s in subs:
-            parts = _CAMEL.findall(s)
+            # CamelCase parts are cut by ASCII case; a part of a
+            # non-ASCII word would be a fragment of it.
+            parts = _CAMEL.findall(s) if s.isascii() else ()
             if len(parts) > 1:
                 out.extend(p.lower() for p in parts)
     return [t for t in out if len(t) >= 2 and t not in STOPWORDS]

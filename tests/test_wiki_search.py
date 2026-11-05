@@ -382,3 +382,74 @@ def test_ordinary_headings_still_split_with_the_same_names(line, name):
 def test_a_crlf_heading_splits():
     secs = split_sections("P", "= One =\r\nbody\r\n")
     assert [s.heading for s in secs] == ["One"]
+
+
+# --------------------------------------------------------------------
+# Non-ASCII words (review fix)
+# --------------------------------------------------------------------
+
+
+def test_accented_and_cyrillic_words_are_tokens():
+    assert tokenize("café") == ["café"]
+    assert tokenize("Café CAFÉ") == ["café", "café"]
+    assert tokenize("Привет, мир") == ["привет", "мир"]
+    assert tokenize("настройка/доступа") == [
+        "настройка/доступа",
+        "настройка",
+        "доступа",
+    ]
+
+
+def test_non_ascii_words_are_found():
+    pages = {
+        "Menu": "Свежий кофе и café au lait\n",
+        "Other": "nothing to see\n",
+    }
+    index = BM25(_sections(pages))
+    assert [h["name"] for h in search_pages(index, "кофе")] == ["Menu"]
+    assert [h["name"] for h in search_pages(index, "CAFÉ")] == ["Menu"]
+    assert "café" in search_pages(index, "café")[0]["snippet"]
+    # a word is a whole token: "caf" is not "café"
+    assert search_pages(index, "caf") == []
+
+
+def _ascii_reference_tokenize(text: str) -> list[str]:
+    """The tokenizer as measured, ASCII-only (the regexes before the
+    non-ASCII change)."""
+    import re
+
+    token = re.compile(r"[A-Za-z0-9]+(?:[._/-][A-Za-z0-9]+)*")
+    camel = re.compile(
+        r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|[0-9]+"
+    )
+    split = re.compile(r"[._/-]")
+    out: list[str] = []
+    for tok in token.findall(text):
+        out.append(tok.lower())
+        subs = split.split(tok)
+        if len(subs) > 1:
+            out.extend(s.lower() for s in subs)
+        for s in subs:
+            parts = camel.findall(s)
+            if len(parts) > 1:
+                out.extend(p.lower() for p in parts)
+    return [t for t in out if len(t) >= 2 and t not in STOPWORDS]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Why was my Status change ignored, I think",
+        "CloseViaWorkflowAction",
+        "ticket_update",
+        "Rules/trac/RenderVerify",
+        "HTTPServer2",
+        "version 1.2.3-rc1 of foo_bar.baz/qux",
+        "snake_case and kebab-case and dot.case",
+        "= Heading =\n * item_one\n * ItemTwo\n{{{\ncode_block()\n}}}",
+        "a-b c_d e.f _lead trail_ -x- 12 345 ABC DEFg hIJ",
+        "Source: [wiki:Page/Name label] ''italic'' '''bold'''",
+    ],
+)
+def test_ascii_text_tokenizes_as_it_always_did(text):
+    assert tokenize(text) == _ascii_reference_tokenize(text)

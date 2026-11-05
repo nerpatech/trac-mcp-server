@@ -17,6 +17,7 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
+from ...core.wiki_search import tokenize
 from .errors import (
     build_error_response,
     format_timestamp,
@@ -327,6 +328,17 @@ async def _handle_search(
 
     # Ensure limit is within bounds
     limit = min(max(1, limit), 50)
+
+    # Stopwords and one-character words are not searched: a query of
+    # nothing else has no terms, which is not "no page matches".
+    if not tokenize(query):
+        return build_error_response(
+            "validation_error",
+            "The query has no searchable words: stopwords and "
+            "one-character words are ignored.",
+            "Use at least one distinctive word of two or more "
+            "characters.",
+        )
 
     # Decode cursor or start at offset 0
     if cursor:
