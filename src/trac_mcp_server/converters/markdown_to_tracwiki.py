@@ -1,7 +1,7 @@
 """Markdown to TracWiki conversion using mistune AST rendering."""
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 import mistune
 
@@ -11,7 +11,7 @@ from .common import (
     ConversionResult,
     markdown_to_tracwiki_lang,
 )
-from .tracwiki_to_markdown import FALLBACK_FENCE_INFO
+from .tracwiki_to_markdown import _LIST_MARKER_RE, FALLBACK_FENCE_INFO
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -240,6 +240,148 @@ def _indent_nonblank(lines: list[str], indent: str) -> list[str]:
     return [indent + line if line else line for line in lines]
 
 
+def _is_fallback_fence(info: str | None) -> bool:
+    """True when a fenced block's info string is the #63 verbatim-unwrap
+    marker (`FALLBACK_FENCE_INFO`). The one test, for `block_code()` and
+    the list-item run split."""
+    return bool(info) and info.strip() == FALLBACK_FENCE_INFO
+
+
+def _is_paragraph_token(token: dict[str, Any]) -> bool:
+    """True for a paragraph-like block token (``paragraph``/``block_text``)."""
+    return token.get("type") in ("paragraph", "block_text")
+
+
+# A line that starts like this is TracWiki passed through verbatim (a
+# `{{{#!html` block, a heading, a `||` row, a rule). Ticket #143 review
+# (F1): " [[BR]][[BR]]" appended to such a paragraph lands on its last line,
+# and `}}} [[BR]][[BR]]` never closes the block (measured on Trac: it
+# swallows the rest of the page).
+_PASSTHROUGH_LINE_PREFIXES = ("{{{", "}}}", "||", "=", "----")
+
+
+def _has_passthrough_line(
+    text: str, *, first_only: bool = False
+) -> bool:
+    """True when a line of `text` (only its first non-blank one with
+    `first_only`) starts, stripped, like passed-through TracWiki."""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_PASSTHROUGH_LINE_PREFIXES):
+            return True
+        if first_only:
+            return False
+    return False
+
+
+def _starts_a_block_in_trac(text: str) -> bool:
+    """True when the first line of `text`, stripped, starts a Trac block of
+    its own: a ``>`` citation line, or a list marker (``*``, ``-``, ``1.``,
+    ``a.``, ``ii.``; the grammar of the read leg's `_LIST_MARKER_RE`).
+    Directly under a citation either would join the quote or open a nested
+    item (#145 review F3, e.g. a Markdown ``\\>`` or ``1\\.``)."""
+    first = text.lstrip().split("\n", 1)[0].strip()
+    return first.startswith(">") or bool(
+        _LIST_MARKER_RE.match(" " + first)
+    )
+
+
+def _item_block_separator(
+    prev_kind: str,
+    next_kind: str,
+    list_seen: bool,
+    prev_text: str,
+    next_text: str,
+) -> Literal["br", "adjacent", "blank", "quote_gap"]:
+    """How two neighbouring blocks of a list item are separated (#143, #145).
+
+    Trac ends a list at any blank line, so the pre-#143 "blank" is the
+    fallback and the other two keep the block inside the ``<li>``:
+
+    * ``"br"``: the earlier paragraph's last line ends ``" [[BR]][[BR]]"``
+      and the next paragraph follows on the next line. Kinds ``para`` then
+      ``para``.
+    * ``"adjacent"``: the next paragraph goes on the line after a ``code``
+      or ``table`` child, no blank line.
+    * ``"blank"``: everything else (#63 fallback fence, a text run after a
+      nested list, ...).
+    * ``"quote_gap"`` (#145): a lone ``>`` line, between two sibling
+      blockquotes of one item. Trac shows one blockquote with two paragraphs.
+
+    A ``quote`` (#145) is Trac's citation syntax, ``> `` lines at the item's
+    continuation indent: ``"adjacent"`` after the item text (kind ``para``),
+    a ``para``/``text`` run, or a ``code``/``table`` child, and a following
+    paragraph is ``"adjacent"`` to it too. ``"blank"`` keeps the pre-#145
+    form (blank line, two-space-indented quote) where Trac cannot take the
+    citation: once a nested list has appeared (it would attach to the
+    innermost nested item, #112/#125), and after a run with a passthrough
+    line (F1 below).
+
+    Review fixes (#145): a ``quote`` is also ``"blank"`` after a run whose
+    text already holds a blank line, and a paragraph after a quote is
+    ``"blank"`` when its first line starts a block of its own in Trac
+    (``_starts_a_block_in_trac``: ``>`` would join the quote, a list marker
+    would open a nested item). ``plain_quote`` is the kind of a quote that
+    kept the pre-#145 form; whatever follows it is ``"blank"``, as before.
+
+    Kinds are ``para`` (a paragraph, or a run starting with one), ``code``,
+    ``table``, ``quote``, ``plain_quote``, ``list`` and ``text`` (any other
+    block). The texts
+    are the rendered TracWiki on either side of the boundary (`prev_text` may be
+    empty for a ``code``/``table`` child, which cannot hold a passthrough
+    line at its end).
+
+    Review fixes: a boundary with a passthrough line (`_has_passthrough_line`;
+    ANY line of either paragraph for ``"br"``, the first line of the next run
+    for ``"adjacent"``) stays ``"blank"`` (F1). `list_seen` says a nested list
+    came earlier in the item: ``"adjacent"`` then becomes ``"blank"``, since
+    Trac attaches a block with no blank line to the innermost open item, the
+    nested one (F2). ``"br"`` inside one run is unaffected: the run itself is
+    already where it is.
+    """
+    if next_kind == "quote":
+        if list_seen:
+            return "blank"
+        if prev_kind == "quote":
+            return "quote_gap"
+        if prev_kind in ("code", "table"):
+            return "adjacent"
+        if (
+            prev_kind in ("para", "text")
+            and not _has_passthrough_line(prev_text)
+            and "\n\n" not in prev_text
+        ):
+            return "adjacent"
+        # A list, a quote that kept the pre-#145 form, or a run that
+        # already holds a blank line (the list ended there; unmeasured).
+        return "blank"
+    if next_kind != "para":
+        return "blank"
+    if prev_kind == "quote":
+        if (
+            list_seen
+            or _has_passthrough_line(next_text, first_only=True)
+            or _starts_a_block_in_trac(next_text)
+        ):
+            return "blank"
+        return "adjacent"
+    if prev_kind == "para":
+        if _has_passthrough_line(prev_text) or _has_passthrough_line(
+            next_text
+        ):
+            return "blank"
+        return "br"
+    if prev_kind in ("code", "table"):
+        if list_seen or _has_passthrough_line(
+            next_text, first_only=True
+        ):
+            return "blank"
+        return "adjacent"
+    return "blank"
+
+
 def _heading_slug(rendered_text: str) -> str:
     """Return the GitHub-style anchor slug for a rendered heading text.
 
@@ -302,6 +444,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # tell whether "[[BR]]" would land directly against a non-space
         # character (ticket #29).
         self._last_char = "\n"
+        # True while a list item's blockquote child renders (ticket #145):
+        # `block_quote()` then emits Trac citation lines, `> `-prefixed, at
+        # every nesting level, instead of the two-space-indented form.
+        self._citation = False
 
     def text(self, text: str) -> str:
         """Render plain text.
@@ -423,6 +569,43 @@ class TracWikiRenderer(mistune.BaseRenderer):
             return f"{marker} {text} {marker} #{slug}\n"
         return f"{marker} {text} {marker}\n"
 
+    def _render_text_run(
+        self, children: list[dict[str, Any]], state: Any
+    ) -> str:
+        """Render a list item's run of plain blocks (ticket #143).
+
+        Concatenates the children exactly as ``render_tokens`` does, except
+        at a paragraph-to-paragraph boundary: the blank line between them
+        would end the Trac list (Trac ends a list at any blank line), so the
+        earlier paragraph's last line ends ``" [[BR]][[BR]]"`` and the next
+        paragraph follows on the next line. The leading space is always
+        there: ``Done![[BR]]`` is Trac's ``!`` escape of the first macro,
+        and ``wiki:Foo[[BR]]`` reads as one link target (#29). Any other
+        neighbour of a paragraph (blockquote, heading, #63 fallback fence)
+        keeps today's blank line, and so does a paragraph with a line of
+        passed-through TracWiki (``_item_block_separator``, review F1).
+        """
+        pieces: list[str] = []
+        prev_paragraph = False
+        for child in children:
+            if child.get("type") == "blank_line":
+                continue  # renders as "" and must not split two paragraphs
+            rendered = self.render_tokens([child], state)
+            is_paragraph = _is_paragraph_token(child)
+            if (
+                is_paragraph
+                and prev_paragraph
+                and pieces
+                and _item_block_separator(
+                    "para", "para", False, pieces[-1], rendered
+                )
+                == "br"
+            ):
+                pieces[-1] = pieces[-1].rstrip() + " [[BR]][[BR]]\n"
+            pieces.append(rendered)
+            prev_paragraph = is_paragraph and bool(rendered.strip())
+        return "".join(pieces)
+
     def paragraph(self, text: str) -> str:
         """Render paragraph."""
         return f"{text}\n\n"
@@ -464,7 +647,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         here never leaks into their output.
         """
         code = code.rstrip("\n")
-        if info and info.strip() == FALLBACK_FENCE_INFO:
+        if _is_fallback_fence(info):
             # Unwrap, per the operator decision on ticket #63: the read leg
             # emitted this fence around TracWiki it could not express, and the
             # body is the ORIGINAL SOURCE verbatim.  Restoring it is a literal
@@ -493,8 +676,36 @@ class TracWikiRenderer(mistune.BaseRenderer):
         quoted lines here.
         """
         lines = text.rstrip("\n").split("\n")
-        quoted = "\n".join(f"  {line}" for line in lines)
+        if self._citation:
+            # Ticket #145: a list item's quote is Trac's citation syntax,
+            # which keeps it inside the <li>. An empty line is a bare ">"
+            # (no trailing space); a nested quote nests the markers
+            # ("> > x"), since ">   x" reads back as a plain paragraph.
+            quoted = "\n".join(
+                f"> {line}" if line else ">" for line in lines
+            )
+        else:
+            quoted = "\n".join(f"  {line}" for line in lines)
         return f"{quoted}\n\n"
+
+    def _render_item_quote(
+        self, children: list[dict[str, Any]], state: Any
+    ) -> str:
+        """Render a list item's blockquote child as citation lines (#145).
+
+        The quote's content is a document of its own, so a list in it
+        restarts at depth 0 (``> `` plus the list's own `` * l1``), however
+        deep the item is; the list state is put back afterwards.
+        """
+        old_depth = getattr(state, "list_depth", -1)
+        old_citation = self._citation
+        state.list_depth = -1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+        self._citation = True
+        try:
+            return self.render_tokens(children, state)
+        finally:
+            self._citation = old_citation
+            state.list_depth = old_depth  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
 
     def block_html(self, html: str) -> str:
         """Render block HTML (pass through)."""
@@ -782,6 +993,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
             # For list items, we need to determine depth and type
             case "list_item":
+                # Ticket #145 review (F2): an item's children are not in
+                # the citation of a quote this item sits in. Only the
+                # item's own quote runs are (`_render_item_quote`); a first-
+                # child quote of a nested item keeps the pre-#145 form.
+                outer_citation = self._citation
+                self._citation = False
+
                 # Track list depth from state
                 depth = getattr(state, "list_depth", 0)
 
@@ -809,7 +1027,22 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # ("table"): `||` rows indented under an item end the
                     # list in Trac (measured on /trac_test), so it is
                     # rendered as a `{{{#!div}}}` block below.
+                    # Ticket #144 (and the code-block half of #143): a
+                    # fenced code child is its own run kind ("code"), for
+                    # the same reason -- it goes under the item text at the
+                    # continuation indent with no blank line before it, in
+                    # a tight or a loose item alike (Trac strips the indent
+                    # back off the body). A #63 fallback fence stays in the
+                    # text run: its body is TracWiki source, unwrapped.
+                    # Ticket #145: a blockquote child is its own run kind
+                    # ("quote"), rendered as Trac citation lines. Not when
+                    # it is the item's first non-blank child: no Trac form
+                    # exists for a quote with no item text before it (` *`
+                    # alone is not an item, ` * > q` renders a literal
+                    # ">"), so it stays in the text run, as before. Nor
+                    # when it is empty: nothing to cite.
                     runs: list[tuple[str, list[dict[str, Any]]]] = []
+                    content_seen = False
                     for child in children:
                         child_type = child.get("type")
                         kind = (
@@ -817,10 +1050,24 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             if child_type == "list"
                             else "table"
                             if child_type == "table"
+                            else "quote"
+                            if child_type == "block_quote"
+                            and content_seen
+                            and any(
+                                c.get("type") != "blank_line"
+                                for c in child.get("children") or []
+                            )
+                            else "code"
+                            if child_type == "block_code"
+                            and not _is_fallback_fence(
+                                (child.get("attrs") or {}).get("info")
+                            )
                             else "text"
                         )
-                        # Adjacent plain blocks share a run; every list
-                        # and every table is its own run.
+                        if child_type != "blank_line":
+                            content_seen = True
+                        # Adjacent plain blocks share a run; every list,
+                        # table, code block and quote is its own run.
                         if (
                             runs
                             and kind == "text"
@@ -832,7 +1079,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                     # The item's own text is the run before the first list.
                     if runs and runs[0][0] == "text":
-                        text = self.render_tokens(runs[0][1], state)
+                        text = self._render_text_run(runs[0][1], state)
                         runs = runs[1:]
                     else:
                         text = ""
@@ -840,13 +1087,36 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # Everything after it, in order. A nested list handles
                     # its own newlines; a later non-list run is a
                     # continuation paragraph that follows a sub-list.
-                    after_runs: list[tuple[str, str]] = []
+                    # Ticket #143: a text run that starts with a paragraph
+                    # is marked "para" so the combine step below can leave
+                    # out the blank line after a code or table run.
+                    # A quote run is rendered in the combine step below
+                    # (#145), once its separator has said which form it
+                    # takes; its entry carries the tokens, not the text.
+                    after_runs: list[
+                        tuple[str, str, list[dict[str, Any]]]
+                    ] = []
                     for kind, run in runs:
-                        rendered = self.render_tokens(run, state).strip(
-                            "\n"
-                        )
+                        if kind == "quote":
+                            after_runs.append((kind, "", run))
+                            continue
+                        rendered = self._render_text_run(
+                            run, state
+                        ).strip("\n")
                         if rendered:
-                            after_runs.append((kind, rendered))
+                            first = next(
+                                (
+                                    c
+                                    for c in run
+                                    if c.get("type") != "blank_line"
+                                ),
+                                {},
+                            )
+                            if kind == "text" and _is_paragraph_token(
+                                first
+                            ):
+                                kind = "para"
+                            after_runs.append((kind, rendered, run))
                 else:
                     text = token.get("raw", "")
                     after_runs = []
@@ -887,9 +1157,55 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Trac renders it as a blockquote (a Trac limit, #112), but
                 # the order is the author's.
                 parts = [f"{prefix} {text}"]
-                for kind, rendered in after_runs:
+                prev_kind = "para" if text.strip() else ""
+                prev_text = text
+                list_seen = False
+                for kind, rendered, run in after_runs:
+                    emitted_kind = kind
                     if kind == "list":
+                        list_seen = True
                         parts.append(rendered)
+                    elif kind == "quote":
+                        # Ticket #145: citation lines at this item's
+                        # continuation indent, directly under what came
+                        # before; `_item_block_separator` says when Trac
+                        # cannot take them, and the pre-#145 form stays.
+                        # Rendered once, in the form chosen.
+                        separator = _item_block_separator(
+                            prev_kind, kind, list_seen, prev_text, ""
+                        )
+                        if separator == "blank":
+                            parts.append("")
+                            rendered = self._render_text_run(
+                                run, state
+                            ).strip("\n")
+                            emitted_kind = "plain_quote"
+                        else:
+                            if separator == "quote_gap":
+                                parts.append(continuation_indent + ">")
+                            rendered = self._render_item_quote(
+                                run, state
+                            ).strip("\n")
+                        parts.extend(
+                            _indent_nonblank(
+                                rendered.split("\n"),
+                                continuation_indent,
+                            )
+                        )
+                    elif kind == "code":
+                        # Ticket #144. Appended at THIS item's continuation
+                        # indent, in source order. After a nested list that
+                        # is a Trac limit, parallel to #112's continuation
+                        # paragraph: Trac attaches a block to the innermost
+                        # open item (measured, F5), so here it lands on the
+                        # nested item, and no TracWiki form attaches a
+                        # block to the outer item after a nested list.
+                        parts.extend(
+                            _indent_nonblank(
+                                rendered.split("\n"),
+                                continuation_indent,
+                            )
+                        )
                     elif kind == "table":
                         # Wrapped in a `{{{#!div}}}` so Trac keeps the
                         # table inside the <li>, and appended with NO blank
@@ -905,14 +1221,27 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             )
                         )
                     else:
-                        parts.append("")
+                        # Ticket #143: the blank line (or its absence)
+                        # before a text run is `_item_block_separator`'s
+                        # call, in one place for this and for the join
+                        # inside a run.
+                        if (
+                            _item_block_separator(
+                                prev_kind, kind, list_seen, "", rendered
+                            )
+                            != "adjacent"
+                        ):
+                            parts.append("")
                         parts.extend(
                             _indent_nonblank(
                                 rendered.split("\n"),
                                 continuation_indent,
                             )
                         )
+                    prev_kind = emitted_kind
+                    prev_text = rendered
                 result = "\n".join(parts) + "\n"
+                self._citation = outer_citation
 
             # Default rendering: extract text from raw, text, or children, pass attrs
             case _:

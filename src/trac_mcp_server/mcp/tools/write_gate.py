@@ -291,13 +291,39 @@ def gate_enabled(client: TracClient) -> bool:
     return bool(getattr(client.config, "write_gate", True))
 
 
+#: Ticket #153. What a write says when :func:`gate_enabled` is false.
+#: A disabled gate has the same effect on the write as one that could
+#: not run -- the content is unchecked -- so it gets the same treatment
+#: as the render-failed ``UNCHECKED`` note in :func:`check_write`: said
+#: in the affirmative, on the write itself. Silence here is what let the
+#: switch sit forgotten on the shared daemon: an unchecked write and a
+#: checked clean one produced the same response. Names both places the
+#: switch can be set, because an operator chasing the env var on a
+#: daemon configured through YAML would find nothing.
+GATE_OFF_LINE = (
+    "NOTE: the write gate is OFF on this daemon (TRAC_WRITE_GATE=0, or "
+    "write_gate: false in its config file), so this write was NOT "
+    "link-checked -- not verified clean."
+)
+
+
+def gate_off_lines(client: TracClient) -> list[str]:
+    """``[GATE_OFF_LINE]`` when the gate is off, else ``[]``.
+
+    For the batch tools, which call :func:`check_write` per item and so
+    never pass through :func:`gate_or_refuse`; they append this once per
+    call, not once per item -- it describes the daemon, not an item.
+    """
+    return [] if gate_enabled(client) else [GATE_OFF_LINE]
+
+
 # Ticket #108. ``known_comment_numbers`` for a ticket being created: it
 # has no comments, and a create posts none. Empty, not ``None`` --
 # ``None`` means "no ticket context, skip the check".
 NEW_TICKET_COMMENT_NUMBERS: frozenset[int] = frozenset()
 
 
-async def _known_comment_numbers(
+async def known_comment_numbers(
     client: TracClient, ticket_id: int
 ) -> frozenset[int] | None:
     """Ticket #105. The comment numbers ``ticket_id`` has right now,
@@ -314,6 +340,9 @@ async def _known_comment_numbers(
     ``_extract_comments`` shows a caller, not duplicated from there
     since that helper returns display-ready dicts, not a bare set of
     ints this module can compare against.
+
+    Also used by ``convert_preview`` (#126) when the caller names the
+    ticket the draft is for.
 
     ``None`` if the changelog can't be fetched: fail OPEN, same as
     every other checker-failure path in this module -- a ticket the
@@ -335,10 +364,12 @@ async def _known_comment_numbers(
         _timestamp, _author, field, oldvalue, newvalue = entry[:5]
         if field != "comment":
             continue
-        try:
-            cnum = int(str(oldvalue).strip())
-        except (TypeError, ValueError):
+        # A threaded row's oldvalue is "2.5": comment 5, which is the
+        # number a comment:5 link names (Trac #131).
+        parsed = TracClient.parse_comment_number(oldvalue)
+        if parsed is None:
             continue
+        cnum = parsed.cnum
         max_cnum = max(max_cnum, cnum)
         if newvalue:
             known.add(cnum)
@@ -354,7 +385,7 @@ async def _known_comment_numbers(
 NEW_TARGET_ATTACHMENT_NAMES: frozenset[str] = frozenset()
 
 
-async def _attachment_names(
+async def attachment_names(
     client: TracClient,
     *,
     wiki_page: str | None,
@@ -370,6 +401,9 @@ async def _attachment_names(
     above, because here a wrong answer would CLEAR a finding. A page
     that does not exist yet raises on the list call, and so lands on
     ``None`` too; its bare links are errors either way.
+
+    Also used by ``convert_preview`` (#126) when the caller names the
+    page or ticket the draft is for.
     """
     if new_ticket:
         return NEW_TARGET_ATTACHMENT_NAMES
@@ -410,9 +444,9 @@ async def _attachment_names(
 async def attachment_names_for_ticket(
     client: TracClient, ticket_id: int
 ) -> frozenset[str] | None:
-    """:func:`_attachment_names` for a caller that gates through
+    """:func:`attachment_names` for a caller that gates through
     :func:`check_write` directly (the batch tools)."""
-    return await _attachment_names(
+    return await attachment_names(
         client, wiki_page=None, ticket_id=ticket_id, new_ticket=False
     )
 
@@ -464,29 +498,32 @@ async def gate_or_refuse(
     refusing a bare ``attachment:`` link to a file the target holds.
     Omitted by every caller with no target (milestone): no lookup, and
     those links stay errors.
+
+    With the gate off (ticket #153) nothing is checked and the one line
+    returned is :data:`GATE_OFF_LINE`, on every call, whether or not
+    this write carries any text: the line reports the daemon's state,
+    and a field-only edit is the cheapest write on which to notice it.
     """
     if not gate_enabled(client):
-        return None, []
+        return None, [GATE_OFF_LINE]
 
     target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
-    known_comment_numbers: frozenset[int] | None = None
+    comment_numbers: frozenset[int] | None = None
     if new_ticket:
-        known_comment_numbers = NEW_TICKET_COMMENT_NUMBERS
+        comment_numbers = NEW_TICKET_COMMENT_NUMBERS
     elif ticket_id is not None and any(
         content and "comment:" in content for content in fields.values()
     ):
-        known_comment_numbers = await _known_comment_numbers(
-            client, ticket_id
-        )
+        comment_numbers = await known_comment_numbers(client, ticket_id)
 
-    attachment_names: frozenset[str] | None = None
+    attached_names: frozenset[str] | None = None
     if (
         new_ticket or wiki_page is not None or ticket_id is not None
     ) and any(
         content and "attachment:" in content
         for content in fields.values()
     ):
-        attachment_names = await _attachment_names(
+        attached_names = await attachment_names(
             client,
             wiki_page=wiki_page,
             ticket_id=ticket_id,
@@ -501,8 +538,8 @@ async def gate_or_refuse(
             field=field,
             recheck_with=recheck_with,
             target_cap=target_cap,
-            known_comment_numbers=known_comment_numbers,
-            attachment_names=attachment_names,
+            known_comment_numbers=comment_numbers,
+            attachment_names=attached_names,
         )
         if outcome.refused:
             return outcome.refusal, []

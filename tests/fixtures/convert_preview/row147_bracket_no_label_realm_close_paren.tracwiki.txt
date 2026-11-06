@@ -1,0 +1,1 @@
+Then a seeded defect ([auto_pm:wiki:Rules/testing/SeededDefectFirst]).

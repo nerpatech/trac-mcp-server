@@ -261,6 +261,7 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_PORT",
         "TRAC_MCP_PATH",
         "TRAC_MCP_AUTH_TOKEN",
+        "TRAC_MCP_OIDC_RPC_URL",
         "TRAC_MCP_READ_ONLY",
         "TRAC_MCP_DISABLED_TOOLS",
         "TRAC_MCP_FILE_ACCESS",
@@ -287,6 +288,7 @@ def test_server_config_defaults_with_no_sources(monkeypatch):
     assert server_config.port == 8080
     assert server_config.path == "/mcp"
     assert server_config.auth_token is None
+    assert server_config.oidc_rpc_url is None
 
 
 def test_env_vars_populate_server_config(monkeypatch):
@@ -314,11 +316,14 @@ def test_env_vars_populate_server_config(monkeypatch):
     assert server_config.auth_token == "envtoken"
 
 
-# --- read_only: CLI > env > YAML > default (False) ---
-
-
-def test_read_only_defaults_to_false(monkeypatch):
+def test_env_var_populates_oidc_rpc_url(monkeypatch):
+    """TRAC_MCP_OIDC_RPC_URL populates ServerConfig.oidc_rpc_url."""
     _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_TRANSPORT", "http")
+    monkeypatch.setenv(
+        "TRAC_MCP_OIDC_RPC_URL",
+        "https://trac.example.com/trac-api/login/xmlrpc",
+    )
 
     with (
         patch("trac_mcp_server.config_bootstrap.load_dotenv"),
@@ -329,98 +334,10 @@ def test_read_only_defaults_to_false(monkeypatch):
     ):
         server_config = bootstrap_server_config(None)
 
-    assert server_config.read_only is False
-
-
-@pytest.mark.parametrize(
-    "value", ["true", "1", "yes", "on", "TRUE", "True"]
-)
-def test_read_only_env_truthy_values(monkeypatch, value):
-    _clear_server_env(monkeypatch)
-    monkeypatch.setenv("TRAC_MCP_READ_ONLY", value)
-
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
-
-    assert server_config.read_only is True
-
-
-@pytest.mark.parametrize("value", ["false", "0", "no", "off", "random"])
-def test_read_only_env_falsy_values(monkeypatch, value):
-    _clear_server_env(monkeypatch)
-    monkeypatch.setenv("TRAC_MCP_READ_ONLY", value)
-
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
-
-    assert server_config.read_only is False
-
-
-def test_read_only_cli_override_wins_over_env(monkeypatch):
-    _clear_server_env(monkeypatch)
-    monkeypatch.setenv("TRAC_MCP_READ_ONLY", "false")
-
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config({"read_only": True})
-
-    assert server_config.read_only is True
-
-
-def test_read_only_falls_back_to_yaml_when_env_unset(monkeypatch):
-    _clear_server_env(monkeypatch)
-
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=["/fake/config.yaml"],
-        ),
-        patch(
-            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
-            return_value={"server": {"read_only": True}},
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
-
-    assert server_config.read_only is True
-
-
-def test_read_only_env_overrides_yaml(monkeypatch):
-    _clear_server_env(monkeypatch)
-    monkeypatch.setenv("TRAC_MCP_READ_ONLY", "false")
-
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=["/fake/config.yaml"],
-        ),
-        patch(
-            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
-            return_value={"server": {"read_only": True}},
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
-
-    assert server_config.read_only is False
+    assert (
+        server_config.oidc_rpc_url
+        == "https://trac.example.com/trac-api/login/xmlrpc"
+    )
 
 
 def test_cli_overrides_win_over_env_for_server_config(monkeypatch):
@@ -675,6 +592,115 @@ def test_file_access_survives_real_yaml_parsing(
         f"transport: http\n{line}\n", Loader=ConfigLoader
     )
     assert _bootstrap_server(yaml_server=server).file_access == expected
+
+
+# --- read_only: CLI > env > YAML > default (False) ---
+
+
+def test_read_only_defaults_to_false(monkeypatch):
+    _clear_server_env(monkeypatch)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.read_only is False
+
+
+@pytest.mark.parametrize(
+    "value", ["true", "1", "yes", "on", "TRUE", "True"]
+)
+def test_read_only_env_truthy_values(monkeypatch, value):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_READ_ONLY", value)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.read_only is True
+
+
+@pytest.mark.parametrize("value", ["false", "0", "no", "off", "random"])
+def test_read_only_env_falsy_values(monkeypatch, value):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_READ_ONLY", value)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.read_only is False
+
+
+def test_read_only_cli_override_wins_over_env(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_READ_ONLY", "false")
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=[],
+        ),
+    ):
+        server_config = bootstrap_server_config({"read_only": True})
+
+    assert server_config.read_only is True
+
+
+def test_read_only_falls_back_to_yaml_when_env_unset(monkeypatch):
+    _clear_server_env(monkeypatch)
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=["/fake/config.yaml"],
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value={"server": {"read_only": True}},
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.read_only is True
+
+
+def test_read_only_env_overrides_yaml(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_READ_ONLY", "false")
+
+    with (
+        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
+        patch(
+            "trac_mcp_server.config_bootstrap.discover_config_files",
+            return_value=["/fake/config.yaml"],
+        ),
+        patch(
+            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
+            return_value={"server": {"read_only": True}},
+        ),
+    ):
+        server_config = bootstrap_server_config(None)
+
+    assert server_config.read_only is False
 
 
 # --- disabled_tools: env (CSV) > YAML > default ([]) ---

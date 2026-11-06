@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import mcp.server.stdio
 import mcp.types as types
@@ -24,6 +24,7 @@ from pydantic_core import Url
 
 from .. import __version__
 from ..config_bootstrap import bootstrap_server_config
+from ..config_schema import ServerConfig
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
@@ -33,10 +34,11 @@ from ..instances import (
     load_declared_instances,
 )
 from ..instances import caller_identity as _caller_identity
-from ..logger import setup_logging
+from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
+from .oidc import OidcClientCache, extract_bearer_token
 from .resources.wiki import (
     handle_list_wiki_resources,
     handle_read_wiki_resource,
@@ -56,6 +58,7 @@ from .tools.registry import (
     with_page_alias,
     with_strict_schema,
 )
+from .tools.write_gate import gate_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,11 @@ _instances: InstanceRegistry | None = None
 # Global registry instance (initialized in main)
 _registry: ToolRegistry | None = None
 
+# Per-user OIDC client cache (initialized in main() only when the http
+# transport is configured with server_config.oidc_rpc_url). None means
+# "OIDC per-user mode is not active" -- the normal InstanceRegistry path is
+# used unconditionally in that case, same as before this mode existed.
+_oidc_cache: OidcClientCache | None = None
 # Ticket #102: `_caller_identity` (imported above as an alias for
 # `instances.caller_identity`) is called at the two dispatch sites below
 # to resolve the in-flight HTTP request's bearer-token identity, if any.
@@ -87,13 +95,24 @@ async def _handle_ping(
     """Handle ping tool -- test Trac connectivity."""
     try:
         version = await run_sync(client.validate_connection)
+        # Ticket #153: the gate's state rides along -- one attribute
+        # read, and the cheapest call a session makes.
+        write_gate = gate_enabled(client)
+        text = (
+            "Trac MCP server connected successfully. "
+            f"API version: {version}\n"
+            f"write_gate: {'true' if write_gate else 'false'}"
+        )
+        # Claude Code shows structuredContent in preference to the text
+        # block when a handler returns a dict (see instance_echo.py), so
+        # the dict carries everything the text does.
         return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text=f"Trac MCP server connected successfully. API version: {version}",
-                )
-            ]
+            content=[types.TextContent(type="text", text=text)],
+            structuredContent={
+                "message": text,
+                "api_version": version,
+                "write_gate": write_gate,
+            },
         )
     except Exception as e:
         return types.CallToolResult(
@@ -183,6 +202,55 @@ def set_registry(registry: ToolRegistry | None) -> None:
     _registry = registry
 
 
+def set_oidc_cache(cache: OidcClientCache | None) -> None:
+    """Set the global OIDC per-user client cache.
+
+    Args:
+        cache: OidcClientCache to set, or None to disable per-user OIDC
+            auth (the default -- see module docstring in mcp/oidc.py).
+    """
+    global _oidc_cache
+    _oidc_cache = cache
+
+
+async def _resolve_client(instance: str | None) -> TracClient:
+    """Resolve the TracClient for the current tool/resource call.
+
+    When OIDC per-user auth is active (``_oidc_cache`` set), this is the
+    *only* path a call can use to reach Trac: it reads the caller's own
+    token from the current request and never touches the InstanceRegistry
+    or any shared identity. Otherwise, behavior is unchanged from before
+    this mode existed: resolve via the InstanceRegistry.
+
+    Raises:
+        ValueError: If ``instance`` is used together with OIDC per-user
+            auth (unsupported -- see module docstring in mcp/oidc.py), or
+            if the caller's Authorization header is missing/malformed.
+            Both are translated into a normal tool-error response by
+            existing callers, exactly like an UnknownInstanceError from
+            the InstanceRegistry path.
+    """
+    if _oidc_cache is not None:
+        if instance not in (None, "default"):
+            raise ValueError(
+                "The 'instance' argument is not supported when OIDC "
+                "per-user authentication is configured -- this deployment "
+                "serves only its single configured Trac endpoint."
+            )
+        try:
+            request = server.request_context.request
+        except LookupError:
+            request = None
+        auth_header = (
+            request.headers.get("authorization") if request else None
+        )
+        return _oidc_cache.get_client(extract_bearer_token(auth_header))
+
+    return get_instances().get_client(
+        instance, identity=_caller_identity()
+    )
+
+
 # ---------------------------------------------------------------------------
 # MCP protocol handlers
 # ---------------------------------------------------------------------------
@@ -234,9 +302,7 @@ async def handle_read_resource(uri: Url) -> str:
     if uri.host == "wiki":
         instance = _instance_from_query(uri.query)
         try:
-            client = get_instances().get_client(
-                instance, identity=_caller_identity()
-            )
+            client = await _resolve_client(instance)
         except ValueError as e:
             error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
@@ -290,9 +356,7 @@ async def handle_call_tool(
     instance = args.pop("instance", None)
     client: TracClient | None
     try:
-        client = get_instances().get_client(
-            instance, identity=_caller_identity()
-        )
+        client = await _resolve_client(instance)
     except InstanceNotAllowedError as e:
         # Ticket #110: a caller scoped away from the DEFAULT instance must
         # still be able to ask what it may reach -- the refusal below tells
@@ -307,10 +371,16 @@ async def handle_call_tool(
             )
         client = None
     except ValueError as e:
+        corrective_action = (
+            "Set the 'Authorization: Bearer <token>' header to your own "
+            "Trac OIDC access token."
+            if _oidc_cache is not None
+            else "Call list_instances to see what is reachable."
+        )
         return build_error_response(
             _instance_error_type(e),
             str(e),
-            "Call list_instances to see what is reachable.",
+            corrective_action,
         )
 
     # Resolution happened above; from here every exit is a call that reached a
@@ -332,12 +402,37 @@ async def handle_call_tool(
             str(e),
             "Use list_tools to see available tools.",
         )
+    # With OIDC per-user auth there is exactly one instance and no
+    # `instance` argument, so the echo carries no information -- and as a
+    # trailing text block it turns a JSON result into JSON plus a line,
+    # which code that parses the result text cannot read.
+    if _oidc_cache is not None:
+        return result
     return annotate(result, url, explicit)
 
 
 # ---------------------------------------------------------------------------
 # Server lifecycle
 # ---------------------------------------------------------------------------
+
+
+def log_startup_settings(
+    server_config: ServerConfig, write_gate: bool
+) -> None:
+    """Log the write gate's state (ticket #153).
+
+    The Trac config that carries ``write_gate`` is only loaded by the
+    lifespan, which is why this line is written once that has run. The
+    ``file_access`` line is not here: it needs no Trac config and stays
+    in ``main()`` straight after ``set_file_access``, so it reaches the
+    journal even when lifespan validation fails. At WARNING when the
+    gate is off, so a switch left set after a test stands out in the
+    journal instead of reading like every other startup.
+    """
+    if write_gate:
+        logger.info("write_gate=on")
+    else:
+        logger.warning("write_gate=off")
 
 
 async def main(config_overrides: dict | None = None):
@@ -367,10 +462,21 @@ async def main(config_overrides: dict | None = None):
     # stdio_server() uses stdout for JSON-RPC); stderr+file for http.
     # CRITICAL: This must be called BEFORE stdio_server context
     # to prevent any stdout contamination during protocol negotiation
-    setup_logging(
-        mode="mcp" if server_config.transport == "stdio" else "http",
-        log_file=log_file,
-    )
+    try:
+        setup_logging(
+            mode="mcp"
+            if server_config.transport == "stdio"
+            else "http",
+            log_file=log_file,
+        )
+    except OSError as e:
+        reason = e.strerror or str(e)
+        sys.stderr.write(
+            f"ERROR: Cannot open log file {e.filename}: {reason}\n"
+        )
+        raise RuntimeError(
+            f"Cannot open log file {e.filename}: {reason}"
+        ) from e
 
     # Version check (non-blocking warning for stale binaries)
     is_consistent, message = check_version_consistency()
@@ -399,11 +505,15 @@ async def main(config_overrides: dict | None = None):
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
     declared_names = sorted(load_declared_instances())
-    all_specs = with_strict_schema(
-        with_instance_param(
-            with_page_alias([PING_SPEC] + ALL_SPECS), declared_names
-        )
-    )
+    specs = with_page_alias([PING_SPEC] + ALL_SPECS)
+    # With OIDC per-user auth every call goes to the one configured endpoint
+    # and _resolve_client rejects any other instance; advertising the
+    # argument only invites calls that are bound to fail.
+    if not (
+        server_config.transport == "http" and server_config.oidc_rpc_url
+    ):
+        specs = with_instance_param(specs, declared_names)
+    all_specs = with_strict_schema(specs)
     disabled_tools = frozenset(server_config.disabled_tools)
     unknown_disabled = disabled_tools - {s.tool.name for s in all_specs}
     if unknown_disabled:
@@ -473,6 +583,29 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
+        # The registry's value, the same one list_instances reports.
+        log_startup_settings(server_config, ctx["instances"].write_gate)
+        oidc_rpc_url = (
+            server_config.oidc_rpc_url
+            if server_config.transport == "http"
+            else None
+        )
+        if oidc_rpc_url:
+            logger.info(
+                "OIDC per-user auth active: requests must carry their own "
+                "'Authorization: Bearer <token>'; no shared identity is "
+                "used for tool calls."
+            )
+            if (
+                server_config.oidc_allow_insecure_http
+                and urlsplit(oidc_rpc_url).scheme == "http"
+            ):
+                logger.warning(
+                    "TRAC_MCP_OIDC_RPC_URL uses plain http: users' access "
+                    "tokens travel unencrypted to %s.",
+                    oidc_rpc_url,
+                )
+            set_oidc_cache(OidcClientCache(ctx["config"], oidc_rpc_url))
         try:
             if server_config.transport == "stdio":
                 await _run_stdio()
@@ -482,6 +615,7 @@ async def main(config_overrides: dict | None = None):
             set_instances(None)
             set_instance_registry(None)
             set_registry(None)
+            set_oidc_cache(None)
             set_file_access("off")
 
 
@@ -556,8 +690,10 @@ must not be piped manually. This does not apply to --transport http.
     )
     parser.add_argument(
         "--log-file",
-        default="/tmp/trac-mcp-server.log",
-        help="Log file path (default: /tmp/trac-mcp-server.log)",
+        default=None,
+        help="Log file path (default: the LOG_FILE env var, else "
+        f"{DEFAULT_MCP_LOG_FILE} for stdio and no file for http; pass an "
+        "empty string to disable the file)",
     )
     parser.add_argument(
         "--permissions-file",
@@ -617,12 +753,9 @@ must not be piped manually. This does not apply to --transport http.
     return parser
 
 
-def run() -> None:
-    """Entry point that handles errors gracefully and parses CLI arguments."""
-    args = build_parser().parse_args()
-
-    # Build config overrides dict from CLI args
-    config_overrides = {}
+def config_overrides_from_args(args: argparse.Namespace) -> dict:
+    """Build the config overrides dict from parsed CLI arguments."""
+    config_overrides: dict = {}
     if args.url:
         config_overrides["url"] = args.url
     if args.username:
@@ -631,7 +764,8 @@ def run() -> None:
         config_overrides["password"] = args.password
     if args.insecure:
         config_overrides["insecure"] = True
-    if args.log_file:
+    if args.log_file is not None:
+        # "" is meaningful: it disables the log file
         config_overrides["log_file"] = args.log_file
     if args.permissions_file:
         config_overrides["permissions_file"] = args.permissions_file
@@ -649,6 +783,15 @@ def run() -> None:
         config_overrides["read_only"] = True
     if args.file_access:
         config_overrides["file_access"] = args.file_access
+    return config_overrides
+
+
+def run() -> None:
+    """Entry point that handles errors gracefully and parses CLI arguments."""
+    args = build_parser().parse_args()
+
+    # Build config overrides dict from CLI args
+    config_overrides = config_overrides_from_args(args)
 
     # Log config overrides to stderr (before stdio transport starts)
     if config_overrides:

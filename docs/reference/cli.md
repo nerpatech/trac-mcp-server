@@ -20,7 +20,7 @@ trac-mcp-server --transport http --port 8080   # streamable HTTP instead of stdi
 | `--username USER` | -- | Override Trac username (takes precedence over `TRAC_USERNAME` env var) |
 | `--password PASS` | -- | Override Trac password (takes precedence over `TRAC_PASSWORD` env var) |
 | `--insecure` | `false` | Skip SSL certificate verification (development only) |
-| `--log-file PATH` | `/tmp/trac-mcp-server.log` | Log file location |
+| `--log-file PATH` | `LOG_FILE`, else `/tmp/trac-mcp-server.log` (stdio) / none (http); `""` disables | Log file location. An empty value (`--log-file ""` or `LOG_FILE=`) means no log file: stdio then logs to stderr, http to stderr only |
 | `--permissions-file PATH` | -- | Restrict available tools by Trac permissions (see [Tool Architecture](tool-architecture.md#permission-filtering)) |
 | `--read-only` | `false` | Expose only read-only tools (view/search/list/get), regardless of transport. Also settable via `TRAC_MCP_READ_ONLY` env var or `config.yaml` `server.read_only`. Combinable with `--permissions-file` -- a tool must pass both filters. |
 | `--transport {stdio,http}` | `stdio` | MCP transport to serve (also settable via `TRAC_MCP_TRANSPORT` or `config.yaml` `server.transport`) |
@@ -181,6 +181,8 @@ The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and s
 - `ticket-pull` writes the stored description (or comment `N`) to `FILE` (`-` for stdout) byte for byte, so `cmp` against the pushed file holds.
 
 `wiki-push` exits **4**, not 1, when the page was stored but its new version could not be read back afterwards (the server reports `readback_failed`): do not retry the push. Exit 1 means nothing was stored.
+
+When the server reports `possible_overwrite` (the page was updated but reads back as a version other than the one after the version the push was based on, so another write most likely landed just before it and was replaced), `wiki-push` prints a `trac-mcp: warning: possible overwrite ...` line on stderr naming the versions in between, and still exits **0**: the page was stored, and a non-zero code would invite a retry that writes it again. Inspect those versions with the `wiki_diff` tool.
 
 The server's write-time link gate and notes apply to all three writes, as for the equivalent MCP tools.
 

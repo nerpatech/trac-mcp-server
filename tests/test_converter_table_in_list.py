@@ -206,7 +206,11 @@ def test_headerless_div_table_unwraps_too():
         (
             "div holding a paragraph in a list item",
             " * a\n   {{{#!div\n   hello\n   }}}\n * d",
-            " - a\n   ```div\n\n   hello\n```\n - d",
+            # Ticket #144 changed this row: master's output had a blank
+            # line after the opener and the closer at column 0 (the
+            # broken fence). It is still a ```div fence; only its
+            # indentation changed.
+            " - a\n   ```div\n   hello\n   ```\n - d",
         ),
         (
             "div after a blank line (outside the list)",
