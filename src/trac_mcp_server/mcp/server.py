@@ -58,7 +58,7 @@ from .tools.registry import (
     with_page_alias,
     with_strict_schema,
 )
-from .tools.write_gate import gate_enabled
+from .tools.write_gate import gate_enabled, write_gate_line
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +100,7 @@ async def _handle_ping(
         write_gate = gate_enabled(client)
         text = (
             "Trac MCP server connected successfully. "
-            f"API version: {version}\n"
-            f"write_gate: {'true' if write_gate else 'false'}"
+            f"API version: {version}\n" + write_gate_line(write_gate)
         )
         # Claude Code shows structuredContent in preference to the text
         # block when a handler returns a dict (see instance_echo.py), so

@@ -132,18 +132,13 @@ def _host_root(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-def _write_gate_line(write_gate: bool) -> str:
-    return f"write_gate: {'true' if write_gate else 'false'}" + (
-        ""
-        if write_gate
-        else " -- OFF on this daemon: writes are NOT link-checked"
-    )
-
-
 def _single_endpoint_result(
     url: str, write_gate: bool
 ) -> types.CallToolResult:
     """list_instances under OIDC per-user auth: no registry, no outbound call."""
+    # Imported here: write_gate imports this module at load time.
+    from .write_gate import write_gate_line
+
     structured: dict = {
         "configured": [
             {
@@ -159,7 +154,7 @@ def _single_endpoint_result(
     text = "\n".join(
         [
             f"Default instance: {url}",
-            _write_gate_line(write_gate),
+            write_gate_line(write_gate),
             "",
             "Configured:",
             f"  default: {url} (default)",
@@ -178,16 +173,36 @@ async def _handle_list_instances(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
     """Handle list_instances tool -- describe configured + discovered instances."""
+    # Imported here: write_gate imports this module at load time.
+    from .write_gate import gate_enabled, write_gate_line
+
+    registry = _registry_ref
+
+    # Ticket #153: the write gate's kill switch is a per-daemon setting
+    # every routed instance inherits (ticket #117), and nothing else a
+    # session can reach reports it -- the env file is root 600. Worked out
+    # once for both listings: from the client this call runs with, whose
+    # config every write of the call goes through -- under OIDC per-user
+    # auth the caller's own client, built by OidcClientCache from the
+    # startup config. A caller scoped away from the default instance
+    # reaches this handler with no client at all; it gets the registry's
+    # value, read from the same startup config.
+    if client is not None:
+        write_gate = gate_enabled(client)
+    elif registry is not None:
+        write_gate = registry.write_gate
+    else:
+        write_gate = True
+
     # OIDC per-user auth: the registry and its default config hold the shared
     # service account, if one is configured at all, and no caller may act as
     # it. The caller's bearer token cannot stand in for the scrape's Basic
     # credentials either, so there is no discovery, only the one endpoint.
     if client is not None and client.config.bearer_token:
         return _single_endpoint_result(
-            client.config.trac_url, client.config.write_gate
+            client.config.trac_url, write_gate
         )
 
-    registry = _registry_ref
     if registry is None:
         return types.CallToolResult(
             content=[
@@ -223,13 +238,6 @@ async def _handle_list_instances(
         # discovery: it needs the default host and the caller's creds.
         default_config = None
 
-    # Ticket #153: the write gate's kill switch is a per-daemon setting
-    # every routed instance inherits (ticket #117), and nothing else a
-    # session can reach reports it -- the env file is root 600. From the
-    # registry rather than `client`: a caller scoped away from the
-    # default instance reaches this handler with no client at all.
-    write_gate = registry.write_gate
-
     structured: dict = {
         "configured": configured,
         "default": default_config.trac_url if default_config else None,
@@ -242,7 +250,7 @@ async def _handle_list_instances(
         f"Default instance: {default_config.trac_url}"
         if default_config
         else "Default instance: unavailable to this caller",
-        _write_gate_line(write_gate),
+        write_gate_line(write_gate),
     ]
     if allowed is not None:
         lines.extend(["", "Allowed:"])

@@ -175,7 +175,7 @@ WSGIScriptAlias /trac-api /path/to/trac.wsgi
 
 **Multiple instances (`instance` argument) are not supported in this mode.** OIDC per-user auth serves only its single configured Trac endpoint; a tool call passing `instance` (other than `"default"`) is rejected with a clear error rather than silently ignored.
 
-**`list_instances` reports only this endpoint.** It makes no outbound call in this mode: project discovery would need Basic credentials, and the only ones available belong to the shared account, which no caller may act as.
+**`list_instances` reports only this endpoint, and the write gate status** (`write_gate`, from the caller's client, which carries the startup config). It makes no outbound call in this mode: project discovery would need Basic credentials, and the only ones available belong to the shared account, which no caller may act as.
 
 **A runnable setup.** [`examples/oidc/`](../../examples/oidc/README.md) starts Keycloak, Apache with `mod_auth_openidc` and Trac, with two test users, and checks that each caller's writes are attributed to them.
 
