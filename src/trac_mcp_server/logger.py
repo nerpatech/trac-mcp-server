@@ -2,9 +2,9 @@
 
 Provides a :class:`JsonFormatter` that emits one JSON object per log record
 (JSON-lines output) and a :func:`setup_logging` helper that configures the
-root logger for either MCP mode (file-only logging, so stdout remains clean
-for JSON-RPC traffic) or CLI mode (human-friendly stderr logging, with an
-optional companion log file).
+root logger for either MCP mode (a log file by default, never stdout, so
+stdout remains clean for JSON-RPC traffic) or CLI/http mode (human-friendly
+stderr logging, with an optional companion log file).
 """
 
 import json
@@ -32,6 +32,28 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
+DEFAULT_MCP_LOG_FILE = "/tmp/trac-mcp-server.log"
+
+_LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
+_LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _resolve_log_file(mode: str, log_file: str | None) -> str | None:
+    """Return the log file path to use, or None for "no log file".
+
+    Order: the ``log_file`` argument if given, then the ``LOG_FILE``
+    environment variable if it is set (even to empty), then the built-in
+    default: ``/tmp/trac-mcp-server.log`` for "mcp" (stdio), none for
+    "cli"/"http". An empty or whitespace-only value at either step means
+    "no log file".
+    """
+    if log_file is None:
+        log_file = os.environ.get("LOG_FILE")
+    if log_file is None:
+        log_file = DEFAULT_MCP_LOG_FILE if mode == "mcp" else None
+    return log_file if log_file and log_file.strip() else None
+
+
 def setup_logging(
     mode: str = "cli",
     debug: bool = False,
@@ -42,18 +64,22 @@ def setup_logging(
     Configure logging based on execution mode.
 
     Args:
-        mode: "mcp" for file logging (never stdout, required for stdio
-            transport); "cli" or "http" for stderr logging (with an
+        mode: "mcp" for stdio transport: file logging by default, and
+            never stdout; "cli" or "http" for stderr logging (with an
             optional companion log file).
         debug: If True, overrides LOG_LEVEL to DEBUG.
-        log_file: Custom log file path (overrides LOG_FILE env var).
+        log_file: Log file path (overrides LOG_FILE env var). An empty
+            string means no log file.
         debug_format: "text" (default) or "json" for structured output.
 
     Environment variables:
         LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR).
                    Default: WARNING for MCP mode, INFO for CLI mode.
-        LOG_FILE: Custom log file path for MCP mode.
-                  Default: /tmp/trac-mcp-server.log
+        LOG_FILE: Log file path, used when ``log_file`` is None; set to
+                  an empty string for no log file. Default:
+                  /tmp/trac-mcp-server.log for MCP (stdio) mode, no file
+                  for CLI and http mode. In MCP mode with no log file,
+                  logging goes to stderr (never stdout).
     """
     # Determine log level from environment or defaults
     default_level = "WARNING" if mode == "mcp" else "INFO"
@@ -65,23 +91,29 @@ def setup_logging(
     else:
         log_level = getattr(logging, env_level, logging.INFO)
 
-    if mode == "mcp":
+    final_log_file = _resolve_log_file(mode, log_file)
+
+    if mode == "mcp" and final_log_file:
         # MCP mode: Log to file to avoid stdout contamination
         # stdio transport uses stdout for JSON-RPC messages
-        # Priority: log_file param > LOG_FILE env var > default
-        final_log_file = log_file or os.getenv(
-            "LOG_FILE", "/tmp/trac-mcp-server.log"
-        )
         logging.basicConfig(
             level=log_level,
-            format="[%(asctime)s] [%(levelname)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            format=_LOG_FORMAT,
+            datefmt=_LOG_DATEFMT,
             filename=final_log_file,
             filemode="a",
         )
+    elif mode == "mcp":
+        # MCP mode with the log file disabled: stderr, never stdout
+        # (stdout carries JSON-RPC; the stdio spec allows stderr logs)
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setFormatter(
+            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+        )
+        logging.basicConfig(level=log_level, handlers=[stderr_handler])
     else:
         # CLI mode: Log to stderr (safe, doesn't interfere with output)
-        # When a log_file is specified (e.g., --debug myfile.log), also write to file
+        # When a log file resolves (--log-file or LOG_FILE), also write to file
         handlers: list[logging.Handler] = []
         stderr_handler = logging.StreamHandler(sys.stderr)
 
@@ -91,15 +123,12 @@ def setup_logging(
             )
         else:
             stderr_handler.setFormatter(
-                logging.Formatter(
-                    "[%(asctime)s] [%(levelname)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
+                logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
             )
         handlers.append(stderr_handler)
 
-        if log_file:
-            file_handler = logging.FileHandler(log_file, mode="a")
+        if final_log_file:
+            file_handler = logging.FileHandler(final_log_file, mode="a")
             if debug_format == "json":
                 file_handler.setFormatter(
                     JsonFormatter(datefmt="%Y-%m-%d %H:%M:%S")

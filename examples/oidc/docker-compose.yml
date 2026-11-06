@@ -1,0 +1,54 @@
+# Test setup for OIDC per-user auth: Keycloak, Apache with mod_auth_openidc
+# and a throwaway Trac. Not for production. See README.md.
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    # mod_auth_openidc fetches the signing keys only over https, so Keycloak
+    # gets a self-signed certificate. It reads this keystore by default.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        [ -f /opt/keycloak/conf/server.keystore ] ||
+        keytool -genkeypair -storepass password -storetype PKCS12
+        -keyalg RSA -keysize 2048 -dname CN=keycloak -alias server
+        -ext SAN=DNS:keycloak -keystore /opt/keycloak/conf/server.keystore;
+        exec /opt/keycloak/bin/kc.sh start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak/trac-demo-realm.json:/opt/keycloak/data/import/trac-demo-realm.json:ro
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8180}:8080"
+    healthcheck:
+      # The image has no curl; ask for the imported realm over bash's /dev/tcp.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /realms/trac-demo HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '200 OK' <&3
+      interval: 5s
+      retries: 30
+
+  trac:
+    build: ./trac
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${TRAC_PORT:-8081}:80"
+    healthcheck:
+      # Apache answers once Trac's environment exists; /trac asks for a password.
+      test:
+        - CMD
+        - python3
+        - -c
+        - |
+          import http.client, sys
+          connection = http.client.HTTPConnection("localhost")
+          connection.request("GET", "/trac/")
+          sys.exit(connection.getresponse().status != 401)
+      interval: 2s
+      retries: 30

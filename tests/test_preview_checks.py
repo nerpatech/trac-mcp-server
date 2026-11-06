@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from trac_mcp_server.preview.checks import (
+    _PREFIX_REALM_RE,
     _is_autolink_page_name,
     build_warnings,
 )
@@ -251,13 +252,24 @@ SILENT_ROWS = [
     # local base is supplied, and for the upstream (trac.edgewall.org)
     # target staying silent even then.
     "row86_missing_intertrac_realm",
+    # Ticket #148. Two resolved label-less bracketed realm links glued
+    # by `]/[`; the typo'd control is asserted next to the #147 rows.
+    "row148_glued_bracket_both_resolved",
+    # Ticket #151. A bare `#3` that resolves to a real ticket. It was
+    # the must-warn row for `bare_ticket_ref`, which fired on every
+    # local ticket link; that code is gone, and every way a bare `#N`
+    # can be wrong has its own code (`missing_local_target`,
+    # `pr_number_as_ticket`, `bare_ref_shadows_prefixed`), each still
+    # pinned by its own must-warn row or test. The ticket link itself
+    # is still extracted with its title: see
+    # `test_row14_bare_ticket_ref_is_silent_but_keeps_its_anchor`.
+    "row14_bare_ticket_ref",
 ]
 
 WARNING_ROWS = [
     ("row11_code_span_intertrac", "link_ref_in_code_span"),
     ("row12_tracwiki_table_in_md", "tracwiki_markup_in_markdown"),
     ("row13_hand_relative_url", "missing_local_target"),
-    ("row14_bare_ticket_ref", "bare_ticket_ref"),
     (
         "row16_unconfigured_prefix_ticket",
         "unconfigured_intertrac_prefix",
@@ -423,6 +435,134 @@ def test_warning_rows_produce_expected_code(name, expected_code):
     assert expected_code in codes, (
         f"{name} should warn {expected_code!r}, got {codes}"
     )
+
+
+def test_row14_bare_ticket_ref_is_silent_but_keeps_its_anchor():
+    """Ticket #151. A bare `#3` that resolves to a real ticket raises
+    nothing -- no `bare_ticket_ref`, which no longer exists, and no
+    other code either -- but the link is still extracted, with Trac's
+    title for it. That anchor is what `render_check` builds its
+    `links.ticket` entries and its `Ticket refs` line from, so losing
+    it would lose the resolved summary along with the warning."""
+    markdown_source, tracwiki, facts, source_format = _load(
+        "row14_bare_ticket_ref"
+    )
+    warnings = build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+    )
+    assert "bare_ticket_ref" not in [w["code"] for w in warnings]
+    tickets = [
+        a
+        for a in facts.anchors
+        if "ticket" in a.classes and "ext-link" not in a.classes
+    ]
+    assert [a.text for a in tickets] == ["#3"]
+    assert tickets[0].title and tickets[0].title.startswith("#3: ")
+    assert "missing" not in tickets[0].classes
+
+
+# Ticket #147. A label-less bracketed realm link followed directly by
+# `).` -- `([auto_pm:wiki:Page]).`, the shape #123 comment 1 tripped on.
+# `_PREFIX_REALM_RE`'s `[^\s`]+` swallows `]).`, not just `]`, so the
+# token no longer ENDS in `]` and the no-label branch (#57 comment 8)
+# missed it. Both renders captured live on /trac_mcp_server
+# (2026-11-04): the configured prefix renders an anchor, the typo'd
+# `auto-pm` renders plain text. Both directions are asserted
+# (`Rules/testing/RecallGateEveryTightening`), and the control's token
+# must stop at the bracket, not carry `]).` into the message.
+ROW147_RESOLVED = "row147_bracket_no_label_realm_close_paren"
+ROW147_TYPO = "row147_typo_bracket_no_label_realm_close_paren"
+
+
+def _prefix_warnings(name):
+    markdown_source, tracwiki, facts, source_format = _load(name)
+    return [
+        w
+        for w in build_warnings(
+            markdown_source,
+            tracwiki,
+            facts,
+            probes={},
+            check_targets=False,
+            source_format=source_format,
+        )
+        if w["code"] == "unconfigured_intertrac_prefix"
+    ]
+
+
+def test_row147_resolved_bracket_before_close_paren_is_silent():
+    assert _prefix_warnings(ROW147_RESOLVED) == []
+
+
+def test_row147_unconfigured_bracket_before_close_paren_still_warns():
+    warnings = _prefix_warnings(ROW147_TYPO)
+    assert [w["evidence"]["token"] for w in warnings] == [
+        "auto-pm:wiki:Rules/testing/SeededDefectFirst"
+    ]
+
+
+# Ticket #148. Two label-less bracketed realm links glued together by
+# `]/[`. `_PREFIX_REALM_RE`'s `[^\s`]+` ran past the first `]`, so
+# `finditer` (which never overlaps matches) read both links as ONE
+# token and the second was never checked on its own: a typo'd prefix
+# there (`auto-pm`) rendered as plain text with no warning. Both renders
+# captured live on /trac_mcp_server. The typo row is the seeded defect
+# (`Rules/testing/SeededDefectFirst`): it fails without the fix.
+ROW148_RESOLVED = "row148_glued_bracket_both_resolved"
+ROW148_TYPO = "row148_glued_bracket_typo_second"
+
+
+def test_row148_glued_brackets_both_resolved_are_silent():
+    assert _prefix_warnings(ROW148_RESOLVED) == []
+
+
+def test_row148_glued_bracket_typo_in_second_link_warns():
+    warnings = _prefix_warnings(ROW148_TYPO)
+    assert [w["evidence"]["token"] for w in warnings] == [
+        "auto-pm:wiki:Rules/testing/RecallGateEveryTightening"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text,tokens",
+    [
+        # The ticket's table, row by row.
+        (
+            "[auto_pm:wiki:A]/[auto-pm:wiki:B]",
+            ["auto_pm:wiki:A", "auto-pm:wiki:B"],
+        ),
+        (
+            "[auto_pm:wiki:A] [auto-pm:wiki:B]",
+            ["auto_pm:wiki:A", "auto-pm:wiki:B"],
+        ),
+        ("([auto_pm:wiki:X]).", ["auto_pm:wiki:X"]),
+        ("[auto_pm:wiki:A label]", ["auto_pm:wiki:A"]),
+        # Unbracketed: unchanged, still reads past `]`.
+        (
+            "see auto_pm:wiki:A]x and p:wiki:B).",
+            ["auto_pm:wiki:A]x", "p:wiki:B)."],
+        ),
+        # An EMPTY bracketed target must not fall through to the
+        # unbracketed alternative, which would swallow `]` and the
+        # glued-on second link again.
+        ("[auto_pm:wiki:]", ["auto_pm:wiki:"]),
+        (
+            "[auto_pm:wiki:]/[auto-pm:wiki:B]",
+            ["auto_pm:wiki:", "auto-pm:wiki:B"],
+        ),
+        # ...while an empty target before a space still matches nothing.
+        ("[auto_pm:wiki: label]", []),
+    ],
+)
+def test_row148_realm_token_boundaries(text, tokens):
+    assert [
+        m.group(0) for m in _PREFIX_REALM_RE.finditer(text)
+    ] == tokens
 
 
 def test_seeded_defect_row1_pre_fix_warns_escaped_link_target():
@@ -793,9 +933,18 @@ def test_suite_balance_is_roughly_even():
     # in SILENT_ROWS gives (no instance table supplied by this suite's
     # default call) -- the defect it carries is exercised by the
     # standalone tests instead, so it counts here as one-sided too.
+    #
+    # Ticket #148 added row148_glued_bracket_both_resolved, silent. Its
+    # must-warn half (the typo'd second link) is a standalone test for
+    # the same reason as row 72: it asserts WHICH token was named.
+    #
+    # Ticket #151 moved row 14 from the warning half to the silent half:
+    # its code, `bare_ticket_ref`, no longer exists. That is a removal,
+    # not a narrowing -- the shapes a bare `#N` can be wrong in each
+    # keep their own must-warn rows and tests.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 40
-    assert warning_count == 39
+    assert silent_count == 42
+    assert warning_count == 38
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (

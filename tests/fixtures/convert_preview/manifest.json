@@ -357,5 +357,25 @@
     "markdown_input": null,
     "tracwiki": " * auto_pm:Rules/trac/RenderVerify\n * auto_pm:wiki:Rules/trac/RenderVerify\n * auto_pm:WikiStart\n * trac:TracDev/ApiDocs\n * trac:wiki:TracDev/ApiDocs\n",
     "source_format": "tracwiki"
+  },
+  "row147_bracket_no_label_realm_close_paren": {
+    "markdown_input": null,
+    "tracwiki": "Then a seeded defect ([auto_pm:wiki:Rules/testing/SeededDefectFirst]).",
+    "source_format": "tracwiki"
+  },
+  "row147_typo_bracket_no_label_realm_close_paren": {
+    "markdown_input": null,
+    "tracwiki": "Then a seeded defect ([auto-pm:wiki:Rules/testing/SeededDefectFirst]).",
+    "source_format": "tracwiki"
+  },
+  "row148_glued_bracket_both_resolved": {
+    "markdown_input": null,
+    "tracwiki": "Rules: [auto_pm:wiki:Rules/testing/SeededDefectFirst]/[auto_pm:wiki:Rules/testing/RecallGateEveryTightening].",
+    "source_format": "tracwiki"
+  },
+  "row148_glued_bracket_typo_second": {
+    "markdown_input": null,
+    "tracwiki": "Rules: [auto_pm:wiki:Rules/testing/SeededDefectFirst]/[auto-pm:wiki:Rules/testing/RecallGateEveryTightening].",
+    "source_format": "tracwiki"
   }
 }
