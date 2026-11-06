@@ -80,8 +80,8 @@ class ToolRegistry:
     disabled_tools names tools to drop outright, by Tool.name -- for a
     tool that can't work in a particular deployment (e.g. one that needs a
     Trac plugin the server doesn't have) and would otherwise only produce
-    errors. It's applied after the other two filters and uses the same
-    "unknown tool" dispatch path.
+    errors. A tool must pass all three filters, so their order doesn't
+    matter; a disabled tool takes the same "unknown tool" dispatch path.
     """
 
     def __init__(

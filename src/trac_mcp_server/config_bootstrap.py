@@ -103,6 +103,10 @@ def bootstrap_config(
     return config, sources
 
 
+_BOOL_TRUE = frozenset({"true", "1", "yes", "on"})
+_BOOL_FALSE = frozenset({"false", "0", "no", "off"})
+
+
 def bootstrap_server_config(
     cli_overrides: dict[str, Any] | None = None,
 ) -> ServerConfig:
@@ -125,13 +129,15 @@ def bootstrap_server_config(
     ``TRAC_IDENTITIES``.
 
     ``TRAC_MCP_READ_ONLY`` (or ``--read-only``) restricts the tool list to
-    read-only tools only (``Tool.annotations.readOnlyHint``), regardless
-    of transport -- applies both stdio and http.
+    the tools marked ``Tool.annotations.readOnlyHint``, on every transport.
+    Its value is true/false, 1/0, yes/no or on/off; anything else raises
+    ``ValueError``, an empty value counts as unset.
 
     ``TRAC_MCP_DISABLED_TOOLS`` (comma-separated tool names, or YAML
     ``server.disabled_tools``) drops individual tools from the tool list,
     e.g. ``ticket_comment_history`` when the Trac server lacks the plugin
-    it needs.
+    it needs. A set value replaces the YAML list; an empty one counts as
+    unset.
 
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
@@ -220,42 +226,43 @@ def bootstrap_server_config(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
 
-    def _parse_bool_env(key: str) -> bool | None:
-        """Env var -> bool, or None if unset. Same truthy-string set as
-        TRAC_INSECURE/TRAC_DEBUG in config.py, for consistency."""
-        val = os.getenv(key)
-        if val is None:
-            return None
-        return val.lower() in ("true", "1", "yes", "on")
-
+    # Strict, because a misread value would expose every write tool: an
+    # unrecognised value is refused rather than taken as "false", and an
+    # empty one counts as unset, so ``${TRAC_MCP_READ_ONLY:-}`` in a
+    # compose file keeps the YAML setting.
+    read_only_env = os.getenv("TRAC_MCP_READ_ONLY", "").strip().lower()
+    if read_only_env and read_only_env not in _BOOL_TRUE | _BOOL_FALSE:
+        raise ValueError(
+            f"Invalid TRAC_MCP_READ_ONLY: {os.getenv('TRAC_MCP_READ_ONLY')!r}"
+            " (expected true/false, 1/0, yes/no or on/off)"
+        )
     if overrides.get("read_only"):
         read_only = True
+    elif read_only_env:
+        read_only = read_only_env in _BOOL_TRUE
     else:
-        read_only_env = _parse_bool_env("TRAC_MCP_READ_ONLY")
-        read_only = (
-            read_only_env
-            if read_only_env is not None
-            else bool(yaml_server.get("read_only", False))
-        )
+        read_only = bool(yaml_server.get("read_only", False))
 
     def _parse_csv_env(key: str) -> list[str] | None:
-        """Comma-separated env var -> list, or None if unset.
+        """Comma-separated env var -> list, or None if unset or blank.
 
         Blank entries (from a trailing comma or stray whitespace) are
-        dropped rather than turning into an empty-string tool name
-        that could never match a real tool.
+        dropped rather than turning into an empty-string tool name that
+        could never match a real tool. A value with no entry at all counts
+        as unset, so ``${VAR:-}`` in a compose file keeps the YAML list.
         """
-        raw = os.getenv(key)
-        if raw is None:
-            return None
-        return [item.strip() for item in raw.split(",") if item.strip()]
+        items = [item.strip() for item in os.getenv(key, "").split(",")]
+        return [item for item in items if item] or None
 
-    disabled_tools_env = _parse_csv_env("TRAC_MCP_DISABLED_TOOLS")
-    disabled_tools = (
-        disabled_tools_env
-        if disabled_tools_env is not None
-        else list(yaml_server.get("disabled_tools", []))
-    )
+    disabled_tools = _parse_csv_env("TRAC_MCP_DISABLED_TOOLS")
+    if disabled_tools is None:
+        # YAML names are normalised like env entries, so " ticket_delete"
+        # still matches the tool.
+        disabled_tools = [
+            str(name).strip()
+            for name in yaml_server.get("disabled_tools", [])
+            if str(name).strip()
+        ]
 
     allowed_hosts = list(yaml_server.get("allowed_hosts", []))
     allowed_origins = list(yaml_server.get("allowed_origins", []))

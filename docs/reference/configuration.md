@@ -45,6 +45,8 @@ server:
   path: /mcp
   auth_token: ${TRAC_MCP_AUTH_TOKEN}
   allow_unauthenticated: false
+  read_only: false
+  disabled_tools: []
   allowed_hosts: []
   allowed_origins: []
 ```
@@ -125,6 +127,8 @@ These govern the MCP server process itself -- transport, bind address, and auth 
 | `TRAC_MCP_PORT` | `8080` | Bind port for the `http` transport (1-65535) |
 | `TRAC_MCP_PATH` | `/mcp` | URL path the MCP endpoint is mounted at |
 | `TRAC_MCP_AUTH_TOKEN` | -- | Bearer token required by the `http` transport. Env/YAML only -- there is no CLI flag, to keep it out of the process list. |
+| `TRAC_MCP_READ_ONLY` | `false` | Expose only tools marked read-only (`--read-only`, YAML `read_only`); see [Tool Architecture](tool-architecture.md#read-only-filtering---read-only). `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`; any other value is refused at startup, an empty value counts as unset. |
+| `TRAC_MCP_DISABLED_TOOLS` | -- | Comma-separated tool names to leave out (YAML `disabled_tools`); see [Tool Architecture](tool-architecture.md#disabling-individual-tools). Replaces the YAML list; an empty value counts as unset. |
 
 See [HTTP Transport](http-transport.md) for the full picture, including the bind-safety rule that refuses an unauthenticated non-loopback bind.
 

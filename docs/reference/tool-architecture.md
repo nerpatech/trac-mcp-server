@@ -285,11 +285,15 @@ With permissions file containing `TICKET_VIEW`, `WIKI_VIEW`, `MILESTONE_VIEW`:
 
 `--read-only` (or `TRAC_MCP_READ_ONLY` / `config.yaml`'s `server.read_only`) produces the same *shape* of result as the permissions-file example above, without needing to enumerate Trac permissions by hand: it includes a tool only if its own `Tool.annotations.readOnlyHint` is `True`. Every registered `ToolSpec` sets this explicitly (checked by `TestAllToolsCarryReadOnlyHint` in `tests/test_mcp/tools/test_registry.py`), so the filter needs no separate maintained list.
 
+`ticket_attachment_get`, `wiki_attachment_get` and `wiki_file_pull` read from Trac but carry `readOnlyHint=False`, because they can write a local file; `--read-only` hides them too.
+
+`TRAC_MCP_READ_ONLY` takes `true`/`false`, `1`/`0`, `yes`/`no` or `on`/`off`, case-insensitive. Any other value is refused at startup rather than taken as `false`, and an empty value counts as unset, so a misspelt or blank setting never exposes the write tools.
+
 It's independent of, and combinable with, `--permissions-file` -- a tool must pass both filters when both are configured. Prefer `--read-only` when the goal is simply "no write access, regardless of which Trac permissions the service account happens to have"; prefer `--permissions-file` when you need finer-grained control (e.g. tickets read-only but wiki read-write) or want the exposed tool list to mirror the service account's actual Trac permissions.
 
 ## Disabling Individual Tools
 
-`TRAC_MCP_DISABLED_TOOLS` (comma-separated, or `config.yaml`'s `server.disabled_tools` list) drops tools by name. Use it for tools that can't work in a given deployment and would only return errors -- e.g. `ticket_comment_history` when the Trac server lacks the `tracrpc_comment` plugin, or `ticket_render_check` when the server's ticket pages aren't reachable with the credentials the MCP server uses. Disabled tools are neither listed nor dispatchable; unknown names are logged as a warning and otherwise ignored. Combinable with `--read-only` and `--permissions-file`.
+`TRAC_MCP_DISABLED_TOOLS` (comma-separated, or `config.yaml`'s `server.disabled_tools` list) drops tools by name. Use it for tools that can't work in a given deployment and would only return errors -- e.g. `ticket_comment_history` when the Trac server lacks the `tracrpc_comment` plugin, or `ticket_render_check` when the server's ticket pages aren't reachable with the credentials the MCP server uses. Disabled tools are neither listed nor dispatchable. A set variable replaces the YAML list; an empty one counts as unset. Names are stripped of surrounding whitespace in both sources. At startup stderr lists the disabled tools that matched, and warns about unknown names, which are otherwise ignored, and about a disabled `list_instances`, which error messages still point callers to. Combinable with `--read-only` and `--permissions-file`.
 
 ## Error Handling
 
