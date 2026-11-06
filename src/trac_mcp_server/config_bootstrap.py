@@ -124,10 +124,12 @@ def bootstrap_server_config(
     file named by ``TRAC_IDENTITIES``.
 
     ``TRAC_MCP_ALLOWED_HOSTS``/``TRAC_MCP_ALLOWED_ORIGINS`` (comma-separated,
-    e.g. ``trac-mcp:8080,trac-mcp:*``) extend the DNS-rebinding-protection
-    allow-list beyond loopback and the configured bind address -- needed
-    whenever a client reaches this server by a name other than what it's
-    bound to, such as a docker-compose service name.
+    e.g. ``trac-mcp:8080,trac-mcp:*``) set the DNS-rebinding-protection
+    allow-list that is accepted besides loopback and the configured bind
+    address -- needed whenever a client reaches this server by a name other
+    than what it's bound to, such as a docker-compose service name. A set
+    value replaces the YAML ``allowed_hosts``/``allowed_origins`` list; an
+    empty value counts as unset, like every other ``TRAC_MCP_*`` string.
 
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
@@ -217,16 +219,16 @@ def bootstrap_server_config(
     ) or bool(yaml_server.get("allow_unauthenticated", False))
 
     def _parse_csv_env(key: str) -> list[str] | None:
-        """Comma-separated env var -> list, or None if unset.
+        """Comma-separated env var -> list, or None if unset or blank.
 
         Blank entries (from a trailing comma or stray whitespace) are
         dropped rather than turning into an empty-string allow-list entry
-        that could never match a real Host/Origin header.
+        that could never match a real Host/Origin header. A value with no
+        entry at all counts as unset, so ``${VAR:-}`` in a compose file
+        keeps the YAML list.
         """
-        raw = os.getenv(key)
-        if raw is None:
-            return None
-        return [item.strip() for item in raw.split(",") if item.strip()]
+        items = [item.strip() for item in os.getenv(key, "").split(",")]
+        return [item for item in items if item] or None
 
     allowed_hosts_env = _parse_csv_env("TRAC_MCP_ALLOWED_HOSTS")
     allowed_hosts = (

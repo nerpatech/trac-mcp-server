@@ -234,10 +234,13 @@ This exists because the server holds the operator's Trac credentials -- an open,
 
 ## DNS-Rebinding Protection
 
-The MCP endpoint validates the `Host` header (and, if present, `Origin`) against an allow-list, rejecting mismatches with `421`. The default allow-list covers loopback on any port (`127.0.0.1:*`, `localhost:*`) plus the exact configured `host:port`. If a client reaches this server by a name other than what it's bound to -- a reverse proxy that changes the `Host` header, or a docker-compose service name like `trac-mcp:8080` -- add it via `TRAC_MCP_ALLOWED_HOSTS` (and, for browser clients, `TRAC_MCP_ALLOWED_ORIGINS`), or the YAML `server:` section's `allowed_hosts`/`allowed_origins`.
+The MCP endpoint validates the `Host` header (and, if present, `Origin`) against an allow-list, rejecting mismatches with `421`. The default allow-list covers loopback on any port (`127.0.0.1:*`, `localhost:*`) plus the exact configured `host:port`. If a client reaches this server by a name other than what it's bound to -- a reverse proxy that changes the `Host` header, or a docker-compose service name like `trac-mcp:8080` -- add it via `TRAC_MCP_ALLOWED_HOSTS` (and, for browser clients, `TRAC_MCP_ALLOWED_ORIGINS`), or the YAML `server:` section's `allowed_hosts`/`allowed_origins`. A set variable replaces the YAML list rather than extending it, so list every name there; an empty variable counts as unset.
+
+A `Host` entry matches exactly, or by a trailing `:*` for any port (`host:*` needs a port in the header): write `host[:port]` or `host:*`. An `Origin` entry is compared with its scheme. A wrongly formed entry is accepted and never matches.
 
 ```bash
-TRAC_MCP_ALLOWED_HOSTS=trac-mcp:8080
+TRAC_MCP_ALLOWED_HOSTS=trac-mcp:8080,trac-mcp:*
+TRAC_MCP_ALLOWED_ORIGINS=http://trac-mcp:8080
 ```
 
 `/healthz` is not subject to this check, so container health probes work regardless of the `Host` header they send.

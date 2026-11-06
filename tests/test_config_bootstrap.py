@@ -603,25 +603,13 @@ def test_env_vars_populate_allowed_hosts_and_origins(monkeypatch):
         "TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080, trac-mcp:*"
     )
     monkeypatch.setenv(
-        "TRAC_MCP_ALLOWED_ORIGINS", "https://assistant.example.com"
+        "TRAC_MCP_ALLOWED_ORIGINS", "http://trac-mcp:8080"
     )
 
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
+    config = _bootstrap_server()
 
-    assert server_config.allowed_hosts == [
-        "trac-mcp:8080",
-        "trac-mcp:*",
-    ]
-    assert server_config.allowed_origins == [
-        "https://assistant.example.com"
-    ]
+    assert config.allowed_hosts == ["trac-mcp:8080", "trac-mcp:*"]
+    assert config.allowed_origins == ["http://trac-mcp:8080"]
 
 
 def test_allowed_hosts_env_blank_entries_dropped(monkeypatch):
@@ -630,73 +618,49 @@ def test_allowed_hosts_env_blank_entries_dropped(monkeypatch):
     _clear_server_env(monkeypatch)
     monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080,, ")
 
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
-
-    assert server_config.allowed_hosts == ["trac-mcp:8080"]
+    assert _bootstrap_server().allowed_hosts == ["trac-mcp:8080"]
 
 
-def test_allowed_hosts_env_overrides_yaml(monkeypatch):
-    """Env wins over YAML, consistent with every other field's precedence."""
+def test_allowed_hosts_env_replaces_yaml(monkeypatch):
+    """A set value replaces the YAML list (env > YAML), it does not extend it."""
     _clear_server_env(monkeypatch)
     monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "from-env:8080")
 
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=["/fake/config.yaml"],
-        ),
-        patch(
-            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
-            return_value={
-                "server": {"allowed_hosts": ["from-yaml:8080"]}
-            },
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
+    config = _bootstrap_server(
+        yaml_server={"allowed_hosts": ["from-yaml:8080"]}
+    )
 
-    assert server_config.allowed_hosts == ["from-env:8080"]
+    assert config.allowed_hosts == ["from-env:8080"]
 
 
-def test_allowed_hosts_falls_back_to_yaml_when_env_unset(monkeypatch):
+@pytest.mark.parametrize("value", [None, "", "  ", " , "])
+@pytest.mark.parametrize(
+    "env_key,yaml_key",
+    [
+        ("TRAC_MCP_ALLOWED_HOSTS", "allowed_hosts"),
+        ("TRAC_MCP_ALLOWED_ORIGINS", "allowed_origins"),
+    ],
+)
+def test_allowed_lists_unset_or_empty_env_keeps_yaml(
+    monkeypatch, env_key, yaml_key, value
+):
+    """Unset, empty or blank counts as unset, so a compose file's
+    ``${TRAC_MCP_ALLOWED_HOSTS:-}`` does not wipe the YAML list."""
     _clear_server_env(monkeypatch)
+    if value is not None:
+        monkeypatch.setenv(env_key, value)
 
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=["/fake/config.yaml"],
-        ),
-        patch(
-            "trac_mcp_server.config_bootstrap.load_hierarchical_config",
-            return_value={
-                "server": {"allowed_hosts": ["from-yaml:8080"]}
-            },
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
+    config = _bootstrap_server(
+        yaml_server={yaml_key: ["from-yaml:8080"]}
+    )
 
-    assert server_config.allowed_hosts == ["from-yaml:8080"]
+    assert getattr(config, yaml_key) == ["from-yaml:8080"]
 
 
 def test_allowed_hosts_defaults_to_empty_list(monkeypatch):
     _clear_server_env(monkeypatch)
 
-    with (
-        patch("trac_mcp_server.config_bootstrap.load_dotenv"),
-        patch(
-            "trac_mcp_server.config_bootstrap.discover_config_files",
-            return_value=[],
-        ),
-    ):
-        server_config = bootstrap_server_config(None)
+    config = _bootstrap_server()
 
-    assert server_config.allowed_hosts == []
-    assert server_config.allowed_origins == []
+    assert config.allowed_hosts == []
+    assert config.allowed_origins == []

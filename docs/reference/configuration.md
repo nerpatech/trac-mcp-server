@@ -125,6 +125,8 @@ These govern the MCP server process itself -- transport, bind address, and auth 
 | `TRAC_MCP_PORT` | `8080` | Bind port for the `http` transport (1-65535) |
 | `TRAC_MCP_PATH` | `/mcp` | URL path the MCP endpoint is mounted at |
 | `TRAC_MCP_AUTH_TOKEN` | -- | Bearer token required by the `http` transport. Env/YAML only -- there is no CLI flag, to keep it out of the process list. |
+| `TRAC_MCP_ALLOWED_HOSTS` | -- | Comma-separated `Host` headers accepted besides loopback and the bind address (`host[:port]` or `host:*`). Replaces the YAML `allowed_hosts` list; empty counts as unset. |
+| `TRAC_MCP_ALLOWED_ORIGINS` | -- | Comma-separated `Origin` headers accepted, with scheme (`http://trac-mcp:8080`). Replaces the YAML `allowed_origins` list; empty counts as unset. |
 
 See [HTTP Transport](http-transport.md) for the full picture, including the bind-safety rule that refuses an unauthenticated non-loopback bind.
 
