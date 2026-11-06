@@ -13,6 +13,7 @@ Usage:
 
     TRAC_MCP_AUTH_TOKEN_STAGE=... python scripts/daemon_smoke.py URL
     python scripts/daemon_smoke.py URL --token-env OTHER_VAR
+    python scripts/daemon_smoke.py URL --instance /other --allow-instance-writes
 
 ``URL`` is the daemon's base (``http://host:8092``); a trailing ``/mcp`` or
 ``/`` is accepted and removed. Checks run in order and stop at the first
@@ -22,15 +23,19 @@ failure, one ``PASS <n> <name>`` / ``FAIL <n> <name>: <reason>`` line each:
   2 auth_enforced  POST /mcp with no Authorization is 401
   3 tools          initialize + tools/list; every tool this checkout
                    defines is listed by the daemon
-  4 read           wiki_get WikiStart on the daemon's default instance
+  4 read           wiki_get WikiStart on the test instance
   5 write_read     write Smoke/DaemonSmoke with a fresh nonce, read it
                    back, compare byte for byte
   6 comment_plugin post a comment on the smoke ticket, edit it, and see
                    the edit in ticket_comment_history (needs the
                    tracrpc_comment plugin on the daemon's Trac)
 
-Checks 5 and 6 WRITE to whatever Trac instance the daemon defaults to
-(``/trac_test`` on staging); check 4 prints which one answered.
+Checks 4-6 pass ``instance=<--instance>`` (default ``/trac_test``) on
+EVERY tool call, never relying on the daemon's default, which on the
+shared daemon is a production store. Each result's reported instance must
+equal the requested one, or the check fails. Checks 5 and 6 WRITE there, so
+an ``--instance`` other than ``/trac_test`` is refused (exit 2, NOT RUN)
+unless ``--allow-instance-writes`` is also given.
 
 Exit codes are the three-state contract of ``Rules/testing/
 ExitCodeContractHasThreeStates``:
@@ -38,8 +43,10 @@ ExitCodeContractHasThreeStates``:
   0  every check passed
   1  a check failed -- including a daemon that is unreachable or refuses
      the connection: that is a finding about the release
-  2  could not run: the token variable is unset or empty, or the URL is
-     malformed. Decided before any network call, and says so ("NOT RUN").
+  2  could not run: the token variable is unset or empty, the URL is
+     malformed, or a write target other than /trac_test was not
+     explicitly allowed. Decided before any network call, and says so
+     ("NOT RUN").
 
 The token is never printed. It is sent only as a bearer header; every
 message built from an exception or a server reply passes through
@@ -58,6 +65,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN_STAGE"
+# Checks 4-6 read and write here, never at the daemon's default instance.
+DEFAULT_INSTANCE = "/trac_test"
+_INSTANCE_NAME = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 EXIT_PASSED = 0
 EXIT_FAILED = 1
 EXIT_NOT_RUN = 2
@@ -114,6 +124,27 @@ def normalise_base(url: str) -> str:
     if path.endswith("/mcp"):
         path = path[: -len("/mcp")]
     return f"{parts.scheme}://{parts.netloc}{path.rstrip('/')}"
+
+
+def instance_refusal(instance: str, allow_writes: bool) -> str | None:
+    """Why ``instance`` may not be the smoke's write target, or None.
+
+    The smoke writes a wiki page and a ticket there, so anything but the
+    test instance has to be a deliberate act, and a value that is no
+    instance path is refused outright.
+    """
+    if not _INSTANCE_NAME.match(instance or ""):
+        return (
+            "--instance must be an instance path such as /trac_test "
+            "(one leading slash, no further slashes)"
+        )
+    if instance != DEFAULT_INSTANCE and not allow_writes:
+        return (
+            f"--instance {instance} is not {DEFAULT_INSTANCE}, and "
+            "checks 5 and 6 write a wiki page and a ticket there; "
+            "pass --allow-instance-writes to say that is intended"
+        )
+    return None
 
 
 def compare_tools(
@@ -355,6 +386,63 @@ async def check_tools(session, init, reporter: Reporter) -> str:
         f"server {server.name} {server.version}, "
         f"{len(daemon_names)} tools"
     )
+
+
+_INSTANCE_LINE = re.compile(r"^\[instance: (\S+) \((\w+)\)\]$")
+
+
+def answered_instance(result) -> tuple[str | None, str | None]:
+    """``(instance, source)`` a tool result says answered it.
+
+    Every result carries them (``tools/instance_echo.py``): in
+    ``structuredContent`` when the handler returned a dict, and always as a
+    final ``[instance: /x (explicit)]`` text block. ``(None, None)`` when
+    neither is there.
+    """
+    data = _structured(result)
+    if isinstance(data.get("instance"), str):
+        return data["instance"], data.get("instance_source")
+    for line in reversed(_result_text(result).splitlines()):
+        match = _INSTANCE_LINE.match(line.strip())
+        if match:
+            return match.group(1), match.group(2)
+    return None, None
+
+
+class Scoped:
+    """A session that sends ``instance=<instance>`` on EVERY tool call and
+    checks, on every result, that the instance that answered is the one
+    asked for.
+
+    Checks 4-6 read and WRITE. Without ``instance`` a call goes to the
+    daemon's default, which on the shared daemon is a production store
+    (``/auto_pm``), so the argument is added here, at the one place every
+    call passes through, and an answer from anywhere else fails the check.
+    """
+
+    def __init__(self, session, instance: str):
+        self._session = session
+        self.instance = instance
+
+    async def call_tool(self, name, arguments):
+        result = await self._session.call_tool(
+            name, {**arguments, "instance": self.instance}
+        )
+        answered, source = answered_instance(result)
+        if answered is None:
+            raise CheckFailed(
+                f"{name} did not report which instance answered, so "
+                f"{self.instance} cannot be confirmed"
+            )
+        if (
+            answered.rstrip("/") != self.instance
+            or source != "explicit"
+        ):
+            raise CheckFailed(
+                f"{name} was sent instance={self.instance} but the "
+                f"answer came from {answered} ({source})"
+            )
+        return result
 
 
 async def check_read(session) -> str:
@@ -626,7 +714,9 @@ _CHECK_NAMES = {
 }
 
 
-async def _session_checks(base, token, reporter, progress) -> None:
+async def _session_checks(
+    base, token, reporter, progress, instance
+) -> None:
     """Checks 3-6 on one MCP session, recording where they got to."""
     import anyio
     import httpx
@@ -651,10 +741,12 @@ async def _session_checks(base, token, reporter, progress) -> None:
                             session, init, reporter
                         )
 
+                scoped = Scoped(session, instance)
+
                 def bounded(check):
                     async def run():
                         with anyio.fail_after(CALL_TIMEOUT * 4):
-                            return await check(session)
+                            return await check(scoped)
 
                     return run
 
@@ -674,7 +766,9 @@ async def _session_checks(base, token, reporter, progress) -> None:
                 progress.completed = True
 
 
-async def run_smoke(base: str, token: str, out=None) -> int:
+async def run_smoke(
+    base: str, token: str, out=None, instance: str = DEFAULT_INSTANCE
+) -> int:
     """Run the checks against ``base``; the process exit code."""
     reporter = Reporter(token, out)
     # The SDK logs transport failures, with tracebacks, straight to
@@ -697,7 +791,7 @@ async def run_smoke(base: str, token: str, out=None) -> int:
 
     progress = Progress()
     try:
-        await _session_checks(base, token, reporter, progress)
+        await _session_checks(base, token, reporter, progress, instance)
     except Exception as exc:
         # The session machinery failed outside any one check: opening
         # it, or closing it afterwards. Closing noise after a verdict is
@@ -743,12 +837,28 @@ def main(argv: list[str] | None = None) -> int:
         help="environment variable holding the bearer token "
         f"(default {DEFAULT_TOKEN_ENV})",
     )
+    parser.add_argument(
+        "--instance",
+        default=DEFAULT_INSTANCE,
+        help="Trac instance path checks 4-6 read and write "
+        f"(default {DEFAULT_INSTANCE})",
+    )
+    parser.add_argument(
+        "--allow-instance-writes",
+        action="store_true",
+        help=f"permit an --instance other than {DEFAULT_INSTANCE}",
+    )
     args = parser.parse_args(argv)
 
     try:
         base = normalise_base(args.url)
     except ValueError as exc:
         return _not_run(f"the daemon URL is malformed: {exc}")
+    refusal = instance_refusal(
+        args.instance, args.allow_instance_writes
+    )
+    if refusal:
+        return _not_run(refusal)
     if not _ENV_NAME.match(args.token_env):
         return _not_run(
             "--token-env must name an environment variable "
@@ -767,7 +877,7 @@ def main(argv: list[str] | None = None) -> int:
             "token (printable ASCII, no spaces)"
         )
 
-    return asyncio.run(run_smoke(base, token))
+    return asyncio.run(run_smoke(base, token, instance=args.instance))
 
 
 if __name__ == "__main__":

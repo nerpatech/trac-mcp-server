@@ -16,7 +16,8 @@
 # summary line to misread. That is #80's target_check_skipped shape one
 # layer out -- a skipped check reported as a clean one.
 #
-# ci-live.sh --daemon <url> [--token-env NAME]
+# ci-live.sh --daemon <url> [--token-env NAME] [--instance PATH
+#                            [--allow-instance-writes]]
 #
 # The in-process suite above builds its own app from this checkout, so it
 # cannot see what only a DEPLOYED daemon has: the FreeBSD wheels it really
@@ -31,9 +32,13 @@
 # token comes from $TRAC_MCP_AUTH_TOKEN_STAGE, or the variable --token-env
 # names, and is never printed. The exit code is the smoke script's: 0
 # passed, 1 a check failed (an unreachable daemon included), 2 not run (no
-# token, bad URL). It needs no .env and no Trac credentials, and it WRITES
-# to the daemon's default Trac instance. Any other argument prints usage
-# and exits 2.
+# token, bad URL, a refused --instance). It needs no .env and no Trac
+# credentials. It WRITES a wiki page and a ticket, always to the instance
+# named by --instance (default /trac_test), passed on every call and never
+# the daemon's own default, which on the shared daemon is a production
+# store. Any other --instance is refused (exit 2) unless
+# --allow-instance-writes is given too. Any other argument prints usage and
+# exits 2.
 
 set -e
 
@@ -44,12 +49,14 @@ cd "$(dirname "$0")"
 usage() {
     echo "usage: ci-live.sh" >&2
     echo "       ci-live.sh --daemon URL [--token-env NAME]" >&2
+    echo "                          [--instance PATH [--allow-instance-writes]]" >&2
 }
 
 if [ "$#" -gt 0 ]; then
     daemon_url=""
-    token_env=""
-    have_token_env=0
+    # Everything but the URL goes to daemon_smoke.py as given; it does the
+    # validating (and the exit 2 for a refused --instance).
+    smoke_args=()
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --daemon)
@@ -60,14 +67,17 @@ if [ "$#" -gt 0 ]; then
                 daemon_url="$2"
                 shift 2
                 ;;
-            --token-env)
+            --token-env | --instance)
                 if [ "$#" -lt 2 ]; then
                     usage
                     exit 2
                 fi
-                token_env="$2"
-                have_token_env=1
+                smoke_args+=("$1" "$2")
                 shift 2
+                ;;
+            --allow-instance-writes)
+                smoke_args+=("$1")
+                shift
                 ;;
             *)
                 usage
@@ -81,11 +91,7 @@ if [ "$#" -gt 0 ]; then
     fi
     # exec: the smoke script's exit code is this script's, with no
     # pytest and no credential probe in between.
-    if [ "$have_token_env" = 1 ]; then
-        exec python scripts/daemon_smoke.py "$daemon_url" \
-            --token-env "$token_env"
-    fi
-    exec python scripts/daemon_smoke.py "$daemon_url"
+    exec python scripts/daemon_smoke.py "$daemon_url" ${smoke_args[@]+"${smoke_args[@]}"}
 fi
 
 echo "=== Live credentials ==="

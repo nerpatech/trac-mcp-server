@@ -39,7 +39,9 @@ from tests.test_mcp.test_http_identity import _free_port, _running_app
 from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.mcp.server import PING_SPEC
 from trac_mcp_server.mcp.tools import ALL_SPECS, ToolRegistry
+from trac_mcp_server.mcp.tools.instance_echo import annotate
 from trac_mcp_server.mcp.tools.registry import (
+    with_instance_param,
     with_page_alias,
     with_strict_schema,
 )
@@ -226,13 +228,21 @@ class FakeTrac:
         self.drop_comment_number = False
         self.edit_creates_revision = True
         self.calls: list[str] = []
+        # (tool, instance argument as received) for every call
+        self.instances: list[tuple[str, str | None]] = []
+        self.answer_as: str | None = None  # answer from elsewhere
+        self.echo_instance = True
         self._ts = 1000
 
     # -- tools/list -------------------------------------------------------
     def tools(self):
-        registry = ToolRegistry(
-            with_strict_schema(with_page_alias([PING_SPEC, *ALL_SPECS]))
+        # The pipeline server.main applies: page alias, the `instance`
+        # argument, then strict schemas -- so a call is validated the way
+        # the daemon validates it.
+        specs = with_instance_param(
+            with_page_alias([PING_SPEC, *ALL_SPECS]), []
         )
+        registry = ToolRegistry(with_strict_schema(specs))
         return [
             t
             for t in registry.list_tools()
@@ -242,7 +252,18 @@ class FakeTrac:
     # -- dispatch ---------------------------------------------------------
     async def call(self, name, args):
         self.calls.append(name)
-        return getattr(self, f"_{name}")(args)
+        instance = args.get("instance")
+        self.instances.append((name, instance))
+        result = getattr(self, f"_{name}")(args)
+        if self.echo_instance:
+            # the real echo (tools/instance_echo.py), as the daemon adds it
+            where = self.answer_as or instance or "/auto_pm"
+            annotate(
+                result,
+                f"http://trac.invalid{where}",
+                explicit=instance is not None,
+            )
+        return result
 
     def _bump(self):
         self._ts += 7
@@ -260,8 +281,6 @@ class FakeTrac:
             "version": page["version"],
             "author": "agent_rpc",
             "lastModified": "2026-11-06 10:00",
-            "instance": "/trac_test",
-            "instance_source": "server_default",
         }
         return _text(page["content"], data)
 
@@ -394,14 +413,19 @@ class FakeTrac:
         return _text("\n".join(lines))
 
 
-class FakeSession:
-    """The two calls the smoke makes on an SDK ClientSession."""
+class _RawSession:
+    """The one call the checks make on an SDK ClientSession."""
 
     def __init__(self, trac):
         self.trac = trac
 
     async def call_tool(self, name, arguments):
         return await self.trac.call(name, arguments)
+
+
+def FakeSession(trac, instance="/trac_test"):  # noqa: N802
+    """What checks 4-6 are handed: the stand-in, scoped to an instance."""
+    return smoke.Scoped(_RawSession(trac), instance)
 
 
 def _run(coro):
@@ -567,7 +591,7 @@ def _config(port):
     )
 
 
-def _smoke_against(trac, path_suffix=""):
+def _smoke_against(trac, path_suffix="", instance="/trac_test"):
     """Run the whole smoke against a real server; (exit, output)."""
     out = io.StringIO()
 
@@ -577,7 +601,10 @@ def _smoke_against(trac, path_suffix=""):
             _fake_daemon_server(trac), _config(port)
         ) as base:
             return await smoke.run_smoke(
-                smoke.normalise_base(base + path_suffix), TOKEN, out
+                smoke.normalise_base(base + path_suffix),
+                TOKEN,
+                out,
+                instance,
             )
 
     code = anyio.run(body)
@@ -963,3 +990,157 @@ def test_an_error_body_that_echoes_the_token_is_not_printed(
     assert "FAIL 3 tools" in result.stdout
     assert TOKEN not in result.stdout + result.stderr
     assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The write target: checks 4-6 name the instance on every call
+# ---------------------------------------------------------------------------
+
+_WRITE_TOOLS = {
+    "wiki_get",
+    "wiki_create",
+    "wiki_update",
+    "ticket_search",
+    "ticket_create",
+    "ticket_get",
+    "ticket_update",
+    "ticket_comment_edit",
+    "ticket_comment_history",
+}
+
+
+def test_no_call_in_checks_4_to_6_omits_the_instance(trac):
+    # twice: the first run creates the page, the second updates it
+    for _ in range(2):
+        code, output = _smoke_against(trac)
+        assert code == 0, output
+    assert {name for name, _ in trac.instances} == _WRITE_TOOLS
+    omitted = [n for n, inst in trac.instances if inst is None]
+    assert omitted == []
+    assert {inst for _, inst in trac.instances} == {"/trac_test"}
+
+
+def test_the_requested_instance_is_what_every_call_names(trac):
+    code, output = _smoke_against(trac, instance="/elsewhere")
+    assert code == 0, output
+    assert {inst for _, inst in trac.instances} == {"/elsewhere"}
+
+
+def test_an_answer_from_another_instance_fails_the_check(trac):
+    trac.answer_as = "/auto_pm"
+    code, output = _smoke_against(trac)
+    assert code == 1
+    assert "PASS 3 tools" in output
+    assert "FAIL 4 read" in output
+    assert "came from /auto_pm" in output
+    assert "PASS 5" not in output
+    assert trac.calls == ["wiki_get"]  # nothing was written
+
+
+def test_a_result_that_does_not_say_which_instance_fails(trac):
+    trac.echo_instance = False
+    code, output = _smoke_against(trac)
+    assert code == 1
+    assert "FAIL 4 read" in output
+    assert "did not report which instance answered" in output
+
+
+def test_a_write_answered_from_elsewhere_fails_check_5(trac):
+    real = trac._wiki_update
+
+    def strays(args):
+        trac.answer_as = "/auto_pm"  # from the write on
+        return real(args)
+
+    trac._wiki_update = strays
+    trac.pages[smoke.WIKI_PAGE] = {"content": "old", "version": 2}
+    code, output = _smoke_against(trac)
+    assert code == 1
+    assert "FAIL 5 write_read" in output and "/auto_pm" in output
+
+
+@pytest.mark.parametrize(
+    "instance, allow, refused",
+    [
+        ("/trac_test", False, False),
+        ("/trac_test", True, False),
+        ("/auto_pm", False, True),
+        ("/auto_pm", True, False),
+        ("auto_pm", True, True),
+        ("/a/b", True, True),
+        ("", True, True),
+        ("/", True, True),
+    ],
+)
+def test_instance_refusal(instance, allow, refused):
+    assert bool(smoke.instance_refusal(instance, allow)) is refused
+
+
+@pytestmark_shell
+def test_an_instance_other_than_trac_test_is_refused_without_the_flag(
+    shell_env, listener
+):
+    tmp_path, env, marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    port = listener.getsockname()[1]
+    result = _ci_live(
+        tmp_path,
+        env,
+        "--daemon",
+        f"http://127.0.0.1:{port}",
+        "--instance",
+        "/auto_pm",
+    )
+    _assert_not_run(result)
+    assert "--allow-instance-writes" in result.stderr
+    assert TOKEN not in result.stderr + result.stdout
+    assert not _was_connected_to(listener)
+    assert not marker.exists()
+
+
+@pytestmark_shell
+def test_the_flag_lets_another_instance_through_to_the_network(
+    shell_env,
+):
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(
+        tmp_path,
+        env,
+        "--daemon",
+        f"http://127.0.0.1:{_closed_port()}",
+        "--instance",
+        "/auto_pm",
+        "--allow-instance-writes",
+    )
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "FAIL 1 healthz" in result.stdout
+
+
+@pytestmark_shell
+def test_a_malformed_instance_is_not_run(shell_env, listener):
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    port = listener.getsockname()[1]
+    result = _ci_live(
+        tmp_path,
+        env,
+        "--daemon",
+        f"http://127.0.0.1:{port}",
+        "--instance",
+        "auto_pm/x",
+        "--allow-instance-writes",
+    )
+    _assert_not_run(result)
+    assert not _was_connected_to(listener)
+
+
+@pytestmark_shell
+def test_instance_without_a_value_is_usage(shell_env):
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(
+        tmp_path, env, "--daemon", "http://127.0.0.1:1", "--instance"
+    )
+    assert result.returncode == 2
+    assert "usage: ci-live.sh" in result.stderr
