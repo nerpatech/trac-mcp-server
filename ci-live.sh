@@ -38,7 +38,9 @@
 # the daemon's own default, which on the shared daemon is a production
 # store. Any other --instance is refused (exit 2) unless
 # --allow-instance-writes is given too. Any other argument prints usage and
-# exits 2.
+# exits 2. The daemon must be started WITHOUT --permissions-file: a daemon
+# that filters its tool list by permission is unsupported (check 3 expects
+# every tool this checkout defines, so it fails by design).
 
 set -e
 
@@ -50,6 +52,7 @@ usage() {
     echo "usage: ci-live.sh" >&2
     echo "       ci-live.sh --daemon URL [--token-env NAME]" >&2
     echo "                          [--instance PATH [--allow-instance-writes]]" >&2
+    echo "       (--daemon: the daemon must run without --permissions-file)" >&2
 }
 
 if [ "$#" -gt 0 ]; then

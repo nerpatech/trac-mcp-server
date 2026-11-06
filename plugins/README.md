@@ -140,9 +140,12 @@ Requires no root: uWSGI's master runs as `user`, and `master = true` makes
 
 The plugin is pip-installable straight from a commit of this repository.
 `plugins/tracrpc_comment/pyproject.toml` carries only a `[build-system]`
-table (`setuptools<81`, because Trac 1.6 imports `pkg_resources`);
+table (`setuptools>=40.8.0`, the first release with `setuptools.build_meta`);
 `setup.py` stays the metadata source, so the version is still the one in
-`setup.py`.
+`setup.py`. The `setuptools<81` that Trac 1.6 needs (it imports
+`pkg_resources`, which setuptools 81 removed) is a property of the *stack
+venv's* own setuptools at run time, not of pip's isolated build environment,
+so it is not pinned here: keep the stack venv on `setuptools<81`.
 
 ```
 # 1. install once into the venv Trac's uWSGI workers run from. <sha> is the
@@ -162,6 +165,26 @@ ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
 The same path works from the internal origin mirror: use that remote's URL
 in place of the GitHub one. The host needs `git` and a route to whichever
 remote it names.
+
+**A host with no route to PyPI** cannot fetch the isolated build
+environment's `setuptools`, so install with `--no-build-isolation`: pip then
+builds with the stack venv's own setuptools, which must stay `<81` for
+Trac 1.6's `pkg_resources` anyway:
+
+```
+ssh kpoxa '/home/user/trac/.venv/bin/pip install --no-build-isolation \
+    "git+https://github.com/nerpatech/trac-mcp-server@<sha>#subdirectory=plugins/tracrpc_comment"'
+```
+
+**Moving to a newer commit.** Every commit keeps version 1.2.0 until the
+plugin's code is next released, so a plain `pip install` of a newer sha sees
+`TracRpcComment 1.2.0` already installed and does nothing. Reinstall it
+explicitly (`--no-deps`, so Trac itself is left alone):
+
+```
+ssh kpoxa '/home/user/trac/.venv/bin/pip install --force-reinstall --no-deps \
+    "git+https://github.com/nerpatech/trac-mcp-server@<newsha>#subdirectory=plugins/tracrpc_comment"'
+```
 
 Confirm by content, not by pip exiting 0: `system.listMethods` from a
 reconnected session must list `ticket.editComment`, `wiki.putPageIfVersion`

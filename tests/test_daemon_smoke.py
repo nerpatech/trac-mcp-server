@@ -155,6 +155,22 @@ def test_scrub_removes_the_token_and_any_bearer_value():
     assert "other-secret" not in out
 
 
+def test_scrub_leaves_the_scripts_own_wording_alone():
+    wording = "the daemon is not enforcing its bearer token"
+    assert smoke.scrub(wording, TOKEN) == wording
+    realm = 'WWW-Authenticate: Bearer realm="trac-mcp"'
+    assert smoke.scrub(realm, TOKEN) == realm
+
+
+def test_scrub_removes_a_token_shaped_bearer_value_and_header_values():
+    out = smoke.scrub("got Bearer abcdefghij0123456789.xyz back", TOKEN)
+    assert out == "got Bearer *** back"
+    out = smoke.scrub("authorization: Basic dXNlcjpwYXNz", TOKEN)
+    assert "dXNlcjpwYXNz" not in out
+    # the token itself goes wherever it sits, even inside other text
+    assert TOKEN not in smoke.scrub(f"x{TOKEN}y bearer {TOKEN}", TOKEN)
+
+
 class _Group(Exception):
     """Stands in for an ExceptionGroup (3.10 has none)."""
 
@@ -232,6 +248,11 @@ class FakeTrac:
         self.instances: list[tuple[str, str | None]] = []
         self.answer_as: str | None = None  # answer from elsewhere
         self.echo_instance = True
+        # server error kind for a wiki_get of the smoke page, or None
+        self.smoke_page_error: str | None = None
+        self.failed_ids: list[int] = []  # ticket_search's failed_ids
+        self.omit_update_ts = False  # ticket_update returns no _ts
+        self.unknown_instance = False  # every call: no instance reached
         self._ts = 1000
 
     # -- tools/list -------------------------------------------------------
@@ -254,6 +275,12 @@ class FakeTrac:
         self.calls.append(name)
         instance = args.get("instance")
         self.instances.append((name, instance))
+        if self.unknown_instance:
+            # server.py answers this before any instance is reached, so
+            # the result carries no instance echo
+            return _err(
+                "unknown_instance", f"Unknown instance {instance!r}"
+            )
         result = getattr(self, f"_{name}")(args)
         if self.echo_instance:
             # the real echo (tools/instance_echo.py), as the daemon adds it
@@ -270,6 +297,11 @@ class FakeTrac:
         return str(self._ts)
 
     def _wiki_get(self, args):
+        if (
+            self.smoke_page_error
+            and args["page_name"] == "Smoke/DaemonSmoke"
+        ):
+            return _err(self.smoke_page_error, "boom")
         page = self.pages.get(args["page_name"])
         if page is None or (
             self.wikistart_error and args["page_name"] == "WikiStart"
@@ -330,7 +362,7 @@ class FakeTrac:
                 "tickets": rows,
                 "total": len(rows),
                 "showing": len(rows),
-                "failed_ids": [],
+                "failed_ids": list(self.failed_ids),
             },
         )
 
@@ -364,16 +396,16 @@ class FakeTrac:
             if self.drop_comment_number
             else len(ticket["comments"])
         )
-        return _text(
-            "Updated",
-            {
-                "ticket_id": args["ticket_id"],
-                "_ts": ticket["ts"],
-                "comment_number": number,
-                "comment_stored_matches": number is not None,
-                "message": "Updated",
-            },
-        )
+        structured = {
+            "ticket_id": args["ticket_id"],
+            "_ts": ticket["ts"],
+            "comment_number": number,
+            "comment_stored_matches": number is not None,
+            "message": "Updated",
+        }
+        if self.omit_update_ts:
+            del structured["_ts"]
+        return _text("Updated", structured)
 
     def _ticket_comment_edit(self, args):
         if not self.plugin:
@@ -540,6 +572,49 @@ def test_comment_plugin_ignores_a_closed_smoke_ticket(trac):
     }
     _run(smoke.check_comment_plugin(FakeSession(trac)))
     assert len(trac.tickets) == 2
+
+
+def test_write_read_creates_only_when_the_page_is_not_found(trac):
+    # the stand-in answers not_found for an absent page: that is "create"
+    _run(smoke.check_write_read(FakeSession(trac)))
+    assert "wiki_create" in trac.calls
+
+
+def test_write_read_fails_on_any_other_wiki_get_error(trac):
+    trac.smoke_page_error = "server_error"
+    message = _failure(smoke.check_write_read(FakeSession(trac)))
+    assert "server_error" in message and smoke.WIKI_PAGE in message
+    assert "wiki_create" not in trac.calls
+    assert "wiki_update" not in trac.calls
+
+
+def test_comment_plugin_fails_on_failed_ids_instead_of_creating(trac):
+    trac.failed_ids = [7, 9]
+    message = _failure(smoke.check_comment_plugin(FakeSession(trac)))
+    assert "#7" in message and "#9" in message
+    assert "ticket_create" not in trac.calls
+    assert trac.tickets == {}
+
+
+def test_comment_plugin_reuses_the_ts_the_update_returned(trac):
+    _run(smoke.check_comment_plugin(FakeSession(trac)))
+    calls = trac.calls
+    assert calls == [
+        "ticket_search",
+        "ticket_create",
+        "ticket_get",
+        "ticket_update",
+        "ticket_comment_edit",
+        "ticket_comment_history",
+    ]
+
+
+def test_comment_plugin_falls_back_to_ticket_get_without_a_ts(trac):
+    trac.omit_update_ts = True
+    _run(smoke.check_comment_plugin(FakeSession(trac)))
+    update = trac.calls.index("ticket_update")
+    edit = trac.calls.index("ticket_comment_edit")
+    assert trac.calls[update + 1 : edit] == ["ticket_get"]
 
 
 def test_comment_plugin_missing_names_the_plugin(trac):
@@ -957,6 +1032,8 @@ def test_an_open_daemon_fails_check_2(shell_env, fake_http):
     assert "PASS 1 healthz" in result.stdout
     assert "FAIL 2 auth_enforced" in result.stdout
     assert "answered 200" in result.stdout
+    # the script's own wording survives scrubbing
+    assert "not enforcing its bearer token" in result.stdout
     assert "DAEMON SMOKE FAILED at check 2" in result.stdout
     assert "PASS 3" not in result.stdout
 
@@ -1043,6 +1120,17 @@ def test_a_result_that_does_not_say_which_instance_fails(trac):
     assert code == 1
     assert "FAIL 4 read" in output
     assert "did not report which instance answered" in output
+
+
+def test_an_error_with_no_instance_echo_shows_the_servers_error(trac):
+    # unknown_instance (server.py) and SDK schema errors reach no
+    # instance, so they carry no echo: the error is the finding
+    trac.unknown_instance = True
+    code, output = _smoke_against(trac)
+    assert code == 1
+    assert "FAIL 4 read" in output
+    assert "unknown_instance" in output
+    assert "did not report which instance" not in output
 
 
 def test_a_write_answered_from_elsewhere_fails_check_5(trac):
@@ -1144,3 +1232,94 @@ def test_instance_without_a_value_is_usage(shell_env):
     )
     assert result.returncode == 2
     assert "usage: ci-live.sh" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Which code the script imports, and when -- by subprocess
+# ---------------------------------------------------------------------------
+
+
+def _clean_env(**extra):
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTHONPATH", DEFAULT_ENV)
+    }
+    env.update(extra)
+    return env
+
+
+def test_the_script_imports_its_own_checkouts_src(tmp_path):
+    # `python scripts/daemon_smoke.py` puts scripts/, not src/, on
+    # sys.path, so without the script's own insert the editable install's
+    # trac_mcp_server (another checkout's src/) would be the one compared
+    # against the daemon. A stand-in checkout with a one-tool package
+    # proves which src/ wins, whatever checkout this test runs in.
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    shutil.copy(SMOKE, repo / "scripts" / "daemon_smoke.py")
+    package = repo / "src" / "trac_mcp_server"
+    tools = package / "mcp" / "tools"
+    tools.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "mcp" / "__init__.py").write_text("")
+    (package / "mcp" / "server.py").write_text(
+        "class _T:\n    name = 'tool_of_the_stand_in'\n"
+        "class _S:\n    tool = _T()\n"
+        "PING_SPEC = _S()\n"
+    )
+    (tools / "__init__.py").write_text("ALL_SPECS = []\n")
+    code = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('ds', "
+        f"{str(repo / 'scripts' / 'daemon_smoke.py')!r})\n"
+        "m = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(m)\n"
+        "print(sorted(m.checkout_tool_names()))\n"
+        "print(sys.modules['trac_mcp_server'].__file__)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=_clean_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    names, where = result.stdout.splitlines()
+    assert names == "['tool_of_the_stand_in']"
+    assert Path(where).is_relative_to(repo / "src")
+
+
+def test_a_missing_dependency_is_not_run_before_any_network_call(
+    tmp_path, listener
+):
+    # httpx is hidden from the interpreter; the token is set and the
+    # daemon is listening. Importing it lazily inside check 1 turned this
+    # into "FAIL 1 healthz", exit 1: a finding about a release that was
+    # never reached.
+    port = listener.getsockname()[1]
+    code = (
+        "import runpy, sys\n"
+        "class Hide:\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] == 'httpx':\n"
+        "            raise ModuleNotFoundError(\n"
+        "                \"No module named 'httpx'\", name='httpx')\n"
+        "sys.meta_path.insert(0, Hide())\n"
+        f"sys.argv = ['daemon_smoke.py', 'http://127.0.0.1:{port}']\n"
+        f"runpy.run_path({str(SMOKE)!r}, run_name='__main__')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=_clean_env(**{DEFAULT_ENV: TOKEN}),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    _assert_not_run(result)
+    assert "httpx" in result.stderr
+    assert TOKEN not in result.stdout + result.stderr
+    assert not _was_connected_to(listener)

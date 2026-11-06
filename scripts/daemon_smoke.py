@@ -6,8 +6,18 @@ suite. The in-process suite imports the checkout's own code and builds its
 own app, so it cannot see what only the deployed daemon has: the FreeBSD
 wheels it actually installed (``constraints/deploy.txt``), the config it
 actually ships, its rc script and its environment. This script talks to
-the daemon over HTTP, as a client would, and checks that what answers is
-this checkout's release.
+the daemon over HTTP, as a client would, and checks that the daemon is up,
+enforces its token, lists every tool this checkout defines, and can read,
+write and edit on the test instance. It cannot tell WHICH commit is
+running: the version string is the same on every commit, so a stale
+install with the same toolset passes. Check 3 proves only that the daemon
+lists every tool this checkout defines; a same-toolset stale install is not
+detectable by this suite.
+
+The daemon must be started WITHOUT a permissions file. One started with
+``--permissions-file`` filters its tool list, so check 3 fails on every
+tool the file leaves out, by design; a permission-restricted daemon is
+unsupported and there is no flag for it.
 
 Usage:
 
@@ -44,17 +54,20 @@ ExitCodeContractHasThreeStates``:
   1  a check failed -- including a daemon that is unreachable or refuses
      the connection: that is a finding about the release
   2  could not run: the token variable is unset or empty, the URL is
-     malformed, or a write target other than /trac_test was not
-     explicitly allowed. Decided before any network call, and says so
-     ("NOT RUN").
+     malformed, a write target other than /trac_test was not explicitly
+     allowed, or a module the checks need (httpx, the MCP SDK, this
+     checkout's trac_mcp_server) cannot be imported. Decided before any
+     network call, and says so ("NOT RUN").
 
 The token is never printed. It is sent only as a bearer header; every
 message built from an exception or a server reply passes through
-``scrub`` first.
+``scrub`` first (the token itself, ``Authorization:`` header values and
+token-shaped ``Bearer`` values).
 """
 
 import argparse
 import asyncio
+import importlib
 import logging
 import os
 import re
@@ -62,7 +75,17 @@ import sys
 import uuid
 from collections.abc import Iterable
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
+
+# ``python scripts/daemon_smoke.py`` puts scripts/, not src/, on sys.path,
+# so trac_mcp_server would come from the editable install -- the MAIN
+# checkout's src/, whichever worktree this script was run from. Check 3
+# compares the daemon against this checkout's tool list, so this
+# checkout's src/ goes first, before anything imports trac_mcp_server.
+_SRC = str(Path(__file__).resolve().parent.parent / "src")
+if sys.path[:1] != [_SRC]:
+    sys.path.insert(0, _SRC)
 
 DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN_STAGE"
 # Checks 4-6 read and write here, never at the daemon's default instance.
@@ -170,11 +193,26 @@ def checkout_tool_names() -> set[str]:
     return {spec.tool.name for spec in [PING_SPEC, *ALL_SPECS]}
 
 
+_AUTH_HEADER = re.compile(
+    r"(?i)\b(authorization)(\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?\S+"
+)
+# A bearer VALUE: token-shaped and long. Not the word "bearer" followed by
+# anything (this script's own "its bearer token"), nor ``Bearer realm=``.
+_BEARER_VALUE = re.compile(
+    r"(?i)\b(bearer)\s+(?!realm=)[A-Za-z0-9._~+/=-]{16,}"
+)
+
+
 def scrub(text: str, token: str | None) -> str:
-    """``text`` with the token, and any bearer value, blotted out."""
+    """``text`` with the token, an ``Authorization:`` header value and any
+    token-shaped bearer value blotted out.
+
+    The token is replaced literally, wherever it sits.
+    """
     if token:
         text = text.replace(token, "***")
-    return re.sub(r"(?i)\b(bearer)\s+\S+", r"\1 ***", text)
+    text = _AUTH_HEADER.sub(r"\1\2***", text)
+    return _BEARER_VALUE.sub(r"\1 ***", text)
 
 
 def _flatten(exc: BaseException) -> list[BaseException]:
@@ -252,6 +290,19 @@ def _error_line(result) -> str:
     """The first line of an error result's text."""
     text = _result_text(result).strip()
     return text.splitlines()[0] if text else "(no text)"
+
+
+_ERROR_KIND = re.compile(r"^Error \((\w+)\)")
+
+
+def _error_kind(result) -> str | None:
+    """The ``not_found`` / ``server_error`` / ... of an error result.
+
+    ``build_error_response`` (tools/errors.py) writes ``Error (<kind>):
+    <message>`` as the first line and sets no structured content.
+    """
+    match = _ERROR_KIND.match(_error_line(result))
+    return match.group(1) if match else None
 
 
 def _structured(result) -> dict:
@@ -429,6 +480,14 @@ class Scoped:
             name, {**arguments, "instance": self.instance}
         )
         answered, source = answered_instance(result)
+        if answered is None and result.isError:
+            # An error that reached no instance (unknown_instance, an SDK
+            # schema error) carries no echo. Still a failure, but the
+            # server's own error is the finding, not the missing echo.
+            raise CheckFailed(
+                f"{name} returned an error before reaching "
+                f"{self.instance}: {_error_line(result)}"
+            )
         if answered is None:
             raise CheckFailed(
                 f"{name} did not report which instance answered, so "
@@ -474,6 +533,13 @@ async def _write_smoke_page(session, body: str) -> None:
         current = await session.call_tool(
             "wiki_get", {"page_name": WIKI_PAGE}
         )
+        if current.isError and _error_kind(current) != "not_found":
+            # Only a missing page is "create it": a permission, server or
+            # connection error is a finding, not licence to write.
+            raise CheckFailed(
+                f"wiki_get {WIKI_PAGE} returned an error: "
+                f"{_error_line(current)}"
+            )
         if current.isError:
             created = await session.call_tool(
                 "wiki_create",
@@ -550,6 +616,16 @@ async def _find_or_create_ticket(session) -> tuple[int, str]:
         summary = str(ticket.get("summary", ""))
         if summary.startswith(TICKET_SUMMARY):
             return int(ticket["id"]), "found"
+    failed_ids = _structured(found).get("failed_ids") or []
+    if failed_ids:
+        # tickets that matched but did not load: the smoke ticket may be
+        # one of them, and creating now would duplicate it
+        raise CheckFailed(
+            "ticket_search could not load "
+            + ", ".join(f"#{tid}" for tid in failed_ids)
+            + ", so the smoke ticket may exist; not creating a second "
+            "one"
+        )
     created = await session.call_tool(
         "ticket_create",
         {
@@ -623,6 +699,11 @@ async def check_comment_plugin(session) -> str:
             "from the text sent"
         )
 
+    # ticket_update returns the new change token; ask ticket_get only if
+    # it did not.
+    new_ts = data.get("_ts")
+    if not isinstance(new_ts, str) or not new_ts:
+        new_ts = await _ticket_ts(session, ticket_id)
     second = f"daemon smoke comment, edited, nonce {make_nonce()}"
     edited = await session.call_tool(
         "ticket_comment_edit",
@@ -630,7 +711,7 @@ async def check_comment_plugin(session) -> str:
             "ticket_id": ticket_id,
             "cnum": cnum,
             "comment": second,
-            "base_ts": await _ticket_ts(session, ticket_id),
+            "base_ts": new_ts,
         },
     )
     if edited.isError:
@@ -815,6 +896,29 @@ async def run_smoke(
     return EXIT_PASSED
 
 
+_REQUIRED_MODULES = (
+    "httpx",
+    "anyio",
+    "mcp.client.session",
+    "mcp.client.streamable_http",
+    "trac_mcp_server.mcp.server",
+    "trac_mcp_server.mcp.tools",
+)
+
+
+def missing_module() -> str | None:
+    """The name of the first module the checks need that cannot be
+    imported, or None. Checked up front: a lazy import inside a check
+    would surface as that check's FAIL (exit 1) after earlier checks had
+    already used the network."""
+    for name in _REQUIRED_MODULES:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            return exc.name or name
+    return None
+
+
 def _not_run(message: str) -> int:
     print(
         f"NOT RUN: {message} -- {_NOT_RUN_TAIL}.",
@@ -875,6 +979,14 @@ def main(argv: list[str] | None = None) -> int:
         return _not_run(
             f"the value of {args.token_env} is not a usable bearer "
             "token (printable ASCII, no spaces)"
+        )
+
+    missing = missing_module()
+    if missing:
+        return _not_run(
+            f"the Python module {missing} cannot be imported by "
+            f"{sys.executable}, so the daemon smoke made no network "
+            "call; run it with the project's venv"
         )
 
     return asyncio.run(run_smoke(base, token, instance=args.instance))
