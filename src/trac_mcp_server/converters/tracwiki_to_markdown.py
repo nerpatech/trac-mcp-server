@@ -1,5 +1,6 @@
 """TracWiki to Markdown conversion using regex patterns."""
 
+import bisect
 import re
 from typing import Literal
 
@@ -851,6 +852,7 @@ class TracWikiParser:
         masked = self._verbatim_mask(text).split("\n")
         out: list[str] = []
         stack: list[int] = []
+        inside: set[int] | None = None
         index = 0
         while index < len(lines):
             probe = masked[index]
@@ -900,6 +902,23 @@ class TracWikiParser:
                 out.extend(run)
                 continue
 
+            # Ticket #143 review (F3): a run that starts straight after the
+            # closing `}}}` of a block in an open list item, deeper than
+            # the item's marker, is the item's own text (Trac keeps it
+            # inside the <li>). Without a list marker later in the run
+            # (the next item) nothing above claims it, and it would be
+            # fenced as an unconverted indent when the item is the last
+            # one or the list ends after it.
+            if self._closes_block_line(masked, start):
+                if inside is None:
+                    inside = self._lines_inside_blocks(lines)
+                if self._continues_item_after_block(
+                    lines, inside, start
+                ):
+                    stack = []
+                    out.extend(run)
+                    continue
+
             depths, stack = _quote_depths(run, stack)
             if _is_canonical_indent(run, depths):
                 out.extend(
@@ -913,6 +932,78 @@ class TracWikiParser:
                     )
                 )
         return "\n".join(out)
+
+    @staticmethod
+    def _closes_block_line(masked: list[str], start: int) -> bool:
+        """True when the line before `start` closes a ``{{{ }}}`` block.
+
+        In the mask the closing line's indentation is swallowed into the
+        blanked interior, so it starts with the filler and ends in
+        ``}}}`` -- which is also why the line after it starts a run of its
+        own.
+        """
+        if start == 0:
+            return False
+        prev = masked[start - 1]
+        return prev.startswith("\x01") and prev.rstrip().endswith("}}}")
+
+    @staticmethod
+    def _continues_item_after_block(
+        lines: list[str], inside: set[int], start: int
+    ) -> bool:
+        """True when the line at `start`, which follows a block's closing
+        line, continues a list item (ticket #143 review, F3).
+
+        A list item must still be open above the block, and the line must
+        sit deeper than the item's marker (Trac's continuation rule, #75;
+        a line at the marker's own column is not claimed here). `inside`
+        holds the indices of block content lines (`_lines_inside_blocks`),
+        which are skipped: a blank or column-zero line in a code body does
+        not end the list. `_open_list_item` empties its stack at a blank
+        line, so only the lines after the last blank one matter.
+        """
+        above: list[str] = []
+        for idx in range(start - 1, -1, -1):
+            if idx in inside:
+                continue
+            if not lines[idx].strip():
+                break
+            above.append(lines[idx])
+        above.reverse()
+        marker = _open_list_item(above)
+        if marker is None:
+            return False
+        return _indent_width(_indent_of(lines[start])) > _indent_width(
+            _indent_of(marker.string)
+        )
+
+    def _lines_inside_blocks(self, lines: list[str]) -> set[int]:
+        """Indices of the lines after a top-level ``{{{`` line, through the
+        line holding its closing ``}}}``: block content, whatever it looks
+        like (a blank line, a column-zero line)."""
+        text = "\n".join(lines)
+        starts = [0]
+        for line in lines[:-1]:
+            starts.append(starts[-1] + len(line) + 1)
+        inside: set[int] = set()
+        i = 0
+        n = len(text)
+        while i < n:
+            if text.startswith("{{{", i):
+                end = self._matching_brace(text, i)
+                if end == -1:
+                    break
+                first = bisect.bisect_right(starts, i) - 1
+                last = bisect.bisect_right(starts, end - 1) - 1
+                inside.update(range(first + 1, last + 1))
+                i = end
+            elif text[i] == "`":
+                j = text.find("`", i + 1)
+                nl = text.find("\n", i + 1)
+                i = j + 1 if j != -1 and (nl == -1 or j < nl) else i + 1
+            else:
+                i += 1
+        return inside
 
     @staticmethod
     def _indent_kind(run: list[str]) -> str:
@@ -1595,6 +1686,25 @@ class TracWikiParser:
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
 
+        Ticket #145: a continuation line (non-empty stack) that follows a
+        citation line, i.e. a line starting with ``>``, also gets a blank
+        line first, unless it is itself a ``>`` line or one of
+        ``_LAZY_CONTINUATION_INTERRUPT_RE``'s shapes (a fence, ...). Plain
+        text straight after ``> q`` is a lazy continuation of the quote to
+        CommonMark, but Trac renders it after the blockquote, inside the
+        item (measured on /trac_test); the blank line makes the Markdown
+        mean what Trac renders, and the write leg takes it back out
+        (``_item_block_separator``'s ``"adjacent"``). The next list marker
+        needs none, and neither does the end of the text. The line must sit
+        deeper than the item's marker and no deeper than its text column
+        (measured: Trac keeps it in the item there, and renders a deeper
+        one outside the list); it is then re-indented to the text column,
+        which is where a Markdown item's content starts. Any other indent is
+        left exactly as before. The inserted blank line makes the Markdown
+        list loose (CommonMark renders every item with ``<p>``); that is the
+        accepted trade-off of this design, the write leg reads a loose item
+        the same as a tight one.
+
         The pop threshold is strict ("deeper than", not "at least as
         deep") -- ticket #75's own measured boundary (section 2's
         two-space continuation under a one-space marker: continues;
@@ -1609,6 +1719,7 @@ class TracWikiParser:
         lines = text.split("\n")
         out: list[str] = []
         stack: list[int] = []
+        text_column: dict[int, int] = {}  # marker column -> text column
         for line in lines:
             if not line.strip():
                 out.append(line)
@@ -1628,6 +1739,11 @@ class TracWikiParser:
                 while stack and stack[-1] >= column:
                     stack.pop()
                 stack.append(column)
+                after = line[marker.end() :]
+                gap = len(after) - len(after.lstrip(" \t"))
+                text_column[column] = marker.end() + (
+                    gap if 1 <= gap <= 4 and after.strip() else 1
+                )
                 out.append(line)
                 continue
             if stack:
@@ -1641,6 +1757,19 @@ class TracWikiParser:
                     and not _LAZY_CONTINUATION_INTERRUPT_RE.match(line)
                 ):
                     out.append("")
+                elif (
+                    stack
+                    and out
+                    and out[-1].lstrip(" \t").startswith(">")
+                    and column <= text_column[stack[-1]]
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                        line.lstrip(" \t")
+                    )
+                ):
+                    out.append("")
+                    line = " " * text_column[stack[-1]] + line.lstrip(
+                        " \t"
+                    )
             out.append(line)
         return "\n".join(out)
 
@@ -1777,6 +1906,21 @@ class TracWikiParser:
                 # End of table - flush accumulated rows
                 flush_table()
                 div_group = False
+                # Ticket #143: item text straight after a table released
+                # from a list item's {{{#!div}}} needs a blank line (no
+                # indent) in the Markdown, or a GFM reader takes it for one
+                # more table row (spec example 202). The next list marker,
+                # a blank line and a block start (a fence opener, heading,
+                # quote or rule: GFM ends a table at those) need none.
+                if (
+                    prev_div_end == len(result)
+                    and line.strip()
+                    and not _LIST_MARKER_RE.match(line)
+                    and not _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                        line.lstrip(" \t")
+                    )
+                ):
+                    result.append("")
                 result.append(line)
 
         # Flush any remaining table at end of document

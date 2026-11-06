@@ -208,6 +208,79 @@ runs on this daemon -- see [Write Gate Status](#write-gate-status).
 
 ---
 
+## ticket_check_list
+
+**Description:** Check a whole list of ticket numbers, or of texts (for example keys from another system), against Trac in one call. Returns which values exist, with the requested fields, and which are missing, so a comparison needs one call instead of one `ticket_search` per value.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `values` | string | **Yes** | - | Ticket numbers or texts, separated by commas, semicolons or new lines; a JSON array of strings is accepted too. At most 1000; duplicates (ignoring case) count once |
+| `match_field` | string | No | `"id"` | `id`: the values are ticket numbers (`#12` and `12` are the same). Otherwise the exact (case-sensitive) name of a text field of the instance, i.e. a field of type `text` or `textarea` (`summary`, `keywords`, `description`, a custom text field, ...): the values are searched for in that field as whole words. Any other name is a `validation_error` that lists the allowed fields |
+| `query` | string | No | - | Trac query that narrows where to look, e.g. `status!=closed&component=Core`. It may only narrow by other fields: `max`, `page`, `order`, `desc`, `group`, `groupdesc`, `col`, `format`, `report`, `verbose`, `rows`, `row`, an `or` clause, a clause without `=`, and the field being matched (`id`, or `match_field`) are refused with a `validation_error` naming the key |
+| `fields` | string | No | `"summary,status"` | Comma-separated ticket fields to return for each match. `id` and `url` are always present and cannot be requested as fields; they are ignored here |
+| `only_missing` | boolean | No | `false` | Return only the values without a match: no `found` and no field values. In id mode no ticket is fetched; in text mode every candidate is still fetched, because the whole-word match needs its text |
+
+**Matching.** Text matching is whole-word and case-insensitive. `-` counts as a word boundary, so `ABC-12` matches inside `ABC-12-3` but not inside `ABC-123`. The Trac query only narrows the candidates; the whole-word filter on the full value decides the match. What the query searches for depends on the field: for a list field (`type` `text` with `format` `list`, such as `keywords` and `cc`) Trac splits the value on whitespace and double quotes and reads a leading `-` as NOT, so the query searches the longest word of each value (leading `-` stripped); for any other field Trac does one substring match on the whole value, so the query searches the whole value (`disk quota exceeded` as it stands), split only at a backslash, for which Trac has no escape, and at the literal `$USER`, which Trac replaces with the caller's name. In both cases `|` and `&` are escaped.
+
+**Limitation.** On a SQLite-backed Trac the substring match folds case for ASCII letters only, so a value whose non-ASCII letters differ in case from the stored text (for example `ÄRGER` against `ärger`) is not among the candidates and can be reported missing.
+
+**Loading failures.** Each ticket is fetched at most once per call, and a ticket that failed to load is not retried within the call. In text mode a value with no whole-word match among the loaded candidates is in `missing` only if every candidate of its batch loaded; if one of them failed to load, the failed ticket might have matched, so the value is in `unresolved` instead. In id mode existence comes from the query, so a ticket that exists but failed to load stays in `found` with only `id` and `url` (no field values) and its id is in `failed_ids`; `found_count` is the same with or without `only_missing`.
+
+**Output keys (structured JSON):**
+
+| Key | Description |
+|-----|-------------|
+| `values_checked` | Number of distinct values received |
+| `found` | Omitted with `only_missing`. In id mode, an object keyed by the value as given; in text mode, keyed by the value, each holding a list of matching tickets. Each hit holds `id`, the requested fields (unset fields are `""`) and `url` |
+| `missing` | Values with no match |
+| `found_count`, `missing_count` | The size of `found` and of `missing` (`unresolved` is not counted) |
+| `not_a_ticket_number` | Id mode only, omitted when empty: values that are not a ticket number (one optional leading `#`, then 1 to 18 ASCII digits) |
+| `unresolved` | Text mode only, omitted when empty: values with no whole-word match among the loaded candidates while a candidate of their batch failed to load. Not in `missing`; retry them |
+| `unsearchable` | Text mode only, omitted when empty: values with no searchable word (for example `\`, `-` or `""`); they are not queried and are not in `missing` |
+| `failed_ids` | Always present: ids of tickets that matched but could not be loaded. In id mode such a ticket is in `found` with only `id` and `url`; in text mode it is not matched and the values it might have matched are in `unresolved` or already found. Retry to load them. Always empty in id mode with `only_missing`, which loads nothing |
+
+**Success Response:**
+```json
+{
+  "values_checked": 3,
+  "found": {
+    "1": {"id": 1, "summary": "First", "status": "new", "url": "https://trac.example.com/ticket/1"}
+  },
+  "missing": ["2"],
+  "found_count": 1,
+  "missing_count": 1,
+  "not_a_ticket_number": ["abc"],
+  "failed_ids": []
+}
+```
+
+**Error Responses:**
+
+- **validation_error:** Empty `values`, more than 1000 values, a `match_field` that is not a field name or not a text field of the instance, or a `query` with a refused key
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): query may not contain 'max'\n\nAction: The query may only narrow by other fields, ..."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_check_list",
+  "arguments": {
+    "values": "ABC-12, ABC-13",
+    "match_field": "summary",
+    "query": "status!=closed",
+    "fields": "summary,status"
+  }
+}
+```
+
+---
+
 ## ticket_get
 
 **Description:** Get full ticket details: summary, description, field values and — by default — every comment with its number, author and timestamp, so one call covers the whole ticket. Use ticket_changelog for full field-change history.
@@ -1782,6 +1855,9 @@ The lookups reuse the write gate's helpers and run only when the converted TracW
       "html_truncated": false
     }
   ],
+  "ticket_refs": [
+    {"ticket": 3, "ref": "#3", "summary": "defect: Expand DEFAULT_TICKET_TYPE docstring comment in mcp/tools/constants.py (closed: fixed)", "first_section": "comment 1"}
+  ],
   "stats": {
     "sections": 2,
     "anchors": 4,
@@ -1796,6 +1872,8 @@ The lookups reuse the write gate's helpers and run only when the converted TracW
 Each anchor's `resolved_url` is populated only for a probed InterTrac wiki-dispatcher href (from `check_targets`'s live probe) -- it's the real page the dispatcher redirects to, not the `/intertrac/wiki%3A...` href itself. `missing: true` marks a link Trac itself rendered with the `missing` class (a dead local wiki target). Realm grouping comes from Trac's own rendered `class` attribute, never from parsing the href.
 
 The text result's `Ticket refs` line lists each local ticket the document links to once, across all sections, in the order first seen (at most 50, then `... and K more`), with Trac's own title for the link (type, summary, status), so a mistyped `#N` that happens to hit an existing ticket shows up as the wrong summary. It is not a finding and does not count toward the error or warning totals; a ticket that does not exist is left off it (that is `missing_local_target`, listed under `Missing links`). The same data is in each section's `links.ticket` entries (`text`, `title`). Before Trac /trac_mcp_server #151 this was the `bare_ticket_ref` warning, emitted once per citation; that code no longer exists.
+
+The structured result carries the same list as the top-level `ticket_refs` key (Trac /trac_mcp_server #152), because clients that read only `structuredContent` never see the text line. Each entry is `{"ticket", "ref", "summary", "first_section"}`: `ticket` is the ticket number as an integer (`null` only when no link to it had a `/ticket/N` href), `ref` the key the text line prints (`#105`, or the whitespace-collapsed link text when the href has no `/ticket/N`, uncapped), `summary` Trac's title for the link without its leading `#N: ` or `Comment M for #N: ` (`null` only when no link to that ticket had a title), and `first_section` the section where the ticket was first seen (`description`, `comment 3`, `page`), even when a later link supplied the summary. The list is complete and its entries are not shortened: the 50-entry cap and the per-entry length cap apply to the text line only, whose overflow tail points here. It is in first-seen order, a ticket cited twice appears once (the first link's values win; later links fill in a still-null `ticket` or `summary`, and a `#N: ` titled link replaces a summary that did not come from one), and a ticket that does not exist is absent. One helper builds both, so the text line and `ticket_refs` cannot disagree. `wiki_render_check` returns `ticket_refs` too, with `first_section` `page`.
 
 **Error Responses:**
 

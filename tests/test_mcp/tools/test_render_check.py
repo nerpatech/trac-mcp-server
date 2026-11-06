@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trac_mcp_server.mcp.tools import render_check
 from trac_mcp_server.mcp.tools.render_check import (
     RENDER_CHECK_SPECS,
     RENDER_CHECK_TOOLS,
@@ -163,6 +164,17 @@ class TestRenderCheckToolDefinitions(unittest.TestCase):
                 tool.inputSchema["properties"]["include_html"][
                     "default"
                 ]
+            )
+
+    def test_descriptions_name_the_structured_ticket_refs(self):
+        """Ticket #152: a structured-only client must learn from the
+        description that the ticket list is in `ticket_refs`."""
+        for tool in RENDER_CHECK_TOOLS:
+            self.assertIn(
+                "structuredContent.ticket_refs", tool.description
+            )
+            self.assertNotIn(
+                "for clients that only see text", tool.description
             )
 
     def test_permissions(self):
@@ -734,6 +746,8 @@ class TestRenderCheckTextBlock(unittest.TestCase):
 
         sections = [
             {
+                "kind": "description",
+                "ref": None,
                 "links": {
                     "ticket": [
                         link(
@@ -743,9 +757,11 @@ class TestRenderCheckTextBlock(unittest.TestCase):
                         ),
                         link("http://h/t/ticket/7", "#7", None),
                     ]
-                }
+                },
             },
             {
+                "kind": "comment",
+                "ref": "1",
                 "links": {
                     "ticket": [
                         link(
@@ -759,11 +775,11 @@ class TestRenderCheckTextBlock(unittest.TestCase):
                             "#18: task: something else",
                         ),
                     ]
-                }
+                },
             },
         ]
         self.assertEqual(
-            _ticket_refs_line(sections),
+            _ticket_refs_line(render_check._ticket_refs(sections)),
             "Ticket refs (2): #18 task: Do it (new); #7",
         )
 
@@ -773,6 +789,8 @@ class TestRenderCheckTextBlock(unittest.TestCase):
         prefix is dropped, not shown as the summary."""
         sections = [
             {
+                "kind": "comment",
+                "ref": "2",
                 "links": {
                     "ticket": [
                         {
@@ -782,11 +800,11 @@ class TestRenderCheckTextBlock(unittest.TestCase):
                             "missing": False,
                         }
                     ]
-                }
+                },
             }
         ]
         self.assertEqual(
-            _ticket_refs_line(sections),
+            _ticket_refs_line(render_check._ticket_refs(sections)),
             "Ticket refs (1): #18 task: Do it (new)",
         )
 
@@ -794,6 +812,8 @@ class TestRenderCheckTextBlock(unittest.TestCase):
     def _sections_with_tickets(count):
         return [
             {
+                "kind": "description",
+                "ref": None,
                 "links": {
                     "ticket": [
                         {
@@ -804,7 +824,7 @@ class TestRenderCheckTextBlock(unittest.TestCase):
                         }
                         for n in range(1, count + 1)
                     ]
-                }
+                },
             }
         ]
 
@@ -812,9 +832,11 @@ class TestRenderCheckTextBlock(unittest.TestCase):
         """60 distinct tickets: the header keeps the full count, only
         the first 50 (first-seen order) are listed, and the tail says
         how many were left off and where they are."""
-        line = _ticket_refs_line(self._sections_with_tickets(60))
+        line = _ticket_refs_line(
+            render_check._ticket_refs(self._sections_with_tickets(60))
+        )
         tail = (
-            "; ... and 10 more (all in structuredContent links.ticket)"
+            "; ... and 10 more (all in structuredContent ticket_refs)"
         )
         self.assertTrue(line.endswith(tail), line)
         head = line[: -len(tail)]
@@ -825,7 +847,9 @@ class TestRenderCheckTextBlock(unittest.TestCase):
         self.assertEqual(entries[-1], "#50 task: Ticket 50 (new)")
 
     def test_ticket_refs_line_at_the_cap_has_no_tail(self):
-        line = _ticket_refs_line(self._sections_with_tickets(50))
+        line = _ticket_refs_line(
+            render_check._ticket_refs(self._sections_with_tickets(50))
+        )
         self.assertTrue(line.startswith("Ticket refs (50): "), line)
         self.assertEqual(len(line.split("; ")), 50, line)
         self.assertNotIn("more", line)
@@ -841,6 +865,321 @@ class TestRenderCheckTextBlock(unittest.TestCase):
     def test_no_code_blocks_says_none(self):
         text = self._wiki("row01_clean").content[0].text
         self.assertIn("Code blocks: none.", text)
+
+
+def _tkt_anchor(n, title, *, cls="ticket", text=None, frag=""):
+    """A ticket anchor in the shape Trac renders; `title=None` omits it."""
+    title_attr = f' title="{title}"' if title is not None else ""
+    return (
+        f'<a class="{cls}" href="{BASE_URL}/ticket/{n}{frag}"'
+        f"{title_attr}>{text or f'#{n}'}</a>"
+    )
+
+
+def _page_with(description, comments):
+    """A ticket page whose description / comment N bodies are the given
+    inline HTML, plus a client serving it."""
+    changes = "".join(
+        f'<div class="change" id="trac-change-{i + 1}-100000000{i}">'
+        f'<div class="comment"><p>{body}</p></div></div>'
+        for i, body in enumerate(comments)
+    )
+    client = _mock_ticket_client("row01_clean")
+    client.session.get.return_value.text = (
+        '<html><body><div class="description"><div class="searchable">'
+        f"<p>{description}</p></div></div>{changes}</body></html>"
+    )
+    client.get_ticket_changelog.return_value = [
+        [
+            "2026-09-01T00:00:00",
+            "someone",
+            "comment",
+            str(i + 1),
+            "x",
+            True,
+        ]
+        for i in range(len(comments))
+    ]
+    return client
+
+
+def _run_ticket(client):
+    return asyncio.run(
+        _handle_ticket_render_check(
+            client, {"ticket_id": 1, "check_targets": False}
+        )
+    )
+
+
+def _refs_line(result):
+    return next(
+        line
+        for line in result.content[0].text.splitlines()
+        if line.startswith("Ticket refs")
+    )
+
+
+class TestTicketRefsStructured(unittest.TestCase):
+    """Ticket #152. The de-duplicated ticket list is also in
+    structuredContent (`ticket_refs`), because Claude Code clients read
+    only structuredContent. One helper builds it and the text line."""
+
+    def test_ticket_cited_twice_gives_one_entry(self):
+        client = _page_with(
+            _tkt_anchor(57, "#57: defect: A (new)"),
+            [f"again {_tkt_anchor(57, '#57: defect: A (new)')}"],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(
+            refs,
+            [
+                {
+                    "ticket": 57,
+                    "ref": "#57",
+                    "summary": "defect: A (new)",
+                    "first_section": "description",
+                }
+            ],
+        )
+
+    def test_first_section_stays_first_when_a_later_link_has_the_summary(
+        self,
+    ):
+        """The description's link has only a `comment:` title (no
+        `#N: ` shape); comment 2's has the real one. The summary comes
+        from comment 2, `first_section` stays `description`."""
+        client = _page_with(
+            _tkt_anchor(
+                9,
+                "Comment 2 for #9: defect: Old (new)",
+                text="comment:2:ticket:9",
+                frag="#comment:2",
+            ),
+            [
+                "nothing here",
+                _tkt_anchor(9, "#9: defect: New (closed: fixed)"),
+            ],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 1, refs)
+        self.assertEqual(refs[0]["ticket"], 9)
+        self.assertEqual(
+            refs[0]["summary"], "defect: New (closed: fixed)"
+        )
+        self.assertEqual(refs[0]["first_section"], "description")
+
+    def test_first_section_names_a_comment_by_number(self):
+        client = _page_with(
+            "no tickets",
+            [
+                "none",
+                _tkt_anchor(4, "#4: task: T (new)"),
+                _tkt_anchor(4, "#4: task: T (new)"),
+            ],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(
+            [r["first_section"] for r in refs], ["comment 2"]
+        )
+
+    def test_missing_ticket_is_absent(self):
+        client = _page_with(
+            f"{_tkt_anchor(5, '#5: task: T (new)')} "
+            f"{_tkt_anchor(99999, None, cls='missing ticket')}",
+            [],
+        )
+        result = _run_ticket(client)
+        self.assertEqual(
+            [r["ref"] for r in result.structuredContent["ticket_refs"]],
+            ["#5"],
+        )
+        self.assertIn("Missing links (1):", result.content[0].text)
+
+    def test_comment_link_title_is_stripped(self):
+        client = _page_with(
+            _tkt_anchor(
+                12,
+                "Comment 2 for #12: defect: X (new)",
+                text="comment:2:ticket:12",
+                frag="#comment:2",
+            ),
+            [],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(refs[0]["summary"], "defect: X (new)")
+
+    def test_no_title_gives_none_summary(self):
+        client = _page_with(_tkt_anchor(6, None), [])
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(refs[0]["ref"], "#6")
+        self.assertIsNone(refs[0]["summary"])
+
+    def test_no_ticket_links_gives_empty_list(self):
+        result = _run_ticket(_page_with("plain", []))
+        self.assertEqual(result.structuredContent["ticket_refs"], [])
+
+    def test_href_without_ticket_number_falls_back_to_text(self):
+        sections = [
+            {
+                "kind": "page",
+                "ref": None,
+                "links": {
+                    "ticket": [
+                        {
+                            "href": "http://h/t/query?id=3",
+                            "text": "the  query",
+                            "title": None,
+                            "missing": False,
+                        }
+                    ]
+                },
+            }
+        ]
+        self.assertEqual(
+            render_check._ticket_refs(sections),
+            [
+                {
+                    "ticket": None,
+                    "ref": "the query",
+                    "summary": None,
+                    "first_section": "page",
+                }
+            ],
+        )
+
+    def test_wiki_render_check_returns_ticket_refs_too(self):
+        client = _mock_wiki_client("row01_clean")
+        client.get_wiki_page_html.return_value = (
+            "<html><body><p>See "
+            f"{_tkt_anchor(57, '#57: defect: A (new)')}</p></body></html>"
+        )
+        result = asyncio.run(
+            _handle_wiki_render_check(
+                client, {"page_name": "Foo", "check_targets": False}
+            )
+        )
+        self.assertEqual(
+            result.structuredContent["ticket_refs"],
+            [
+                {
+                    "ticket": 57,
+                    "ref": "#57",
+                    "summary": "defect: A (new)",
+                    "first_section": "page",
+                }
+            ],
+        )
+
+    def test_structured_list_is_complete_while_the_text_line_caps(self):
+        anchors = " ".join(
+            _tkt_anchor(n, f"#{n}: task: T{n} (new)")
+            for n in range(1, 61)
+        )
+        result = _run_ticket(_page_with(anchors, []))
+        refs = result.structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 60)
+        self.assertEqual(refs[-1]["summary"], "task: T60 (new)")
+        line = _refs_line(result)
+        self.assertTrue(line.startswith("Ticket refs (60): "), line)
+        self.assertTrue(
+            line.endswith(
+                "; ... and 10 more (all in structuredContent ticket_refs)"
+            ),
+            line,
+        )
+        self.assertEqual(len(line.split("; ")), 51, line)
+
+    def test_text_line_and_structured_list_share_one_helper(self):
+        """The tickets the text line names equal the structured `ref`s,
+        in the same order, over a fixture with a duplicate and a ticket
+        whose summary comes from a later section. A separate inline
+        pass for either would drift from the other."""
+        early_ten = _tkt_anchor(
+            10,
+            "Comment 1 for #10: task: Ten (new)",
+            text="comment:1:ticket:10",
+            frag="#comment:1",
+        )
+        thirty = _tkt_anchor(30, "#30: task: Thirty (new)")
+        client = _page_with(
+            f"{thirty} {early_ten} {thirty}",
+            [
+                f"{_tkt_anchor(20, '#20: task: Twenty (new)')} "
+                f"{_tkt_anchor(10, '#10: task: Ten (new)')}",
+                _tkt_anchor(5, "#5: task: Five (new)"),
+            ],
+        )
+        result = _run_ticket(client)
+        refs = result.structuredContent["ticket_refs"]
+        self.assertEqual(
+            [e["ref"] for e in refs], ["#30", "#10", "#20", "#5"]
+        )
+        # Summaries may contain ": " and "; ", so compare the whole
+        # line, not a parse of it.
+        self.assertEqual(
+            _refs_line(result), render_check._ticket_refs_line(refs)
+        )
+
+    def test_later_ticket_href_fills_in_the_number(self):
+        """The description's link has no `/ticket/N` in its href (so it
+        is keyed by its text `#5`); a later comment's does. One entry,
+        and its `ticket` is 5, not None."""
+        query = f'<a class="ticket" href="{BASE_URL}/query?id=5">#5</a>'
+        client = _page_with(
+            query, [_tkt_anchor(5, "#5: task: Five (new)")]
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 1, refs)
+        self.assertEqual(refs[0]["ref"], "#5")
+        self.assertEqual(refs[0]["ticket"], 5)
+        self.assertEqual(refs[0]["first_section"], "description")
+
+    def test_later_comment_link_fills_in_a_missing_summary(self):
+        """#9 is cited untitled in the description; comment 2 has only a
+        `comment:` link, whose title is no `#N: ` summary but is the
+        only one there is. `summary` is null only when no link to the
+        ticket had a title."""
+        client = _page_with(
+            _tkt_anchor(9, None),
+            [
+                "nothing",
+                _tkt_anchor(
+                    9,
+                    "Comment 1 for #9: defect: X (new)",
+                    text="comment:1:ticket:9",
+                    frag="#comment:1",
+                ),
+            ],
+        )
+        refs = _run_ticket(client).structuredContent["ticket_refs"]
+        self.assertEqual(len(refs), 1, refs)
+        self.assertEqual(refs[0]["summary"], "defect: X (new)")
+        self.assertEqual(refs[0]["first_section"], "description")
+
+    def test_long_fallback_ref_is_whole_while_the_text_line_caps(self):
+        text = "word " * 60  # 300 chars once collapsed and stripped
+        sections = [
+            {
+                "kind": "page",
+                "ref": None,
+                "links": {
+                    "ticket": [
+                        {
+                            "href": "http://h/t/query?id=3",
+                            "text": text,
+                            "title": None,
+                            "missing": False,
+                        }
+                    ]
+                },
+            }
+        ]
+        refs = render_check._ticket_refs(sections)
+        self.assertEqual(refs[0]["ref"], " ".join(text.split()))
+        self.assertGreater(len(refs[0]["ref"]), 160)
+        entry = _ticket_refs_line(refs).split(": ", 1)[1]
+        self.assertTrue(entry.endswith("…"), entry)
+        self.assertLessEqual(len(entry), 161)
 
 
 @pytest.mark.live

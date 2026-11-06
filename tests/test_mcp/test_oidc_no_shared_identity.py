@@ -133,8 +133,11 @@ def _arguments_for(schema: dict) -> dict:
 # tool returns "attributes is required" on an empty one before any request.
 # Nor can it say that a query needs a word of two or more characters:
 # wiki_search refuses "x" ("no searchable words") before any request.
+# ticket_check_list's handler refuses a non-number such as "x" in its default id
+# mode before any request, so it needs a real ticket number.
 _EXTRA_ARGUMENTS = {
     "milestone_update": {"attributes": {"description": "x"}},
+    "ticket_check_list": {"values": "1"},
     "wiki_search": {"query": "xyz"},
 }
 

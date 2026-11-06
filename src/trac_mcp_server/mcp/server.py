@@ -34,7 +34,7 @@ from ..instances import (
     load_declared_instances,
 )
 from ..instances import caller_identity as _caller_identity
-from ..logger import setup_logging
+from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
@@ -462,10 +462,21 @@ async def main(config_overrides: dict | None = None):
     # stdio_server() uses stdout for JSON-RPC); stderr+file for http.
     # CRITICAL: This must be called BEFORE stdio_server context
     # to prevent any stdout contamination during protocol negotiation
-    setup_logging(
-        mode="mcp" if server_config.transport == "stdio" else "http",
-        log_file=log_file,
-    )
+    try:
+        setup_logging(
+            mode="mcp"
+            if server_config.transport == "stdio"
+            else "http",
+            log_file=log_file,
+        )
+    except OSError as e:
+        reason = e.strerror or str(e)
+        sys.stderr.write(
+            f"ERROR: Cannot open log file {e.filename}: {reason}\n"
+        )
+        raise RuntimeError(
+            f"Cannot open log file {e.filename}: {reason}"
+        ) from e
 
     # Version check (non-blocking warning for stale binaries)
     is_consistent, message = check_version_consistency()
@@ -649,8 +660,10 @@ must not be piped manually. This does not apply to --transport http.
     )
     parser.add_argument(
         "--log-file",
-        default="/tmp/trac-mcp-server.log",
-        help="Log file path (default: /tmp/trac-mcp-server.log)",
+        default=None,
+        help="Log file path (default: the LOG_FILE env var, else "
+        f"{DEFAULT_MCP_LOG_FILE} for stdio and no file for http; pass an "
+        "empty string to disable the file)",
     )
     parser.add_argument(
         "--permissions-file",
@@ -702,12 +715,9 @@ must not be piped manually. This does not apply to --transport http.
     return parser
 
 
-def run() -> None:
-    """Entry point that handles errors gracefully and parses CLI arguments."""
-    args = build_parser().parse_args()
-
-    # Build config overrides dict from CLI args
-    config_overrides = {}
+def config_overrides_from_args(args: argparse.Namespace) -> dict:
+    """Build the config overrides dict from parsed CLI arguments."""
+    config_overrides: dict = {}
     if args.url:
         config_overrides["url"] = args.url
     if args.username:
@@ -716,7 +726,8 @@ def run() -> None:
         config_overrides["password"] = args.password
     if args.insecure:
         config_overrides["insecure"] = True
-    if args.log_file:
+    if args.log_file is not None:
+        # "" is meaningful: it disables the log file
         config_overrides["log_file"] = args.log_file
     if args.permissions_file:
         config_overrides["permissions_file"] = args.permissions_file
@@ -732,6 +743,15 @@ def run() -> None:
         config_overrides["allow_unauthenticated"] = True
     if args.file_access:
         config_overrides["file_access"] = args.file_access
+    return config_overrides
+
+
+def run() -> None:
+    """Entry point that handles errors gracefully and parses CLI arguments."""
+    args = build_parser().parse_args()
+
+    # Build config overrides dict from CLI args
+    config_overrides = config_overrides_from_args(args)
 
     # Log config overrides to stderr (before stdio transport starts)
     if config_overrides:
