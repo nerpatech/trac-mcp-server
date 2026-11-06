@@ -136,11 +136,63 @@ saves reading the changelog.
 Requires no root: uWSGI's master runs as `user`, and `master = true` makes
 `HUP` a graceful worker reload.
 
-Installed as a **per-environment egg**, not into the shared Trac venv: each
-instance gets its own copy in its own `plugins/` directory, so disabling or
-removing it on one instance can never affect another (confirmed by the
-`TracRpcComment-1.0.0-py3.11.egg` deployed for #98 -- see the rollback note
-above).
+### Install by commit into the Trac stack venv
+
+The plugin is pip-installable straight from a commit of this repository.
+`plugins/tracrpc_comment/pyproject.toml` carries only a `[build-system]`
+table (`setuptools<81`, because Trac 1.6 imports `pkg_resources`);
+`setup.py` stays the metadata source, so the version is still the one in
+`setup.py`.
+
+```
+# 1. install once into the venv Trac's uWSGI workers run from. <sha> is the
+#    commit to deploy -- a sha, not a branch, so what runs is what was
+#    reviewed.
+ssh kpoxa '/home/user/trac/.venv/bin/pip install \
+    "git+https://github.com/nerpatech/trac-mcp-server@<sha>#subdirectory=plugins/tracrpc_comment"'
+
+# 2. enable it in ONE instance -- /trac_test FIRST, the rest once proven
+ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/trac_test \
+    config set components "tracrpc_comment.*" enabled'
+
+# 3. one reload
+ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
+```
+
+The same path works from the internal origin mirror: use that remote's URL
+in place of the GitHub one. The host needs `git` and a route to whichever
+remote it names.
+
+Confirm by content, not by pip exiting 0: `system.listMethods` from a
+reconnected session must list `ticket.editComment`, `wiki.putPageIfVersion`
+and `ticket.getChangeAt`. `importlib.metadata.entry_points(group="trac.plugins")`
+in that venv lists the three `tracrpc_comment.*` entries.
+
+**Why this removes the `VersionConflict` trap.** All instances run in the
+same uWSGI worker processes, and a pip install is one process-wide
+distribution: there is exactly one version of `TracRpcComment` in the
+working set, so no instance can load a different one (see the upgrade notes
+under the per-environment steps below, which are about exactly that).
+*Enabling* is still per instance, a `config set` in that instance's own
+`trac.ini`, so `config set ... disabled` plus a reload still switches it off
+for one instance without touching the others. Removing the code is the
+opposite: `pip uninstall TracRpcComment` removes it for every instance at
+once.
+
+**An instance that still has a per-environment egg** must lose it before
+this install takes effect there: delete `TracRpcComment-*.egg` from that
+instance's `plugins/` in the same change, then reload. An egg and the pip
+install side by side are two versions in one process, which is the
+`VersionConflict` again. The production instances move together, since they
+share worker processes; that migration is rookery ticket 69.
+
+### Current state of the production instances: per-environment eggs, until rookery ticket 69 migrates them
+
+Each instance has its own egg in its own `plugins/` directory, not an install
+in the shared Trac venv, so disabling or removing it on one instance can
+never affect another (confirmed by the `TracRpcComment-1.0.0-py3.11.egg`
+deployed for #98 -- see the rollback note above). Use these steps only to
+keep an instance in step with the others until the migration lands.
 
 ```
 # 1. build the egg -- with a Python matching the target Trac venv's own

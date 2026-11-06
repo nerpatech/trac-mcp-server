@@ -15,12 +15,78 @@
 # script exits non-zero without running pytest at all, so there is no green
 # summary line to misread. That is #80's target_check_skipped shape one
 # layer out -- a skipped check reported as a clean one.
+#
+# ci-live.sh --daemon <url> [--token-env NAME]
+#
+# The in-process suite above builds its own app from this checkout, so it
+# cannot see what only a DEPLOYED daemon has: the FreeBSD wheels it really
+# installed (constraints/deploy.txt), the config it really ships, its rc
+# script and its environment. --daemon replaces the credential probe and the
+# pytest run with scripts/daemon_smoke.py, which talks to the daemon over
+# HTTP like a client: /healthz, bearer auth enforced, every tool of this
+# checkout listed, a wiki read, a wiki write with a byte-exact read-back,
+# and a ticket comment post/edit/history (the tracrpc_comment plugin) --
+# see that script's docstring. <url> is the daemon base, e.g.
+# http://192.168.10.4:8092 (a trailing /mcp or / is accepted). The bearer
+# token comes from $TRAC_MCP_AUTH_TOKEN_STAGE, or the variable --token-env
+# names, and is never printed. The exit code is the smoke script's: 0
+# passed, 1 a check failed (an unreachable daemon included), 2 not run (no
+# token, bad URL). It needs no .env and no Trac credentials, and it WRITES
+# to the daemon's default Trac instance. Any other argument prints usage
+# and exits 2.
 
 set -e
 
 # Run from the repo root whatever the caller's cwd, so the .env probe and
 # pytest both see the same checkout.
 cd "$(dirname "$0")"
+
+usage() {
+    echo "usage: ci-live.sh" >&2
+    echo "       ci-live.sh --daemon URL [--token-env NAME]" >&2
+}
+
+if [ "$#" -gt 0 ]; then
+    daemon_url=""
+    token_env=""
+    have_token_env=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --daemon)
+                if [ "$#" -lt 2 ]; then
+                    usage
+                    exit 2
+                fi
+                daemon_url="$2"
+                shift 2
+                ;;
+            --token-env)
+                if [ "$#" -lt 2 ]; then
+                    usage
+                    exit 2
+                fi
+                token_env="$2"
+                have_token_env=1
+                shift 2
+                ;;
+            *)
+                usage
+                exit 2
+                ;;
+        esac
+    done
+    if [ -z "$daemon_url" ]; then
+        usage
+        exit 2
+    fi
+    # exec: the smoke script's exit code is this script's, with no
+    # pytest and no credential probe in between.
+    if [ "$have_token_env" = 1 ]; then
+        exec python scripts/daemon_smoke.py "$daemon_url" \
+            --token-env "$token_env"
+    fi
+    exec python scripts/daemon_smoke.py "$daemon_url"
+fi
 
 echo "=== Live credentials ==="
 
