@@ -647,13 +647,13 @@ async def _handle_changelog(
                 newvalue_text = comment_text
             else:
                 # Trac numbers every change as a comment, also one made
-                # without text; "comment added" made agents look for a
-                # comment that ticket_get (rightly) never returns.
-                number = str(oldvalue).strip() if oldvalue else ""
-                label = f"comment {number}" if number else "comment"
+                # without text or edited down to empty; "comment added"
+                # made agents look for a comment that ticket_get (rightly)
+                # never returns. A reply's "2.5" is comment 5.
+                parsed = TracClient.parse_comment_number(oldvalue)
+                label = f"comment {parsed.cnum}" if parsed else "comment"
                 entries.append(
-                    f"- {timestamp_str} by {author}: {label} without "
-                    "text (only the field changes of this entry)"
+                    f"- {timestamp_str} by {author}: {label} has no text"
                 )
                 # The structured row keeps the stored bytes (#69), so a
                 # whitespace-only comment stays "\n" there.
