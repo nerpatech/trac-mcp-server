@@ -1,0 +1,45 @@
+{
+  "realm": "trac-demo",
+  "enabled": true,
+  "clients": [
+    {
+      "clientId": "trac-mcp",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "protocolMappers": [
+        {
+          "name": "audience-trac-mcp-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "trac-mcp-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@example.com",
+      "firstName": "Alice",
+      "lastName": "Test",
+      "emailVerified": true,
+      "credentials": [{"type": "password", "value": "alice"}]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@example.com",
+      "firstName": "Bob",
+      "lastName": "Test",
+      "emailVerified": true,
+      "credentials": [{"type": "password", "value": "bob"}]
+    }
+  ]
+}

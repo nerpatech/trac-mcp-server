@@ -4,7 +4,10 @@ Drives the ASGI app with Starlette's TestClient as a context manager so
 the lifespan runs and the StreamableHTTPSessionManager starts.
 """
 
+import asyncio
+
 from mcp.server import Server
+from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from trac_mcp_server import __version__
@@ -12,6 +15,7 @@ from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp.http_app import (
     BearerAuthMiddleware,
+    OidcTokenRequiredMiddleware,
     build_http_app,
 )
 
@@ -155,6 +159,114 @@ class TestBearerAuth:
                 "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
             )
         assert f'"version":"{__version__}"' in response.text
+
+
+# ---------------------------------------------------------------------------
+# OIDC per-user token requirement
+# ---------------------------------------------------------------------------
+
+
+class TestOidcTokenRequired:
+    """OidcTokenRequiredMiddleware gating when oidc_rpc_url is configured.
+
+    Mirrors TestBearerAuth's shape -- same no-op-when-unconfigured,
+    healthz-exempt, missing-header-rejected pattern -- but there is no
+    "correct value" to accept: the standard Authorization header only needs
+    to carry *some* bearer token, since validating it is Trac's own Apache
+    layer's job (see mcp/oidc.py). It's the same header
+    BearerAuthMiddleware's static token would otherwise occupy -- the two
+    modes are mutually exclusive (enforced in config.validate_server_config,
+    not here), so a ServerConfig with both set never reaches this app in
+    practice.
+    """
+
+    def test_not_configured_no_bearer_required(self):
+        """oidc_rpc_url unset -> completely unaffected, same as before
+        this mode existed."""
+        app = build_http_app(_make_mcp_server(), _make_server_config())
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
+            )
+        assert response.status_code == 200
+
+    def test_healthz_exempt_when_configured(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.get("/healthz")
+        assert response.status_code == 200
+
+    def test_missing_authorization_header_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
+            )
+        assert response.status_code == 401
+        assert response.headers["www-authenticate"] == "Bearer"
+
+    def test_wrong_scheme_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": "Basic dXNlcjpwYXNz",
+                },
+            )
+        assert response.status_code == 401
+
+    def test_blank_bearer_token_rejected(self):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={**_MCP_HEADERS, "Authorization": "Bearer "},
+            )
+        assert response.status_code == 401
+
+    def test_present_bearer_token_accepted(self):
+        """Any non-empty bearer token is admitted at this layer -- it's
+        forwarded to Trac as-is, which is what actually validates it."""
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+            ),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": "Bearer the-users-own-keycloak-token",
+                },
+            )
+        assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -332,3 +444,52 @@ class TestNoTrailingSlashRedirect:
                 "/mcp", json=_INITIALIZE_PAYLOAD, headers=_MCP_HEADERS
             )
         assert response.status_code == 200
+
+
+class TestOidcDuplicateAuthorizationHeaders:
+    """The middleware must gate on the header _resolve_client() then uses,
+    which reads request.headers: Starlette returns the first duplicate."""
+
+    def _run(self, headers: list[tuple[bytes, bytes]]):
+        seen = []
+
+        async def inner(scope, _receive, _send):
+            seen.append(Request(scope).headers.get("authorization"))
+
+        statuses = []
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+
+        middleware = OidcTokenRequiredMiddleware(
+            inner, "https://trac.example.com/trac-api/login/xmlrpc"
+        )
+        asyncio.run(
+            middleware(
+                {"type": "http", "path": "/mcp", "headers": headers},
+                None,
+                send,
+            )
+        )
+        return seen, statuses
+
+    def test_gates_on_the_first_header(self):
+        seen, statuses = self._run(
+            [
+                (b"authorization", b"Basic not-a-bearer-token"),
+                (b"authorization", b"Bearer BBB"),
+            ]
+        )
+        assert seen == []
+        assert statuses == [401]
+
+    def test_the_gated_header_is_the_one_that_gets_used(self):
+        seen, statuses = self._run(
+            [
+                (b"authorization", b"Bearer AAA"),
+                (b"authorization", b"Bearer BBB"),
+            ]
+        )
+        assert seen == ["Bearer AAA"]
+        assert statuses == []

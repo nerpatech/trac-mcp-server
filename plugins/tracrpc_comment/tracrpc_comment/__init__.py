@@ -6,7 +6,9 @@ dispatcher (``tracrpc.api.XMLRPCSystem.get_method``) iterates every
 ``IXMLRPCHandler`` provider and matches on the full dotted method name, so a
 second component may claim an existing namespace as long as it yields method
 names the incumbent does not. ``tracrpc.ticket.TicketRPC`` never yields
-``editComment``, ``deleteComment`` or ``getCommentHistory``, and nothing
+``editComment``, ``deleteComment``, ``getCommentHistory``,
+``replyToComment`` or ``getChangeAt``,
+``tracrpc.wiki.WikiRPC`` never yields ``putPageIfVersion``, and nothing
 yields a ``timeline`` namespace at all.
 
 The practical consequence is that enabling or disabling this plugin cannot
@@ -16,7 +18,8 @@ components tracrpc_comment.* disabled`` plus a uWSGI reload.
 
 from tracrpc_comment.ticket_comment import TicketCommentRPC
 from tracrpc_comment.timeline import TimelineRPC
+from tracrpc_comment.wiki_put import WikiConditionalPutRPC
 
-__all__ = ['TicketCommentRPC', 'TimelineRPC']
+__all__ = ['TicketCommentRPC', 'TimelineRPC', 'WikiConditionalPutRPC']
 
-__version__ = '1.0.0'
+__version__ = '1.2.0'

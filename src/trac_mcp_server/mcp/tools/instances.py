@@ -132,10 +132,47 @@ def _host_root(url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _single_endpoint_result(url: str) -> types.CallToolResult:
+    """list_instances under OIDC per-user auth: no registry, no outbound call."""
+    structured: dict = {
+        "configured": [
+            {
+                "name": "default",
+                "url": url,
+                "is_default": True,
+                "credentials": "per-user",
+            }
+        ],
+        "default": url,
+    }
+    text = "\n".join(
+        [
+            f"Default instance: {url}",
+            "",
+            "Configured:",
+            f"  default: {url} (default)",
+            "",
+            "This server uses OIDC per-user auth: it reaches only this "
+            "endpoint, and project discovery is off.",
+        ]
+    )
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)],
+        structuredContent=structured,
+    )
+
+
 async def _handle_list_instances(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
     """Handle list_instances tool -- describe configured + discovered instances."""
+    # OIDC per-user auth: the registry and its default config hold the shared
+    # service account, if one is configured at all, and no caller may act as
+    # it. The caller's bearer token cannot stand in for the scrape's Basic
+    # credentials either, so there is no discovery, only the one endpoint.
+    if client is not None and client.config.bearer_token:
+        return _single_endpoint_result(client.config.trac_url)
+
     registry = _registry_ref
     if registry is None:
         return types.CallToolResult(
@@ -172,9 +209,17 @@ async def _handle_list_instances(
         # discovery: it needs the default host and the caller's creds.
         default_config = None
 
+    # Ticket #153: the write gate's kill switch is a per-daemon setting
+    # every routed instance inherits (ticket #117), and nothing else a
+    # session can reach reports it -- the env file is root 600. From the
+    # registry rather than `client`: a caller scoped away from the
+    # default instance reaches this handler with no client at all.
+    write_gate = registry.write_gate
+
     structured: dict = {
         "configured": configured,
         "default": default_config.trac_url if default_config else None,
+        "write_gate": write_gate,
     }
     if allowed is not None:
         structured["allowed"] = sorted(allowed)
@@ -183,6 +228,12 @@ async def _handle_list_instances(
         f"Default instance: {default_config.trac_url}"
         if default_config
         else "Default instance: unavailable to this caller",
+        f"write_gate: {'true' if write_gate else 'false'}"
+        + (
+            ""
+            if write_gate
+            else " -- OFF on this daemon: writes are NOT link-checked"
+        ),
     ]
     if allowed is not None:
         lines.extend(["", "Allowed:"])

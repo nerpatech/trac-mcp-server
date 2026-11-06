@@ -5,6 +5,7 @@ All tools use async handlers with run_sync() to bridge synchronous TracClient ca
 automatic Markdown conversion, and structured error responses.
 """
 
+import re
 import xmlrpc.client
 from typing import Any
 
@@ -29,7 +30,7 @@ DEFAULT_MAX_COMMENTS = 50
 TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_search",
-        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries.",
+        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries and their web URLs.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -56,7 +57,7 @@ TICKET_READ_TOOLS = [
     ),
     types.Tool(
         name="ticket_get",
-        description="Get full ticket details: summary, description, field values, and -- by default -- every comment with its number, author and timestamp, so one call covers the whole ticket. Set include_comments=false when you only need field values or the _ts change token before a write. Response includes a change token (_ts) -- pass it to ticket_update's base_ts to detect if the ticket changes before your write lands. Use ticket_changelog for full field-change history. The description and comment bodies are returned as stored: TracWiki, byte-for-byte.",
+        description="Get full ticket details: summary, description, field values, web URL, and -- by default -- every comment with its number, author and timestamp, so one call covers the whole ticket. Set include_comments=false when you only need field values or the _ts change token before a write. Response includes a change token (_ts) -- pass it to ticket_update's base_ts to detect if the ticket changes before your write lands. Use ticket_changelog for full field-change history. The description and comment bodies are returned as stored: TracWiki, byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -146,6 +147,17 @@ TICKET_READ_TOOLS = [
 ]
 
 
+def _ticket_url(client: TracClient, ticket_id: int) -> str:
+    """Build the web-facing URL for a ticket.
+
+    Without this, an agent asked to "include links" has no way to know --
+    ticket_search/ticket_get results carried no URL at all, so it either
+    guesses (often wrong: the MCP client's own host, not Trac's) or omits
+    links entirely.
+    """
+    return f"{client.config.trac_url.rstrip('/')}/ticket/{ticket_id}"
+
+
 async def _handle_search(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -190,9 +202,10 @@ async def _handle_search(
             ]  # [id, created, modified, attributes]
             return {
                 "id": tid,
-                "summary": attrs.get("summary", ""),
-                "status": attrs.get("status", ""),
-                "owner": attrs.get("owner", ""),
+                "summary": attrs.get("summary") or "",
+                "status": attrs.get("status") or "",
+                "owner": attrs.get("owner") or "",
+                "url": _ticket_url(client, tid),
             }
         except Exception:
             failed_ids.append(tid)
@@ -208,7 +221,7 @@ async def _handle_search(
         if item is None:
             continue
         results.append(
-            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']})"
+            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}) - {item['url']}"
         )
         tickets_json.append(item)
 
@@ -255,10 +268,14 @@ def _extract_comments(changelog: list) -> list[dict[str, Any]]:
     Returns:
         One dict per comment carrying number, author, timestamp and body,
         in changelog order. Trac stores a comment's number in the entry's
-        ``oldvalue`` -- the same key ``ticket_render_check``'s ``comment``
-        parameter is keyed on -- so the number reported here is the one
-        that tool accepts. An entry without one yields ``number: None``
-        rather than a fabricated ordinal.
+        ``oldvalue``: ``"5"``, or ``"2.5"`` for comment 5 threaded as a
+        reply to comment 2. ``number`` is the comment's own number (the
+        last dotted part, ``"5"`` for both), the key
+        ``ticket_render_check``'s ``comment`` parameter is keyed on, so
+        the number reported here is the one that tool accepts. A
+        threaded comment also carries ``in_reply_to`` (``"2"``); a flat
+        one has no such key. An entry without a parseable number yields
+        ``number: None`` rather than a fabricated ordinal.
     """
     comments: list[dict[str, Any]] = []
     for entry in changelog:
@@ -269,15 +286,16 @@ def _extract_comments(changelog: list) -> list[dict[str, Any]]:
             continue
 
         body = newvalue
-        number = str(oldvalue).strip() if oldvalue else ""
-        comments.append(
-            {
-                "number": number or None,
-                "author": author,
-                "timestamp": format_timestamp(timestamp),
-                "body": body,
-            }
-        )
+        parsed = TracClient.parse_comment_number(oldvalue)
+        comment: dict[str, Any] = {
+            "number": str(parsed.cnum) if parsed else None,
+            "author": author,
+            "timestamp": format_timestamp(timestamp),
+            "body": body,
+        }
+        if parsed is not None and parsed.reply_to is not None:
+            comment["in_reply_to"] = str(parsed.reply_to)
+        comments.append(comment)
     return comments
 
 
@@ -366,11 +384,18 @@ def _format_comment_section(
     for index, comment in enumerate(comments):
         if omitted and index == head_count:
             lines.extend(["", _omitted_notice(omitted)])
+        # Only the heading carries "(reply to M)"; the omitted notice
+        # names its range by the plain ref.
+        reply_note = (
+            f" (reply to {comment['in_reply_to']})"
+            if comment.get("in_reply_to")
+            else ""
+        )
         lines.extend(
             [
                 "",
-                f"### {_comment_ref(comment)} -- {comment['author']}, "
-                f"{comment['timestamp']}",
+                f"### {_comment_ref(comment)}{reply_note} -- "
+                f"{comment['author']}, {comment['timestamp']}",
                 comment["body"],
             ]
         )
@@ -415,20 +440,22 @@ async def _handle_get(
     attrs = ticket_data[3]
 
     # Extract fields
-    summary = attrs.get("summary", "")
-    # Trac returns None for a ticket whose description was never set; the
-    # response lines are joined as strings, so None must become "".
+    # Trac returns the key with value None for a field that was never set
+    # (`attrs.get(name, "")` only defaults an absent key). The response
+    # lines are joined as strings and structuredContent is typed, so every
+    # string field reads as "" when unset (Trac #141).
+    summary = attrs.get("summary") or ""
     description = attrs.get("description") or ""
-    status = attrs.get("status", "")
-    owner = attrs.get("owner", "")
-    reporter = attrs.get("reporter", "")
-    ticket_type = attrs.get("type", "")
-    priority = attrs.get("priority", "")
-    component = attrs.get("component", "")
-    milestone = attrs.get("milestone", "")
-    keywords = attrs.get("keywords", "")
-    cc = attrs.get("cc", "")
-    resolution = attrs.get("resolution", "")
+    status = attrs.get("status") or ""
+    owner = attrs.get("owner") or ""
+    reporter = attrs.get("reporter") or ""
+    ticket_type = attrs.get("type") or ""
+    priority = attrs.get("priority") or ""
+    component = attrs.get("component") or ""
+    milestone = attrs.get("milestone") or ""
+    keywords = attrs.get("keywords") or ""
+    cc = attrs.get("cc") or ""
+    resolution = attrs.get("resolution") or ""
     change_token = attrs.get("_ts")
 
     # Returned as stored. Nothing converts on this leg any more, so a
@@ -438,6 +465,7 @@ async def _handle_get(
     # Format timestamps
     created_str = format_timestamp(created)
     modified_str = format_timestamp(modified)
+    url = _ticket_url(client, ticket_id_resp)
 
     # Comments live in the changelog, not in the ticket attributes.
     # Fetching them by default is what makes one ticket_get the whole
@@ -467,6 +495,7 @@ async def _handle_get(
         f"Keywords: {keywords} | Cc: {cc}"
         + (f" | Resolution: {resolution}" if resolution else ""),
         f"Created: {created_str} | Modified: {modified_str}",
+        f"URL: {url}",
         f"Change token (base_ts): {change_token}"
         " -- pass this to ticket_update's base_ts to detect if the "
         "ticket changes before your write lands.",
@@ -516,6 +545,7 @@ async def _handle_get(
         "resolution": resolution,
         "created": created_str,
         "modified": modified_str,
+        "url": url,
         "_ts": change_token,
         "comments_included": include_comments
         and comments_error is None,
@@ -588,11 +618,24 @@ async def _handle_changelog(
 
         if field == "comment":
             # Comment content is in newvalue, returned as stored (#69)
-            if newvalue:
+            # A whitespace-only comment has nothing to show: print it like
+            # an empty one, not as a bare "comment: " line (#155).
+            if newvalue and not newvalue.isspace():
                 comment_text = newvalue
-                # Indent multiline comments for readability
-                comment_lines = comment_text.strip().split("\n")
-                if len(comment_lines) > 1:
+                # Indent multiline comments for readability. Only trailing
+                # whitespace goes (rstrip, so a "\n \n" tail too): leading
+                # whitespace is TracWiki markup (` * item` is a list item),
+                # so stripping it would print something other than what is
+                # stored (#69, #155). Lines split on LF or CRLF so a CRLF
+                # comment leaves no stray "\r"; not splitlines(), which
+                # also splits on \x0b, \x0c, U+2028 and so changes the
+                # text. A comment that starts with whitespace takes the
+                # block form too, where its own indent stays visible under
+                # the 4-space one.
+                comment_lines = re.split(
+                    r"\r?\n", comment_text.rstrip()
+                )
+                if len(comment_lines) > 1 or comment_text[0].isspace():
                     indented_comment = "\n    ".join(comment_lines)
                     entries.append(
                         f"- {timestamp_str} by {author}: comment:\n    {indented_comment}"
@@ -606,7 +649,9 @@ async def _handle_changelog(
                 entries.append(
                     f"- {timestamp_str} by {author}: comment added"
                 )
-                newvalue_text = ""
+                # The structured row keeps the stored bytes (#69), so a
+                # whitespace-only comment stays "\n" there.
+                newvalue_text = newvalue or ""
         else:
             newvalue_text = newvalue
             if oldvalue and newvalue:
