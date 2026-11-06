@@ -151,13 +151,16 @@ logging:
   level: DEBUG
 ```
 
-When enabled, the server writes detailed debug output to the log file.
+When enabled, the server writes detailed debug output to the log file (stdio) or to stderr (http, i.e. the service log), and to a file only when one is configured with `--log-file` or `LOG_FILE`.
 
 ## Log File Locations
 
 | Mode | Default Location |
 |------|------------------|
-| MCP Server | `/tmp/trac-mcp-server.log` |
+| MCP Server (stdio) | `/tmp/trac-mcp-server.log` |
+| MCP Server (http) | none; logs to stderr (a file only with `--log-file` or `LOG_FILE`) |
+
+`--log-file` wins over the `LOG_FILE` environment variable. An empty value (`--log-file ""` or `LOG_FILE=`) disables the file; stdio then logs to stderr.
 
 **Custom MCP log location:**
 ```bash

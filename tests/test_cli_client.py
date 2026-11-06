@@ -313,6 +313,49 @@ class TestRealSubstrate:
         assert "do not retry" in captured.err
         assert "Created wiki page 'P' (version unknown)" in captured.out
 
+    def test_wiki_push_possible_overwrite_warns_on_stderr_exits_0(
+        self, tmp_path, capsys
+    ):
+        """Trac /trac_mcp_server #130: the update was based on version 3
+        but stored as 5. The write succeeded, so the exit stays 0; the
+        warning goes to stderr."""
+
+        class _Raced(FakeTrac):
+            def get_wiki_page_info(self, name, version=None):
+                return {"name": name, "version": 3}
+
+            def put_wiki_page(self, name, content, comment, version):
+                self.pages.setdefault(name, []).append(content)
+                return {
+                    "version": 5,
+                    "possible_overwrite": True,
+                    "intervening_versions": [4],
+                }
+
+        src = tmp_path / "page.wiki"
+        src.write_text("= Title =\n")
+        with _served(_Raced()) as url:
+            rc = _cli(url, "wiki-push", "P", str(src))
+        assert rc == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "Updated wiki page 'P' (version 5)" in captured.out
+        assert "possible overwrite on wiki page 'P'" in captured.err
+        assert "version 4" in captured.err
+        assert "wiki_diff" in captured.err
+
+    def test_wiki_push_uncontended_prints_no_overwrite_warning(
+        self, tmp_path, capsys
+    ):
+        src = tmp_path / "page.wiki"
+        src.write_text("= Title =\n")
+        trac = FakeTrac()
+        trac.pages["P"] = ["old\n"]
+        with _served(trac) as url:
+            assert _cli(url, "wiki-push", "P", str(src)) == cli.EXIT_OK
+        captured = capsys.readouterr()
+        assert "overwrite" not in captured.err.lower()
+        assert "overwrite" not in captured.out.lower()
+
     def test_markdown_file_converted_on_push(self, tmp_path):
         src = tmp_path / "notes.md"
         src.write_text("# Notes\n\nSome **bold**.\n")
@@ -1342,14 +1385,82 @@ class TestTicketBodyReview:
         with _served(trac) as url:
             assert _cli(url, "ticket-describe", "7", str(src)) == 0
 
-    def test_comment_number_is_the_newest_match_not_a_float_max(self):
-        # Threaded numbers are text: "1.10" is not the decimal 1.1, and
-        # the changelog is chronological, so the last match is ours.
+    def test_comment_number_is_the_newest_match(self):
+        # The changelog is chronological, so the last match is ours.
+        changelog = [
+            {"field": "comment", "oldvalue": "1", "newvalue": "ok"},
+            {"field": "comment", "oldvalue": "3", "newvalue": "ok"},
+            {"field": "status", "oldvalue": "new", "newvalue": "x"},
+        ]
+        assert cli._comment_number(changelog, "ok") == "3"
+        assert cli._comment_number(changelog, "absent") is None
+
+    def test_comment_number_of_a_threaded_row_is_its_own_number(self):
+        # Trac /trac_mcp_server #131: "1.10" is comment 10, a reply to
+        # 1 -- the last dotted part, as an integer. The shared parser
+        # decides, so "1.2" (comment 2) is older than "1.10" here only
+        # by position, never by comparing the text.
         changelog = [
             {"field": "comment", "oldvalue": "1.2", "newvalue": "ok"},
             {"field": "comment", "oldvalue": "1.10", "newvalue": "ok"},
-            {"field": "status", "oldvalue": "new", "newvalue": "x"},
         ]
-        # float("1.10") < float("1.2"), so a float max would say "1.2".
-        assert cli._comment_number(changelog, "ok") == "1.10"
-        assert cli._comment_number(changelog, "absent") is None
+        assert cli._comment_number(changelog, "ok") == "10"
+        assert cli._comment_number(changelog[:1], "ok") == "2"
+
+    def test_comment_number_flat_row(self):
+        changelog = [
+            {"field": "comment", "oldvalue": "5", "newvalue": "hi"}
+        ]
+        assert cli._comment_number(changelog, "hi") == "5"
+
+    def test_comment_number_skips_rows_without_a_parseable_number(self):
+        changelog = [
+            {"field": "attachment", "oldvalue": None, "newvalue": "ok"},
+            {"field": "comment", "oldvalue": None, "newvalue": "ok"},
+            {"field": "comment", "oldvalue": "abc", "newvalue": "ok"},
+            {
+                "field": "comment",
+                "oldvalue": "\u00b2",
+                "newvalue": "ok",
+            },
+        ]
+        assert cli._comment_number(changelog, "ok") is None
+        # An unparseable newest row does not hide an older good one.
+        changelog.insert(
+            0, {"field": "comment", "oldvalue": "4", "newvalue": "ok"}
+        )
+        assert cli._comment_number(changelog, "ok") == "4"
+
+    def test_pull_finds_a_threaded_comment_by_its_own_number(
+        self, tmp_path
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(
+            7,
+            comments=[
+                (1, "one"),
+                ("1.2", "threaded two"),
+                (3, "three"),
+            ],
+        )
+        out = tmp_path / "out.wiki"
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-pull", "7", str(out), "--comment", "2"
+            )
+        assert rc == cli.EXIT_OK
+        assert out.read_text() == "threaded two"
+
+    def test_pull_skips_attachment_and_non_numeric_rows(self, tmp_path):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[("abc", "junk"), (2, "two")])
+        trac.changelogs[7].append(
+            [trac._tick(), "alice", "attachment", None, "f.txt", 1]
+        )
+        out = tmp_path / "out.wiki"
+        with _served(trac) as url:
+            rc = _cli(
+                url, "ticket-pull", "7", str(out), "--comment", "2"
+            )
+        assert rc == cli.EXIT_OK
+        assert out.read_text() == "two"
