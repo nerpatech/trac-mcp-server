@@ -36,6 +36,11 @@ The cases, and what Trac renders:
 D and F, and the other shapes the rule does not touch, are pinned to the
 bytes `master` (cf92e87) produced before the change.
 
+**The gate.** The rule applies only to a bullet or digits-only ordered
+innermost item, with no tab in either line's indentation, and a line that is
+not a list interrupter; the separator also needs no blank line since the
+marker. Outside it the sites keep `master`'s pop (GATE_ROWS below).
+
 **Case C is NOT changed here (ticket #176).** A line that continues a
 non-innermost item, closing deeper ones (C, and a line at a middle marker's
 column in a three-level list), reads as on `master`, byte for byte, at every
@@ -177,6 +182,90 @@ def test_a_line_after_a_blank_line_keeps_the_pre_149_reading():
     (ticket #144's REDUCED row depends on it). Master's bytes."""
     wiki = " 2. a\n\n b\n 3. c\n"
     assert _md(wiki) == " 2. a\n\n b\n\n 3. c\n"
+
+
+# -- The gate (code review of the first #149 branch) ---------------------------
+#
+# The marker-column rule applies only when the innermost item is a bullet or
+# a digits-only ordered item, neither line has a tab in its indentation, the
+# line is not one of CommonMark's list interrupters, and (separator only) no
+# blank line has passed since the item's marker. Everywhere else the bytes
+# are master's (cf92e87), on the read leg and on the round trip.
+
+# (source, master's read-leg bytes, master's round-trip bytes)
+GATE_ROWS = {
+    # F1: a lettered list (fallback path, #74/#89): the first branch put a
+    # blank line inside the code body.
+    "F1 lettered, block, marker line": (
+        " a. x\n {{{\n y\n }}}\n a. z\n",
+        " a. x\n\n ```\n y\n```\n```tracwiki-unconverted\n a. z\n```\n",
+        "a. x\n\n{{{\ny\n}}}\n\n a. z",
+    ),
+    # F2: a lettered list: the first branch moved the continuation out of
+    # the fallback fence into the list.
+    "F2 lettered, block, continuation": (
+        " a. x\n {{{\n y\n z\n }}}\n b\n",
+        " a. x\n\n ```\n y\n z\n```\n```tracwiki-unconverted\n b\n```\n",
+        "a. x\n\n{{{\ny\nz\n}}}\n\n b",
+    ),
+    # F3: a tab-indented list is a declined shape, and the separator
+    # measures in characters.
+    "F3 tab-indented": (
+        "\t* a\n\tb\n\t* c\n",
+        "\t* a\n\n\tb\n\t* c\n",
+        "{{{\n* a\n\nb\n* c\n}}}",
+    ),
+    # F5: a blockquote line at the marker column, then a continuation: the
+    # first branch moved the continuation below a blank line.
+    "F5 interrupter then continuation": (
+        " * a\n > q\n b\n * c\n",
+        " - a\n\n > q\n b\n - c\n",
+        " * a\n\n  q\n  b\n\n * c",
+    ),
+    # F6: the separator keeps its stack across a blank line (#52/#53), so a
+    # line two below a blank one was judged against closed items.
+    "F6 line below a blank line": (
+        " * a\n   * b\n\n   c\n d\n * e\n",
+        " - a\n   - b\n\n   c\n\n d\n - e\n",
+        " * a\n   * b\n\n   c\n\nd\n\n * e",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(GATE_ROWS))
+def test_outside_the_gate_the_read_leg_is_masters(name):
+    wiki, read, _ = GATE_ROWS[name]
+    assert _md(wiki) == read
+
+
+@pytest.mark.parametrize("name", list(GATE_ROWS))
+def test_outside_the_gate_the_round_trip_is_masters(name):
+    wiki, _, written = GATE_ROWS[name]
+    assert markdown_to_tracwiki(_md(wiki)) == written
+
+
+# Inside the gate (computed on be8880b): the improved reading stays.
+@pytest.mark.parametrize(
+    ("wiki", "read", "written"),
+    [
+        (
+            " 1. x\n {{{\n y\n z\n }}}\n b\n",
+            " 1. x\n    ```\n    y\n    z\n    ```\n    b\n",
+            " 1. x\n    {{{\n    y\n    z\n    }}}\n    b",
+        ),
+        (
+            " * x\n {{{\n y\n }}}\n b\n * c\n",
+            " - x\n   ```\n   y\n   ```\n   b\n - c\n",
+            " * x\n   {{{\n   y\n   }}}\n   b\n * c",
+        ),
+    ],
+    ids=["numeric block", "bullet block then marker"],
+)
+def test_inside_the_gate_the_continuation_stays_in_the_item(
+    wiki, read, written
+):
+    assert _md(wiki) == read
+    assert markdown_to_tracwiki(read) == written
 
 
 # -- Structure in Markdown --------------------------------------------------
