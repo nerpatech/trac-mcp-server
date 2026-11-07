@@ -220,7 +220,11 @@ class TestDispatchAnnotates:
     def test_unknown_tool_error_still_names_the_instance(
         self, mock_get_instances
     ):
-        # It resolved an instance before failing, so it can say which one.
+        # The registry vouches for the name (has_tool is a truthy mock) and
+        # then call_tool refuses it, as a registry that changed in between
+        # would: the instance is resolved by then, so it can say which one.
+        # A name the registry never served is answered before resolution
+        # and carries no annotation (ticket #164).
         client = MagicMock()
         client.config.trac_url = URL
         mock_get_instances.return_value.get_client.return_value = client
@@ -239,11 +243,13 @@ class TestDispatchAnnotates:
         assert result.isError
         assert _marker(result) == "[instance: /bcs (server_default)]"
 
+    @patch("trac_mcp_server.mcp.server.get_registry")
     @patch("trac_mcp_server.mcp.server.get_instances")
     def test_unresolvable_instance_error_is_not_annotated(
-        self, mock_get_instances
+        self, mock_get_instances, _mock_get_registry
     ):
-        # Nothing was reached, so there is no instance to name.
+        # Nothing was reached, so there is no instance to name. The tool
+        # lookup comes first (ticket #164), so a registry has to exist.
         from trac_mcp_server.instances import UnknownInstanceError
 
         mock_get_instances.return_value.get_client.side_effect = (

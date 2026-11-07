@@ -340,6 +340,9 @@ async def handle_call_tool(
     ever sees an unexpected key, and resolves it against the InstanceRegistry
     to pick which Trac project's client to use.
 
+    A name the registry does not serve is answered ``unknown_tool`` before
+    the instance is resolved.
+
     Annotates whatever comes back with the instance it actually reached, so
     the silent fallback to the server's default is visible from the response
     alone -- see ``tools.instance_echo`` and ticket #94.
@@ -353,6 +356,16 @@ async def handle_call_tool(
     """
     args = dict(arguments or {})
     instance = args.pop("instance", None)
+    # A tool the registry does not serve (hidden by a filter, or no such
+    # name) does not exist for this caller, whatever `instance` says: asking
+    # first would answer a hidden tool with an instance error. Nothing is
+    # reached, so this exit carries no instance annotation.
+    if not get_registry().has_tool(name):
+        return build_error_response(
+            "unknown_tool",
+            f"Unknown tool: {name}",
+            "Use list_tools to see available tools.",
+        )
     client: TracClient | None
     try:
         client = await _resolve_client(instance)

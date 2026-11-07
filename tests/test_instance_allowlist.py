@@ -741,3 +741,85 @@ def test_list_instances_exemption_is_only_for_list_instances():
     assert "instance_not_allowed" in result.content[0].text
     call_tool.assert_not_called()
     client_cls.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# A tool the registry does not serve is unknown_tool, whatever `instance` says
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_with_real_registry(tool, args, tool_registry, identity):
+    """``handle_call_tool`` over a real InstanceRegistry and a real
+    ToolRegistry, with ``_resolve_client`` wrapped so a test can see
+    whether it was asked."""
+    registry = InstanceRegistry(_config(), {})
+    server_module.set_instances(registry)
+    server_module.set_registry(tool_registry)
+    try:
+        with (
+            patch.object(
+                server_module, "_caller_identity", return_value=identity
+            ),
+            patch.object(
+                server_module,
+                "_resolve_client",
+                wraps=server_module._resolve_client,
+            ) as resolve,
+            patch("trac_mcp_server.instances.TracClient"),
+        ):
+            result = asyncio.run(handle_call_tool(tool, args))
+        return result, resolve
+    finally:
+        server_module.set_registry(None)
+        server_module.set_instances(None)
+
+
+def _read_only_registry():
+    from trac_mcp_server.mcp.server import PING_SPEC
+    from trac_mcp_server.mcp.tools import ALL_SPECS
+
+    return ToolRegistry([PING_SPEC] + ALL_SPECS, read_only=True)
+
+
+def test_filtered_out_tool_on_a_foreign_instance_is_unknown_tool():
+    """wiki_update is hidden by read_only; the caller is scoped to
+    /trac_test and names /auto_pm. The tool does not exist for it, so
+    that is what it is told, not that the instance is refused."""
+    tool_registry = _read_only_registry()
+    assert not tool_registry.has_tool("wiki_update")
+    result, resolve = _dispatch_with_real_registry(
+        "wiki_update",
+        {"instance": "/auto_pm", "page_name": "Index"},
+        tool_registry,
+        CLOUD,
+    )
+    assert result.isError
+    text = result.content[0].text
+    assert "unknown_tool" in text, text
+    assert "instance_not_allowed" not in text, text
+    # Nothing was reached, so nothing is annotated with an instance.
+    assert len(result.content) == 1
+    assert "[instance:" not in text
+    resolve.assert_not_called()
+
+
+def test_served_tool_on_a_foreign_instance_is_still_refused():
+    """Recall gate: the same call to a tool the registry does serve."""
+    result, resolve = _dispatch_with_real_registry(
+        "wiki_get",
+        {"instance": "/auto_pm", "page_name": "Index"},
+        _read_only_registry(),
+        CLOUD,
+    )
+    assert "instance_not_allowed" in result.content[0].text
+    resolve.assert_called_once()
+
+
+def test_nonexistent_tool_does_not_resolve_a_client():
+    result, resolve = _dispatch_with_real_registry(
+        "no_such_tool", {}, _read_only_registry(), CLOUD
+    )
+    assert result.isError
+    assert "unknown_tool" in result.content[0].text
+    assert "Unknown tool: no_such_tool" in result.content[0].text
+    resolve.assert_not_called()
