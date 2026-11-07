@@ -130,3 +130,18 @@ def test_probe_prefers_the_checkouts_own_dotenv(layout):
     assert "http://child.invalid" in result.stdout
     assert "child_user" in result.stdout
     assert "parent" not in result.stdout
+
+
+def test_no_arguments_still_runs_the_probe_then_pytest(layout):
+    # Trac #161 added `--daemon`; the argument-less path must be the
+    # one it always was: probe banner, probe passes, the suite runs.
+    tmp_path, _child, script, env = layout
+    (tmp_path / "parent" / ".env").write_text(
+        _dotenv("http://fake.invalid")
+    )
+    result = _run(tmp_path, script, env)
+    assert result.returncode == 0, result.stderr
+    assert "=== Live credentials ===" in result.stdout
+    assert "STUB-PYTEST-RAN tests/ -q --run-live" in result.stdout
+    assert "=== Live checks passed ===" in result.stdout
+    assert "DAEMON SMOKE" not in result.stdout

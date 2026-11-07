@@ -36,6 +36,18 @@ BLOCKING_CODES = frozenset(
         "missing_local_target",
         "intertrac_target_captured_punctuation",
         "missing_cross_instance_target",
+        # Ticket #163. The LOCAL sibling of
+        # `intertrac_target_captured_punctuation`, blocking for the same
+        # argument: `ticket:12's` / `wiki:WikiStart's` render as a dead
+        # link the writer never meant, whatever the stem is.
+        # It REPLACES `missing_local_target` for those anchors at the same
+        # severity (error to error), so the set of refused writes is
+        # unchanged and only the diagnosis and the fix change -- the old
+        # message said the target "does not exist", which sent the writer
+        # to change the target instead of ending the link before the
+        # suffix. Shape only, no probe of the stem: a dead stem is caught
+        # on the retry by `missing_local_target`.
+        "local_target_captured_tail",
         # Section 4 too, but PROMOTED from `warning` by #64: the table
         # puts it in the error column and the code did not agree. It
         # only became reachable before a write at all when ticket #77
