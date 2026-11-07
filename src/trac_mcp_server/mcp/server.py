@@ -434,11 +434,51 @@ def log_startup_settings(
         logger.warning("write_gate=off")
 
 
-def _startup_note(message: str, *args) -> None:
-    """Log a startup line and print it on stderr, which under stdio is the
-    only place an operator sees it (the logger writes to the log file)."""
-    logger.info(message, *args)
-    print(message % args, file=sys.stderr)
+def _logging_reaches_stderr(level: int) -> bool:
+    """Whether a record from ``logger`` at ``level`` is written to stderr.
+
+    True when the logger is enabled for ``level`` and some handler it
+    propagates to emits the record to the current ``sys.stderr``. A
+    ``FileHandler`` is a ``StreamHandler`` too, but its stream is the file.
+    ``sys.stderr`` is read at call time, so a handler built on a replaced
+    stream (a test capture, say) counts only while that stream is current.
+    """
+    if not logger.isEnabledFor(level):
+        return False
+    streams = (sys.stderr, sys.__stderr__)
+    current: logging.Logger | None = logger
+    while current is not None:
+        for handler in current.handlers:
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and handler.stream in streams
+                and level >= handler.level
+            ):
+                return True
+        current = current.parent if current.propagate else None
+    return False
+
+
+def _startup_note(
+    message: str, *args, level: int = logging.INFO
+) -> None:
+    """Log a startup line, and print it on stderr unless the logger
+    already does.
+
+    Under stdio with a log file the logger writes only that file, so stderr
+    is the only place an operator sees the line. Under http/cli, or stdio
+    without a log file, the logger has its own stderr handler and shows the
+    line itself: printing it as well showed it twice. The printed fallback
+    of a WARNING carries a ``Warning: `` prefix.
+    """
+    logger.log(level, message, *args)
+    if _logging_reaches_stderr(level):
+        return
+    text = message % args if args else message
+    if level >= logging.WARNING:
+        text = f"Warning: {text}"
+    print(text, file=sys.stderr)
 
 
 def build_registry(
@@ -486,22 +526,17 @@ def build_registry(
     if disabled:
         _startup_note("Disabled tools: %s", ", ".join(sorted(disabled)))
     if unknown:
-        logger.warning(
+        _startup_note(
             "Disabled tools not found (ignored): %s",
             ", ".join(sorted(unknown)),
-        )
-        print(
-            "Warning: disabled tools not found (ignored): "
-            + ", ".join(sorted(unknown)),
-            file=sys.stderr,
+            level=logging.WARNING,
         )
     if "list_instances" in disabled:
-        message = (
+        _startup_note(
             "list_instances is disabled, but error messages still tell "
-            "callers to call it; they get unknown_tool"
+            "callers to call it; they get unknown_tool",
+            level=logging.WARNING,
         )
-        logger.warning(message)
-        print(f"Warning: {message}", file=sys.stderr)
     if (
         allowed_permissions is not None
         or server_config.read_only
