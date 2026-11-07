@@ -357,8 +357,9 @@ def _item_block_separator(
     * ``"quote_gap"`` (#145): a lone ``>`` line, between two sibling
       blockquotes of one item. Trac shows one blockquote with two paragraphs.
     * ``"between"`` (#176): a ``para`` run directly after a nested list
-      (``prev_kind == "list"``): no blank line, every line at the item's
-      marker column + 1, strictly between its marker and the nested list's.
+      (``prev_kind == "list"``): no blank line, its first line at the item's
+      marker column + 1, strictly between its marker and the nested list's,
+      and every later line at the item's continuation indent.
       Trac then closes the nested list and continues the OUTER item
       (measured on /trac_test), which is innermost again afterwards, so the
       caller resets `list_seen`. Refused (``"blank"``, today's form) when
@@ -1196,7 +1197,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # order. A continuation paragraph after a sub-list goes
                 # between the item's marker and the nested marker, with no
                 # blank line (`_item_block_separator`'s "between", #176):
-                # Trac closes the nested list and continues THIS item.
+                # its first line closes the nested list and continues THIS
+                # item.
                 # Where that is refused it is set off by a blank line and
                 # indented under the item text; Trac renders it as a
                 # blockquote (a Trac limit, #112), but the order is the
@@ -1275,15 +1277,24 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             prev_kind, kind, list_seen, "", rendered
                         )
                         if separator == "between":
-                            # #176: no blank line, one column past this
-                            # item's marker. The nested list is closed and
-                            # this item is innermost again (measured C10,
-                            # Q1, D1, N1), so what follows behaves as in an
-                            # item with no nested list.
+                            # #176: no blank line. The FIRST line goes one
+                            # column past this item's marker, which closes
+                            # the nested list; this item is innermost again
+                            # (measured C10, Q1, D1, N1), so every later
+                            # line is a continuation line at the usual
+                            # indent (measured C6: both paragraphs stay in
+                            # the item), and what follows behaves as in an
+                            # item with no nested list. The read leg needs
+                            # the later lines at the text column: it turns
+                            # `[[BR]][[BR]]` into a blank line, and a line
+                            # at marker + 1 after one would leave the item.
+                            first, *rest = rendered.split("\n")
+                            parts.append(
+                                " " * (len(indent) + 1) + first
+                            )
                             parts.extend(
                                 _indent_nonblank(
-                                    rendered.split("\n"),
-                                    " " * (len(indent) + 1),
+                                    rest, continuation_indent
                                 )
                             )
                             list_seen = False
@@ -1591,7 +1602,7 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     split, with nothing to tell the author.
 
     One form keeps the item whole (#176): a paragraph run directly after the
-    nested list, which the writer puts at a column between the item's marker
+    nested list, which the writer starts at a column between the item's marker
     and the nested marker, with no blank line (`_item_block_separator`'s
     ``"between"``). It is not a finding, and the walk resets as the writer's
     does: the item is innermost again, so a block after it is the same as in

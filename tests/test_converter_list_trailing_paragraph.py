@@ -254,7 +254,7 @@ class TestItemChildrenKeepSourceOrder(unittest.TestCase):
             "   * a\n"
             "   * b\n"
             "  Para one. [[BR]][[BR]]\n"
-            "  Para two.\n"
+            "   Para two.\n"
             " * Next",
         )
 

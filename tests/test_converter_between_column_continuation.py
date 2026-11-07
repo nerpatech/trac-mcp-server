@@ -18,7 +18,8 @@ code block, a citation or a `{{{#!div}}}` table that follows joins `a` too
   (`_separate_list_from_trailing_paragraph`); `_list_stack_step` keeps the
   middle item open for a line at its marker column (C9).
 * Write leg: a paragraph run directly after a nested list is written with
-  no blank line at the item's marker column + 1 (`_item_block_separator`'s
+  no blank line, its first line at the item's marker column + 1 and the
+  later lines at the continuation indent (`_item_block_separator`'s
   `"between"`), and `find_list_item_splits` no longer reports it.
 
 C2, C3, C7 and C8 (an ordered outer item, whose nested list sits left of
@@ -217,13 +218,15 @@ def test_c9_text_sits_in_the_middle_item_in_markdown():
 
 # -- Round trip -------------------------------------------------------------
 
-# tw -> md -> tw: the between line comes back at the outer marker column + 1
+# tw -> md -> tw: the first between line comes back at the outer marker column + 1
 # with no blank line; C10's block comes back in the outer item.
 ROUND_TRIP_ROWS = {
     "C1": (C1, " * a\n   * b\n  text col2 between\n * c"),
     "C4": (C4, " * a\n   * b\n     * c\n    text col4\n   * d"),
-    "C5": (C5, " * a\n   * b\n  t1\n  t2\n * c"),
-    "C6": (C6, " * a\n   * b\n  t1 [[BR]][[BR]]\n  t2\n * c"),
+    # Only the first line of the run goes at marker + 1; the rest is at the
+    # item's continuation indent, as every continuation line is (#75).
+    "C5": (C5, " * a\n   * b\n  t1\n   t2\n * c"),
+    "C6": (C6, " * a\n   * b\n  t1 [[BR]][[BR]]\n   t2\n * c"),
     # The middle item's column: the text comes back one past it, still
     # between the middle marker and the inner one.
     "C9": (C9, " * a\n   * b\n     * c\n    text col3\n * d"),
@@ -248,26 +251,11 @@ def test_round_trip_keeps_trac_structure(name):
     assert find_list_item_splits(_md(wiki)) == []
 
 
-# C6: the write leg puts the second paragraph at the outer marker column + 1
-# too (` * a` / `   * b` / `  t1 [[BR]][[BR]]` / `  t2`). Trac renders both in
-# `a`, but the read leg turns `[[BR]][[BR]]` into a blank line and then reads
-# a line at that column as outside the item (a separate, older read-leg
-# defect: the same happens on master for ` * a` / `  t1 [[BR]][[BR]]` /
-# `  t2` with no nested list), so the second cycle splits the list.
-_C6_SECOND_CYCLE = pytest.mark.xfail(
-    strict=True,
-    reason="read leg: a line at marker column + 1 after [[BR]][[BR]] "
-    "leaves the item (older defect, not #176)",
-)
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(n, marks=_C6_SECOND_CYCLE) if n == "C6" else n
-        for n in ROUND_TRIP_ROWS
-    ],
-)
+# tw -> md -> tw -> md -> tw: the second cycle changes nothing. C6 is the row
+# that needs the later lines of a between run at the continuation indent: the
+# read leg turns `[[BR]][[BR]]` into a blank line, and a line at marker + 1
+# after it would leave the item.
+@pytest.mark.parametrize("name", list(ROUND_TRIP_ROWS))
 def test_round_trip_is_byte_stable_on_a_second_cycle(name):
     wiki, _ = ROUND_TRIP_ROWS[name]
     once = markdown_to_tracwiki(_md(wiki))
@@ -283,7 +271,7 @@ WRITE_ROWS = {
     ),
     "two paragraphs": (
         " - a\n   - b\n\n   t1\n\n   t2\n - c\n",
-        " * a\n   * b\n  t1 [[BR]][[BR]]\n  t2\n * c",
+        " * a\n   * b\n  t1 [[BR]][[BR]]\n   t2\n * c",
     ),
     # A nested item (depth 1) whose own nested list is followed by a
     # paragraph: column 3 + 1.
@@ -293,7 +281,13 @@ WRITE_ROWS = {
     ),
     "soft break": (
         " - a\n   - b\n\n   t1\n   t2\n - c\n",
-        " * a\n   * b\n  t1\n  t2\n * c",
+        " * a\n   * b\n  t1\n   t2\n * c",
+    ),
+    # An ordered outer item: first line at column 2, the rest at its
+    # continuation indent (4).
+    "ordered outer, two lines": (
+        "1. a\n   - b\n\n   l1\n   l2\n2. c\n",
+        " 1. a\n   * b\n  l1\n    l2\n 2. c",
     ),
     # After the run, the outer item is innermost again: each block takes
     # the form it takes in an item with no nested list.

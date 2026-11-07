@@ -279,11 +279,11 @@ def test_paragraph_after_a_nested_list_goes_between_the_markers():
 
 
 def test_two_paragraphs_after_a_nested_list_separate_by_br():
-    """Both go between the markers, joined by the break the #143 form uses
-    between two paragraphs."""
+    """The first goes between the markers (the rest at the continuation
+    indent), joined by the break the #143 form uses between paragraphs."""
     md = "- a\n  - b\n\n  p1\n\n  p2\n- c\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   * b\n  p1 [[BR]][[BR]]\n  p2\n * c"
+        " * a\n   * b\n  p1 [[BR]][[BR]]\n   p2\n * c"
     )
 
 
