@@ -10,6 +10,7 @@ from ..config_bootstrap import bootstrap_config
 from ..core.async_utils import init_semaphore, run_sync
 from ..core.client import TracClient
 from ..instances import InstanceRegistry, load_declared_instances
+from ..logger import startup_note
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,24 @@ logger = logging.getLogger(__name__)
 def _stderr_print(msg: str) -> None:
     """Print message to stderr for user feedback (safe in MCP mode)."""
     print(msg, file=sys.stderr, flush=True)
+
+
+def _note(
+    message: str,
+    *args: object,
+    level: int = logging.INFO,
+    printed: str | list[str] | None = None,
+) -> None:
+    """Log a startup line; print it on stderr only where the logger does
+    not (stdio with a log file), via this module's ``_stderr_print``."""
+    startup_note(
+        logger,
+        message,
+        *args,
+        level=level,
+        printed=printed,
+        print_fn=_stderr_print,
+    )
 
 
 @asynccontextmanager
@@ -46,8 +65,9 @@ async def server_lifespan(
     Raises:
         RuntimeError: If configuration is invalid or Trac connection fails.
     """
-    logger.info("MCP server starting...")
-    _stderr_print("Trac MCP Server starting...")
+    _note(
+        "MCP server starting...", printed="Trac MCP Server starting..."
+    )
 
     # Load configuration with unified precedence:
     # CLI args > env vars (.env loaded first) > YAML config > defaults
@@ -55,15 +75,25 @@ async def server_lifespan(
         overrides = config_overrides or {}
         config, sources = bootstrap_config(overrides)
         source_desc = ", ".join(sources) if sources else "defaults"
-        logger.info("Configuration loaded from: %s", source_desc)
-        _stderr_print(f"  Configuration loaded from: {source_desc}")
-        logger.info("Trac URL: %s", config.trac_url)
-        _stderr_print(f"  Trac URL: {config.trac_url}")
+        _note(
+            "Configuration loaded from: %s",
+            source_desc,
+            printed=f"  Configuration loaded from: {source_desc}",
+        )
+        _note(
+            "Trac URL: %s",
+            config.trac_url,
+            printed=f"  Trac URL: {config.trac_url}",
+        )
     except ValueError as e:
-        logger.error("Configuration error: %s", e)
-        _stderr_print(f"ERROR: Configuration error: {e}")
-        _stderr_print(
-            "  Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set."
+        _note(
+            "Configuration error: %s",
+            e,
+            level=logging.ERROR,
+            printed=[
+                f"ERROR: Configuration error: {e}",
+                "  Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set.",
+            ],
         )
         raise RuntimeError(
             f"Configuration error: {e}. Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set."
@@ -75,38 +105,51 @@ async def server_lifespan(
     # per-request instead, against each caller's own forwarded token.
     client: TracClient | None = None
     if config.oidc_only:
-        logger.info(
+        _note(
             "OIDC-only deployment (TRAC_MCP_OIDC_RPC_URL set, no shared "
-            "Trac credentials): skipping startup connectivity self-test."
-        )
-        _stderr_print(
-            "  OIDC per-user mode: skipping startup connectivity check "
-            "(no shared credentials configured)."
+            "Trac credentials): skipping startup connectivity self-test.",
+            printed=(
+                "  OIDC per-user mode: skipping startup connectivity check "
+                "(no shared credentials configured)."
+            ),
         )
         init_semaphore(config.max_parallel_requests)
-        _stderr_print(
-            f"  Parallel requests: {config.max_parallel_requests}"
+        _note(
+            "Parallel requests: %d",
+            config.max_parallel_requests,
+            printed=f"  Parallel requests: {config.max_parallel_requests}",
         )
     else:
-        logger.info("Validating Trac connection...")
-        _stderr_print("  Validating Trac connection...")
+        _note(
+            "Validating Trac connection...",
+            printed="  Validating Trac connection...",
+        )
         try:
             client = TracClient(config)
             version = await run_sync(client.validate_connection)
-            logger.info(
-                "Successfully connected to Trac API version %s", version
+            _note(
+                "Successfully connected to Trac API version %s",
+                version,
+                printed=f"  Connected to Trac API version {version}",
             )
-            _stderr_print(f"  Connected to Trac API version {version}")
             init_semaphore(config.max_parallel_requests)
-            _stderr_print(
-                f"  Parallel requests: {config.max_parallel_requests}"
+            _note(
+                "Parallel requests: %d",
+                config.max_parallel_requests,
+                printed=(
+                    f"  Parallel requests: {config.max_parallel_requests}"
+                ),
             )
         except Exception as e:
-            logger.error("Failed to connect to Trac: %s", e)
-            _stderr_print("ERROR: Trac connection failed.")
-            _stderr_print(f"  {e}")
-            _stderr_print(
-                "  Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD."
+            _note(
+                "Failed to connect to Trac: %s",
+                e,
+                level=logging.ERROR,
+                printed=[
+                    "ERROR: Trac connection failed.",
+                    f"  {e}",
+                    "  Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD.",
+                ],
             )
             raise RuntimeError(
                 f"Trac connection failed: {e}. Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD."
@@ -117,12 +160,18 @@ async def server_lifespan(
         instances.seed_default(client)
     declared_names = instances.declared_names()
     if declared_names:
-        _stderr_print(
-            f"  Configured instances: default, {', '.join(declared_names)}"
+        names = ", ".join(declared_names)
+        _note(
+            "Configured instances: default, %s",
+            names,
+            printed=f"  Configured instances: default, {names}",
         )
     else:
-        _stderr_print("  Configured instances: default only")
-    _stderr_print("Server ready. Waiting for MCP client connection...")
+        _note(
+            "Configured instances: default only",
+            printed="  Configured instances: default only",
+        )
+    _note("Server ready. Waiting for MCP client connection...")
 
     # Server is ready - yield client, instance registry, and the resolved
     # Config (callers wire OIDC per-user auth off the latter -- see
@@ -131,5 +180,7 @@ async def server_lifespan(
     yield {"client": client, "instances": instances, "config": config}
 
     # Shutdown
-    logger.info("MCP server shutting down")
-    _stderr_print("Trac MCP Server shutting down.")
+    _note(
+        "MCP server shutting down",
+        printed="Trac MCP Server shutting down.",
+    )

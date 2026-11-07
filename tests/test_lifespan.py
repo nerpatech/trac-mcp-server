@@ -9,6 +9,8 @@ Tests the server_lifespan() async context manager which:
 - Prints status messages to stderr
 """
 
+import logging
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -813,3 +815,194 @@ class TestServerLifespanShutdown:
         assert "1.3.5" in full_output
         assert "Server ready" in full_output
         assert "shutting down" in full_output.lower()
+
+
+# -------------------------------------------------------------------------
+# Startup lines print once per transport shape (Trac #167)
+# -------------------------------------------------------------------------
+
+_PKG_LOGGER = "trac_mcp_server"
+
+
+@pytest.fixture
+def pkg_logger():
+    """The ``trac_mcp_server`` logger with its state saved and restored."""
+    lg = logging.getLogger(_PKG_LOGGER)
+    saved = (lg.level, lg.propagate, list(lg.handlers))
+    yield lg
+    for handler in lg.handlers:
+        if handler not in saved[2]:
+            handler.close()
+    lg.level, lg.propagate = saved[0], saved[1]
+    lg.handlers = saved[2]
+
+
+async def _run_lifespan(config=None, run_sync_effect=None):
+    """Run server_lifespan() with the Trac side mocked and
+    ``_stderr_print`` left real (it writes to the current sys.stderr)."""
+    config = config or _make_config()
+    with (
+        _MOCK_DOTENV,
+        _NO_CONFIG_FILES,
+        patch(
+            "trac_mcp_server.config_bootstrap.load_config",
+            return_value=config,
+        ),
+        patch(
+            "trac_mcp_server.mcp.lifespan.TracClient",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "trac_mcp_server.mcp.lifespan.run_sync",
+            return_value="1.3.5",
+            side_effect=run_sync_effect,
+        ),
+        patch("trac_mcp_server.mcp.lifespan.init_semaphore"),
+    ):
+        async with server_lifespan() as _:
+            pass
+
+
+_STARTUP_LINES = [
+    "starting",
+    "Configuration loaded from",
+    "Trac URL",
+    "Validating",
+    "Connected to Trac API version",
+    "Parallel requests",
+    "Configured instances",
+    "Server ready",
+    "shutting down",
+]
+
+
+class TestStartupLinesPrintOnce:
+    async def test_http_shape_shows_each_line_once(
+        self, pkg_logger, capsys
+    ):
+        """A stderr handler at INFO (what http mode installs) shows every
+        startup line; the lifespan must not print each a second time."""
+        pkg_logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s] [%(levelname)s] %(message)s"
+            )
+        )
+        pkg_logger.addHandler(handler)
+
+        await _run_lifespan()
+
+        err = capsys.readouterr().err.lower()
+        for fragment in _STARTUP_LINES:
+            assert err.count(fragment.lower()) == 1, (
+                f"{fragment!r} appears {err.count(fragment.lower())} "
+                f"times in:\n{err}"
+            )
+        # every line is the timestamped log line, none is the raw print
+        assert all(line.startswith("[") for line in err.splitlines())
+
+    async def test_stdio_file_shape_prints_todays_sequence(
+        self, pkg_logger, tmp_path, capsys
+    ):
+        """A file handler at WARNING (stdio) leaves stderr to the prints,
+        which keep their wording and order byte for byte."""
+        pkg_logger.setLevel(logging.WARNING)
+        log = tmp_path / "server.log"
+        pkg_logger.addHandler(logging.FileHandler(log))
+
+        await _run_lifespan()
+
+        assert capsys.readouterr().err == (
+            "Trac MCP Server starting...\n"
+            "  Configuration loaded from: environment variables\n"
+            "  Trac URL: https://trac.example.com/trac\n"
+            "  Validating Trac connection...\n"
+            "  Connected to Trac API version 1.3.5\n"
+            "  Parallel requests: 5\n"
+            "  Configured instances: default only\n"
+            "Server ready. Waiting for MCP client connection...\n"
+            "Trac MCP Server shutting down.\n"
+        )
+
+    async def test_http_shape_connection_failure_shows_once(
+        self, pkg_logger, capsys
+    ):
+        pkg_logger.setLevel(logging.INFO)
+        pkg_logger.addHandler(logging.StreamHandler(sys.stderr))
+
+        with pytest.raises(RuntimeError):
+            await _run_lifespan(
+                run_sync_effect=ConnectionError("Connection refused")
+            )
+
+        err = capsys.readouterr().err
+        assert err.count("Connection refused") == 1
+        assert err.count("Failed to connect to Trac") == 1
+        assert "ERROR: Trac connection failed." not in err
+
+    async def test_stdio_file_shape_connection_failure_lines(
+        self, pkg_logger, tmp_path, capsys
+    ):
+        pkg_logger.setLevel(logging.WARNING)
+        pkg_logger.addHandler(logging.FileHandler(tmp_path / "s.log"))
+
+        with pytest.raises(RuntimeError):
+            await _run_lifespan(
+                run_sync_effect=ConnectionError("Connection refused")
+            )
+
+        assert capsys.readouterr().err == (
+            "Trac MCP Server starting...\n"
+            "  Configuration loaded from: environment variables\n"
+            "  Trac URL: https://trac.example.com/trac\n"
+            "  Validating Trac connection...\n"
+            "ERROR: Trac connection failed.\n"
+            "  Connection refused\n"
+            "  Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD.\n"
+        )
+
+    async def test_http_shape_config_error_shows_once(
+        self, pkg_logger, capsys
+    ):
+        pkg_logger.setLevel(logging.INFO)
+        pkg_logger.addHandler(logging.StreamHandler(sys.stderr))
+
+        with (
+            _MOCK_DOTENV,
+            _NO_CONFIG_FILES,
+            patch(
+                "trac_mcp_server.config_bootstrap.load_config",
+                side_effect=ValueError("missing URL"),
+            ),
+        ):
+            with pytest.raises(RuntimeError):
+                async with server_lifespan() as _:
+                    pass  # pragma: no cover
+
+        err = capsys.readouterr().err
+        assert err.count("Configuration error: missing URL") == 1
+
+    async def test_stdio_file_shape_config_error_lines(
+        self, pkg_logger, tmp_path, capsys
+    ):
+        pkg_logger.setLevel(logging.WARNING)
+        pkg_logger.addHandler(logging.FileHandler(tmp_path / "s.log"))
+
+        with (
+            _MOCK_DOTENV,
+            _NO_CONFIG_FILES,
+            patch(
+                "trac_mcp_server.config_bootstrap.load_config",
+                side_effect=ValueError("missing URL"),
+            ),
+        ):
+            with pytest.raises(RuntimeError):
+                async with server_lifespan() as _:
+                    pass  # pragma: no cover
+
+        assert capsys.readouterr().err == (
+            "Trac MCP Server starting...\n"
+            "ERROR: Configuration error: missing URL\n"
+            "  Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set.\n"
+        )
