@@ -370,6 +370,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   - New `list_instances` tool (28th documented tool, 43rd registered including `ping`) surfaces configured instances plus, via a new `scrape_project_index()` web-scraping helper, other projects discoverable on the host's "Available Projects" index
   - `src/trac_mcp_server/instances.py`: `InstanceSpec`, `InstanceRegistry` (resolve/get_client/describe, with per-URL client caching and mtime-gated live reload), `UnknownInstanceError`, `load_declared_instances()`
 
+### Tests
+- `main()` passing the resolved server config to the tool registry is now pinned by a test: with `read_only` or `disabled_tools` set, the registry `run_http` is handed leaves those tools out (Trac /trac_mcp_server #165). Seeded: with `main()` building the registry from a default `ServerConfig()`, the read-only and disabled-tools cases fail and the defaults case passes.
+
 ## [2.2.0] - 2026-07-26
 
 ### Added
