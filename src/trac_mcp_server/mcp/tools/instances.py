@@ -169,6 +169,18 @@ def _single_endpoint_result(
     )
 
 
+def _registry_not_initialized() -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text",
+                text="Error (server_error): Instance registry not initialized.",
+            )
+        ],
+        isError=True,
+    )
+
+
 async def _handle_list_instances(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -178,6 +190,11 @@ async def _handle_list_instances(
 
     registry = _registry_ref
 
+    # No client and no registry: nothing to describe, and no setting to
+    # report either.
+    if client is None and registry is None:
+        return _registry_not_initialized()
+
     # Ticket #153: the write gate's kill switch is a per-daemon setting
     # every routed instance inherits (ticket #117), and nothing else a
     # session can reach reports it -- the env file is root 600. Worked out
@@ -186,13 +203,13 @@ async def _handle_list_instances(
     # auth the caller's own client, built by OidcClientCache from the
     # startup config. A caller scoped away from the default instance
     # reaches this handler with no client at all; it gets the registry's
-    # value, read from the same startup config.
-    if client is not None:
-        write_gate = gate_enabled(client)
-    elif registry is not None:
-        write_gate = registry.write_gate
-    else:
-        write_gate = True
+    # value, read from the same startup config. The early return above
+    # leaves one of the two present.
+    write_gate = (
+        gate_enabled(client)
+        if client is not None
+        else registry.write_gate
+    )
 
     # OIDC per-user auth: the registry and its default config hold the shared
     # service account, if one is configured at all, and no caller may act as
@@ -203,16 +220,9 @@ async def _handle_list_instances(
             client.config.trac_url, write_gate
         )
 
+    # A client with no registry (not OIDC): there is nothing to list.
     if registry is None:
-        return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text",
-                    text="Error (server_error): Instance registry not initialized.",
-                )
-            ],
-            isError=True,
-        )
+        return _registry_not_initialized()
 
     discover = args.get("discover", True)
     identity = caller_identity()

@@ -373,9 +373,10 @@ async def handle_call_tool(
     except InstanceNotAllowedError as e:
         # Ticket #110: a caller scoped away from the DEFAULT instance must
         # still be able to ask what it may reach -- the refusal below tells
-        # it to do exactly that. list_instances reads the registry, not
-        # the client, so it runs with none; every other tool, and an
-        # explicit out-of-scope `instance`, is still refused.
+        # it to do exactly that. list_instances takes the client when it
+        # has one and the registry otherwise, so it runs with none; every
+        # other tool, and an explicit out-of-scope `instance`, is still
+        # refused.
         if name != "list_instances" or instance is not None:
             return build_error_response(
                 _instance_error_type(e),
