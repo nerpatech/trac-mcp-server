@@ -940,6 +940,7 @@ class TestStartupLinesPrintOnce:
         assert err.count("Connection refused") == 1
         assert err.count("Failed to connect to Trac") == 1
         assert "ERROR: Trac connection failed." not in err
+        assert err.count("Check TRAC_URL") == 1
 
     async def test_stdio_file_shape_connection_failure_lines(
         self, pkg_logger, tmp_path, capsys
@@ -982,6 +983,7 @@ class TestStartupLinesPrintOnce:
 
         err = capsys.readouterr().err
         assert err.count("Configuration error: missing URL") == 1
+        assert err.count("Ensure TRAC_URL") == 1
 
     async def test_stdio_file_shape_config_error_lines(
         self, pkg_logger, tmp_path, capsys

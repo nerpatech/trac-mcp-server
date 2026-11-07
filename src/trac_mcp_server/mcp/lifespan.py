@@ -87,7 +87,7 @@ async def server_lifespan(
         )
     except ValueError as e:
         _note(
-            "Configuration error: %s",
+            "Configuration error: %s. Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set.",
             e,
             level=logging.ERROR,
             printed=[
@@ -142,7 +142,7 @@ async def server_lifespan(
             )
         except Exception as e:
             _note(
-                "Failed to connect to Trac: %s",
+                "Failed to connect to Trac: %s. Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD.",
                 e,
                 level=logging.ERROR,
                 printed=[
