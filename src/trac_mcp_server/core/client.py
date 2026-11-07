@@ -220,10 +220,10 @@ WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
 # /trac_mcp_server #132).
 TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
 
-# The same, for the stock ``system.multicall`` the wiki search fills its
-# page cache with (Trac /trac_mcp_server #154) and ``get_tickets`` batches
-# ``ticket.get`` with (#158).
-WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
+# The same, for the stock ``system.multicall``: one memory shared by the
+# wiki search, which fills its page cache with it (Trac /trac_mcp_server
+# #154), and ``get_tickets``, which batches ``ticket.get`` with it (#158).
+MULTICALL_ABSENT_TTL_SECONDS = 300.0
 
 # Pages read per ``system.multicall`` (two calls each: getPageInfo and
 # getPage).
@@ -424,7 +424,7 @@ class TracClient:
         # server, not the wiki, so wiki search (#154) and ``get_tickets``
         # (#158) share this one memory of it.
         self._multicall = _OptionalMethod(
-            "system.multicall", WIKI_MULTICALL_ABSENT_TTL_SECONDS
+            "system.multicall", MULTICALL_ABSENT_TTL_SECONDS
         )
         # The wiki search's page cache (#154). It is per client, and a
         # client is per caller: the instance pool keeps one per instance

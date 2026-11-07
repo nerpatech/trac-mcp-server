@@ -574,12 +574,13 @@ def test_a_get_tickets_that_raises_is_reported_not_raised():
     client = _client(tickets, lambda query: [5, 6])
     client.get_tickets.side_effect = RuntimeError("boom")
 
-    result = _run(
+    outcome = _run(
         client,
         {"values": "x, z", "match_field": "summary"},
-    ).structuredContent
+    )
+    result = outcome.structuredContent
 
-    assert not result.get("isError")
+    assert not outcome.isError
     assert result["failed_ids"] == [5, 6]
     assert result["unresolved"] == ["x", "z"]
     assert client.get_tickets.call_count == 1
@@ -596,6 +597,52 @@ def test_a_get_tickets_that_raises_in_id_mode_is_reported_not_raised():
         "id": 1,
         "url": "https://trac.example/proj/ticket/1",
     }
+
+
+def _id_mode_values(n):
+    return ",".join(str(i) for i in range(1, n + 1))
+
+
+def test_load_fetches_in_chunks_of_the_batch_size():
+    tickets = {i: {"summary": f"T{i}"} for i in range(1, 121)}
+    client = _client(tickets)
+
+    result = _run(client, {"values": _id_mode_values(120)})
+
+    assert not result.isError
+    calls = [c.args[0] for c in client.get_tickets.call_args_list]
+    assert [len(c) for c in calls] == [50, 50, 20]
+    assert sorted(i for c in calls for i in c) == list(range(1, 121))
+    assert result.structuredContent["failed_ids"] == []
+    assert result.structuredContent["found_count"] == 120
+
+
+def test_a_chunk_that_raises_fails_only_its_own_ids(caplog):
+    tickets = {i: {"summary": f"T{i}"} for i in range(1, 121)}
+    client = _client(tickets)
+    good = client.get_tickets.side_effect
+
+    def get_tickets(ids):
+        if 51 in ids:
+            raise RuntimeError("boom")
+        return good(ids)
+
+    client.get_tickets.side_effect = get_tickets
+
+    with caplog.at_level("WARNING"):
+        result = _run(client, {"values": _id_mode_values(120)})
+
+    assert not result.isError
+    assert result.structuredContent["failed_ids"] == list(
+        range(51, 101)
+    )
+    found = result.structuredContent["found"]
+    assert found["1"]["summary"] == "T1"
+    assert found["120"]["summary"] == "T120"
+    assert "summary" not in found["75"]
+    warned = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warned) == 1
+    assert warned[0].exc_info is not None
 
 
 def test_a_malformed_get_tickets_entry_counts_as_failed():

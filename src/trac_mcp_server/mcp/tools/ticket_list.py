@@ -5,19 +5,23 @@ comparison needs one tool call instead of one search per item.
 """
 
 import json
+import logging
 import re
 from typing import Any
 
 import mcp.types as types
 
 from ...core.async_utils import (
+    gather_limited,
     run_sync,
     run_sync_limited,
 )
-from ...core.client import TracClient
+from ...core.client import TICKET_FETCH_BATCH, TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
 from .ticket_read import _ticket_url
+
+logger = logging.getLogger(__name__)
 
 MAX_TERMS = 1000
 ID_CHUNK = 100
@@ -208,12 +212,27 @@ async def _load(
     cached as None and not fetched again."""
 
     todo = [tid for tid in dict.fromkeys(ids) if tid not in cache]
-    if not todo:
-        return
-    try:
-        fetched = await run_sync_limited(client.get_tickets, todo)
-    except Exception:
-        fetched = {}
+
+    async def one(chunk: list[int]) -> dict[int, Any]:
+        try:
+            return await run_sync_limited(client.get_tickets, chunk)
+        except Exception:
+            logger.warning(
+                "get_tickets failed for %d tickets (%s ... %s)",
+                len(chunk),
+                chunk[0],
+                chunk[-1],
+                exc_info=True,
+            )
+            return {}
+
+    chunks = [
+        todo[i : i + TICKET_FETCH_BATCH]
+        for i in range(0, len(todo), TICKET_FETCH_BATCH)
+    ]
+    fetched: dict[int, Any] = {}
+    for part in await gather_limited([one(chunk) for chunk in chunks]):
+        fetched.update(part)
     for tid in todo:
         entry = fetched.get(tid)
         cache[tid] = (
