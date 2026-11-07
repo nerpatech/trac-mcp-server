@@ -25,7 +25,7 @@ The negative rows' expected values were computed on ``master`` (adc1325)
 before the change and hard-coded.
 """
 
-import time
+import importlib
 
 import mistune
 import pytest
@@ -36,6 +36,12 @@ from trac_mcp_server.converters.markdown_to_tracwiki import (
 )
 from trac_mcp_server.converters.tracwiki_to_markdown import (
     tracwiki_to_markdown,
+)
+
+# The package re-exports the function under the module's name, so import the
+# module itself to patch its `_list_stack_step`.
+t2m = importlib.import_module(
+    "trac_mcp_server.converters.tracwiki_to_markdown"
 )
 
 TICKET_WIKI = " * a\n   ||=x=||=y=||\n   ||1||2||\n * d\n"
@@ -248,21 +254,34 @@ def _rows_in_a_new_div(back):
     return "{{{#!div\n" in back
 
 
-def test_linear_in_the_length_of_a_blank_free_run():
+def test_linear_in_the_length_of_a_blank_free_run(monkeypatch):
     """F1: every group used to re-walk the whole blank-free run above it
-    (about 16x for 4x the input). One forward pass is about 4x; the bound
-    leaves room for noise."""
+    (about 16x the steps for 4x the input). The forward pass steps the
+    list stack at most once per input line, so the count is linear.
+    Counted, not timed: a wall-clock ratio is noisy and says nothing about
+    which loop did the work."""
+    real = t2m._list_stack_step
+    calls = 0
 
-    def best(n):
+    def counting(stack, line):
+        nonlocal calls
+        calls += 1
+        return real(stack, line)
+
+    monkeypatch.setattr(t2m, "_list_stack_step", counting)
+
+    def count(n):
+        nonlocal calls
+        calls = 0
         wiki = "".join(f"text {i}\n||{i}||x||\n" for i in range(n))
-        times = []
-        for _ in range(3):
-            start = time.perf_counter()
-            tracwiki_to_markdown(wiki)
-            times.append(time.perf_counter() - start)
-        return min(times)
+        tracwiki_to_markdown(wiki)
+        return calls
 
-    assert best(4000) / best(1000) < 8
+    small, large = count(1000), count(4000)
+    assert small > 0
+    assert large <= 4 * small + 16, (small, large)
+    # Never more steps than input lines (4000 text/row pairs: 8000 lines).
+    assert large <= 2 * 4000, large
 
 
 def test_f2_a_container_wrapping_the_whole_list_does_not_exempt():
@@ -313,3 +332,53 @@ def test_f5_a_bare_group_directly_before_a_div_group_stays_two_tables():
     md = _md(wiki)
     assert md == (" - a\n\n| 1 |\n|---|\n\n   | 2 |\n   |---|\n - d\n")
     assert "||---||" not in markdown_to_tracwiki(md)
+
+
+# -- Second review: R1, R2, R5 -------------------------------------------------
+
+R1_WIKI = " * a\n   {{{ #!div class=x\n   ||1||\n   }}}\n * d\n"
+R2_WIKI = " * a\n   {{{#!div class=x\n   ||1||\n * d\n"
+R5_WIKI = " * a\n   ||1||\n   more\n * d\n"
+
+
+def test_r1_space_between_the_braces_and_the_processor_is_an_opener():
+    """Measured on Trac's renderer (/trac_test, 2026-11-07): `{{{ #!div
+    class=x` renders the div with its table INSIDE the item, and the list
+    goes on with `d`. Master bytes (no blank line added)."""
+    md = _md(R1_WIKI)
+    assert (
+        md == " - a\n   {{{ #!div class=x\n| 1 |\n|---|\n   }}}\n - d\n"
+    )
+    back = markdown_to_tracwiki(md)
+    lines = back.split("\n")
+    assert any(
+        ln.startswith(" ") and ln.strip() == "{{{ #!div class=x"
+        for ln in lines
+    ), back
+    assert not any(ln.startswith("}}}") for ln in lines), back
+
+
+def test_r2_an_opener_with_no_closer_runs_to_the_end_of_the_document():
+    """Trac closes open blocks at the end of the document: the div swallows
+    `d`, so its rows are inside it, not bare. Master bytes (no blank)."""
+    md = _md(R2_WIKI)
+    assert md == " - a\n   {{{#!div class=x\n| 1 |\n|---|\n - d\n"
+    back = markdown_to_tracwiki(md)
+    assert not any(ln.startswith("||") for ln in back.split("\n")), back
+
+
+def test_r2_a_stray_closer_with_no_opener_is_an_ordinary_line():
+    md = _md(" * a\n   }}}\n   ||1||\n * d\n")
+    assert md == " - a\n   }}}\n\n| 1 |\n|---|\n - d\n"
+
+
+def test_r5_text_right_after_a_bare_group_gets_a_blank_line():
+    """GFM reads `   more` straight after a table as one more row (spec
+    example 202), as it does after a div group (#143)."""
+    md = _md(R5_WIKI)
+    assert md == " - a\n\n| 1 |\n|---|\n\n   more\n - d\n"
+    back = markdown_to_tracwiki(md)
+    # Where `more` lands is not measured: only that it is not a table row.
+    assert not any(
+        "more" in ln for ln in back.split("\n") if "||" in ln
+    ), back
