@@ -4068,6 +4068,35 @@ class TestHandleTicketChangelog:
             assert "comment" in text
             assert "Fixed the bug" in text
 
+    @pytest.mark.parametrize(
+        "oldvalue,label",
+        [("2", "comment 2"), ("2.5", "comment 5"), ("", "comment")],
+    )
+    def test_changelog_empty_comment_says_no_text(
+        self, oldvalue, label
+    ):
+        """A change without comment text still carries a numbered,
+        empty comment entry; it must not read as a hidden comment. A
+        reply's threaded "2.5" is comment 5, as everywhere else."""
+        client = MagicMock(spec=TracClient)
+        ts = datetime(2026, 1, 20, 10, 0, 0)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = [
+                [ts, "alice", "comment", oldvalue, "", 1],
+                [ts, "alice", "milestone", "A", "B", 1],
+            ]
+
+            result = self._run(
+                _handle_changelog(client, {"ticket_id": 5})
+            )
+
+            text = result.content[0].text
+            assert f"by alice: {label} has no text" in text
+            assert "comment added" not in text
+
     def test_changelog_returns_stored_tracwiki(self):
         """Comment content comes back as stored, with no `raw` argument
         to ask for it (ticket #69)."""
@@ -4149,7 +4178,7 @@ class TestHandleTicketChangelog:
         bare `comment: ` line; the structured row keeps the stored
         bytes (#155)."""
         text, row = self._changelog_text("\n")
-        assert "comment added" in text
+        assert "comment 3 has no text" in text
         assert "comment: \n" not in text + "\n"
         assert row["newvalue"] == "\n"
 
