@@ -20,14 +20,16 @@ import time
 
 import anyio
 import pytest
-from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.server import Server
 
-from tests.test_mcp.test_http_identity import _free_port, _running_app
-from trac_mcp_server import __version__
-from trac_mcp_server.config_schema import ServerConfig
+from tests.test_mcp.test_http_identity import (
+    _LEGACY_TOKEN,
+    _free_port,
+    _make_identity_probe_server,
+    _probe_server_config,
+    _running_app,
+)
 from trac_mcp_server.mcp.http_app import (
     _SseWriterCloseFilter,
     build_http_app,
@@ -35,7 +37,7 @@ from trac_mcp_server.mcp.http_app import (
 
 _SDK_LOGGER = "mcp.server.streamable_http"
 _MESSAGE = "Error in standalone SSE writer"
-_TOKEN = "sse-close-token"
+_WRITER_CLOSED = "Closing standalone SSE writer"
 
 
 def _record(
@@ -63,49 +65,36 @@ def _record(
     )
 
 
-@pytest.fixture
-def sdk_logger_level():
-    """Set the SDK logger's level for one test, restoring it after."""
-    lg = logging.getLogger(_SDK_LOGGER)
-    saved = lg.level
-
-    def _set(level: int) -> None:
-        lg.setLevel(level)
-
-    yield _set
-    lg.setLevel(saved)
-
-
 class TestSseWriterCloseFilter:
     def test_a_matching_record_is_dropped_when_the_logger_is_at_info(
-        self, sdk_logger_level
+        self, caplog
     ):
-        sdk_logger_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger=_SDK_LOGGER)
         record = _record(exc=anyio.ClosedResourceError())
         assert _SseWriterCloseFilter().filter(record) is False
 
     def test_a_matching_record_is_kept_but_demoted_at_debug(
-        self, sdk_logger_level
+        self, caplog
     ):
-        sdk_logger_level(logging.DEBUG)
+        caplog.set_level(logging.DEBUG, logger=_SDK_LOGGER)
         record = _record(exc=anyio.ClosedResourceError())
         assert _SseWriterCloseFilter().filter(record) is True
         assert record.levelno == logging.DEBUG
         assert record.levelname == "DEBUG"
 
     def test_the_same_message_with_another_exception_stays_error(
-        self, sdk_logger_level
+        self, caplog
     ):
-        sdk_logger_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger=_SDK_LOGGER)
         record = _record(exc=RuntimeError("boom"))
         assert _SseWriterCloseFilter().filter(record) is True
         assert record.levelno == logging.ERROR
         assert record.levelname == "ERROR"
 
     def test_another_message_with_the_same_exception_stays_error(
-        self, sdk_logger_level
+        self, caplog
     ):
-        sdk_logger_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger=_SDK_LOGGER)
         record = _record(
             msg="Error in standalone SSE response",
             exc=anyio.ClosedResourceError(),
@@ -115,9 +104,9 @@ class TestSseWriterCloseFilter:
         assert record.levelname == "ERROR"
 
     def test_the_same_record_from_another_logger_stays_error(
-        self, sdk_logger_level
+        self, caplog
     ):
-        sdk_logger_level(logging.INFO)
+        caplog.set_level(logging.INFO, logger=_SDK_LOGGER)
         record = _record(
             name="some.other.logger", exc=anyio.ClosedResourceError()
         )
@@ -125,35 +114,13 @@ class TestSseWriterCloseFilter:
         assert record.levelno == logging.ERROR
         assert record.levelname == "ERROR"
 
-    def test_a_record_without_exc_info_passes_unchanged(
-        self, sdk_logger_level
-    ):
-        sdk_logger_level(logging.INFO)
+    def test_a_record_without_exc_info_passes_unchanged(self, caplog):
+        caplog.set_level(logging.INFO, logger=_SDK_LOGGER)
         record = _record()
         assert record.exc_info is None
         assert _SseWriterCloseFilter().filter(record) is True
         assert record.levelno == logging.ERROR
         assert record.levelname == "ERROR"
-
-
-def _probe_config(port: int) -> ServerConfig:
-    return ServerConfig(
-        transport="http",
-        host="127.0.0.1",
-        port=port,
-        path="/mcp",
-        auth_token=_TOKEN,
-    )
-
-
-def _empty_server() -> Server:
-    probe = Server("sse-close-probe", version=__version__)
-
-    @probe.list_tools()
-    async def _list_tools() -> list[types.Tool]:
-        return []
-
-    return probe
 
 
 @pytest.fixture
@@ -180,9 +147,9 @@ class TestFilterInstall:
         self, clean_sdk_logger_filters
     ):
         lg = clean_sdk_logger_filters
-        config = _probe_config(_free_port())
-        build_http_app(_empty_server(), config)
-        build_http_app(_empty_server(), config)
+        config = _probe_server_config(_free_port())
+        build_http_app(_make_identity_probe_server(), config)
+        build_http_app(_make_identity_probe_server(), config)
         installed = [
             f
             for f in lg.filters
@@ -191,61 +158,76 @@ class TestFilterInstall:
         assert len(installed) == 1
 
 
-class _Collect(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.ERROR)
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
-
-
 class TestSessionCloseIsQuiet:
     def test_closing_a_session_logs_no_error_from_the_sdk_transport(
-        self, clean_sdk_logger_filters, sdk_logger_level
+        self, clean_sdk_logger_filters, caplog
     ):
-        """Guards SDK 1.30.0 behaviour: there, closing a streamable-http
-        session (the client's DELETE) made the server's standalone SSE
-        writer log ``Error in standalone SSE writer`` at ERROR with a
-        ``ClosedResourceError``. On SDK 1.29.1 the SDK never logs it, so
-        this passes trivially there; on 1.30.0 it fails without the
-        filter ``build_http_app`` installs (#169).
+        """Closing a streamable-http session (the client's DELETE) must
+        not log an ERROR from the SDK's server transport (#169).
 
-        Real uvicorn server and the SDK's real client, no mocks. Every
-        ERROR-or-above record from ``mcp.server.streamable_http`` is
-        collected by a handler on that logger; a demoted record is DEBUG
-        and is not collected.
+        Real uvicorn server (in its own thread) and the SDK's real
+        client, no mocks. The SDK logs ``Closing standalone SSE writer``
+        at DEBUG from ``standalone_sse_writer``'s ``finally`` on both
+        1.29.1 and 1.30.0; the test waits for that record, so it cannot
+        pass before the close path has run, and fails with a clear
+        message if the client's GET stream or the close never happened.
+        It then asserts nothing from ``mcp.server.streamable_http`` is
+        at ERROR or above, and that any ``Error in standalone SSE
+        writer`` record is at DEBUG.
+
+        On SDK 1.29.1 this proves the close path ran cleanly. On 1.30.0
+        the writer logs ``Error in standalone SSE writer`` at ERROR with
+        a ``ClosedResourceError``, and this test fails without the
+        filter ``build_http_app`` installs; with it the record is
+        demoted to DEBUG and kept, because DEBUG is enabled here.
         """
-        sdk_logger_level(logging.INFO)
-        lg = clean_sdk_logger_filters
-        handler = _Collect()
-        lg.addHandler(handler)
+        caplog.set_level(logging.DEBUG, logger=_SDK_LOGGER)
+
+        def _sdk_records() -> list[logging.LogRecord]:
+            return [
+                r for r in list(caplog.records) if r.name == _SDK_LOGGER
+            ]
 
         async def _body():
             port = _free_port()
             with _running_app(
-                _empty_server(), _probe_config(port)
+                _make_identity_probe_server(),
+                _probe_server_config(port),
             ) as base_url:
                 async with streamablehttp_client(
                     f"{base_url}/mcp",
-                    headers={"Authorization": f"Bearer {_TOKEN}"},
+                    headers={
+                        "Authorization": f"Bearer {_LEGACY_TOKEN}"
+                    },
                 ) as (read, write, _get_session_id):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         await session.list_tools()
-                # The session is closed (DELETE sent). Give the server
-                # up to ~3 s to process it and run the writer's cleanup.
-                deadline = time.monotonic() + 3
+                # The session is closed (DELETE sent). Wait up to ~5 s
+                # for the server's writer cleanup to log its record.
+                deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    if handler.records:
-                        break
-                    await anyio.sleep(0.1)
+                    if any(
+                        r.getMessage() == _WRITER_CLOSED
+                        for r in _sdk_records()
+                    ):
+                        return
+                    await anyio.sleep(0.05)
 
-        try:
-            anyio.run(_body)
-        finally:
-            lg.removeHandler(handler)
+        anyio.run(_body)
 
+        records = _sdk_records()
+        seen = [(r.levelname, r.getMessage()) for r in records]
+        assert any(r.getMessage() == _WRITER_CLOSED for r in records), (
+            f"never saw the SDK's {_WRITER_CLOSED!r} record within 5 s "
+            "of closing the session: the close path, or the client's "
+            f"GET stream, did not happen. Records seen: {seen}"
+        )
         assert [
-            (r.levelname, r.getMessage()) for r in handler.records
+            (r.levelname, r.getMessage())
+            for r in records
+            if r.levelno >= logging.ERROR
         ] == []
+        assert [
+            r.levelname for r in records if r.getMessage() == _MESSAGE
+        ] in ([], ["DEBUG"])

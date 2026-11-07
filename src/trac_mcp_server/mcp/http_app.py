@@ -67,7 +67,7 @@ class _SseWriterCloseFilter(logging.Filter):
             )
         ):
             record.levelno = logging.DEBUG
-            record.levelname = "DEBUG"
+            record.levelname = logging.getLevelName(logging.DEBUG)
             return logging.getLogger(record.name).isEnabledFor(
                 logging.DEBUG
             )
