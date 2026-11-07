@@ -377,5 +377,65 @@
     "markdown_input": null,
     "tracwiki": "Rules: [auto_pm:wiki:Rules/testing/SeededDefectFirst]/[auto-pm:wiki:Rules/testing/RecallGateEveryTightening].",
     "source_format": "tracwiki"
+  },
+  "row163a_ticket_possessive_local": {
+    "markdown_input": null,
+    "tracwiki": "ticket:12's fix.",
+    "source_format": "tracwiki"
+  },
+  "row163b_ticket_hyphen_local": {
+    "markdown_input": null,
+    "tracwiki": "ticket:12-ish x.",
+    "source_format": "tracwiki"
+  },
+  "row163c_wiki_possessive_local": {
+    "markdown_input": null,
+    "tracwiki": "wiki:WikiStart's text.",
+    "source_format": "tracwiki"
+  },
+  "row163d_intertrac_slash_tail": {
+    "markdown_input": null,
+    "tracwiki": "auto_pm:#3/#4 x.",
+    "source_format": "tracwiki"
+  },
+  "row163e_intertrac_dash_range": {
+    "markdown_input": null,
+    "tracwiki": "auto_pm:#3-#5 x.",
+    "source_format": "tracwiki"
+  },
+  "row163f_ticket_comment_fragment": {
+    "markdown_input": null,
+    "tracwiki": "ticket:99999#comment:1 x.",
+    "source_format": "tracwiki"
+  },
+  "row163g_wiki_hyphen_page": {
+    "markdown_input": null,
+    "tracwiki": "wiki:Foo-Bar x.",
+    "source_format": "tracwiki"
+  },
+  "row163h_bracket_ticket_label": {
+    "markdown_input": null,
+    "tracwiki": "[ticket:12's label] x.",
+    "source_format": "tracwiki"
+  },
+  "row163i_bracket_wiki_possessive": {
+    "markdown_input": null,
+    "tracwiki": "[wiki:WikiStart's] x.",
+    "source_format": "tracwiki"
+  },
+  "row163j_bare_ticket_possessive": {
+    "markdown_input": null,
+    "tracwiki": "#12's fix.",
+    "source_format": "tracwiki"
+  },
+  "row163k_macro_wiki_possessive": {
+    "markdown_input": null,
+    "tracwiki": "[[WikiStart]]'s text.",
+    "source_format": "tracwiki"
+  },
+  "row163l_bracketed_intertrac_pair": {
+    "markdown_input": null,
+    "tracwiki": "[auto_pm:#3 #3]/[auto_pm:#4 #4] x.",
+    "source_format": "tracwiki"
   }
 }

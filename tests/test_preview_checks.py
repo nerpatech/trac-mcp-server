@@ -264,6 +264,13 @@ SILENT_ROWS = [
     # is still extracted with its title: see
     # `test_row14_bare_ticket_ref_is_silent_but_keeps_its_anchor`.
     "row14_bare_ticket_ref",
+    # Ticket #163 silent controls: the same shapes as the seeded rows
+    # with the suffix kept OUT of the link, each rendered live. They are
+    # also the suggestions the new checks hand back, so a drift between
+    # what is advised and what renders silent shows up here.
+    "row163j_bare_ticket_possessive",
+    "row163k_macro_wiki_possessive",
+    "row163l_bracketed_intertrac_pair",
 ]
 
 WARNING_ROWS = [
@@ -375,6 +382,29 @@ WARNING_ROWS = [
     ("row79a_bare_prose_camelcase", "incidental_wiki_autolink"),
     ("row79g_bare_short_name", "incidental_wiki_autolink"),
     ("row79h_autolink_shape_probe", "incidental_wiki_autolink"),
+    # Suite 10 (ticket #163). Rows 163a-163d are the seeded defects:
+    # a local short link whose target Trac extended with the text after
+    # it (a-c, refused as `missing_local_target` with no fix before),
+    # and a cross-instance `#N/#N` target nothing looked at (d). Rows
+    # 163e-163i are the recall gate: the sibling that must keep its
+    # code (e) and the shapes that must STAY `missing_local_target`
+    # because the writer typed the whole target (f-i). The silent
+    # controls (163j-163l) are in SILENT_ROWS.
+    ("row163a_ticket_possessive_local", "local_target_captured_tail"),
+    ("row163b_ticket_hyphen_local", "local_target_captured_tail"),
+    ("row163c_wiki_possessive_local", "local_target_captured_tail"),
+    (
+        "row163d_intertrac_slash_tail",
+        "intertrac_target_captured_punctuation",
+    ),
+    (
+        "row163e_intertrac_dash_range",
+        "intertrac_target_captured_punctuation",
+    ),
+    ("row163f_ticket_comment_fragment", "missing_local_target"),
+    ("row163g_wiki_hyphen_page", "missing_local_target"),
+    ("row163h_bracket_ticket_label", "missing_local_target"),
+    ("row163i_bracket_wiki_possessive", "missing_local_target"),
 ]
 
 # Seeded defect: row 1 rendered from ITS PRE-FIX TracWiki
@@ -942,9 +972,14 @@ def test_suite_balance_is_roughly_even():
     # its code, `bare_ticket_ref`, no longer exists. That is a removal,
     # not a narrowing -- the shapes a bare `#N` can be wrong in each
     # keep their own must-warn rows and tests.
+    #
+    # Ticket #163 added rows 163a-163l: nine must-warn, three silent
+    # controls. One-sided to the warning half, deliberately -- the
+    # ticket adds a code and widens another's reach, and the rows that
+    # prove nothing else moved (163e-163i) are must-warn rows too.
     warning_count = len(WARNING_ROWS) + 1
-    assert silent_count == 42
-    assert warning_count == 38
+    assert silent_count == 45
+    assert warning_count == 47
     # "Roughly even" per the ticket's coverage note, not a bulk weighted
     # to positives: neither side outnumbers the other more than 2:1.
     assert (
@@ -2043,3 +2078,602 @@ def test_blank_code_span_and_quote_count_message():
     ]
     run = _broken_inline("<p>word ''' bold stayed</p>")
     assert "3 quotes" in run[0]["message"], run[0]["message"]
+
+
+# ---------------------------------------------------------------------
+# Ticket #163: a short link whose target Trac extended with the text
+# after it, in the two places the gate fell short.
+#
+# (a) The LOCAL forms (`ticket:12's`, `wiki:WikiStart's`) were refused
+# as `missing_local_target` -- "does not exist on this instance" -- when
+# ticket 12 and the page both exist, so the obvious retry changed the
+# target instead of ending the link before the suffix.
+# (b) `auto_pm:#3/#4` was not a captured tail to the href check, which
+# read only the LAST path segment of the dispatcher href; on a local
+# dispatcher it was instead misdiagnosed as a missing `wiki:` realm.
+#
+# Every fixture row was rendered on /trac_mcp_server (2026-11-06).
+# ---------------------------------------------------------------------
+
+
+def _warnings_for(name, **kwargs):
+    markdown_source, tracwiki, facts, source_format = _load(name)
+    return build_warnings(
+        markdown_source,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format=source_format,
+        **kwargs,
+    )
+
+
+def _only(name, code, **kwargs):
+    found = [
+        w for w in _warnings_for(name, **kwargs) if w["code"] == code
+    ]
+    assert len(found) == 1, (name, code, found)
+    return found[0]
+
+
+ROW163_SUGGESTIONS = [
+    (
+        "row163a_ticket_possessive_local",
+        "local_target_captured_tail",
+        "#12's",
+    ),
+    (
+        "row163b_ticket_hyphen_local",
+        "local_target_captured_tail",
+        "#12-ish",
+    ),
+    (
+        "row163c_wiki_possessive_local",
+        "local_target_captured_tail",
+        "[[WikiStart]]'s",
+    ),
+    (
+        "row163d_intertrac_slash_tail",
+        "intertrac_target_captured_punctuation",
+        "[auto_pm:#3 #3]/[auto_pm:#4 #4]",
+    ),
+    (
+        "row163e_intertrac_dash_range",
+        "intertrac_target_captured_punctuation",
+        "[auto_pm:#3 #3]-[auto_pm:#5 #5]",
+    ),
+]
+
+
+@pytest.mark.parametrize("row,code,expected", ROW163_SUGGESTIONS)
+def test_row163_suggestion(row, code, expected):
+    """Each seeded row names its code AND carries the exact fix. Every
+    string here was rendered through the live daemon and came back with
+    zero warnings (the silent controls, rows 163j-163l, are those
+    renders)."""
+    found = _only(row, code, local_intertrac_bases=_LOCAL_BASE)
+    assert found["severity"] == "error"
+    assert found["evidence"]["suggestion"] == expected
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "row163a_ticket_possessive_local",
+        "row163b_ticket_hyphen_local",
+        "row163c_wiki_possessive_local",
+    ],
+)
+def test_local_captured_tail_replaces_missing_local_target(row):
+    """INSTEAD of, not alongside: one diagnosis per anchor."""
+    codes = [w["code"] for w in _warnings_for(row)]
+    assert codes == ["local_target_captured_tail"], codes
+
+
+def test_local_captured_tail_evidence_ticket():
+    found = _only(
+        "row163a_ticket_possessive_local", "local_target_captured_tail"
+    )
+    ev = found["evidence"]
+    assert ev["token"] == "ticket:12"
+    assert ev["resolved_as"] == "ticket:12's"
+    assert ev["text"] == "ticket:12's"
+    assert ev["href"] is None
+
+
+def test_local_captured_tail_evidence_wiki():
+    found = _only(
+        "row163c_wiki_possessive_local", "local_target_captured_tail"
+    )
+    ev = found["evidence"]
+    assert ev["token"] == "wiki:WikiStart"
+    assert ev["resolved_as"] == "wiki:WikiStart's"
+    assert ev["text"] == "wiki:WikiStart's"
+    assert ev["href"].endswith("/trac_mcp_server/wiki/WikiStart's")
+
+
+@pytest.mark.parametrize(
+    "row,meant",
+    [
+        ("row163a_ticket_possessive_local", "if you meant ticket 12"),
+        ("row163b_ticket_hyphen_local", "if you meant ticket 12"),
+        (
+            "row163c_wiki_possessive_local",
+            "if you meant page WikiStart",
+        ),
+    ],
+)
+def test_local_captured_tail_message_is_shape_only(row, meant):
+    """Ticket #163 design call: no probe of the stem. The message says
+    "if you meant X" and never asserts X exists, and it tells the
+    writer to end the link before the suffix."""
+    message = _only(row, "local_target_captured_tail")["message"]
+    assert meant in message, message
+    assert "end the link before" in message, message
+    assert "does not exist" not in message, message
+    assert "exists" not in message, message
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "row163f_ticket_comment_fragment",
+        "row163g_wiki_hyphen_page",
+        "row163h_bracket_ticket_label",
+        "row163i_bracket_wiki_possessive",
+    ],
+)
+def test_row163_recall_stays_missing_local_target(row):
+    """The writer typed the whole target (a `#comment:` fragment, a
+    hyphenated page, a label, a bracket), so Trac did not extend it and
+    the old diagnosis is the right one."""
+    codes = [w["code"] for w in _warnings_for(row)]
+    assert codes == ["missing_local_target"], codes
+
+
+def test_local_captured_tail_is_blocking():
+    """Same refusal as before for the same anchors: severity error, and
+    entered in the inventory."""
+    from trac_mcp_server.preview.gate import BLOCKING_CODES
+
+    assert "local_target_captured_tail" in BLOCKING_CODES
+
+
+def _missing_anchor_warnings(html):
+    return build_warnings(
+        None,
+        "",
+        extract_facts(html),
+        probes={},
+        check_targets=False,
+        source_format="tracwiki",
+    )
+
+
+@pytest.mark.parametrize(
+    "html,code,suggestion",
+    [
+        # `WikiStart's/Sub`: the tail runs from the apostrophe.
+        (
+            '<p><a class="missing wiki" '
+            'href="http://h/p/wiki/WikiStart\'s/Sub" '
+            'rel="nofollow">wiki:WikiStart\'s/Sub</a></p>',
+            "local_target_captured_tail",
+            "[[WikiStart]]'s/Sub",
+        ),
+        # A ticket tail starting with punctuation other than `'`/`-`.
+        (
+            '<p><a class="missing ticket">ticket:12/13</a></p>',
+            "local_target_captured_tail",
+            "#12/13",
+        ),
+        # Tail starts alphanumeric or `_`: a different, longer token.
+        (
+            '<p><a class="missing ticket">ticket:12abc</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        (
+            '<p><a class="missing ticket">ticket:12_x</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        # `?` and `#` are Trac's own query and fragment separators.
+        (
+            '<p><a class="missing ticket">ticket:12?format=x</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        (
+            '<p><a class="missing ticket">'
+            "ticket:99999#comment:1</a></p>",
+            "missing_local_target",
+            None,
+        ),
+        # No ticket number at all.
+        (
+            '<p><a class="missing ticket">ticket:abc\'s</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        # Apostrophe not followed by a letter, or with an empty stem.
+        (
+            '<p><a class="missing wiki" href="http://h/p/wiki/Foo\'1" '
+            'rel="nofollow">wiki:Foo\'1</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        (
+            '<p><a class="missing wiki" href="http://h/p/wiki/\'s" '
+            'rel="nofollow">wiki:\'s</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        # Hyphen and slash are page characters.
+        (
+            '<p><a class="missing wiki" '
+            'href="http://h/p/wiki/Projects/trac-mcp-server" '
+            'rel="nofollow">wiki:Projects/trac-mcp-server</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        # Text is not `wiki:` + the page name (labelled form).
+        (
+            '<p><a class="missing wiki" href="http://h/p/wiki/Foo\'s" '
+            'rel="nofollow">some label</a></p>',
+            "missing_local_target",
+            None,
+        ),
+        # A missing anchor that is neither ticket nor wiki.
+        (
+            '<p><a class="missing attachment">ticket:12\'s</a></p>',
+            "missing_local_target",
+            None,
+        ),
+    ],
+)
+def test_local_captured_tail_shape_boundaries(html, code, suggestion):
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == [code], warnings
+    assert warnings[0]["evidence"].get("suggestion") == suggestion
+
+
+def test_local_captured_tail_does_not_disturb_the_incidental_budget():
+    """An auto-linked CamelCase word still downgrades exactly as before:
+    only the final `missing_local_target` append is affected."""
+    codes = [
+        w["code"] for w in _warnings_for("row79a_bare_prose_camelcase")
+    ]
+    assert "incidental_wiki_autolink" in codes
+    assert "local_target_captured_tail" not in codes
+
+
+def test_local_captured_tail_needs_no_source_in_verify():
+    """`build_verify_warnings` passes `tracwiki=""` when no source could
+    be paired: the new code needs no source, unlike the downgrade."""
+    _, _, facts, _ = _load("row163a_ticket_possessive_local")
+    codes = [
+        w["code"]
+        for w in build_verify_warnings(
+            "", facts, probes={}, check_targets=False
+        )
+    ]
+    assert codes == ["local_target_captured_tail"]
+
+
+@pytest.mark.parametrize("row", [r for r, _, _ in ROW163_SUGGESTIONS])
+def test_row163_both_assemblers_agree(row):
+    _, tracwiki, facts, _ = _load(row)
+    direct = build_warnings(
+        None,
+        tracwiki,
+        facts,
+        probes={},
+        check_targets=False,
+        source_format="tracwiki",
+    )
+    via_verify = build_verify_warnings(
+        tracwiki, facts, probes={}, check_targets=False
+    )
+    assert direct == via_verify
+
+
+def test_intertrac_slash_tail_is_captured_not_a_missing_realm():
+    """Ticket #163 (b): `auto_pm:#3/#4` dispatches on `#3/#4`, a captured
+    tail. With a LOCAL base supplied (so the realm check is live) it
+    must be that one diagnosis, not also "insert wiki:"."""
+    codes = [
+        w["code"]
+        for w in _warnings_for(
+            "row163d_intertrac_slash_tail",
+            local_intertrac_bases=_LOCAL_BASE,
+        )
+        if w["code"] != "target_check_disabled"
+    ]
+    assert codes == ["intertrac_target_captured_punctuation"], codes
+
+
+def test_intertrac_slash_tail_is_captured_on_an_off_host_prefix():
+    """Without a local base the realm check is gated off (the shape of
+    the filed `rookery:#3/#4`), and the captured tail still fires."""
+    codes = [
+        w["code"]
+        for w in _warnings_for("row163d_intertrac_slash_tail")
+        if w["code"] != "target_check_disabled"
+    ]
+    assert codes == ["intertrac_target_captured_punctuation"], codes
+
+
+def test_intertrac_slash_tail_evidence():
+    ev = _only(
+        "row163d_intertrac_slash_tail",
+        "intertrac_target_captured_punctuation",
+    )["evidence"]
+    assert ev["token"] == "auto_pm:#3"
+    assert ev["resolved_as"] == "auto_pm:#3/#4"
+
+
+def test_wiki_realm_slashed_target_is_not_a_captured_tail():
+    """Row 86's `wiki%3ARules/trac/...` and the realm-less forms start
+    with no `#N`, so widening the href capture leaves them alone."""
+    codes = _row86_codes(_LOCAL_BASE)
+    assert "intertrac_target_captured_punctuation" not in codes
+    assert "missing_intertrac_realm" in codes
+
+
+@pytest.mark.parametrize(
+    "token,tail,expected",
+    [
+        ("auto_pm:#87", "'s", "[auto_pm:#87 #87]'s"),
+        ("auto_pm:#87", "-ish", "[auto_pm:#87 #87]-ish"),
+        ("auto_pm:#3", "-#5", "[auto_pm:#3 #3]-[auto_pm:#5 #5]"),
+        ("auto_pm:#3", "/#4", "[auto_pm:#3 #3]/[auto_pm:#4 #4]"),
+        (
+            "auto_pm:#3",
+            "/#4/#5",
+            "[auto_pm:#3 #3]/[auto_pm:#4 #4]/[auto_pm:#5 #5]",
+        ),
+        (
+            "auto_pm:#3",
+            "-#5/#6",
+            "[auto_pm:#3 #3]-[auto_pm:#5 #5]/[auto_pm:#6 #6]",
+        ),
+        # A tail holding `#` in any shape but the measured `[-/]#N`
+        # chain gets no suggestion: a bracket form we cannot vouch for
+        # is worse than none (review fixes, ticket #163).
+        ("auto_pm:#3", "/#x", None),
+        ("auto_pm:#3", "-x#12", None),
+        ("auto_pm:#3", "/#5abc", None),
+        ("auto_pm:#3", "-#5x", None),
+        ("auto_pm:#3", "#5", None),
+        ("auto_pm:#3", "", None),
+        ("nocolon", "'s", None),
+        ("auto_pm:", "'s", None),
+    ],
+)
+def test_bracket_form_for_captured_token(token, tail, expected):
+    from trac_mcp_server.preview.checks import (
+        _bracket_form_for_captured_token,
+    )
+
+    assert _bracket_form_for_captured_token(token, tail) == expected
+
+
+# ---------------------------------------------------------------------
+# Ticket #163 review fixes.
+# ---------------------------------------------------------------------
+
+
+def _pragma_warnings(html, *allowed, local_intertrac_bases=frozenset()):
+    """`build_warnings` over `html` with one `allow` pragma per code, so
+    only the pragma filter differs between the cases below."""
+    tracwiki = "".join(
+        f"preview-checks: allow {code}\n" for code in allowed
+    )
+    return [
+        w
+        for w in build_warnings(
+            None,
+            tracwiki + "x\n",
+            extract_facts(html),
+            probes={},
+            check_targets=False,
+            source_format="tracwiki",
+            local_intertrac_bases=local_intertrac_bases,
+        )
+        if w["code"] != "target_check_disabled"
+    ]
+
+
+_TICKET_POSSESSIVE_HTML = (
+    '<p><a class="missing ticket">ticket:12\'s</a></p>'
+)
+_WIKI_POSSESSIVE_HTML = (
+    '<p><a class="missing wiki" href="http://h/p/wiki/WikiStart\'s" '
+    'rel="nofollow">wiki:WikiStart\'s</a></p>'
+)
+
+
+def _html_for_row(name):
+    return (FIXTURES_DIR / f"{name}.html").read_text()
+
+
+@pytest.mark.parametrize(
+    "html",
+    [_TICKET_POSSESSIVE_HTML, _WIKI_POSSESSIVE_HTML],
+)
+def test_old_missing_local_target_pragma_still_passes_a_captured_tail(
+    html,
+):
+    """`allow missing_local_target` let `ticket:12's` through before
+    #163 renamed the finding; the new code carries `replaces_code` so
+    the same pragma still does."""
+    assert _pragma_warnings(html) != []
+    assert _pragma_warnings(html, "missing_local_target") == []
+
+
+@pytest.mark.parametrize(
+    "html", [_TICKET_POSSESSIVE_HTML, _WIKI_POSSESSIVE_HTML]
+)
+def test_new_code_pragma_passes_a_local_captured_tail(html):
+    assert _pragma_warnings(html, "local_target_captured_tail") == []
+
+
+def test_local_captured_tail_names_the_code_it_replaces():
+    warnings = _missing_anchor_warnings(_TICKET_POSSESSIVE_HTML)
+    assert warnings[0]["evidence"]["replaces_code"] == (
+        "missing_local_target"
+    )
+
+
+@pytest.mark.parametrize("local", [frozenset(), _LOCAL_BASE])
+def test_old_realm_pragma_still_passes_a_slash_tail(local):
+    """Before #163 `auto_pm:#3/#4` was `missing_intertrac_realm` on a
+    local base and silent off-host; `allow missing_intertrac_realm`
+    reproduces the old pass in both."""
+    html = _html_for_row("row163d_intertrac_slash_tail")
+    assert _pragma_warnings(html, local_intertrac_bases=local) != []
+    assert (
+        _pragma_warnings(
+            html,
+            "missing_intertrac_realm",
+            local_intertrac_bases=local,
+        )
+        == []
+    )
+
+
+def test_slash_tail_names_the_code_it_replaces():
+    ev = _only(
+        "row163d_intertrac_slash_tail",
+        "intertrac_target_captured_punctuation",
+    )["evidence"]
+    assert ev["replaces_code"] == "missing_intertrac_realm"
+
+
+def test_own_code_pragma_still_passes_a_slash_tail():
+    html = _html_for_row("row163d_intertrac_slash_tail")
+    assert (
+        _pragma_warnings(
+            html,
+            "intertrac_target_captured_punctuation",
+            local_intertrac_bases=_LOCAL_BASE,
+        )
+        == []
+    )
+
+
+def test_realm_pragma_does_not_pass_a_dash_tail():
+    """A `-` tail was `intertrac_target_captured_punctuation` before
+    #163 too, so the realm pragma never covered it and must not now."""
+    html = _html_for_row("row163e_intertrac_dash_range")
+    codes = [
+        w["code"]
+        for w in _pragma_warnings(
+            html,
+            "missing_intertrac_realm",
+            local_intertrac_bases=_LOCAL_BASE,
+        )
+    ]
+    assert codes == ["intertrac_target_captured_punctuation"], codes
+
+
+def test_dash_tail_carries_no_replaces_code():
+    ev = _only(
+        "row163e_intertrac_dash_range",
+        "intertrac_target_captured_punctuation",
+    )["evidence"]
+    assert "replaces_code" not in ev
+
+
+def test_wiki_surname_apostrophe_is_a_missing_page_not_a_tail():
+    """`O'Brien`: the `'` is followed by a capital, so it is part of the
+    page name, not a possessive."""
+    html = (
+        '<p><a class="missing wiki" href="http://h/p/wiki/O\'Brien" '
+        'rel="nofollow">wiki:O\'Brien</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "tail", ["'s", "'t", "'ll", "'re", "'ve", "'d"]
+)
+def test_wiki_contraction_tails_are_still_captured(tail):
+    html = (
+        f'<p><a class="missing wiki" href="http://h/p/wiki/Foo{tail}" '
+        f'rel="nofollow">wiki:Foo{tail}</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == [
+        "local_target_captured_tail"
+    ]
+    assert warnings[0]["evidence"]["suggestion"] == f"[[Foo]]{tail}"
+
+
+@pytest.mark.parametrize(
+    "text", ["ticket:12:5", "ticket:12.5", "ticket:12,5", "ticket:12(x"]
+)
+def test_ticket_tail_outside_the_rendered_shapes_stays_missing(text):
+    """Only `-`, `/` and `'`+letter tails were rendered live; any other
+    punctuation after the number is not vouched for."""
+    html = f'<p><a class="missing ticket">{text}</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "text,suggestion",
+    [
+        ("ticket:12-ish", "#12-ish"),
+        ("ticket:12/13", "#12/13"),
+        ("ticket:12's", "#12's"),
+        ("ticket:12'x", "#12'x"),
+    ],
+)
+def test_ticket_tail_in_the_rendered_shapes_is_captured(
+    text, suggestion
+):
+    html = f'<p><a class="missing ticket">{text}</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == [
+        "local_target_captured_tail"
+    ]
+    assert warnings[0]["evidence"]["suggestion"] == suggestion
+
+
+def test_ticket_apostrophe_then_digit_stays_missing():
+    html = '<p><a class="missing ticket">ticket:12\'5</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "target", ["WikiStart's#Sec", "WikiStart's?action=x"]
+)
+def test_wiki_fragment_or_query_is_not_a_captured_tail(target):
+    """`wiki:WikiStart's#Sec`: the href carries a fragment/query after
+    the page, so the stem/tail split is not the whole story."""
+    html = (
+        f'<p><a class="missing wiki" href="http://h/p/wiki/{target}" '
+        f'rel="nofollow">wiki:{target}</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "token,tail",
+    [("auto_pm:#87", "'s"), ("auto_pm:#87", "-ish")],
+)
+def test_bracket_form_without_hash_in_tail_is_unchanged(token, tail):
+    from trac_mcp_server.preview.checks import (
+        _bracket_form_for_captured_token,
+    )
+
+    assert (
+        _bracket_form_for_captured_token(token, tail)
+        == f"[{token} #87]{tail}"
+    )

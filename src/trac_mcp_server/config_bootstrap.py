@@ -139,6 +139,14 @@ def bootstrap_server_config(
     it needs. A set value replaces the YAML list; an empty one counts as
     unset.
 
+    ``TRAC_MCP_ALLOWED_HOSTS``/``TRAC_MCP_ALLOWED_ORIGINS`` (comma-separated,
+    e.g. ``trac-mcp:8080,trac-mcp:*``) set the DNS-rebinding-protection
+    allow-list that is accepted besides loopback and the configured bind
+    address -- needed whenever a client reaches this server by a name other
+    than what it's bound to, such as a docker-compose service name. A set
+    value replaces the YAML ``allowed_hosts``/``allowed_origins`` list; an
+    empty value counts as unset, like every other ``TRAC_MCP_*`` string.
+
     Args:
         cli_overrides: Optional dict with CLI-sourced values.
 
@@ -247,9 +255,10 @@ def bootstrap_server_config(
         """Comma-separated env var -> list, or None if unset or blank.
 
         Blank entries (from a trailing comma or stray whitespace) are
-        dropped rather than turning into an empty-string tool name that
-        could never match a real tool. A value with no entry at all counts
-        as unset, so ``${VAR:-}`` in a compose file keeps the YAML list.
+        dropped rather than turning into an empty-string entry that
+        could never match a tool name or a Host/Origin header. A value
+        with no entry at all counts as unset, so ``${VAR:-}`` in a
+        compose file keeps the YAML list.
         """
         items = [item.strip() for item in os.getenv(key, "").split(",")]
         return [item for item in items if item] or None
@@ -264,8 +273,19 @@ def bootstrap_server_config(
             if str(name).strip()
         ]
 
-    allowed_hosts = list(yaml_server.get("allowed_hosts", []))
-    allowed_origins = list(yaml_server.get("allowed_origins", []))
+    allowed_hosts_env = _parse_csv_env("TRAC_MCP_ALLOWED_HOSTS")
+    allowed_hosts = (
+        allowed_hosts_env
+        if allowed_hosts_env is not None
+        else list(yaml_server.get("allowed_hosts", []))
+    )
+
+    allowed_origins_env = _parse_csv_env("TRAC_MCP_ALLOWED_ORIGINS")
+    allowed_origins = (
+        allowed_origins_env
+        if allowed_origins_env is not None
+        else list(yaml_server.get("allowed_origins", []))
+    )
 
     # Ticket #111: an http server does not share its caller's filesystem,
     # so a path argument names a file on the wrong machine -- and, unless
