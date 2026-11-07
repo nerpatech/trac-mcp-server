@@ -201,10 +201,7 @@ def test_headerless_div_table_unwraps_too():
         (
             "div with an argument in a list item",
             " * a\n   {{{#!div class=x\n   ||1||2||\n   }}}\n * d",
-            # Ticket #146 changed this row: the bare group inside the
-            # arbitrary-argument div (not unwrapped, #142) gets the blank
-            # line a bare group in an open item now gets.
-            " - a\n   {{{#!div class=x\n\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
+            " - a\n   {{{#!div class=x\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
         ),
         (
             "div holding a paragraph in a list item",

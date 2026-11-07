@@ -1838,7 +1838,21 @@ class TracWikiParser:
                 since_blank = len(result)
                 while since_blank and result[since_blank - 1].strip():
                     since_blank -= 1
-                if _open_list_item(result[since_blank:]) is not None:
+                window = result[since_blank:]
+                # Not when the rows sit inside a passed-through `{{{`
+                # block still open here (code blocks are fenced earlier,
+                # so this is a processor block such as `{{{#!div class=x`):
+                # Trac renders the rows within the block, so they are not
+                # bare, and a blank line plus the block's column-0 closer
+                # would end the list on the write leg.
+                opened = 0
+                for ln in window:
+                    s = ln.strip()
+                    if s == "}}}":
+                        opened -= 1
+                    elif s.startswith("{{{") and "}}}" not in s:
+                        opened += 1
+                if opened <= 0 and _open_list_item(window) is not None:
                     result.append("")
             first_line_at = len(result)
 

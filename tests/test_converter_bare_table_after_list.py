@@ -140,6 +140,54 @@ def test_other_shapes_read_back_exactly_as_on_master(
     assert _md(wiki) == expected, name
 
 
+@pytest.mark.parametrize(
+    ("name", "wiki", "expected"),
+    [
+        (
+            "rows inside a div with an argument",
+            " * a\n   {{{#!div class=x\n   ||1||2||\n   }}}\n * d\n",
+            " - a\n   {{{#!div class=x\n| 1 | 2 |\n|---|---|\n   }}}\n - d\n",
+        ),
+        (
+            "rows after text inside a div with an argument",
+            " * a\n   {{{#!div class=x\n   text\n   ||1||2||\n   }}}\n * d\n",
+            " - a\n   {{{#!div class=x\n   text\n| 1 | 2 |\n|---|---|\n"
+            "   }}}\n - d\n",
+        ),
+    ],
+)
+def test_rows_inside_a_passthrough_block_are_not_bare(
+    name, wiki, expected
+):
+    """Master bytes. Trac renders rows inside a `{{{#!div class=x` block
+    within the block, so they are not bare rows: a blank line plus the
+    block's column-0 closer would end the list on the write leg (the div
+    would stay in the item on master, `d` would start a new list)."""
+    assert _md(wiki) == expected, name
+
+
+@pytest.mark.parametrize(
+    ("name", "wiki", "expected"),
+    [
+        (
+            "inline {{{x}}} on the item line is not an opener",
+            " * a {{{x}}}\n   ||1||2||\n * d\n",
+            " - a {{{x}}}\n\n| 1 | 2 |\n|---|---|\n - d\n",
+        ),
+        (
+            "a closed block before the rows leaves them bare",
+            " * a\n   {{{#!div class=x\n   t\n   }}}\n   ||1||2||\n * d\n",
+            " - a\n   {{{#!div class=x\n   t\n   }}}\n\n"
+            "| 1 | 2 |\n|---|---|\n - d\n",
+        ),
+    ],
+)
+def test_a_closed_or_inline_brace_does_not_exempt_the_rows(
+    name, wiki, expected
+):
+    assert _md(wiki) == expected, name
+
+
 # -- Round trip --------------------------------------------------------------
 
 
