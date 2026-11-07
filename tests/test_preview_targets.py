@@ -219,6 +219,41 @@ class TestIsMissingRealmHref(unittest.TestCase):
             )
         )
 
+    def test_ticket_token_led_slashed_target_is_not_flagged(self):
+        """Ticket #163: `auto_pm:#3/#4` dispatches on `%233/%234`. A
+        `#N` ticket token followed by `/` is a captured tail, not a page
+        missing its realm -- inserting `wiki:` would not fix it, so it is
+        `intertrac_target_captured_punctuation`'s, not this check's."""
+        for target in (
+            "%233/%234",
+            "%2387/Sub",
+            "%233-%235/%236",
+            "%233%27s/x",
+        ):
+            with self.subTest(target=target):
+                self.assertFalse(
+                    is_missing_realm_href(
+                        f"http://h/auto_pm/intertrac/{target}"
+                    )
+                )
+
+    def test_ticket_token_led_target_on_a_foreign_dispatcher(self):
+        self.assertFalse(
+            is_missing_realm_href(
+                "https://trac.edgewall.org/intertrac/%233/%234"
+            )
+        )
+
+    def test_hash_inside_a_page_path_is_still_flagged(self):
+        """Only a target that STARTS with the ticket token is exempt: a
+        slashed page path that merely contains `%23` later is still the
+        ticket-#86 shape."""
+        self.assertTrue(
+            is_missing_realm_href(
+                "http://h/auto_pm/intertrac/Rules/C%23/Foo"
+            )
+        )
+
 
 class TestDispatcherBase(unittest.TestCase):
     def test_extracts_base_before_intertrac_marker(self):

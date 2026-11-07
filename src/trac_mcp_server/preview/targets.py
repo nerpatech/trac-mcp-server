@@ -182,6 +182,14 @@ def is_missing_realm_href(href: str | None) -> bool:
     and are the form that resolves correctly even on this host, so they
     are excluded here.
 
+    A target that STARTS with the encoded ticket token ``%23`` is not
+    this shape (ticket #163). ``auto_pm:#3/#4`` dispatches on
+    ``%233/%234``: the ``#3`` is a ticket short link and the ``/#4`` is
+    text Trac swallowed into the target, so inserting ``wiki:`` would not
+    fix it. That is a captured tail, reported by
+    ``intertrac_target_captured_punctuation``; counting it here as well
+    gave the writer two contradictory diagnoses on a same-host prefix.
+
     Shape only: says nothing about whether ``href``'s dispatcher is one
     of ours. Upstream Trac (``trac.edgewall.org``) resolves the
     identical shape correctly -- see the module docstring's scoping
@@ -194,6 +202,8 @@ def is_missing_realm_href(href: str | None) -> bool:
     if not match:
         return False
     target = match.group(1)
+    if target.startswith("%23"):
+        return False
     slash_index = target.find("/")
     if slash_index == -1:
         return False

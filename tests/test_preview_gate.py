@@ -130,6 +130,10 @@ def test_the_two_inventories_are_disjoint():
     [
         "missing_local_target",
         "intertrac_target_captured_punctuation",
+        # Not in section 4's table: ticket #163's local sibling of the
+        # line above, listed with it because it replaces
+        # `missing_local_target` at the same severity.
+        "local_target_captured_tail",
         "missing_cross_instance_target",
         "literal_markup_in_render",
         "escaped_link_target",
