@@ -262,6 +262,8 @@ def _clear_server_env(monkeypatch):
         "TRAC_MCP_PATH",
         "TRAC_MCP_AUTH_TOKEN",
         "TRAC_MCP_OIDC_RPC_URL",
+        "TRAC_MCP_ALLOWED_HOSTS",
+        "TRAC_MCP_ALLOWED_ORIGINS",
         "TRAC_MCP_FILE_ACCESS",
         "TRAC_MCP_MAX_INLINE_BYTES",
     ):
@@ -590,3 +592,75 @@ def test_file_access_survives_real_yaml_parsing(
         f"transport: http\n{line}\n", Loader=ConfigLoader
     )
     assert _bootstrap_server(yaml_server=server).file_access == expected
+
+
+def test_env_vars_populate_allowed_hosts_and_origins(monkeypatch):
+    """TRAC_MCP_ALLOWED_HOSTS/ORIGINS are comma-separated lists -- needed
+    whenever a client reaches this server by a name other than what it's
+    bound to, e.g. a docker-compose service name."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv(
+        "TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080, trac-mcp:*"
+    )
+    monkeypatch.setenv(
+        "TRAC_MCP_ALLOWED_ORIGINS", "http://trac-mcp:8080"
+    )
+
+    config = _bootstrap_server()
+
+    assert config.allowed_hosts == ["trac-mcp:8080", "trac-mcp:*"]
+    assert config.allowed_origins == ["http://trac-mcp:8080"]
+
+
+def test_allowed_hosts_env_blank_entries_dropped(monkeypatch):
+    """A trailing comma or stray whitespace must not produce an empty-
+    string allow-list entry that could never match a real Host header."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "trac-mcp:8080,, ")
+
+    assert _bootstrap_server().allowed_hosts == ["trac-mcp:8080"]
+
+
+def test_allowed_hosts_env_replaces_yaml(monkeypatch):
+    """A set value replaces the YAML list (env > YAML), it does not extend it."""
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_ALLOWED_HOSTS", "from-env:8080")
+
+    config = _bootstrap_server(
+        yaml_server={"allowed_hosts": ["from-yaml:8080"]}
+    )
+
+    assert config.allowed_hosts == ["from-env:8080"]
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", " , "])
+@pytest.mark.parametrize(
+    "env_key,yaml_key",
+    [
+        ("TRAC_MCP_ALLOWED_HOSTS", "allowed_hosts"),
+        ("TRAC_MCP_ALLOWED_ORIGINS", "allowed_origins"),
+    ],
+)
+def test_allowed_lists_unset_or_empty_env_keeps_yaml(
+    monkeypatch, env_key, yaml_key, value
+):
+    """Unset, empty or blank counts as unset, so a compose file's
+    ``${TRAC_MCP_ALLOWED_HOSTS:-}`` does not wipe the YAML list."""
+    _clear_server_env(monkeypatch)
+    if value is not None:
+        monkeypatch.setenv(env_key, value)
+
+    config = _bootstrap_server(
+        yaml_server={yaml_key: ["from-yaml:8080"]}
+    )
+
+    assert getattr(config, yaml_key) == ["from-yaml:8080"]
+
+
+def test_allowed_hosts_defaults_to_empty_list(monkeypatch):
+    _clear_server_env(monkeypatch)
+
+    config = _bootstrap_server()
+
+    assert config.allowed_hosts == []
+    assert config.allowed_origins == []
