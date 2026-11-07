@@ -244,7 +244,7 @@ async def test_main_serves_the_registry_its_config_builds(
 ):
     """``main()`` passes the ServerConfig it resolved into
     ``build_registry`` (``test_build_registry`` above covers the filters
-    themselves): the registry ``run_http`` is handed lists exactly the
+    themselves): the registry passed to ``run_http`` lists exactly the
     tools that config leaves in. A ``main()`` that built the registry from
     a default ``ServerConfig()`` would still serve every tool."""
     served = {}
@@ -262,6 +262,9 @@ async def test_main_serves_the_registry_its_config_builds(
             ),
             "client": MagicMock(),
         }
+
+    async def _fake_run_stdio():
+        raise AssertionError("main() took the stdio path")
 
     async def _fake_run_http(_server, _config):
         # main() clears the registry in its finally, so read it here.
@@ -287,12 +290,12 @@ async def test_main_serves_the_registry_its_config_builds(
         ),
         patch.object(server_module, "server_lifespan", _fake_lifespan),
         patch.object(server_module, "run_http", _fake_run_http),
+        patch.object(server_module, "_run_stdio", _fake_run_stdio),
     ):
         await server_module.main()
 
+    assert "names" in served, "main() never reached run_http"
     assert served["names"] == expected
-    if server_config.read_only:
-        assert "ticket_update" not in served["names"]
     # main()'s finally cleared the globals it set.
     with pytest.raises(RuntimeError):
         server_module.get_registry()

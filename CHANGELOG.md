@@ -186,6 +186,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   - Comments are filtered out of the changelog inside the tool, so field-only changes never reach the response: a ticket whose description was edited no longer drags two full copies of that description along to deliver a few bytes of comment text (the cost that ruled out proxying `ticket_changelog` wholesale)
   - Each comment carries the number Trac assigns it — the same number `ticket_render_check`'s `comment` parameter is keyed on, closing a discoverability gap where that number could only be found by guessing
   - Truncation is loud by construction: over the cap, the head and tail are kept and the middle dropped (a long thread has its scope set early and corrected late), and the response names how many exist, how many are shown, and which comment numbers were omitted — `comment_count` is always the exact total. A failed changelog fetch still returns the ticket, and says the comments are missing
+- `main()` passing the resolved server config to the tool registry is now pinned by a test: with `read_only` or `disabled_tools` set, the registry passed to `run_http` leaves those tools out (Trac /trac_mcp_server #165). Seeded: with `main()` building the registry from a default `ServerConfig()`, the read-only and disabled-tools cases fail and the defaults case passes.
 
 ### Fixed
 - **Each startup filter line prints once under http, and a tool the registry does not serve is `unknown_tool` whatever `instance` says (Trac /trac_mcp_server #164).** Two defects in the tool filters from #112
@@ -369,9 +370,6 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   - Ad-hoc addressing (`instance: "/project-path"`) reaches any project on the same Trac host as the default instance using the default's credentials, restricted to the default instance's exact scheme+host so credentials can never be sent to another host
   - New `list_instances` tool (28th documented tool, 43rd registered including `ping`) surfaces configured instances plus, via a new `scrape_project_index()` web-scraping helper, other projects discoverable on the host's "Available Projects" index
   - `src/trac_mcp_server/instances.py`: `InstanceSpec`, `InstanceRegistry` (resolve/get_client/describe, with per-URL client caching and mtime-gated live reload), `UnknownInstanceError`, `load_declared_instances()`
-
-### Tests
-- `main()` passing the resolved server config to the tool registry is now pinned by a test: with `read_only` or `disabled_tools` set, the registry `run_http` is handed leaves those tools out (Trac /trac_mcp_server #165). Seeded: with `main()` building the registry from a default `ServerConfig()`, the read-only and disabled-tools cases fail and the defaults case passes.
 
 ## [2.2.0] - 2026-07-26
 
