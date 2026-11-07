@@ -187,6 +187,29 @@ def test_a_dirty_release_fails_even_when_the_prefix_matches():
         smoke.check_release(FULL + "-dirty", FULL)
 
 
+@pytest.mark.parametrize("given", ["", "abcdef", "HEAD", "abcdef0\n"])
+def test_check_release_refuses_an_expectation_that_is_not_a_sha(given):
+    # "" must not read as a match-anything expectation: None is the
+    # way to say "no expectation"
+    with pytest.raises(ValueError):
+        smoke.check_release(FULL, given)
+
+
+@pytest.mark.parametrize("given", ["", "HEAD"])
+def test_run_smoke_refuses_an_expectation_that_is_not_a_sha(given):
+    out = io.StringIO()
+    with pytest.raises(ValueError):
+        anyio.run(
+            smoke.run_smoke,
+            "http://127.0.0.1:1",
+            TOKEN,
+            out,
+            "/trac_test",
+            given,
+        )
+    assert out.getvalue() == ""
+
+
 def test_compare_tools_reports_missing_and_extra_sorted():
     missing, extra = smoke.compare_tools(
         ["a", "b", "c", "d"], ["d", "z", "b", "y"]

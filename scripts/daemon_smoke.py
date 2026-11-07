@@ -202,11 +202,16 @@ def check_release(release: object, expect_sha: str | None) -> str:
     """Judge the ``release`` /healthz reported; the PASS detail, or
     ``CheckFailed``.
 
-    Without ``expect_sha`` anything passes and the reported value is the
-    detail (``none reported`` for an older daemon whose /healthz has no
-    ``release`` key). With it, the release must be present, not
-    ``unknown``, not ``-dirty``, and start with ``expect_sha``.
+    Without ``expect_sha`` (``None``) anything passes and the reported
+    value is the detail (``none reported`` for an older daemon whose
+    /healthz has no ``release`` key). With it, the release must be
+    present, not ``unknown``, not ``-dirty``, and start with
+    ``expect_sha``. An ``expect_sha`` that is not 7 to 40 lowercase hex
+    characters, ``""`` included, is ``ValueError``: it would otherwise
+    match every release.
     """
+    if expect_sha is not None:
+        validate_expect_sha(expect_sha)
     reported = "none reported" if release is None else str(release)[:80]
     if expect_sha is None:
         return f"release {reported}"
@@ -908,7 +913,13 @@ async def run_smoke(
     instance: str = DEFAULT_INSTANCE,
     expect_sha: str | None = None,
 ) -> int:
-    """Run the checks against ``base``; the process exit code."""
+    """Run the checks against ``base``; the process exit code.
+
+    ``expect_sha`` is ``None`` for no expectation; anything else must be
+    a valid ``--expect-sha`` value, else ``ValueError`` before any
+    check runs."""
+    if expect_sha is not None:
+        validate_expect_sha(expect_sha)
     reporter = Reporter(token, out)
     # The SDK logs transport failures, with tracebacks, straight to
     # stderr, bypassing scrub(). The verdict lines say what failed.

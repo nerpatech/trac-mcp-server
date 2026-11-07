@@ -14,7 +14,7 @@ TRAC_MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
 | Method + Path | Auth required? | Description |
 |----------------|-----------------|--------------|
 | `POST/GET/DELETE <path>` (default `/mcp`) | Yes, if `auth_token` is configured; or requires an `Authorization: Bearer <token>` per caller if `oidc_rpc_url` is configured instead (mutually exclusive, see [OIDC Per-User Auth](#oidc-per-user-auth)) | The MCP JSON-RPC endpoint (streamable HTTP: `POST` for requests, `GET` for the SSE stream, `DELETE` to end a session) |
-| `GET /healthz` | No, always open | Liveness/readiness probe. Returns `{"status": "ok"}`. |
+| `GET /healthz` | No, always open | Liveness/readiness probe. Returns `{"status": "ok", "release": "<40-hex sha>"}`, with `"unknown"` for a build without a stamp (an editable install, an sdist, the Docker image); `ci-live.sh --daemon <url> --expect-sha <sha>` compares it. |
 
 Sessions are **stateful** (the SDK default): the server returns an `Mcp-Session-Id` response header on `initialize`, and clients send it back on subsequent requests. Each session gets its own MCP protocol state; multiple concurrent sessions are supported, including calls that pass different `instance` arguments (see [Configuration: Multiple Instances](configuration.md#multiple-instances)).
 
