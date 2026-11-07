@@ -11,9 +11,9 @@ lazy continuation of ``b`` only by accident of Markdown's column rules.
 `Formatter._indent_formatter`.** For an indented, non-blank, non-marker
 line `d` columns wide, with open marker columns `m_0 < ... < m_k`:
 
-* `d >= m_k`: it continues the innermost item (the upper bound, marker + 2
-  for a bullet and + 3 for an ordered item, is a separate ticket and not
-  applied here);
+* `d >= m_k`: it continues the innermost item, up to the upper bound
+  (marker + 2 for a bullet, + 3 for an ordered item; past it the list
+  ends, ticket #175);
 * `0 < d < m_k` and `d > m_0`: the items whose marker is past `d` close and
   it continues the deepest one left;
 * otherwise (`d <= m_0` while a deeper item is open, or `d == 0`): the
@@ -112,26 +112,34 @@ def _md(wiki: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("columns", "width", "expected"),
+    ("columns", "width", "expected", "ordered"),
     [
-        ([1], 1, 0),  # A: at the only marker's column
-        ([1, 3], 3, 1),  # B: at the inner marker's column
-        ([1, 4], 2, 0),  # C: between; the inner item closes
-        ([1, 3], 1, None),  # D: at the outer column, deeper item open
-        ([3], 1, None),  # F: left of the only marker
-        ([1], 3, 0),  # G: deeper than the marker
-        ([1], 4, 0),  # J
-        ([1, 3, 5], 3, 1),  # a middle item of three levels
-        ([1, 3, 5], 4, 1),  # between the middle and the inner
-        ([1, 3, 5], 2, 0),
-        ([1, 3, 5], 9, 2),  # deeper than the innermost: unchanged
-        ([1, 3], 0, None),  # column zero ends the list
-        ([1], 0, None),
-        ([], 3, None),
+        ([1], 1, 0, False),  # A: at the only marker's column
+        ([1, 3], 3, 1, False),  # B: at the inner marker's column
+        ([1, 4], 2, 0, False),  # C: between; the inner item closes
+        ([1, 3], 1, None, False),  # D: at the outer column, deeper open
+        ([3], 1, None, False),  # F: left of the only marker
+        ([1], 3, 0, False),  # G: deeper than the marker, at the bound
+        ([1], 4, 0, True),  # J: an ordered item's bound is m + 3
+        ([1], 4, None, False),  # #175 case H: past a bullet's bound
+        ([1, 3, 5], 3, 1, False),  # a middle item of three levels
+        ([1, 3, 5], 4, 1, False),  # between the middle and the inner
+        ([1, 3, 5], 2, 0, False),
+        # past the innermost bound (m+2): the list ends (#175)
+        ([1, 3, 5], 9, None, False),
+        ([1, 3, 5], 7, 2, False),  # exactly at the bound
+        ([1, 3], 0, None, False),  # column zero ends the list
+        ([1], 0, None, False),
+        ([], 3, None, False),
     ],
 )
-def test_continued_item(columns, width, expected):
-    assert _continued_item(columns, width) == expected
+def test_continued_item(columns, width, expected, ordered):
+    assert (
+        _continued_item(
+            columns, width, innermost_ordered=ordered, upper_bound=True
+        )
+        == expected
+    )
 
 
 # -- Read leg ---------------------------------------------------------------
@@ -164,7 +172,7 @@ def test_list_stack_step_keeps_masters_pop_unless_the_line_is_innermost(
     columns, line, kept
 ):
     stack = [(c, re.match(r"\s*", "")) for c in columns]
-    _list_stack_step(stack, line)
+    _list_stack_step(stack, line, upper_bound=False)
     assert [c for c, _ in stack] == kept
 
 
