@@ -169,20 +169,8 @@ def _single_endpoint_result(
     )
 
 
-def _registry_not_initialized() -> types.CallToolResult:
-    return types.CallToolResult(
-        content=[
-            types.TextContent(
-                type="text",
-                text="Error (server_error): Instance registry not initialized.",
-            )
-        ],
-        isError=True,
-    )
-
-
 async def _handle_list_instances(
-    client: TracClient, args: dict
+    client: TracClient | None, args: dict
 ) -> types.CallToolResult:
     """Handle list_instances tool -- describe configured + discovered instances."""
     # Imported here: write_gate imports this module at load time.
@@ -190,39 +178,42 @@ async def _handle_list_instances(
 
     registry = _registry_ref
 
-    # No client and no registry: nothing to describe, and no setting to
-    # report either.
-    if client is None and registry is None:
-        return _registry_not_initialized()
-
-    # Ticket #153: the write gate's kill switch is a per-daemon setting
-    # every routed instance inherits (ticket #117), and nothing else a
-    # session can reach reports it -- the env file is root 600. Worked out
-    # once for both listings: from the client this call runs with, whose
-    # config every write of the call goes through -- under OIDC per-user
-    # auth the caller's own client, built by OidcClientCache from the
-    # startup config. A caller scoped away from the default instance
-    # reaches this handler with no client at all; it gets the registry's
-    # value, read from the same startup config. The early return above
-    # leaves one of the two present.
-    write_gate = (
-        gate_enabled(client)
-        if client is not None
-        else registry.write_gate
-    )
-
     # OIDC per-user auth: the registry and its default config hold the shared
     # service account, if one is configured at all, and no caller may act as
     # it. The caller's bearer token cannot stand in for the scrape's Basic
     # credentials either, so there is no discovery, only the one endpoint.
     if client is not None and client.config.bearer_token:
         return _single_endpoint_result(
-            client.config.trac_url, write_gate
+            client.config.trac_url, gate_enabled(client)
         )
 
-    # A client with no registry (not OIDC): there is nothing to list.
+    # Everything below needs the registry: no registry, nothing to list.
     if registry is None:
-        return _registry_not_initialized()
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text",
+                    text="Error (server_error): Instance registry not "
+                    "initialized.",
+                )
+            ],
+            isError=True,
+        )
+
+    # Ticket #153: the write gate's kill switch is a per-daemon setting
+    # every routed instance inherits (ticket #117), and nothing else a
+    # session can reach reports it -- the env file is root 600. The rule:
+    # the client this call runs with, else the registry. The client's
+    # config is the one every write of the call goes through (under OIDC
+    # per-user auth that is the caller's own client, built by
+    # OidcClientCache from the startup config). A caller scoped away from
+    # the default instance reaches this handler with no client at all; it
+    # gets the registry's value, read from the same startup config.
+    write_gate = (
+        gate_enabled(client)
+        if client is not None
+        else registry.write_gate
+    )
 
     discover = args.get("discover", True)
     identity = caller_identity()

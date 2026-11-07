@@ -3,7 +3,8 @@
 `list_instances` and the per-write OFF line are tested beside their own
 handlers (`tools/test_instances.py`, `tools/test_write_gate.py`). This
 file holds the two that live in ``server.py``: ``ping`` and the startup
-log line.
+log line, plus the check that ``list_instances`` and ``ping`` print the
+same shared write-gate line.
 """
 
 import asyncio
@@ -55,15 +56,20 @@ def _list_instances(write_gate: bool):
     config = _config(write_gate=write_gate)
     client = MagicMock()
     client.config = config
-    set_instance_registry(InstanceRegistry(config, {}))
-    try:
-        return asyncio.run(
-            ToolRegistry(INSTANCE_SPECS).call_tool(
-                "list_instances", {"discover": False}, client
+    # No host config files: the registry would otherwise read the machine's.
+    with patch(
+        "trac_mcp_server.instances.discover_config_files",
+        return_value=[],
+    ):
+        set_instance_registry(InstanceRegistry(config, {}))
+        try:
+            return asyncio.run(
+                ToolRegistry(INSTANCE_SPECS).call_tool(
+                    "list_instances", {"discover": False}, client
+                )
             )
-        )
-    finally:
-        set_instance_registry(None)
+        finally:
+            set_instance_registry(None)
 
 
 @pytest.mark.parametrize("state", [True, False])

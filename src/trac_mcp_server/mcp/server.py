@@ -633,7 +633,8 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
-        # The registry's value, the same one list_instances reports.
+        # The registry's (startup config) value. list_instances reports the
+        # calling client's, which is built from the same config.
         log_startup_settings(server_config, ctx["instances"].write_gate)
         oidc_rpc_url = (
             server_config.oidc_rpc_url

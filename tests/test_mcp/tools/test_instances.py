@@ -274,6 +274,34 @@ class TestListInstancesHandler(unittest.TestCase):
                 )
                 self.assertNotIn(write_gate_line(registry_gate), text)
 
+    def test_oidc_client_with_no_registry_returns_the_single_endpoint(
+        self,
+    ):
+        """Under OIDC per-user auth the answer comes from the caller's own
+        client; the registry (shared service account) is not consulted, so
+        its absence is no error."""
+        config = dataclasses.replace(
+            self.config, bearer_token="user-token", write_gate=False
+        )
+        self.client.config = config
+        set_instance_registry(None)
+        result = asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, self.client
+            )
+        )
+        self.assertFalse(result.isError, result.content[0].text)
+        structured = result.structuredContent
+        self.assertEqual(structured["default"], config.trac_url)
+        self.assertEqual(
+            [e["url"] for e in structured["configured"]],
+            [config.trac_url],
+        )
+        self.assertIs(structured["write_gate"], False)
+        self.assertIn(
+            write_gate_line(False), result.content[0].text.splitlines()
+        )
+
     def test_no_client_and_no_registry_returns_the_registry_error(self):
         set_instance_registry(None)
         result = asyncio.run(
