@@ -340,6 +340,9 @@ async def handle_call_tool(
     ever sees an unexpected key, and resolves it against the InstanceRegistry
     to pick which Trac project's client to use.
 
+    A name the registry does not serve is answered ``unknown_tool`` before
+    the instance is resolved.
+
     Annotates whatever comes back with the instance it actually reached, so
     the silent fallback to the server's default is visible from the response
     alone -- see ``tools.instance_echo`` and ticket #94.
@@ -353,6 +356,17 @@ async def handle_call_tool(
     """
     args = dict(arguments or {})
     instance = args.pop("instance", None)
+    # A tool the registry does not serve (hidden by a filter, or no such
+    # name) does not exist for this caller, whatever `instance` says: asking
+    # first would answer a hidden tool with an instance error. Nothing is
+    # reached, so this exit carries no instance annotation.
+    registry = get_registry()
+    if not registry.has_tool(name):
+        return build_error_response(
+            "unknown_tool",
+            f"Unknown tool: {name}",
+            "Use list_tools to see available tools.",
+        )
     client: TracClient | None
     try:
         client = await _resolve_client(instance)
@@ -388,19 +402,11 @@ async def handle_call_tool(
     url = getattr(getattr(client, "config", None), "trac_url", None)
     explicit = instance is not None
 
-    try:
-        result = await get_registry().call_tool(
-            name,
-            args,
-            client,  # type: ignore[arg-type]  # None only for list_instances (#110)
-        )
-    except ValueError as e:
-        # Unknown or filtered-out tool name
-        result = build_error_response(
-            "unknown_tool",
-            str(e),
-            "Use list_tools to see available tools.",
-        )
+    result = await registry.call_tool(
+        name,
+        args,
+        client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+    )
     # With OIDC per-user auth there is exactly one instance and no
     # `instance` argument, so the echo carries no information -- and as a
     # trailing text block it turns a JSON result into JSON plus a line,
@@ -434,11 +440,59 @@ def log_startup_settings(
         logger.warning("write_gate=off")
 
 
-def _startup_note(message: str, *args) -> None:
-    """Log a startup line and print it on stderr, which under stdio is the
-    only place an operator sees it (the logger writes to the log file)."""
-    logger.info(message, *args)
-    print(message % args, file=sys.stderr)
+def _logging_reaches_stderr(level: int) -> bool:
+    """Whether a record from ``logger`` at ``level`` is written to stderr.
+
+    True when the logger is enabled for ``level`` and some handler it
+    propagates to emits the record to the current ``sys.stderr``. A
+    ``FileHandler`` is a ``StreamHandler`` too, but its stream is the file.
+    ``sys.stderr`` is read at call time, so a handler built on a replaced
+    stream (a test capture, say) counts only while that stream is current.
+    With no handler anywhere on the chain, logging's ``lastResort`` handler
+    writes WARNING and above to the current stderr.
+    """
+    if not logger.isEnabledFor(level):
+        return False
+    seen_handler = False
+    current: logging.Logger | None = logger
+    while current is not None:
+        for handler in current.handlers:
+            seen_handler = True
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and handler.stream is sys.stderr
+                and level >= handler.level
+            ):
+                return True
+        current = current.parent if current.propagate else None
+    last_resort = logging.lastResort
+    return (
+        not seen_handler
+        and last_resort is not None
+        and level >= last_resort.level
+    )
+
+
+def _startup_note(
+    message: str, *args, level: int = logging.INFO
+) -> None:
+    """Log a startup line, and print it on stderr unless the logger
+    already does.
+
+    Under stdio with a log file the logger writes only that file, so stderr
+    is the only place an operator sees the line. Under http/cli, or stdio
+    without a log file, the logger has its own stderr handler and shows the
+    line itself: printing it as well showed it twice. The printed fallback
+    of a WARNING carries a ``Warning: `` prefix.
+    """
+    logger.log(level, message, *args)
+    if _logging_reaches_stderr(level):
+        return
+    text = message % args if args else message
+    if level >= logging.WARNING:
+        text = f"Warning: {text}"
+    print(text, file=sys.stderr)
 
 
 def build_registry(
@@ -486,22 +540,17 @@ def build_registry(
     if disabled:
         _startup_note("Disabled tools: %s", ", ".join(sorted(disabled)))
     if unknown:
-        logger.warning(
+        _startup_note(
             "Disabled tools not found (ignored): %s",
             ", ".join(sorted(unknown)),
-        )
-        print(
-            "Warning: disabled tools not found (ignored): "
-            + ", ".join(sorted(unknown)),
-            file=sys.stderr,
+            level=logging.WARNING,
         )
     if "list_instances" in disabled:
-        message = (
+        _startup_note(
             "list_instances is disabled, but error messages still tell "
-            "callers to call it; they get unknown_tool"
+            "callers to call it; they get unknown_tool",
+            level=logging.WARNING,
         )
-        logger.warning(message)
-        print(f"Warning: {message}", file=sys.stderr)
     if (
         allowed_permissions is not None
         or server_config.read_only

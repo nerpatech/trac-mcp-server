@@ -53,22 +53,25 @@ class ToolSpec:
 
 `src/trac_mcp_server/mcp/tools/registry.py`
 
-Constructed once at startup with all specs and two independent, combinable filters:
+Constructed once at startup with all specs and three independent, combinable filters (permissions, `read_only`, `disabled_tools`):
 
 ```python
 registry = ToolRegistry(all_specs, allowed_permissions=None)  # all tools
 registry = ToolRegistry(all_specs, allowed_permissions=frozenset({"TICKET_VIEW"}))  # filtered
 registry = ToolRegistry(all_specs, read_only=True)  # only readOnlyHint=True tools
+registry = ToolRegistry(all_specs, disabled_tools=frozenset({"ticket_comment_history"}))  # all but the named tools
 ```
 
-Filtering logic -- a spec is included only if it passes BOTH:
+Filtering logic -- a spec is included only if it passes ALL THREE:
 - **Permissions**: `allowed_permissions=None` includes all specs (default); otherwise a spec passes if its permissions are empty OR a subset of `allowed_permissions` (`--permissions-file`, see below)
 - **Read-only**: `read_only=False` (default) includes all specs; `read_only=True` includes a spec only if its own `Tool.annotations.readOnlyHint` is `True` (`--read-only` / `TRAC_MCP_READ_ONLY`) -- a coarser, permission-agnostic alternative that needs no Trac-side permission enumeration, since it reuses the same `readOnlyHint` every spec already declares (enforced by a regression test, see below)
+- **Disabled tools**: `disabled_tools=frozenset()` (default) drops nothing; otherwise a spec whose `Tool.name` is in the set is dropped (`TRAC_MCP_DISABLED_TOOLS` / `server.disabled_tools`, see [Disabling Individual Tools](#disabling-individual-tools) below)
 
-A tool excluded by either filter isn't just missing from `list_tools()` -- `call_tool()` raises the same "unknown tool" `ValueError` if called by name anyway, so there's no separate code path a filtered-out tool could slip through.
+A tool excluded by any of the filters isn't just missing from `list_tools()` -- `handle_call_tool` asks `has_tool()` before it resolves the `instance` argument, so a call by name gets an unannotated `unknown_tool` error whatever `instance` says (nothing was reached, so there is no instance to name), and `call_tool()` itself raises the same "unknown tool" `ValueError` for a name it does not serve. There is no separate code path a filtered-out tool could slip through.
 
-Provides two methods used by the MCP protocol handlers:
+Provides three methods used by the MCP protocol handlers:
 - `list_tools()` -- returns `list[types.Tool]` for the MCP `list_tools` response
+- `has_tool(name)` -- whether `name` is registered and passed every filter; `handle_call_tool` checks it first
 - `call_tool(name, arguments, client)` -- dispatches to the matching handler with centralized error handling (XML-RPC faults, validation errors, unexpected exceptions)
 
 ## File Layout

@@ -288,3 +288,28 @@ def test_list_instances_reports_a_disabled_write_gate():
         "write_gate: false -- OFF on this daemon"
         in result.content[0].text
     )
+
+
+@pytest.mark.parametrize("instance", [None, "/elsewhere"])
+def test_unknown_tool_without_authorization_header_is_unknown_tool(
+    instance,
+):
+    """A name the registry does not serve is unknown_tool before anything
+    asks for the caller's token or the `instance` argument."""
+    token = request_ctx.set(
+        SimpleNamespace(
+            request=Request({"type": "http", "headers": []})
+        )
+    )
+    try:
+        arguments = {} if instance is None else {"instance": instance}
+        result = asyncio.run(
+            handle_call_tool("no_such_tool", arguments)
+        )
+    finally:
+        request_ctx.reset(token)
+
+    assert result.isError
+    text = result.content[0].text
+    assert "unknown_tool" in text, text
+    assert "Authorization" not in text, text

@@ -113,6 +113,10 @@ class ToolRegistry:
         """Return number of registered tools."""
         return len(self._specs)
 
+    def has_tool(self, name: str) -> bool:
+        """Whether ``name`` is served: registered and past every filter."""
+        return name in self._specs
+
     async def call_tool(
         self,
         name: str,
