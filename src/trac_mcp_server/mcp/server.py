@@ -373,9 +373,10 @@ async def handle_call_tool(
     except InstanceNotAllowedError as e:
         # Ticket #110: a caller scoped away from the DEFAULT instance must
         # still be able to ask what it may reach -- the refusal below tells
-        # it to do exactly that. list_instances reads the registry, not
-        # the client, so it runs with none; every other tool, and an
-        # explicit out-of-scope `instance`, is still refused.
+        # it to do exactly that. list_instances takes the client when it
+        # has one and the registry otherwise, so it runs with none; every
+        # other tool, and an explicit out-of-scope `instance`, is still
+        # refused.
         if name != "list_instances" or instance is not None:
             return build_error_response(
                 _instance_error_type(e),
@@ -632,7 +633,8 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
-        # The registry's value, the same one list_instances reports.
+        # The registry's (startup config) value. list_instances reports the
+        # calling client's, which is built from the same config.
         log_startup_settings(server_config, ctx["instances"].write_gate)
         oidc_rpc_url = (
             server_config.oidc_rpc_url

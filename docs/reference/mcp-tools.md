@@ -60,8 +60,10 @@ off, empty otherwise). `wiki_file_push`'s `gate_notes` also holds the
 gate-on advisory lines the push appends to its text. The other write tools
 return text only, which Claude Code does show.
 
-`list_instances` and `ping` report the switch too, as `write_gate: true|false`
-(top-level in `structuredContent` and in the text). The server's startup log
+`list_instances` and `ping` report the switch too, as `write_gate` (top-level
+in `structuredContent`, a boolean, and as a line in the text). With the gate on
+the line is `write_gate: true`; with it off it carries a suffix:
+`write_gate: false -- OFF on this daemon: writes are NOT link-checked`. The server's startup log
 carries `write_gate=on` (`INFO`) or `write_gate=off` (`WARNING`) as its own
 line, written once the lifespan has loaded the Trac config; the
 `file_access=..., max_inline_bytes=...` line is separate and is written
@@ -96,7 +98,10 @@ before the lifespan starts.
 
 `message` is the full text, because Claude Code shows `structuredContent` in
 preference to the text block. `write_gate` is whether the write-time link gate
-runs on this daemon -- see [Write Gate Status](#write-gate-status).
+runs on this daemon -- see [Write Gate Status](#write-gate-status). With the
+gate off the text line reads
+`write_gate: false -- OFF on this daemon: writes are NOT link-checked` (and
+`message` carries it too), with `"write_gate": false` in the dict.
 
 **Error Response:**
 ```json

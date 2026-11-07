@@ -13,6 +13,7 @@ from trac_mcp_server.mcp.tools.instances import (
     set_instance_registry,
 )
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
+from trac_mcp_server.mcp.tools.write_gate import write_gate_line
 
 
 def _default_config() -> Config:
@@ -220,11 +221,10 @@ class TestListInstancesHandler(unittest.TestCase):
         self.assertIn("write_gate: false", text)
         self.assertIn("NOT link-checked", text)
 
-    def test_153_reads_the_daemon_setting_not_the_resolved_client(self):
-        """A caller scoped away from the default instance reaches this
-        handler with no client at all (ticket #110), and must still be
-        told -- the setting is the daemon's, inherited by every routed
-        instance (ticket #117)."""
+    def test_153_without_a_client_reads_the_registry_setting(self):
+        """A call with no client (a caller scoped away from the default
+        instance, ticket #110) gets the registry's value -- the setting is
+        the daemon's, inherited by every routed instance (ticket #117)."""
         config = dataclasses.replace(self.config, write_gate=False)
         set_instance_registry(InstanceRegistry(config, {}))
         result = asyncio.run(
@@ -234,6 +234,83 @@ class TestListInstancesHandler(unittest.TestCase):
         )
         self.assertFalse(result.isError, result.content[0].text)
         self.assertIs(result.structuredContent["write_gate"], False)
+
+    def test_153_with_a_client_the_client_wins_over_the_registry(self):
+        """With a client, the gate is the one that client's writes go
+        through, not the registry's: the two disagree here, in both
+        directions, and the report follows the client."""
+        for client_gate, registry_gate in (
+            (False, True),
+            (True, False),
+        ):
+            with self.subTest(
+                client=client_gate, registry=registry_gate
+            ):
+                self.client.config = dataclasses.replace(
+                    self.config, write_gate=client_gate
+                )
+                set_instance_registry(
+                    InstanceRegistry(
+                        dataclasses.replace(
+                            self.config, write_gate=registry_gate
+                        ),
+                        {},
+                    )
+                )
+                result = asyncio.run(
+                    ToolRegistry(INSTANCE_SPECS).call_tool(
+                        "list_instances",
+                        {"discover": False},
+                        self.client,
+                    )
+                )
+                self.assertFalse(result.isError, result.content[0].text)
+                self.assertIs(
+                    result.structuredContent["write_gate"], client_gate
+                )
+                text = result.content[0].text
+                self.assertIn(
+                    write_gate_line(client_gate), text.splitlines()
+                )
+                self.assertNotIn(write_gate_line(registry_gate), text)
+
+    def test_oidc_client_with_no_registry_returns_the_single_endpoint(
+        self,
+    ):
+        """Under OIDC per-user auth the answer comes from the caller's own
+        client; the registry (shared service account) is not consulted, so
+        its absence is no error."""
+        config = dataclasses.replace(
+            self.config, bearer_token="user-token", write_gate=False
+        )
+        self.client.config = config
+        set_instance_registry(None)
+        result = asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, self.client
+            )
+        )
+        self.assertFalse(result.isError, result.content[0].text)
+        structured = result.structuredContent
+        self.assertEqual(structured["default"], config.trac_url)
+        self.assertEqual(
+            [e["url"] for e in structured["configured"]],
+            [config.trac_url],
+        )
+        self.assertIs(structured["write_gate"], False)
+        self.assertIn(
+            write_gate_line(False), result.content[0].text.splitlines()
+        )
+
+    def test_no_client_and_no_registry_returns_the_registry_error(self):
+        set_instance_registry(None)
+        result = asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, None
+            )
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("not initialized", result.content[0].text)
 
 
 if __name__ == "__main__":
