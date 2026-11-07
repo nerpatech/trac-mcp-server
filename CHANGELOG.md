@@ -186,6 +186,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
   - Comments are filtered out of the changelog inside the tool, so field-only changes never reach the response: a ticket whose description was edited no longer drags two full copies of that description along to deliver a few bytes of comment text (the cost that ruled out proxying `ticket_changelog` wholesale)
   - Each comment carries the number Trac assigns it — the same number `ticket_render_check`'s `comment` parameter is keyed on, closing a discoverability gap where that number could only be found by guessing
   - Truncation is loud by construction: over the cap, the head and tail are kept and the middle dropped (a long thread has its scope set early and corrected late), and the response names how many exist, how many are shown, and which comment numbers were omitted — `comment_count` is always the exact total. A failed changelog fetch still returns the ticket, and says the comments are missing
+- `main()` passing the resolved server config to the tool registry is now pinned by a test: with `read_only` or `disabled_tools` set, the registry passed to `run_http` leaves those tools out (Trac /trac_mcp_server #165). Seeded: with `main()` building the registry from a default `ServerConfig()`, the read-only and disabled-tools cases fail and the defaults case passes.
 
 ### Fixed
 - **Each startup filter line prints once under http, and a tool the registry does not serve is `unknown_tool` whatever `instance` says (Trac /trac_mcp_server #164).** Two defects in the tool filters from #112
