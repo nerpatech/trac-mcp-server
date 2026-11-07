@@ -11,7 +11,6 @@ from typing import Any
 import mcp.types as types
 
 from ...core.async_utils import (
-    gather_limited,
     run_sync,
     run_sync_limited,
 )
@@ -208,16 +207,22 @@ async def _load(
     """Fetch the tickets not in ``cache`` yet; a ticket that failed to load is
     cached as None and not fetched again."""
 
-    async def one(tid: int) -> tuple[int, dict | None]:
-        try:
-            ticket = await run_sync_limited(client.get_ticket, tid)
-            return tid, ticket[3]
-        except Exception:
-            return tid, None
-
     todo = [tid for tid in dict.fromkeys(ids) if tid not in cache]
-    for tid, attrs in await gather_limited([one(tid) for tid in todo]):
-        cache[tid] = attrs
+    if not todo:
+        return
+    try:
+        fetched = await run_sync_limited(client.get_tickets, todo)
+    except Exception:
+        fetched = {}
+    for tid in todo:
+        entry = fetched.get(tid)
+        cache[tid] = (
+            entry[3]
+            if isinstance(entry, (list, tuple))
+            and len(entry) >= 4
+            and isinstance(entry[3], dict)
+            else None
+        )
 
 
 def _compact(
