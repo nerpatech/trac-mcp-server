@@ -959,7 +959,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         match token_type:
             # For lists, track ordered state and reset item counter
             case "list":
-                ordered = token.get("attrs", {}).get("ordered", False)
+                ordered = (attrs or {}).get("ordered", False)
                 depth = getattr(
                     state, "list_depth", -1
                 )  # Start at -1 so first level is 0
@@ -979,7 +979,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # /trac_test: ` 5.` / ` 7.` / ` 9.` and ` 3.` / ` 1.` both
                 # count up from the first), so consecutive numbers from
                 # `start` are what Trac shows.
-                start = (token.get("attrs") or {}).get("start", 1)
+                start = (attrs or {}).get("start", 1)
                 state.list_item_num = start - 1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
 
                 # Render children

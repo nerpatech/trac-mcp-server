@@ -15,6 +15,9 @@ write leg emits consecutive numbers from `start`, which is exactly what Trac
 shows for the source.
 """
 
+import re
+
+import mistune
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
@@ -26,8 +29,7 @@ from trac_mcp_server.converters.tracwiki_to_markdown import (
 
 
 def _tw(markdown: str) -> str:
-    result = markdown_to_tracwiki(markdown)
-    return result.text if hasattr(result, "text") else result
+    return markdown_to_tracwiki(markdown)
 
 
 def _round_trip(wiki: str) -> str:
@@ -71,7 +73,6 @@ ROUND_TRIP_ROWS = {
     "steps_5_to_8": " 5. one\n 6. two\n 7. three\n 8. four\n",
     "two_digit_start": " 10. j\n 11. k\n",
     "zero": " 0. z\n 1. o\n",
-    "nested_under_bullet": " * outer\n   4. inner a\n   5. inner b\n * outer2\n",
 }
 
 
@@ -91,26 +92,50 @@ def test_round_trip_of_non_consecutive_numbers_is_what_trac_shows():
     )
 
 
-def _ol_shape(html: str) -> list[tuple[str, int]]:
-    """Each `<ol ...>` opening tag, in order, with the number of `<li>` that
-    follow it before the next `<ol`/`</ol>` boundary. Enough to tell a
-    renumbered or split list from the source's."""
-    import re
+def test_nested_list_from_4_under_a_bullet_keeps_its_tracwiki_bytes():
+    """The read leg emits `4.`/`5.` as lazy paragraph text, because
+    CommonMark lets only a list starting at 1 interrupt a paragraph; so this
+    row passes on master too and pins only that the stored TracWiki stays
+    byte-stable. The Markdown view losing the nested list is ticket #180."""
+    source = " * outer\n   4. inner a\n   5. inner b\n * outer2\n"
+    assert _round_trip(source) == source.rstrip("\n")
 
-    shape = []
-    for m in re.finditer(r"<ol[^>]*>", html):
-        rest = html[m.end() :]
-        stop = re.search(r"<ol[\s>]|</ol>", rest)
-        segment = rest[: stop.start()] if stop else rest
-        shape.append((m.group(0), segment.count("<li>")))
-    return shape
+    tokens = mistune.create_markdown(renderer=None)(
+        tracwiki_to_markdown(source).text
+    )
+    first_item = next(
+        item
+        for item in tokens[0]["children"]
+        if item["type"] == "list_item"
+    )
+    # Current, known behaviour: #180 will flip this assertion.
+    assert not any(
+        child["type"] == "list"
+        for block in first_item["children"]
+        for child in [block, *block.get("children", [])]
+    )
 
 
-def test_ol_shape_tells_a_renumbered_list_apart():
+def _list_shape(html: str) -> list[str]:
+    """Every `<ol>`/`<ul>` open and close tag and every `<li>`, in document
+    order, whitespace collapsed. Captures nesting and the `start` attribute
+    together, enough to tell a renumbered, split or flattened list apart."""
+    return [
+        " ".join(m.group(0).split())
+        for m in re.finditer(
+            r"<(?:ol|ul)\b[^>]*>|</(?:ol|ul)>|<li\b[^>]*>", html
+        )
+    ]
+
+
+def test_list_shape_tells_renumbering_and_nesting_apart():
     """The live row's comparison would be vacuous if it could not."""
-    assert _ol_shape(
+    assert _list_shape(
         '<ol start="5"><li>a</li><li>b</li></ol>'
-    ) != _ol_shape("<ol><li>a</li><li>b</li></ol>")
+    ) != _list_shape("<ol><li>a</li><li>b</li></ol>")
+    assert _list_shape(
+        '<ul><li>a<ol start="4"><li>x</li></ol></li></ul>'
+    ) != _list_shape('<ul><li>a</li></ul><ol start="4"><li>x</li></ol>')
 
 
 LIVE_SOURCES = {
@@ -126,7 +151,7 @@ LIVE_SOURCES = {
 def test_live_source_and_round_trip_render_the_same_lists(name):
     """Ticket #150 acceptance, against Trac's own renderer on /trac_test: the
     TracWiki source and its `tw -> md -> tw` round trip render the same
-    `<ol>` tags (start attribute included) with the same item counts.
+    list tags (nesting and start attribute included) and items.
     Read-only (wiki.wikiToHtml writes nothing)."""
     from trac_mcp_server.config_bootstrap import bootstrap_config
     from trac_mcp_server.core.client import TracClient
@@ -141,5 +166,5 @@ def test_live_source_and_round_trip_render_the_same_lists(name):
     before = client.wiki_to_html(source)
     after = client.wiki_to_html(_round_trip(source))
 
-    assert _ol_shape(before), before
-    assert _ol_shape(before) == _ol_shape(after), (before, after)
+    assert _list_shape(before), before
+    assert _list_shape(before) == _list_shape(after), (before, after)
