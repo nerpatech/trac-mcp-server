@@ -201,7 +201,10 @@ def test_headerless_div_table_unwraps_too():
         (
             "div with an argument in a list item",
             " * a\n   {{{#!div class=x\n   ||1||2||\n   }}}\n * d",
-            " - a\n   {{{#!div class=x\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
+            # Ticket #146 changed this row: the bare group inside the
+            # arbitrary-argument div (not unwrapped, #142) gets the blank
+            # line a bare group in an open item now gets.
+            " - a\n   {{{#!div class=x\n\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
         ),
         (
             "div holding a paragraph in a list item",
@@ -233,12 +236,14 @@ def test_headerless_div_table_unwraps_too():
             # reading; only rows that came from an unwrapped div keep it.
             "bare indented rows in a list item",
             " * a\n   ||=x=||=y=||\n   ||1||2||\n * d\n",
-            " - a\n| x | y |\n|---|---|\n| 1 | 2 |\n - d\n",
+            # Ticket #146 added the blank line before the table, so
+            # Markdown ends the item there as Trac does.
+            " - a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n - d\n",
         ),
         (
             "bare indented rows after a nested item",
             " * a\n   * b\n     ||=x=||\n     ||1||\n * d\n",
-            " - a\n   - b\n| x |\n|---|\n| 1 |\n - d\n",
+            " - a\n   - b\n\n| x |\n|---|\n| 1 |\n - d\n",
         ),
         (
             "top-level rows",

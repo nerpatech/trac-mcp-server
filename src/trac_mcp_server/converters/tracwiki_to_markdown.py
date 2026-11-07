@@ -1826,6 +1826,20 @@ class TracWikiParser:
             nonlocal div_group, prev_div_end
             if not table_rows:
                 return
+            # Ticket #146: bare rows under a list item render OUTSIDE the
+            # list in Trac, but with no blank line between the item text
+            # and the table Markdown reads the table as part of the item,
+            # and the write leg then puts it back in the list as a div. A
+            # blank line (no indent) ends the item in Markdown too. Only
+            # when an item is still open over the lines above (the walk
+            # `_open_list_item` does, from the last blank line); a div
+            # group (#142) stays in the item on purpose.
+            if not div_group and result and result[-1].strip():
+                since_blank = len(result)
+                while since_blank and result[since_blank - 1].strip():
+                    since_blank -= 1
+                if _open_list_item(result[since_blank:]) is not None:
+                    result.append("")
             first_line_at = len(result)
 
             # Determine number of columns from first row
