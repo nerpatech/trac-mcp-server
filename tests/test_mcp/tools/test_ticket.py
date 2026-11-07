@@ -1276,6 +1276,27 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertIn("> Threaded five.", posted[0])
             self.assertNotIn("Flat two.", posted[0])
 
+    def test_update_reply_to_quote_keeps_leading_whitespace(self):
+        """Trac #160. Leading whitespace is TracWiki markup: the quoted
+        list items must keep the same indent, as the tracrpc_comment
+        plugin's quote and Trac's own Reply do. Trailing whitespace
+        (a "\\n \\n" tail too) goes, and a CRLF comment leaves no "\\r"."""
+        expected = (
+            "Replying to [comment:3 alice]:\n"
+            ">  * a\n"
+            ">  * b\n\n"
+            "New reply text"
+        )
+        for text in (
+            " * a\n * b",
+            " * a\n * b\n \n",
+            " * a\r\n * b\r\n",
+        ):
+            changelog = [(1700000000, "alice", "comment", "3", text, 1)]
+            result, posted = self._reply_to_run(changelog, 3)
+            self.assertFalse(result.isError, repr(text))
+            self.assertEqual(posted, [expected], repr(text))
+
     def test_update_reply_to_flat_row_still_matches(self):
         changelog = [(1700000000, "alice", "comment", "3", "Three.", 1)]
         result, posted = self._reply_to_run(changelog, "3")

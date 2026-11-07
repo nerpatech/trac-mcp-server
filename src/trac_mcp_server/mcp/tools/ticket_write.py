@@ -7,6 +7,7 @@ byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
 import asyncio
+import re
 import xmlrpc.client
 from dataclasses import dataclass
 from typing import Any
@@ -386,8 +387,14 @@ async def _handle_update(
                 f"Comment #{reply_to} not found on ticket #{ticket_id}",
                 "Use ticket_changelog to see valid comment numbers.",
             )
+        # Only trailing whitespace goes (#160): leading whitespace is
+        # TracWiki markup (` * item` is a list item), so a strip() would
+        # shift the first line's indent against the rest. Split on LF or
+        # CRLF so a CRLF comment leaves no stray "\r" -- the same rule
+        # ticket_changelog follows since #155.
         quote_lines = "\n".join(
-            f"> {line}" for line in quoted_text.strip().split("\n")
+            f"> {line}"
+            for line in re.split(r"\r?\n", quoted_text.rstrip())
         )
         comment = (
             f"Replying to [comment:{wanted.cnum} {quoted_author}]:\n"
