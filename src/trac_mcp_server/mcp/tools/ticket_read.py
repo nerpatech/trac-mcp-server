@@ -651,7 +651,9 @@ async def _handle_changelog(
                 # made agents look for a comment that ticket_get (rightly)
                 # never returns. A reply's "2.5" is comment 5.
                 parsed = TracClient.parse_comment_number(oldvalue)
-                label = f"comment {parsed.cnum}" if parsed else "comment"
+                label = (
+                    f"comment {parsed.cnum}" if parsed else "comment"
+                )
                 entries.append(
                     f"- {timestamp_str} by {author}: {label} has no text"
                 )
