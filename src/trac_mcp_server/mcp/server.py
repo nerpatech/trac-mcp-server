@@ -34,7 +34,7 @@ from ..instances import (
     load_declared_instances,
 )
 from ..instances import caller_identity as _caller_identity
-from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging
+from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging, startup_note
 from ..version import check_version_consistency
 from .http_app import run_http
 from .lifespan import server_lifespan
@@ -440,59 +440,26 @@ def log_startup_settings(
         logger.warning("write_gate=off")
 
 
-def _logging_reaches_stderr(level: int) -> bool:
-    """Whether a record from ``logger`` at ``level`` is written to stderr.
-
-    True when the logger is enabled for ``level`` and some handler it
-    propagates to emits the record to the current ``sys.stderr``. A
-    ``FileHandler`` is a ``StreamHandler`` too, but its stream is the file.
-    ``sys.stderr`` is read at call time, so a handler built on a replaced
-    stream (a test capture, say) counts only while that stream is current.
-    With no handler anywhere on the chain, logging's ``lastResort`` handler
-    writes WARNING and above to the current stderr.
-    """
-    if not logger.isEnabledFor(level):
-        return False
-    seen_handler = False
-    current: logging.Logger | None = logger
-    while current is not None:
-        for handler in current.handlers:
-            seen_handler = True
-            if (
-                isinstance(handler, logging.StreamHandler)
-                and not isinstance(handler, logging.FileHandler)
-                and handler.stream is sys.stderr
-                and level >= handler.level
-            ):
-                return True
-        current = current.parent if current.propagate else None
-    last_resort = logging.lastResort
-    return (
-        not seen_handler
-        and last_resort is not None
-        and level >= last_resort.level
-    )
-
-
 def _startup_note(
     message: str, *args, level: int = logging.INFO
 ) -> None:
-    """Log a startup line, and print it on stderr unless the logger
-    already does.
+    """Log a startup line for this module's logger, printing it on stderr
+    unless the logger already does (see ``logger.startup_note``)."""
+    startup_note(logger, message, *args, level=level)
 
-    Under stdio with a log file the logger writes only that file, so stderr
-    is the only place an operator sees the line. Under http/cli, or stdio
-    without a log file, the logger has its own stderr handler and shows the
-    line itself: printing it as well showed it twice. The printed fallback
-    of a WARNING carries a ``Warning: `` prefix.
-    """
-    logger.log(level, message, *args)
-    if _logging_reaches_stderr(level):
-        return
-    text = message % args if args else message
-    if level >= logging.WARNING:
-        text = f"Warning: {text}"
-    print(text, file=sys.stderr)
+
+def _report_version(is_consistent: bool, message: str) -> None:
+    """Report the version check: a warning that also reaches stderr when
+    no handler writes it there, else an info line in the log."""
+    if not is_consistent:
+        startup_note(
+            logger,
+            message,
+            level=logging.WARNING,
+            printed=f"\u26a0\ufe0f  Warning: {message}",
+        )
+    else:
+        logger.info(message)
 
 
 def build_registry(
@@ -607,11 +574,7 @@ async def main(config_overrides: dict | None = None):
 
     # Version check (non-blocking warning for stale binaries)
     is_consistent, message = check_version_consistency()
-    if not is_consistent:
-        logger.warning(message)
-        sys.stderr.write(f"\u26a0\ufe0f  Warning: {message}\n")
-    else:
-        logger.info(message)
+    _report_version(is_consistent, message)
 
     # Build ToolRegistry with optional permission filtering
     permissions_file = (

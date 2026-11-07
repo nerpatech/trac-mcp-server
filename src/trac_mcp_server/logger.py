@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 
 
 class JsonFormatter(logging.Formatter):
@@ -36,6 +37,83 @@ DEFAULT_MCP_LOG_FILE = "/tmp/trac-mcp-server.log"
 
 _LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
 _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+
+def logging_reaches_stderr(logger: logging.Logger, level: int) -> bool:
+    """Whether a record from ``logger`` at ``level`` is written to stderr.
+
+    True when the logger is enabled for ``level`` and some handler it
+    propagates to emits the record to the current ``sys.stderr``. A
+    ``FileHandler`` is a ``StreamHandler`` too, but its stream is the file.
+    ``sys.stderr`` is read at call time, so a handler built on a replaced
+    stream (a test capture, say) counts only while that stream is current.
+    With no handler anywhere on the chain, logging's ``lastResort`` handler
+    writes WARNING and above to the current stderr.
+    """
+    if not logger.isEnabledFor(level):
+        return False
+    seen_handler = False
+    current: logging.Logger | None = logger
+    while current is not None:
+        for handler in current.handlers:
+            seen_handler = True
+            if (
+                isinstance(handler, logging.StreamHandler)
+                and not isinstance(handler, logging.FileHandler)
+                and handler.stream is sys.stderr
+                and level >= handler.level
+            ):
+                return True
+        current = current.parent if current.propagate else None
+    last_resort = logging.lastResort
+    return (
+        not seen_handler
+        and last_resort is not None
+        and level >= last_resort.level
+    )
+
+
+def _print_stderr(text: str) -> None:
+    print(text, file=sys.stderr, flush=True)
+
+
+def startup_note(
+    logger: logging.Logger,
+    message: str,
+    *args: object,
+    level: int = logging.INFO,
+    printed: str | list[str] | None = None,
+    print_fn: Callable[[str], None] | None = None,
+) -> None:
+    """Log a startup line, and print it on stderr unless the logger
+    already does.
+
+    Under stdio with a log file the logger writes only that file, so stderr
+    is the only place an operator sees the line. Under http/cli, or stdio
+    without a log file, the logger has its own stderr handler and shows the
+    line itself: printing it as well showed it twice.
+
+    ``printed`` is the fallback text, a string or a list of strings printed
+    one per line; it lets stdio keep its own wording and indentation. By
+    default the fallback is ``message % args``, with a ``Warning: `` prefix
+    at WARNING and above. ``print_fn`` receives each line (default: print
+    to stderr).
+    """
+    logger.log(level, message, *args)
+    if logging_reaches_stderr(logger, level):
+        return
+    if printed is None:
+        text = message % args if args else message
+        if level >= logging.WARNING:
+            text = f"Warning: {text}"
+        lines = [text]
+    elif isinstance(printed, str):
+        lines = [printed]
+    else:
+        lines = list(printed)
+    emit = print_fn if print_fn is not None else _print_stderr
+    for line in lines:
+        emit(line)
 
 
 def _resolve_log_file(mode: str, log_file: str | None) -> str | None:

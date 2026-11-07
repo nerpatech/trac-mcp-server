@@ -13,6 +13,7 @@ since pytest's log capture plugin interferes with actual basicConfig calls.
 """
 
 import asyncio
+import io
 import json
 import logging
 import sys
@@ -21,8 +22,14 @@ from unittest.mock import patch
 
 import pytest
 
-from trac_mcp_server.logger import JsonFormatter, setup_logging
+from trac_mcp_server.logger import (
+    JsonFormatter,
+    logging_reaches_stderr,
+    setup_logging,
+    startup_note,
+)
 from trac_mcp_server.mcp.server import (
+    _report_version,
     build_parser,
     config_overrides_from_args,
     main,
@@ -455,3 +462,219 @@ class TestJsonFormatter:
         assert "\n" not in output
         # Verify it's still valid JSON
         json.loads(output)
+
+
+# -------------------------------------------------------------------------
+# logging_reaches_stderr() / startup_note() (Trac #167)
+# -------------------------------------------------------------------------
+
+
+@pytest.fixture
+def note_logger():
+    """A dedicated logger that does not propagate, so only the handlers a
+    test adds count; all of its state is restored on exit."""
+    lg = logging.getLogger("test_startup_note.dedicated")
+    saved = (lg.level, lg.propagate, list(lg.handlers))
+    lg.setLevel(logging.INFO)
+    lg.propagate = False
+    lg.handlers = []
+    yield lg
+    for handler in lg.handlers:
+        handler.close()
+    lg.level, lg.propagate = saved[0], saved[1]
+    lg.handlers = saved[2]
+
+
+class TestLoggingReachesStderr:
+    def test_stderr_stream_handler_reaches(self, note_logger, capsys):
+        note_logger.addHandler(logging.StreamHandler(sys.stderr))
+        assert logging_reaches_stderr(note_logger, logging.INFO)
+
+    def test_file_handler_does_not_reach(self, note_logger, tmp_path):
+        note_logger.addHandler(logging.FileHandler(tmp_path / "x.log"))
+        assert not logging_reaches_stderr(note_logger, logging.INFO)
+        assert not logging_reaches_stderr(note_logger, logging.ERROR)
+
+    def test_stdout_stream_handler_does_not_reach(
+        self, note_logger, capsys
+    ):
+        note_logger.addHandler(logging.StreamHandler(sys.stdout))
+        assert not logging_reaches_stderr(note_logger, logging.INFO)
+
+    def test_level_below_the_handlers_does_not_reach(
+        self, note_logger, capsys
+    ):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(logging.WARNING)
+        note_logger.addHandler(handler)
+        assert not logging_reaches_stderr(note_logger, logging.INFO)
+        assert logging_reaches_stderr(note_logger, logging.WARNING)
+
+    def test_level_below_the_loggers_does_not_reach(
+        self, note_logger, capsys
+    ):
+        note_logger.addHandler(logging.StreamHandler(sys.stderr))
+        note_logger.setLevel(logging.WARNING)
+        assert not logging_reaches_stderr(note_logger, logging.INFO)
+
+    def test_handler_on_a_propagated_to_parent_reaches(
+        self, note_logger, capsys
+    ):
+        parent = logging.getLogger("test_startup_note")
+        saved = (list(parent.handlers), parent.level)
+        try:
+            parent.handlers = [logging.StreamHandler(sys.stderr)]
+            note_logger.propagate = True
+            assert logging_reaches_stderr(note_logger, logging.INFO)
+        finally:
+            parent.handlers, parent.level = saved
+
+    def test_stream_replaced_after_the_handler_was_built(
+        self, note_logger
+    ):
+        """A handler on a stream that is no longer sys.stderr does not
+        count."""
+        note_logger.addHandler(logging.StreamHandler(io.StringIO()))
+        assert not logging_reaches_stderr(note_logger, logging.INFO)
+
+
+class TestStartupNote:
+    def test_stderr_handler_means_no_print(self, note_logger, capsys):
+        note_logger.addHandler(logging.StreamHandler(sys.stderr))
+        printed = []
+        startup_note(
+            note_logger,
+            "hello %s",
+            "x",
+            printed="fallback",
+            print_fn=printed.append,
+        )
+        assert printed == []
+        # the logger itself wrote the line
+        assert "hello x" in capsys.readouterr().err
+
+    def test_file_handler_only_prints(self, note_logger, tmp_path):
+        log = tmp_path / "x.log"
+        note_logger.addHandler(logging.FileHandler(log))
+        printed = []
+        startup_note(
+            note_logger, "hello %s", "x", print_fn=printed.append
+        )
+        assert printed == ["hello x"]
+        assert "hello x" in log.read_text()
+
+    def test_level_below_the_handler_prints(self, note_logger, capsys):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setLevel(logging.WARNING)
+        note_logger.addHandler(handler)
+        printed = []
+        startup_note(note_logger, "quiet", print_fn=printed.append)
+        assert printed == ["quiet"]
+
+    def test_printed_str_is_printed_as_given(
+        self, note_logger, tmp_path
+    ):
+        note_logger.addHandler(logging.FileHandler(tmp_path / "x.log"))
+        printed = []
+        startup_note(
+            note_logger,
+            "Trac URL: %s",
+            "http://t",
+            printed="  Trac URL: http://t",
+            print_fn=printed.append,
+        )
+        assert printed == ["  Trac URL: http://t"]
+
+    def test_printed_list_is_one_line_each(self, note_logger, tmp_path):
+        note_logger.addHandler(logging.FileHandler(tmp_path / "x.log"))
+        printed = []
+        startup_note(
+            note_logger,
+            "Failed: %s",
+            "boom",
+            level=logging.ERROR,
+            printed=["ERROR: Failed.", "  boom", "  Check it."],
+            print_fn=printed.append,
+        )
+        assert printed == ["ERROR: Failed.", "  boom", "  Check it."]
+
+    def test_default_fallback_has_the_warning_prefix(
+        self, note_logger, tmp_path
+    ):
+        note_logger.addHandler(logging.FileHandler(tmp_path / "x.log"))
+        printed = []
+        startup_note(
+            note_logger,
+            "odd %s",
+            "thing",
+            level=logging.WARNING,
+            print_fn=printed.append,
+        )
+        startup_note(note_logger, "plain", print_fn=printed.append)
+        assert printed == ["Warning: odd thing", "plain"]
+
+    def test_default_print_goes_to_stderr(
+        self, note_logger, tmp_path, capsys
+    ):
+        note_logger.addHandler(logging.FileHandler(tmp_path / "x.log"))
+        startup_note(note_logger, "to stderr", printed=["a", "b"])
+        captured = capsys.readouterr()
+        assert captured.err == "a\nb\n"
+        assert captured.out == ""
+
+    def test_logs_even_when_it_prints(self, note_logger, tmp_path):
+        log = tmp_path / "x.log"
+        note_logger.addHandler(logging.FileHandler(log))
+        startup_note(
+            note_logger,
+            "logged",
+            printed="shown",
+            print_fn=lambda t: None,
+        )
+        assert "logged" in log.read_text()
+
+
+class TestReportVersion:
+    """The version-mismatch warning in main() goes through one helper."""
+
+    _MSG = "Version mismatch: runtime 1 vs source 2"
+    _WARNING = f"⚠️  Warning: {_MSG}"
+
+    @pytest.fixture
+    def server_logger(self):
+        lg = logging.getLogger("trac_mcp_server.mcp.server")
+        saved = (lg.level, lg.propagate, list(lg.handlers))
+        yield lg
+        for handler in lg.handlers:
+            if handler not in saved[2]:
+                handler.close()
+        lg.level, lg.propagate = saved[0], saved[1]
+        lg.handlers = saved[2]
+
+    def test_http_shape_warns_once(self, server_logger, capsys):
+        server_logger.setLevel(logging.INFO)
+        server_logger.addHandler(logging.StreamHandler(sys.stderr))
+        _report_version(False, self._MSG)
+        err = capsys.readouterr().err
+        assert err.count(self._MSG) == 1
+        assert "⚠️" not in err
+
+    def test_stdio_file_shape_warns_once_on_stderr(
+        self, server_logger, tmp_path, capsys
+    ):
+        server_logger.setLevel(logging.WARNING)
+        log = tmp_path / "x.log"
+        server_logger.addHandler(logging.FileHandler(log))
+        _report_version(False, self._MSG)
+        assert capsys.readouterr().err == self._WARNING + "\n"
+        assert self._MSG in log.read_text()
+
+    def test_consistent_version_prints_nothing(
+        self, server_logger, tmp_path, capsys
+    ):
+        server_logger.setLevel(logging.INFO)
+        server_logger.addHandler(
+            logging.FileHandler(tmp_path / "x.log")
+        )
+        _report_version(True, "all good")
+        assert capsys.readouterr().err == ""
