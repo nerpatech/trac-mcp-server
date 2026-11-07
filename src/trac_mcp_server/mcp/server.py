@@ -435,6 +435,85 @@ def log_startup_settings(
         logger.warning("write_gate=off")
 
 
+def _startup_note(message: str, *args) -> None:
+    """Log a startup line and print it on stderr, which under stdio is the
+    only place an operator sees it (the logger writes to the log file)."""
+    logger.info(message, *args)
+    print(message % args, file=sys.stderr)
+
+
+def build_registry(
+    all_specs: list[ToolSpec],
+    allowed_permissions: frozenset[str] | None,
+    server_config: ServerConfig,
+    permissions_file: str | None = None,
+) -> ToolRegistry:
+    """The registry main() serves: the permissions, read-only and
+    disabled-tools filters over all_specs.
+
+    Each active filter gets its own stderr line with the count that filter
+    alone lets through; a final line gives the combined result.
+    """
+    total = len(all_specs)
+    names = {spec.tool.name for spec in all_specs}
+    configured = frozenset(server_config.disabled_tools)
+    disabled = configured & names
+    unknown = configured - names
+    registry = ToolRegistry(
+        all_specs,
+        allowed_permissions,
+        read_only=server_config.read_only,
+        disabled_tools=disabled,
+    )
+    logger.info(
+        "Registered %d tools (of %d total)",
+        registry.tool_count(),
+        total,
+    )
+
+    if allowed_permissions is not None:
+        _startup_note(
+            "Permissions file: %s (%d of %d tools pass)",
+            permissions_file,
+            ToolRegistry(all_specs, allowed_permissions).tool_count(),
+            total,
+        )
+    if server_config.read_only:
+        _startup_note(
+            "Read-only mode: %d of %d tools pass",
+            ToolRegistry(all_specs, read_only=True).tool_count(),
+            total,
+        )
+    if disabled:
+        _startup_note("Disabled tools: %s", ", ".join(sorted(disabled)))
+    if unknown:
+        logger.warning(
+            "Disabled tools not found (ignored): %s",
+            ", ".join(sorted(unknown)),
+        )
+        print(
+            "Warning: disabled tools not found (ignored): "
+            + ", ".join(sorted(unknown)),
+            file=sys.stderr,
+        )
+    if "list_instances" in disabled:
+        message = (
+            "list_instances is disabled, but error messages still tell "
+            "callers to call it; they get unknown_tool"
+        )
+        logger.warning(message)
+        print(f"Warning: {message}", file=sys.stderr)
+    if (
+        allowed_permissions is not None
+        or server_config.read_only
+        or disabled
+    ):
+        _startup_note(
+            "Tools enabled: %d of %d", registry.tool_count(), total
+        )
+    return registry
+
+
 async def main(config_overrides: dict | None = None):
     """Run the MCP server with the configured transport.
 
@@ -514,20 +593,9 @@ async def main(config_overrides: dict | None = None):
     ):
         specs = with_instance_param(specs, declared_names)
     all_specs = with_strict_schema(specs)
-    registry = ToolRegistry(all_specs, allowed_permissions)
-    logger.info(
-        "Registered %d tools (of %d total)",
-        registry.tool_count(),
-        len(all_specs),
+    registry = build_registry(
+        all_specs, allowed_permissions, server_config, permissions_file
     )
-
-    if permissions_file:
-        print(
-            f"Permissions file: {permissions_file} "
-            f"({registry.tool_count()} of {len(all_specs)} tools enabled)",
-            file=sys.stderr,
-        )
-
     set_registry(registry)
     # bootstrap_server_config() always resolves file_access (by transport
     # when unset); the `or` only satisfies the Optional field type.
@@ -699,6 +767,15 @@ must not be piped manually. This does not apply to --transport http.
         "Prefer setting TRAC_MCP_AUTH_TOKEN instead.",
     )
     parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Expose only tools marked read-only (readOnlyHint), on every "
+        "transport. Also hides ticket_attachment_get, wiki_attachment_get "
+        "and wiki_file_pull, which can write a local file. Also settable "
+        "via TRAC_MCP_READ_ONLY env var or config.yaml server.read_only. "
+        "Combinable with --permissions-file.",
+    )
+    parser.add_argument(
         "--file-access",
         choices=["local", "off"],
         help="Whether the file tools may read and write this process's "
@@ -741,6 +818,8 @@ def config_overrides_from_args(args: argparse.Namespace) -> dict:
         config_overrides["path"] = args.path
     if args.allow_unauthenticated:
         config_overrides["allow_unauthenticated"] = True
+    if args.read_only:
+        config_overrides["read_only"] = True
     if args.file_access:
         config_overrides["file_access"] = args.file_access
     return config_overrides

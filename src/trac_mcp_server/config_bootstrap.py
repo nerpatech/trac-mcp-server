@@ -103,6 +103,10 @@ def bootstrap_config(
     return config, sources
 
 
+_BOOL_TRUE = frozenset({"true", "1", "yes", "on"})
+_BOOL_FALSE = frozenset({"false", "0", "no", "off"})
+
+
 def bootstrap_server_config(
     cli_overrides: dict[str, Any] | None = None,
 ) -> ServerConfig:
@@ -115,13 +119,25 @@ def bootstrap_server_config(
     CLI > env var (``TRAC_MCP_*``) > YAML ``server:`` section > default.
 
     Accepted ``cli_overrides`` keys: ``transport``, ``host``, ``port``,
-    ``path``, ``allow_unauthenticated``, ``file_access``. ``auth_token`` is intentionally
-    not accepted here -- it must come from ``TRAC_MCP_AUTH_TOKEN`` or the
-    YAML ``server:`` section, never a CLI flag, so it never appears in the
-    process list. ``identities`` (ticket #102) is likewise never a CLI
-    override, and unlike ``auth_token`` it is not a YAML setting either --
-    it always comes from ``instances.load_identities()``, which reads the
-    file named by ``TRAC_IDENTITIES``.
+    ``path``, ``allow_unauthenticated``, ``read_only``, ``file_access``.
+    ``auth_token`` is intentionally not accepted here -- it must come from
+    ``TRAC_MCP_AUTH_TOKEN`` or the YAML ``server:`` section, never a CLI
+    flag, so it never appears in the process list. ``identities`` (ticket
+    #102) is likewise never a CLI override, and unlike ``auth_token`` it is
+    not a YAML setting either -- it always comes from
+    ``instances.load_identities()``, which reads the file named by
+    ``TRAC_IDENTITIES``.
+
+    ``TRAC_MCP_READ_ONLY`` (or ``--read-only``) restricts the tool list to
+    the tools marked ``Tool.annotations.readOnlyHint``, on every transport.
+    Its value is true/false, 1/0, yes/no or on/off; anything else raises
+    ``ValueError``, an empty value counts as unset.
+
+    ``TRAC_MCP_DISABLED_TOOLS`` (comma-separated tool names, or YAML
+    ``server.disabled_tools``) drops individual tools from the tool list,
+    e.g. ``ticket_comment_history`` when the Trac server lacks the plugin
+    it needs. A set value replaces the YAML list; an empty one counts as
+    unset.
 
     ``TRAC_MCP_ALLOWED_HOSTS``/``TRAC_MCP_ALLOWED_ORIGINS`` (comma-separated,
     e.g. ``trac-mcp:8080,trac-mcp:*``) set the DNS-rebinding-protection
@@ -218,17 +234,44 @@ def bootstrap_server_config(
         overrides.get("allow_unauthenticated", False)
     ) or bool(yaml_server.get("allow_unauthenticated", False))
 
+    # Strict, because a misread value would expose every write tool: an
+    # unrecognised value is refused rather than taken as "false", and an
+    # empty one counts as unset, so ``${TRAC_MCP_READ_ONLY:-}`` in a
+    # compose file keeps the YAML setting.
+    read_only_env = os.getenv("TRAC_MCP_READ_ONLY", "").strip().lower()
+    if read_only_env and read_only_env not in _BOOL_TRUE | _BOOL_FALSE:
+        raise ValueError(
+            f"Invalid TRAC_MCP_READ_ONLY: {os.getenv('TRAC_MCP_READ_ONLY')!r}"
+            " (expected true/false, 1/0, yes/no or on/off)"
+        )
+    if overrides.get("read_only"):
+        read_only = True
+    elif read_only_env:
+        read_only = read_only_env in _BOOL_TRUE
+    else:
+        read_only = bool(yaml_server.get("read_only", False))
+
     def _parse_csv_env(key: str) -> list[str] | None:
         """Comma-separated env var -> list, or None if unset or blank.
 
         Blank entries (from a trailing comma or stray whitespace) are
-        dropped rather than turning into an empty-string allow-list entry
-        that could never match a real Host/Origin header. A value with no
-        entry at all counts as unset, so ``${VAR:-}`` in a compose file
-        keeps the YAML list.
+        dropped rather than turning into an empty-string entry that
+        could never match a tool name or a Host/Origin header. A value
+        with no entry at all counts as unset, so ``${VAR:-}`` in a
+        compose file keeps the YAML list.
         """
         items = [item.strip() for item in os.getenv(key, "").split(",")]
         return [item for item in items if item] or None
+
+    disabled_tools = _parse_csv_env("TRAC_MCP_DISABLED_TOOLS")
+    if disabled_tools is None:
+        # YAML names are normalised like env entries, so " ticket_delete"
+        # still matches the tool.
+        disabled_tools = [
+            str(name).strip()
+            for name in yaml_server.get("disabled_tools", [])
+            if str(name).strip()
+        ]
 
     allowed_hosts_env = _parse_csv_env("TRAC_MCP_ALLOWED_HOSTS")
     allowed_hosts = (
@@ -287,6 +330,8 @@ def bootstrap_server_config(
         oidc_rpc_url=oidc_rpc_url,
         oidc_allow_insecure_http=oidc_allow_insecure_http,
         allow_unauthenticated=allow_unauthenticated,
+        read_only=read_only,
+        disabled_tools=disabled_tools,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         file_access=file_access,

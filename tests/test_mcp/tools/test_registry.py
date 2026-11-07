@@ -28,8 +28,14 @@ def _make_spec(
     name: str,
     permissions: frozenset[str] | None = None,
     handler=None,
+    read_only_hint: bool | None = None,
 ) -> ToolSpec:
-    """Helper to create a ToolSpec for testing."""
+    """Helper to create a ToolSpec for testing.
+
+    read_only_hint mirrors Tool.annotations.readOnlyHint. Left as None
+    (the default) produces a spec with no annotations at all -- exercises
+    the "missing signal" case, distinct from an explicit readOnlyHint=False.
+    """
     if permissions is None:
         permissions = frozenset()
     if handler is None:
@@ -41,6 +47,12 @@ def _make_spec(
                 ]
             )
 
+    annotations = (
+        types.ToolAnnotations(readOnlyHint=read_only_hint)
+        if read_only_hint is not None
+        else None
+    )
+
     return ToolSpec(
         tool=types.Tool(
             name=name,
@@ -50,6 +62,7 @@ def _make_spec(
                 "properties": {},
                 "required": [],
             },
+            annotations=annotations,
         ),
         permissions=permissions,
         handler=handler,
@@ -353,6 +366,125 @@ class TestToolRegistry(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             asyncio.run(
                 registry.call_tool("ticket_create", {}, MagicMock())
+            )
+        self.assertIn("Unknown tool", str(ctx.exception))
+
+
+class TestToolRegistryReadOnlyFilter(unittest.TestCase):
+    """Test ToolRegistry's read_only filter -- orthogonal to and
+    combinable with the permissions filter above."""
+
+    def setUp(self):
+        self.specs = [
+            _make_spec("ticket_search", read_only_hint=True),
+            _make_spec("ticket_create", read_only_hint=False),
+            _make_spec("wiki_get", read_only_hint=True),
+            _make_spec("wiki_delete", read_only_hint=False),
+            _make_spec("no_annotations_at_all"),  # read_only_hint=None
+        ]
+
+    def test_read_only_false_includes_everything(self):
+        """Default (read_only=False) is unaffected -- pure regression
+        guard against the new parameter changing existing behavior."""
+        registry = ToolRegistry(self.specs)
+        self.assertEqual(registry.tool_count(), 5)
+
+    def test_read_only_true_excludes_write_tools(self):
+        registry = ToolRegistry(self.specs, read_only=True)
+        names = [t.name for t in registry.list_tools()]
+        self.assertIn("ticket_search", names)
+        self.assertIn("wiki_get", names)
+        self.assertNotIn("ticket_create", names)
+        self.assertNotIn("wiki_delete", names)
+
+    def test_read_only_true_excludes_tools_with_no_annotations(self):
+        """Missing readOnlyHint is treated as NOT read-only -- the safe
+        default when the signal is absent is to exclude, never to
+        accidentally admit a write tool through a gap in annotations."""
+        registry = ToolRegistry(self.specs, read_only=True)
+        names = [t.name for t in registry.list_tools()]
+        self.assertNotIn("no_annotations_at_all", names)
+
+    def test_read_only_combines_with_permissions_filter(self):
+        """A tool must pass BOTH filters when both are active."""
+        specs = [
+            _make_spec(
+                "ticket_search",
+                frozenset({"TICKET_VIEW"}),
+                read_only_hint=True,
+            ),
+            _make_spec(
+                "wiki_get",
+                frozenset({"WIKI_VIEW"}),
+                read_only_hint=True,
+            ),
+        ]
+        # read-only, but WIKI_VIEW not granted -> wiki_get still excluded
+        registry = ToolRegistry(
+            specs, frozenset({"TICKET_VIEW"}), read_only=True
+        )
+        names = [t.name for t in registry.list_tools()]
+        self.assertIn("ticket_search", names)
+        self.assertNotIn("wiki_get", names)
+
+    def test_call_tool_read_only_filtered_out_raises(self):
+        """A write tool excluded by read_only=True can't be dispatched by
+        name either -- same "unknown tool" path as permission filtering,
+        so there's no separate bypass to worry about."""
+        registry = ToolRegistry(self.specs, read_only=True)
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                registry.call_tool("ticket_create", {}, MagicMock())
+            )
+        self.assertIn("Unknown tool", str(ctx.exception))
+
+
+class TestToolRegistryDisabledTools(unittest.TestCase):
+    """Test ToolRegistry's disabled_tools filter (by tool name)."""
+
+    def setUp(self):
+        self.specs = [
+            _make_spec("ticket_search", read_only_hint=True),
+            _make_spec("ticket_render_check", read_only_hint=True),
+            _make_spec("ticket_create", read_only_hint=False),
+        ]
+
+    def test_default_disables_nothing(self):
+        self.assertEqual(ToolRegistry(self.specs).tool_count(), 3)
+
+    def test_disabled_tool_is_not_listed(self):
+        registry = ToolRegistry(
+            self.specs,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        names = [t.name for t in registry.list_tools()]
+        self.assertEqual(names, ["ticket_search", "ticket_create"])
+
+    def test_combines_with_read_only(self):
+        registry = ToolRegistry(
+            self.specs,
+            read_only=True,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        names = [t.name for t in registry.list_tools()]
+        self.assertEqual(names, ["ticket_search"])
+
+    def test_unknown_name_is_ignored(self):
+        registry = ToolRegistry(
+            self.specs, disabled_tools=frozenset({"no_such_tool"})
+        )
+        self.assertEqual(registry.tool_count(), 3)
+
+    def test_call_disabled_tool_raises(self):
+        registry = ToolRegistry(
+            self.specs,
+            disabled_tools=frozenset({"ticket_render_check"}),
+        )
+        with self.assertRaises(ValueError) as ctx:
+            asyncio.run(
+                registry.call_tool(
+                    "ticket_render_check", {}, MagicMock()
+                )
             )
         self.assertIn("Unknown tool", str(ctx.exception))
 

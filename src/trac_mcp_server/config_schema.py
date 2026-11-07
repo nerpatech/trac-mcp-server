@@ -165,6 +165,23 @@ class ServerConfig(BaseModel):
         default=False,
         description="Allow binding a non-loopback host without an auth_token",
     )
+    read_only: bool = Field(
+        default=False,
+        description=(
+            "Expose only read-only tools (Tool.annotations.readOnlyHint), "
+            "regardless of transport. A stricter, coarser alternative to "
+            "--permissions-file's Trac-permission-based filtering -- "
+            "combinable with it."
+        ),
+    )
+    disabled_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tool names to leave out of the tool list entirely, e.g. tools "
+            "that need a Trac plugin this server doesn't have. Combinable "
+            "with read_only and --permissions-file."
+        ),
+    )
     allowed_hosts: list[str] = Field(
         default_factory=list,
         description="Extra Host header values to accept, beyond the loopback/host:port defaults",
