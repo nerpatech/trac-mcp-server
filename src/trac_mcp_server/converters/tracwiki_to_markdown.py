@@ -275,7 +275,12 @@ def _lines_since_blank(pieces: list[str]) -> list[str]:
         size *= 4
 
 
-def _continued_item(columns: Sequence[int], width: int) -> int | None:
+def _continued_item(
+    columns: Sequence[int],
+    width: int,
+    *,
+    innermost_ordered: bool = False,
+) -> int | None:
     """The index into `columns` of the list item an indented, non-blank,
     non-marker line `width` columns wide continues, or None when the line
     ends the list (ticket #149).
@@ -284,28 +289,45 @@ def _continued_item(columns: Sequence[int], width: int) -> int | None:
     first (`m_0 < ... < m_k`). Measured on /trac_test on 2026-11-07 and read
     off Trac 1.6's `Formatter._indent_formatter`:
 
-    * `width >= m_k`: the line continues the innermost item (a line AT the
-      marker column included: ` 1. a` / ` b` / ` 1. c` is one list with b in
-      item a).
+    * `width > m_k + 2` (`m_k + 3` when the innermost item is a digits-only
+      ordered one, `innermost_ordered`): the list ends. The line is a
+      blockquote in Trac (ticket #175).
+    * `width >= m_k`, up to that bound: the line continues the innermost item
+      (a line AT the marker column included: ` 1. a` / ` b` / ` 1. c` is one
+      list with b in item a).
     * `0 < width < m_k` and `width > m_0`: the items whose marker is past
       `width` close, and the line continues the deepest remaining item
       (`m <= width`).
     * otherwise (`width <= m_0` while a deeper item is open, or width 0):
       the list ends.
 
-    This is the lower side of Trac's rule only. Trac also puts an upper
-    bound on `width` (marker column + 2 for a bullet, + 3 for an ordered
-    item); a line deeper than that leaves the list. This function does not
-    apply it -- that is a separate ticket, and lines deeper than `m_k` keep
-    continuing the innermost item here as they did before #149.
+    The upper bound is Trac 1.6's `_indent_formatter` rule, measured on
+    /trac_test on 2026-11-07 (ticket #175): ` * a` / text at column 3
+    continues `a`, at column 4 the list ends; ` 1. a` / text at column 4
+    continues, at column 5 the list ends. It is read off the innermost item
+    only, which is the item a deeper line would continue; the caller passes
+    `innermost_ordered` from that item's marker line (`_is_digits_ordered`).
     """
     if not columns or width <= 0:
+        return None
+    if width > columns[-1] + (3 if innermost_ordered else 2):
         return None
     if width >= columns[-1]:
         return len(columns) - 1
     if width <= columns[0]:
         return None
     return max(i for i, column in enumerate(columns) if column <= width)
+
+
+_DIGITS_ORDERED_RE = re.compile(rf"^[ \t]+{_NUMERIC_MARKER}(?=[ \t])")
+
+
+def _is_digits_ordered(marker_line: str) -> bool:
+    """True when `marker_line` opens a digits-only ordered item (`1.`), the
+    kind whose continuation bound is marker column + 3 (ticket #175); a
+    bullet's is + 2. Lettered and roman markers are not asked: the gate
+    (`_marker_column_rule_applies`) excludes them."""
+    return bool(_DIGITS_ORDERED_RE.match(marker_line))
 
 
 def _marker_column_rule_applies(marker_line: str, line: str) -> bool:
@@ -346,9 +368,11 @@ def _list_stack_step(
     at or past its column, with one exception (ticket #149): when
     `_marker_column_rule_applies` holds for the innermost item and
     `_continued_item` says the line continues that innermost item, the stack
-    is kept (a line at its marker column included). Every other shape,
-    including a line that continues an outer item and closes deeper ones
-    (ticket #176), keeps that pop, as on `master`.
+    is kept (a line at its marker column included); when it says the list
+    ends, the stack is emptied (ticket #175: that includes a line past the
+    innermost item's upper bound, which the pop would not remove). Every other
+    shape, including a line that continues an outer item and closes deeper
+    ones (ticket #176), keeps that pop, as on `master`.
     """
     if not line.strip():
         stack.clear()
@@ -360,15 +384,60 @@ def _list_stack_step(
             stack.pop()
         stack.append((column, found))
         return
-    if (
-        stack
-        and _marker_column_rule_applies(stack[-1][1].string, line)
-        and _continued_item([c for c, _ in stack], column)
-        == len(stack) - 1
-    ):
-        return
+    if stack and _marker_column_rule_applies(stack[-1][1].string, line):
+        answer = _continued_item(
+            [c for c, _ in stack],
+            column,
+            innermost_ordered=_is_digits_ordered(stack[-1][1].string),
+        )
+        if answer == len(stack) - 1:
+            return
+        if answer is None:
+            # The list ends: a line at or left of the outermost marker, or
+            # past the innermost item's upper bound (#175). The pop below
+            # would empty the stack for the first and leave it whole for
+            # the second.
+            stack.clear()
+            return
     while stack and stack[-1][0] >= column:
         stack.pop()
+
+
+def _items_open_above(
+    lines: list[str],
+    inside: set[int],
+    start: int,
+    *,
+    openers_transparent: bool = False,
+) -> list[tuple[int, re.Match[str]]]:
+    """The list-item stack open just above line `start`, as
+    `_list_stack_step` walks it over the lines since the last blank one.
+    `inside` holds the indices of block content lines
+    (`_lines_inside_blocks`), which are skipped.
+
+    With `openers_transparent` the line that opens a block (one starting
+    with `{{{`, whose next line is block content) is skipped too. Trac keeps
+    a block, whatever its indent, inside the open item; walked as a line,
+    a flush-left `{{{` would end the list (ticket #175, the seed of
+    `_split_past_bound`)."""
+    above: list[str] = []
+    for idx in range(start - 1, -1, -1):
+        if idx in inside:
+            continue
+        if not lines[idx].strip():
+            break
+        if (
+            openers_transparent
+            and idx + 1 in inside
+            and lines[idx].lstrip(" \t").startswith("{{{")
+        ):
+            continue
+        above.append(lines[idx])
+    above.reverse()
+    stack: list[tuple[int, re.Match[str]]] = []
+    for line in above:
+        _list_stack_step(stack, line)
+    return stack
 
 
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
@@ -1024,6 +1093,36 @@ class TracWikiParser:
                 )
                 continue
 
+            # Ticket #175: Trac ends a list at an indented line past the
+            # innermost item's upper bound and renders it as a blockquote.
+            # The run is split there; the quote part goes out verbatim.
+            if any(_LIST_MARKER_RE.match(m) for m in probes):
+                if inside is None:
+                    inside = self._lines_inside_blocks(lines)
+                segments = self._split_past_bound(
+                    lines, masked, inside, start, index
+                )
+                if segments is not None:
+                    stack = []
+                    for seg, (is_quote, part) in enumerate(segments):
+                        if is_quote:
+                            # A blank line each side keeps the fence out
+                            # of the list for CommonMark; the write leg
+                            # writes the same blank lines back.
+                            if out and out[-1].strip():
+                                out.append("")
+                            out.append(
+                                self._stash_fallback(
+                                    "\n".join(part),
+                                    "Indented line past a list item's bound",
+                                )
+                            )
+                            if seg < len(segments) - 1:
+                                out.append("")
+                        else:
+                            out.extend(part)
+                    continue
+
             if any(self._line_is_not_a_quote(m) for m in probes):
                 stack = []
                 out.extend(run)
@@ -1060,6 +1159,84 @@ class TracWikiParser:
                 )
         return "\n".join(out)
 
+    def _split_past_bound(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        start: int,
+        end: int,
+    ) -> list[tuple[bool, list[str]]] | None:
+        """Split the run `lines[start:end]` (which holds a list marker line)
+        where Trac ends a list at an indented line past the innermost item's
+        upper bound (ticket #175), or None when no line is past it.
+
+        The run is walked with a list stack as `_list_stack_step` does,
+        over the masked probes. A run that starts straight after a block's
+        closing line is seeded with the item open before the block, as
+        `_continues_item_after_block` finds it. At the first non-marker line
+        where the stack is non-empty, `_marker_column_rule_applies` holds
+        and the width is past the innermost item's bound (marker column + 2
+        for a bullet, + 3 for a digits-only ordered item), the walk splits:
+        the lines before it stay as they are, and the quote part runs from
+        that line up to the next marker line (or the end of the run). The
+        walk then restarts at that marker line with an empty stack. The
+        result is `(is_quote, original lines)` segments in order.
+        """
+        segments: list[tuple[bool, list[str]]] = []
+        found = False
+        pos = start
+        while pos < end:
+            stack: list[tuple[int, re.Match[str]]] = []
+            if pos == start and (
+                self._closes_block_line(masked, start)
+                or start - 1 in inside
+            ):
+                # `_closes_block_line` sees only an indented closing line
+                # (its indent is masked); `inside` also holds a flush-left
+                # one.
+                stack = _items_open_above(
+                    lines, inside, start, openers_transparent=True
+                )
+            split = None
+            for idx in range(pos, end):
+                probe = masked[idx]
+                if _LIST_MARKER_RE.match(probe):
+                    _list_stack_step(stack, probe)
+                    continue
+                if stack and _marker_column_rule_applies(
+                    stack[-1][1].string, probe
+                ):
+                    columns = [c for c, _ in stack]
+                    width = _indent_width(_indent_of(probe))
+                    if width > columns[-1] and (
+                        _continued_item(
+                            columns,
+                            width,
+                            innermost_ordered=_is_digits_ordered(
+                                stack[-1][1].string
+                            ),
+                        )
+                        is None
+                    ):
+                        split = idx
+                        break
+                _list_stack_step(stack, probe)
+            if split is None:
+                segments.append((False, lines[pos:end]))
+                break
+            found = True
+            quote_end = split
+            while quote_end < end and not _LIST_MARKER_RE.match(
+                masked[quote_end]
+            ):
+                quote_end += 1
+            if split > pos:
+                segments.append((False, lines[pos:split]))
+            segments.append((True, lines[split:quote_end]))
+            pos = quote_end
+        return segments if found else None
+
     @staticmethod
     def _closes_block_line(masked: list[str], start: int) -> bool:
         """True when the line before `start` closes a ``{{{ }}}`` block.
@@ -1086,31 +1263,24 @@ class TracWikiParser:
         A line AT the marker's column of a bullet or digits-only ordered
         item also counts (#149, `_marker_column_rule_applies` gates it, as
         in `_list_stack_step`); a line that would close deeper items is not
-        claimed (#176). `inside` holds the indices of block content lines
+        claimed (#176), nor is one past the item's upper bound (#175: Trac
+        ends the list there). `inside` holds the indices of block content lines
         (`_lines_inside_blocks`), which are skipped: a blank or column-zero
         line in a code body does not end the list. The stack empties at a
         blank line, so only the lines after the last blank one matter.
         """
-        above: list[str] = []
-        for idx in range(start - 1, -1, -1):
-            if idx in inside:
-                continue
-            if not lines[idx].strip():
-                break
-            above.append(lines[idx])
-        above.reverse()
-        stack: list[tuple[int, re.Match[str]]] = []
-        for line in above:
-            _list_stack_step(stack, line)
+        stack = _items_open_above(lines, inside, start)
         if not stack:
             return False
         marker_line = stack[-1][1].string
         width = _indent_width(_indent_of(lines[start]))
         if _marker_column_rule_applies(marker_line, lines[start]):
             # A line that would close deeper items stays as it was (#176).
-            return _continued_item([c for c, _ in stack], width) == (
-                len(stack) - 1
-            )
+            return _continued_item(
+                [c for c, _ in stack],
+                width,
+                innermost_ordered=_is_digits_ordered(marker_line),
+            ) == (len(stack) - 1)
         return width > stack[-1][0]
 
     def _lines_inside_blocks(self, lines: list[str]) -> set[int]:
@@ -1874,9 +2044,11 @@ class TracWikiParser:
         (case C: ``_continued_item`` answers an outer item) is not changed
         here: the Markdown for it can only be written below a blank line,
         which ends the Trac list on the way back; that is ticket #176. A
-        line deeper than the innermost marker is unchanged, and Trac's upper
-        bound (marker column + 2 for a bullet, + 3 for an ordered item) is
-        not applied: a separate ticket.
+        line deeper than the innermost marker, up to Trac's upper bound
+        (marker column + 2 for a bullet, + 3 for an ordered item), is
+        unchanged; one past that bound ends the list, like a flush-left
+        line (ticket #175: ``_continued_item`` answers None, the stack
+        empties, and the blank line goes in as for any list end).
         """
         lines = text.split("\n")
         out: list[str] = []
@@ -1915,19 +2087,33 @@ class TracWikiParser:
                 continue
             if stack:
                 column = len(_indent_of(line))
+                moved = False
+                answer: int | None = -1  # -1: the rule does not apply
                 if (
                     not blank_since_marker
                     and _marker_column_rule_applies(
                         marker_lines[stack[-1]], line
                     )
-                    and _continued_item(stack, column) == len(stack) - 1
                 ):
+                    answer = _continued_item(
+                        stack,
+                        column,
+                        innermost_ordered=_is_digits_ordered(
+                            marker_lines[stack[-1]]
+                        ),
+                    )
+                if answer == len(stack) - 1:
                     # #149: the line continues the innermost item. At its
                     # marker's column Markdown would not keep it there as
                     # written, so it moves to the text column below.
                     moved = column <= stack[-1]
+                elif answer is None:
+                    # #175: the list ends, as at a flush-left line (the
+                    # pop below would leave a line past the innermost
+                    # item's upper bound in the list). The blank-line
+                    # insertion below then applies as for any list end.
+                    stack.clear()
                 else:
-                    moved = False
                     while stack and stack[-1] >= column:
                         stack.pop()
                 after_quote = bool(out) and out[-1].lstrip(
