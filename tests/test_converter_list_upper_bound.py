@@ -28,10 +28,13 @@ and, at the bound, G `" * a" / "   col3" / " * c"`, J `" 1. a" / "    col4" /
 " 1. c"` and B2 (J's shape after a block, `"    col4 after block"`) still
 continue the item.
 
-**The fix is to carry the bytes**: every list walk now ends the list at such a
-line (`_continued_item`'s upper bound, `_list_stack_step`,
-`_separate_list_from_trailing_paragraph`, `_continues_item_after_block`), and
-`_convert_indented_blocks` splits the run there. The quote part (from the
+**The fix is to carry the bytes**: only the walks over RAW TracWiki lines
+end the list at such a line (`_split_past_bound` and
+`_continues_item_after_block`, both through `_items_open_above`, which pass
+`upper_bound=True`), and `_convert_indented_blocks` splits the run there.
+The walks over converted text (`_open_list_item`, the table walk,
+`_separate_list_from_trailing_paragraph`) keep master's rule, because an
+item numbered 10 or more puts its text at m + 4, past the bound. The quote part (from the
 line up to the next list marker) goes out through the `tracwiki-unconverted`
 fallback, the rest as before. The write leg writes a fallback fence after a
 list as blank line / original bytes / blank line, which closes the list and
@@ -56,6 +59,7 @@ from trac_mcp_server.converters.tracwiki_to_markdown import (
     TracWikiParser,
     _continued_item,
     _list_stack_step,
+    _open_list_item,
     tracwiki_to_markdown,
 )
 
@@ -202,14 +206,19 @@ def _stack(columns: list[int], marker_line: str):
 
 
 def test_list_stack_step_ends_the_list_past_the_bound():
+    """Only the raw-TracWiki walks (`_items_open_above`, for
+    `_split_past_bound` and `_continues_item_after_block`) pass
+    `upper_bound=True`; every other caller keeps the default, master's pop."""
     stack = _stack([1], " * a")
-    _list_stack_step(stack, "    col4")
+    _list_stack_step(stack, "    col4", upper_bound=True)
     assert stack == []
 
     stack = _stack([1], " 1. a")
-    _list_stack_step(stack, "    col4")  # at the bound: kept
+    _list_stack_step(
+        stack, "    col4", upper_bound=True
+    )  # at the bound
     assert [c for c, _ in stack] == [1]
-    _list_stack_step(stack, "     col5")  # past it
+    _list_stack_step(stack, "     col5", upper_bound=True)  # past it
     assert stack == []
 
 
@@ -295,24 +304,6 @@ def test_round_trip_bytes(name):
 # -- The other two walks --------------------------------------------------------
 
 
-def test_the_separator_ends_the_list_past_the_bound_like_a_flush_left_line():
-    parser = TracWikiParser()
-    assert parser._separate_list_from_trailing_paragraph(
-        " - a\n    col4\n - c"
-    ) == (" - a\n\n    col4\n - c")
-    # Digits-only ordered: + 3, so col4 continues and col5 ends.
-    assert parser._separate_list_from_trailing_paragraph(
-        " 1. a\n    col4\n 1. c"
-    ) == (" 1. a\n    col4\n 1. c")
-    assert parser._separate_list_from_trailing_paragraph(
-        " 1. a\n     col5\n 1. c"
-    ) == (" 1. a\n\n     col5\n 1. c")
-    # At the bound for a bullet: unchanged.
-    assert parser._separate_list_from_trailing_paragraph(
-        " - a\n   col3\n - c"
-    ) == (" - a\n   col3\n - c")
-
-
 @pytest.mark.parametrize(
     ("lines", "expected"),
     [
@@ -349,6 +340,114 @@ def test_continues_item_after_block_stops_at_the_bound(lines, expected):
         )
         is expected
     )
+
+
+# -- Code review of the first #175 branch: the bound is for RAW lines ------------
+#
+# The bound is Trac's rule about the raw TracWiki line. Passes that walk text
+# the converter has already rewritten (block placement in `_open_list_item`,
+# the table walk) see generated lines at an item's Markdown text column, which
+# is past the bound for an item numbered 10 or more. Block openers past the
+# bound are blocks (#144), and table rows are not quote text. Each row below
+# is `master`'s (c76efac) output, pinned as a literal.
+
+R1 = " 10. a\n     {{{\n     x\n     }}}\n 11. b"
+R2 = (
+    " 10. a\n     {{{\n     x\n     }}}\n     {{{\n     y\n     }}}\n"
+    " 11. b"
+)
+R3 = " * a\n      {{{\n  code\n      }}}\n   more"
+R4 = " * a\n    ||x||y||\n    ||1||2||\n * b"
+R5 = " 10. a\n     {{{#!div\n     ||=x=||=y=||\n     ||1||2||\n     }}}\n 11. b"
+
+# source -> (master's Markdown, master's round trip, None to skip it)
+RAW_ONLY_ROWS = {
+    "R1": (R1, " 10. a\n     ```\n     x\n     ```\n 11. b", R1),
+    "R2": (
+        R2,
+        " 10. a\n     ```\n     x\n     ```\n     ```\n     y\n     ```\n"
+        " 11. b",
+        R2,
+    ),
+    "R3": (
+        R3,
+        " - a\n   ```\n     code\n   ```\n   more",
+        " * a\n   {{{\n     code\n   }}}\n   more",
+    ),
+    "R4": (R4, " - a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n - b", None),
+    "R5": (
+        R5,
+        " 10. a\n     | x | y |\n     |---|---|\n     | 1 | 2 |\n 11. b",
+        R5,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(RAW_ONLY_ROWS))
+def test_raw_only_rows_read_leg_is_masters(name):
+    source, markdown, _ = RAW_ONLY_ROWS[name]
+    assert _md(source) == markdown
+
+
+@pytest.mark.parametrize(
+    "name",
+    [n for n in RAW_ONLY_ROWS if RAW_ONLY_ROWS[n][2] is not None],
+)
+def test_raw_only_rows_round_trip_is_masters(name):
+    source, _, expected = RAW_ONLY_ROWS[name]
+    assert markdown_to_tracwiki(_md(source)) == expected
+
+
+def test_list_stack_step_applies_the_bound_only_when_asked():
+    # Default (generated lines, `_open_list_item`, the table walk): master's
+    # pop, which removes nothing for a width past the bound.
+    stack = _stack([1], " 10. a")
+    _list_stack_step(stack, "     x")
+    assert [c for c, _ in stack] == [1]
+    # The raw walks ask for it.
+    stack = _stack([1], " 10. a")
+    _list_stack_step(stack, "      x", upper_bound=True)
+    assert stack == []
+
+
+def test_continued_item_upper_bound_can_be_skipped():
+    assert _continued_item([1], 9, upper_bound=False) == 0
+    assert _continued_item([1], 9) is None
+
+
+def test_separator_keeps_masters_bytes_past_the_bound():
+    """`_split_past_bound` fences raw past-bound lines before the separator
+    runs, so the separator never applies the bound: it keeps master's bytes."""
+    parser = TracWikiParser()
+    assert parser._separate_list_from_trailing_paragraph(
+        " - a\n    col4\n - c"
+    ) == (" - a\n    col4\n - c")
+    # Digits-only ordered: the bound is + 3, col5 is past it.
+    assert parser._separate_list_from_trailing_paragraph(
+        " 1. a\n     col5\n 1. c"
+    ) == (" 1. a\n     col5\n 1. c")
+
+
+def test_open_list_item_does_not_apply_the_bound():
+    found = _open_list_item([" 10. a", "     x"])
+    assert found is not None
+    assert found.string == " 10. a"
+
+
+def test_continues_item_after_block_keeps_an_opener_past_the_bound():
+    lines = [
+        " 10. a",
+        "     {{{",
+        "     x",
+        "     }}}",
+        "     {{{",
+        "     y",
+        "     }}}",
+        "    more",  # at the bound of a digits-only item (+ 3)
+    ]
+    parser = TracWikiParser()
+    inside = parser._lines_inside_blocks(lines)
+    assert parser._continues_item_after_block(lines, inside, 7) is True
 
 
 # -- Against Trac's renderer -----------------------------------------------------
