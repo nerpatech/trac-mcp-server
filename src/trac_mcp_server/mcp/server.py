@@ -360,7 +360,8 @@ async def handle_call_tool(
     # name) does not exist for this caller, whatever `instance` says: asking
     # first would answer a hidden tool with an instance error. Nothing is
     # reached, so this exit carries no instance annotation.
-    if not get_registry().has_tool(name):
+    registry = get_registry()
+    if not registry.has_tool(name):
         return build_error_response(
             "unknown_tool",
             f"Unknown tool: {name}",
@@ -401,19 +402,11 @@ async def handle_call_tool(
     url = getattr(getattr(client, "config", None), "trac_url", None)
     explicit = instance is not None
 
-    try:
-        result = await get_registry().call_tool(
-            name,
-            args,
-            client,  # type: ignore[arg-type]  # None only for list_instances (#110)
-        )
-    except ValueError as e:
-        # Unknown or filtered-out tool name
-        result = build_error_response(
-            "unknown_tool",
-            str(e),
-            "Use list_tools to see available tools.",
-        )
+    result = await registry.call_tool(
+        name,
+        args,
+        client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+    )
     # With OIDC per-user auth there is exactly one instance and no
     # `instance` argument, so the echo carries no information -- and as a
     # trailing text block it turns a JSON result into JSON plus a line,
@@ -455,22 +448,30 @@ def _logging_reaches_stderr(level: int) -> bool:
     ``FileHandler`` is a ``StreamHandler`` too, but its stream is the file.
     ``sys.stderr`` is read at call time, so a handler built on a replaced
     stream (a test capture, say) counts only while that stream is current.
+    With no handler anywhere on the chain, logging's ``lastResort`` handler
+    writes WARNING and above to the current stderr.
     """
     if not logger.isEnabledFor(level):
         return False
-    streams = (sys.stderr, sys.__stderr__)
+    seen_handler = False
     current: logging.Logger | None = logger
     while current is not None:
         for handler in current.handlers:
+            seen_handler = True
             if (
                 isinstance(handler, logging.StreamHandler)
                 and not isinstance(handler, logging.FileHandler)
-                and handler.stream in streams
+                and handler.stream is sys.stderr
                 and level >= handler.level
             ):
                 return True
         current = current.parent if current.propagate else None
-    return False
+    last_resort = logging.lastResort
+    return (
+        not seen_handler
+        and last_resort is not None
+        and level >= last_resort.level
+    )
 
 
 def _startup_note(

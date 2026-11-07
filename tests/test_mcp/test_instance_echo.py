@@ -27,6 +27,7 @@ from trac_mcp_server.mcp.tools.instance_echo import (
     annotate,
     instance_label,
 )
+from trac_mcp_server.mcp.tools.registry import ToolRegistry
 
 URL = "http://trac.example:8000/bcs"
 
@@ -217,31 +218,30 @@ class TestDispatchAnnotates:
         assert args == {"page_name": "X"}
 
     @patch("trac_mcp_server.mcp.server.get_instances")
-    def test_unknown_tool_error_still_names_the_instance(
+    def test_unknown_tool_error_is_not_annotated(
         self, mock_get_instances
     ):
-        # The registry vouches for the name (has_tool is a truthy mock) and
-        # then call_tool refuses it, as a registry that changed in between
-        # would: the instance is resolved by then, so it can say which one.
-        # A name the registry never served is answered before resolution
-        # and carries no annotation (ticket #164).
+        # The registry is asked before any instance is resolved (ticket
+        # #164), so a name it does not serve reaches nothing and has no
+        # instance to name -- even when the caller passed one explicitly.
         client = MagicMock()
         client.config.trac_url = URL
         mock_get_instances.return_value.get_client.return_value = client
 
         with patch(
-            "trac_mcp_server.mcp.server.get_registry"
-        ) as mock_get_registry:
-            registry = MagicMock()
-            registry.call_tool = MagicMock(
-                side_effect=ValueError("Unknown tool: x")
+            "trac_mcp_server.mcp.server.get_registry",
+            return_value=ToolRegistry([]),
+        ):
+            result = asyncio.run(
+                handle_call_tool("x", {"instance": "/bcs"})
             )
-            mock_get_registry.return_value = registry
-
-            result = asyncio.run(handle_call_tool("x", {}))
 
         assert result.isError
-        assert _marker(result) == "[instance: /bcs (server_default)]"
+        assert len(result.content) == 1
+        text = result.content[0].text
+        assert "unknown_tool" in text
+        assert "[instance:" not in text
+        mock_get_instances.return_value.get_client.assert_not_called()
 
     @patch("trac_mcp_server.mcp.server.get_registry")
     @patch("trac_mcp_server.mcp.server.get_instances")

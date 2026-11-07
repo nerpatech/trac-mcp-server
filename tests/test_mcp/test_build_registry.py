@@ -177,3 +177,24 @@ def test_stdio_without_log_file_shows_each_line_once(
         setup_logging(mode="mcp", log_file="")
         build_registry(SPECS, None, _ALL_FILTERS)
     _assert_each_line_once(capsys.readouterr().err)
+
+
+def test_no_handlers_leaves_the_warning_to_last_resort(capsys):
+    """With no handler anywhere, logging's lastResort writes a WARNING to
+    stderr itself, so the print must not repeat it; it ignores INFO, which
+    only the fallback print shows."""
+    with _own_root_logging():
+        logging.getLogger().setLevel(logging.WARNING)
+        build_registry(
+            SPECS,
+            None,
+            ServerConfig(
+                read_only=True,
+                disabled_tools=["ticket_comment_histroy"],
+            ),
+        )
+    err = capsys.readouterr().err
+    assert (
+        err.count("not found (ignored): ticket_comment_histroy") == 1
+    ), err
+    assert err.count("Read-only mode: ") == 1, err
