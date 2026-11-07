@@ -183,6 +183,42 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|\|.*\|\|\s*$")
 _DIV_TABLE_MARK = "\x00DIVTABLE\x00"
 _DIV_TABLE_MARK_RE = re.compile(r"^[ \t]*\x00DIVTABLE\x00$")
 
+# Trac's block-opener grammar: `{{{` alone, or `{{{#!processor args`, with
+# optional whitespace between the braces and the `#!` (measured on Trac's
+# renderer: `{{{ #!div class=x` is a div). Text after the braces that is not
+# a `#!` processor (`{{{ some text`) is not an opener. A closer is `}}}`
+# alone, at any indent.
+_BLOCK_OPEN_RE = re.compile(r"^[ \t]*\{\{\{[ \t]*(?:#!\S.*)?[ \t]*$")
+_BLOCK_CLOSE_RE = re.compile(r"^[ \t]*\}\}\}[ \t]*$")
+
+
+def _passthrough_containers(
+    lines: list[str],
+) -> tuple[set[int], set[int]]:
+    """Indexes of the `{{{` openers and of the `}}}` closers that close
+    one, in one linear pass (ticket #146).
+
+    A closer pops the most recent unmatched opener. An opener nobody closes
+    is still a container: Trac closes open blocks at the end of the
+    document, so it runs to the end and swallows the rest (measured), and
+    its index is in the first set with no closer in the second. A closer
+    with no opener is an ordinary line. A table row can be neither (it
+    matches neither pattern). Code blocks are fences by the time this runs,
+    so these are processor blocks passed through as they are
+    (`{{{#!div class=x`, a bare `{{{#!div` that was not unwrapped).
+    """
+    openers: list[int] = []
+    open_at: set[int] = set()
+    close_at: set[int] = set()
+    for idx, line in enumerate(lines):
+        if _BLOCK_OPEN_RE.match(line):
+            openers.append(idx)
+        elif _BLOCK_CLOSE_RE.match(line) and openers:
+            open_at.add(openers.pop())
+            close_at.add(idx)
+    open_at.update(openers)
+    return open_at, close_at
+
 
 def _enclosing_list_marker(
     prev_lines: list[str], indent: int
@@ -238,6 +274,27 @@ def _lines_since_blank(pieces: list[str]) -> list[str]:
         size *= 4
 
 
+def _list_stack_step(
+    stack: list[tuple[int, re.Match[str]]], line: str
+) -> None:
+    """Advance a list-item stack over one line, in place (the per-line step
+    of `_open_list_item`, which documents the walk).
+
+    A blank line empties the stack; any other line pops every entry at or
+    past its own column (Trac's tab-expanded `_indent_width`), and a line
+    matching `_LIST_MARKER_RE` then pushes itself.
+    """
+    if not line.strip():
+        stack.clear()
+        return
+    column = _indent_width(_indent_of(line))
+    found = _LIST_MARKER_RE.match(line)
+    while stack and stack[-1][0] >= column:
+        stack.pop()
+    if found:
+        stack.append((column, found))
+
+
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """The list-marker match of the innermost list item still OPEN after
     `lines`, or None (ticket #144).
@@ -252,15 +309,7 @@ def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """
     stack: list[tuple[int, re.Match[str]]] = []
     for line in lines:
-        if not line.strip():
-            stack.clear()
-            continue
-        column = _indent_width(_indent_of(line))
-        found = _LIST_MARKER_RE.match(line)
-        while stack and stack[-1][0] >= column:
-            stack.pop()
-        if found:
-            stack.append((column, found))
+        _list_stack_step(stack, line)
     return stack[-1][1] if stack else None
 
 
@@ -1815,17 +1864,48 @@ class TracWikiParser:
         table_alignments = []  # Track alignments from first row
         table_indents: list[str] = []  # Leading whitespace of each row
         # Ticket #142: the group being accumulated came from a list item's
-        # unwrapped {{{#!div}}} (it follows a `_DIV_TABLE_MARK` line), and
-        # whether the previous emitted group did, with nothing since.
+        # unwrapped {{{#!div}}} (it follows a `_DIV_TABLE_MARK` line).
         div_group = False
-        prev_div_end = -1
+        # Where the previous emitted group of either kind (div or bare)
+        # ended in `result`; a line appended since moves `result` past it,
+        # so `prev_group_end == len(result)` means "a table is the last
+        # thing written" (#143, F5, R5).
+        prev_group_end = -1
+        # Ticket #146: the bare group being accumulated needs a blank line
+        # before it (decided on its first row).
+        bare_blank = False
+        # Ticket #146: a list-item stack per `{{{` container depth, fed
+        # INPUT lines only (never the lines appended to `result`: #143's
+        # synthetic blank after a div table must not end a list, #171).
+        # Bare rows under a list item render OUTSIDE the list in Trac, but
+        # with no blank line between the item text and the table Markdown
+        # reads the table as part of the item, and the write leg then puts
+        # it back in the list as a div. A blank line (no indent) ends the
+        # item in Markdown too, so a bare group gets one when an item is
+        # open on the current stack (`_list_stack_step`) and the line above
+        # is not blank. A container opener is a child of the item above it
+        # (or ends it, by column) and starts an empty stack, so rows inside
+        # `{{{#!div class=x` under an item are not bare (Trac renders them
+        # within the block; a blank line plus its column-0 closer would
+        # end the list on the write leg) while rows after a closed block,
+        # or in a block that wraps the whole list (F2), are. Only
+        # `_passthrough_containers`' openers count (F3, F4); an opener with
+        # no closer runs to the end of the document (R2), so its stack is
+        # never popped, and the closer of a pair restores the outer stack
+        # untouched. A div group (#142)
+        # stays in the item on purpose; after a bare group the stack is
+        # cleared, because Trac ends the list at bare rows.
+        open_at, close_at = _passthrough_containers(lines)
+        stacks: list[list[tuple[int, re.Match[str]]]] = [[]]
 
         def flush_table():
             """Process accumulated table rows and add to result."""
             nonlocal table_rows, table_alignments, table_indents
-            nonlocal div_group, prev_div_end
+            nonlocal div_group, prev_group_end, bare_blank
             if not table_rows:
                 return
+            if bare_blank:
+                result.append("")
             first_line_at = len(result)
 
             # Determine number of columns from first row
@@ -1876,24 +1956,35 @@ class TracWikiParser:
                     prefix + ln if ln else ln
                     for ln in result[first_line_at:]
                 ]
-                prev_div_end = len(result)
+            prev_group_end = len(result)
             div_group = False
+            bare_blank = False
 
             table_rows = []
             table_alignments = []
             table_indents = []
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             if _DIV_TABLE_MARK_RE.match(line):
                 # The mark ends any group in progress. Two unwrapped divs
                 # back to back must stay two tables: with nothing between
                 # them Markdown reads one table and demotes the second
                 # header to a data row, so put a blank line (no indent) in.
+                # The same after a bare group (review F5), which would
+                # otherwise merge with the div's rows into one table.
                 flush_table()
-                if prev_div_end == len(result):
+                if prev_group_end == len(result):
                     result.append("")
                 div_group = True
             elif _TABLE_ROW_RE.match(line):
+                if div_group:
+                    _list_stack_step(stacks[-1], line)
+                elif not table_rows:
+                    # First row of a bare group.
+                    bare_blank = bool(
+                        result and result[-1].strip() and stacks[-1]
+                    )
+                    stacks[-1].clear()
                 cells, aligns, is_header = self._parse_tracwiki_row(
                     line
                 )
@@ -1906,15 +1997,24 @@ class TracWikiParser:
                 # End of table - flush accumulated rows
                 flush_table()
                 div_group = False
-                # Ticket #143: item text straight after a table released
-                # from a list item's {{{#!div}}} needs a blank line (no
-                # indent) in the Markdown, or a GFM reader takes it for one
-                # more table row (spec example 202). The next list marker,
-                # a blank line and a block start (a fence opener, heading,
-                # quote or rule: GFM ends a table at those) need none.
+                if idx in close_at:
+                    stacks.pop()
+                else:
+                    _list_stack_step(stacks[-1], line)
+                    if idx in open_at:
+                        stacks.append([])
+                # Ticket #143 (and #146's second review, R5, for a bare
+                # group): item text straight after a table needs a blank
+                # line (no indent) in the Markdown, or a GFM reader takes
+                # it for one more table row (spec example 202). The next
+                # list marker, a blank line, a block start (a fence opener,
+                # heading, quote or rule: GFM ends a table at those) and
+                # the closer of a container (not text: the table was the
+                # block's last content) need none.
                 if (
-                    prev_div_end == len(result)
+                    prev_group_end == len(result)
                     and line.strip()
+                    and idx not in close_at
                     and not _LIST_MARKER_RE.match(line)
                     and not _LAZY_CONTINUATION_INTERRUPT_RE.match(
                         line.lstrip(" \t")
