@@ -64,6 +64,13 @@ class TestConvertPreviewToolDefinition(unittest.TestCase):
             CONVERT_PREVIEW_SPECS[0].permissions, frozenset()
         )
 
+    def test_description_names_local_captured_tail_links(self):
+        """Ticket #163: the captured-punctuation entry covers the local
+        `ticket:`/`wiki:` short links too, not only cross-instance."""
+        description = CONVERT_PREVIEW_TOOLS[0].description
+        self.assertIn("swallowed trailing punctuation", description)
+        self.assertIn("local 'ticket:N' or 'wiki:Page'", description)
+
     def test_content_required(self):
         schema = CONVERT_PREVIEW_TOOLS[0].inputSchema
         self.assertEqual(schema["required"], ["content"])
@@ -865,6 +872,75 @@ class TestConvertPreviewLive:
             "control no longer discriminates and the ticket-realm check "
             "is now inert"
         )
+
+    # --- Ticket #163: advice is only advice if it renders clean -----
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "row163a_ticket_possessive_local",
+            "row163b_ticket_hyphen_local",
+            "row163c_wiki_possessive_local",
+            "row163d_intertrac_slash_tail",
+            "row163e_intertrac_dash_range",
+        ],
+    )
+    def test_captured_tail_suggestions_render_clean_live(self, row):
+        """Render the seeded row, take its `evidence.suggestion`,
+        substitute it for the resolved text in the source, and render
+        again: the second render must carry no error-severity warning.
+
+        This is the live half of the "render each emitted suggestion
+        before shipping it as advice" rule. The first pass proves the
+        row still fires against what Trac emits NOW; the second proves
+        the advice is accepted by the same gate that refused the
+        original. Ticket #59's builder once shipped a suggestion that
+        rendered silent but linked the wrong project's ticket; a
+        silent render is necessary, and the fixtures' anchors are the
+        other half of that check.
+        """
+        from trac_mcp_server.config_bootstrap import bootstrap_config
+        from trac_mcp_server.core.client import TracClient
+
+        config, _ = bootstrap_config()
+        client = TracClient(config)
+        source = MANIFEST[row]["tracwiki"]
+
+        def render(content):
+            return asyncio.run(
+                _handle_convert_preview(
+                    client,
+                    {
+                        "content": content,
+                        "format": "tracwiki",
+                        "check_targets": False,
+                    },
+                )
+            ).structuredContent["warnings"]
+
+        first = [
+            w
+            for w in render(source)
+            if w["code"]
+            in (
+                "local_target_captured_tail",
+                "intertrac_target_captured_punctuation",
+            )
+        ]
+        assert len(first) == 1, first
+        evidence = first[0]["evidence"]
+        assert evidence["resolved_as"] in source, (source, evidence)
+        fixed = source.replace(
+            evidence["resolved_as"], evidence["suggestion"], 1
+        )
+        assert fixed != source
+
+        errors = [
+            (w["code"], w["message"])
+            for w in render(fixed)
+            if w["severity"] == "error"
+        ]
+        assert errors == [], (fixed, errors)
 
 
 if __name__ == "__main__":
