@@ -5,6 +5,7 @@ comparison needs one tool call instead of one search per item.
 """
 
 import json
+import logging
 import re
 from typing import Any
 
@@ -15,10 +16,12 @@ from ...core.async_utils import (
     run_sync,
     run_sync_limited,
 )
-from ...core.client import TracClient
+from ...core.client import TICKET_FETCH_BATCH, TracClient
 from .errors import build_error_response
 from .registry import ToolSpec
 from .ticket_read import _ticket_url
+
+logger = logging.getLogger(__name__)
 
 MAX_TERMS = 1000
 ID_CHUNK = 100
@@ -208,16 +211,37 @@ async def _load(
     """Fetch the tickets not in ``cache`` yet; a ticket that failed to load is
     cached as None and not fetched again."""
 
-    async def one(tid: int) -> tuple[int, dict | None]:
-        try:
-            ticket = await run_sync_limited(client.get_ticket, tid)
-            return tid, ticket[3]
-        except Exception:
-            return tid, None
-
     todo = [tid for tid in dict.fromkeys(ids) if tid not in cache]
-    for tid, attrs in await gather_limited([one(tid) for tid in todo]):
-        cache[tid] = attrs
+
+    async def one(chunk: list[int]) -> dict[int, Any]:
+        try:
+            return await run_sync_limited(client.get_tickets, chunk)
+        except Exception:
+            logger.warning(
+                "get_tickets failed for %d tickets (%s ... %s)",
+                len(chunk),
+                chunk[0],
+                chunk[-1],
+                exc_info=True,
+            )
+            return {}
+
+    chunks = [
+        todo[i : i + TICKET_FETCH_BATCH]
+        for i in range(0, len(todo), TICKET_FETCH_BATCH)
+    ]
+    fetched: dict[int, Any] = {}
+    for part in await gather_limited([one(chunk) for chunk in chunks]):
+        fetched.update(part)
+    for tid in todo:
+        entry = fetched.get(tid)
+        cache[tid] = (
+            entry[3]
+            if isinstance(entry, (list, tuple))
+            and len(entry) >= 4
+            and isinstance(entry[3], dict)
+            else None
+        )
 
 
 def _compact(

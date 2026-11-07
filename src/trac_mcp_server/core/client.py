@@ -220,13 +220,18 @@ WIKI_CONDITIONAL_PUT_ABSENT_TTL_SECONDS = 300.0
 # /trac_mcp_server #132).
 TICKET_CHANGE_AT_ABSENT_TTL_SECONDS = 300.0
 
-# The same, for the stock ``system.multicall`` the wiki search fills its
-# page cache with (Trac /trac_mcp_server #154).
-WIKI_MULTICALL_ABSENT_TTL_SECONDS = 300.0
+# The same, for the stock ``system.multicall``: one memory shared by the
+# wiki search, which fills its page cache with it (Trac /trac_mcp_server
+# #154), and ``get_tickets``, which batches ``ticket.get`` with it (#158).
+MULTICALL_ABSENT_TTL_SECONDS = 300.0
 
 # Pages read per ``system.multicall`` (two calls each: getPageInfo and
 # getPage).
 WIKI_FETCH_BATCH_PAGES = 50
+
+# Tickets read per ``system.multicall`` (one ``ticket.get`` each) in
+# ``get_tickets`` (Trac /trac_mcp_server #158).
+TICKET_FETCH_BATCH = 50
 
 # Per-prefix BM25 indexes the wiki search keeps (least recently used
 # first out): each holds every section in its scope, and a caller can
@@ -415,6 +420,12 @@ class TracClient:
         self._ticket_change_at = _OptionalMethod(
             "ticket.getChangeAt", TICKET_CHANGE_AT_ABSENT_TTL_SECONDS
         )
+        # Whether the server has ``system.multicall``: a fact about the
+        # server, not the wiki, so wiki search (#154) and ``get_tickets``
+        # (#158) share this one memory of it.
+        self._multicall = _OptionalMethod(
+            "system.multicall", MULTICALL_ABSENT_TTL_SECONDS
+        )
         # The wiki search's page cache (#154). It is per client, and a
         # client is per caller: the instance pool keeps one per instance
         # and identity, and under OIDC mcp/oidc.py keeps one per bearer
@@ -423,9 +434,6 @@ class TracClient:
         # one full read -- never worse than the old per-query full read.
         # ``run_sync`` runs calls in threads, hence the lock around every
         # refresh and index build.
-        self._wiki_multicall = _OptionalMethod(
-            "system.multicall", WIKI_MULTICALL_ABSENT_TTL_SECONDS
-        )
         self._wiki_cache_lock = threading.Lock()
         self._wiki_cache: dict[str, _CachedWikiPage] = {}
         self._wiki_scope_index: OrderedDict[str, BM25] = OrderedDict()
@@ -612,6 +620,70 @@ class TracClient:
         Get ticket details by ticket ID.
         """
         return self._rpc_request("ticket", "get", ticket_id)
+
+    def get_tickets(self, ticket_ids: list[int]) -> dict[int, Any]:
+        """Get several tickets, batched through ``system.multicall``.
+
+        Returns ``{id: <ticket.get result>}`` -- the value ``get_ticket``
+        returns -- for each id that loaded; an id that failed is absent.
+
+        - Ids are de-duplicated, order kept. An empty list makes no RPC.
+        - While the server has ``system.multicall``, ids go in batches of
+          ``TICKET_FETCH_BATCH``, one ``ticket.get`` each. A fault on one
+          entry leaves that id absent, with no single retry. A reply that
+          is not a list of the right length sends that batch to single
+          gets.
+        - A ``Fault`` that says ``system.multicall`` is missing is
+          remembered (shared with the wiki search) and the rest is read
+          by single gets; any other ``Fault``, or any other exception,
+          sends just that batch to single gets.
+        - Single gets are ``get_ticket`` per id, a failure skipping that
+          id.
+        """
+        ids = list(dict.fromkeys(ticket_ids))
+        out: dict[int, Any] = {}
+        done = 0
+        if ids and self._multicall.available():
+            while done < len(ids):
+                batch = ids[done : done + TICKET_FETCH_BATCH]
+                try:
+                    out.update(self._fetch_ticket_batch(batch))
+                except xmlrpc.client.Fault as err:
+                    if self._multicall.note_fault(err):
+                        break  # no multicall: the rest goes one by one
+                    out.update(self._fetch_tickets_singly(batch))
+                except Exception:
+                    out.update(self._fetch_tickets_singly(batch))
+                done += len(batch)
+        out.update(self._fetch_tickets_singly(ids[done:]))
+        return out
+
+    def _fetch_tickets_singly(self, ids: list[int]) -> dict[int, Any]:
+        """``get_ticket`` per id, skipping any that fail."""
+        out: dict[int, Any] = {}
+        for tid in ids:
+            try:
+                out[tid] = self.get_ticket(tid)
+            except Exception:
+                continue
+        return out
+
+    def _fetch_ticket_batch(self, ids: list[int]) -> dict[int, Any]:
+        """One ``system.multicall`` of ``ticket.get`` for ``ids``. A
+        per-entry fault leaves that id out; a reply that is not a list of
+        ``len(ids)`` entries is read singly."""
+        calls = [
+            {"methodName": "ticket.get", "params": [tid]} for tid in ids
+        ]
+        results = self._rpc_request("system", "multicall", calls)
+        if not isinstance(results, list) or len(results) != len(calls):
+            return self._fetch_tickets_singly(ids)
+        out = {}
+        for tid, entry in zip(ids, results, strict=True):
+            ok, value = _multicall_value(entry)
+            if ok:
+                out[tid] = value
+        return out
 
     def get_ticket_changelog(self, ticket_id: int) -> Any:
         """
@@ -1468,13 +1540,13 @@ class TracClient:
         """
         out: dict[str, tuple[int | None, str | None, str]] = {}
         done = 0
-        if names and self._wiki_multicall.available():
+        if names and self._multicall.available():
             while done < len(names):
                 batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
                 try:
                     out.update(self._fetch_wiki_batch(batch))
                 except xmlrpc.client.Fault as err:
-                    if self._wiki_multicall.note_fault(err):
+                    if self._multicall.note_fault(err):
                         break  # no multicall: the rest goes page by page
                     out.update(self._fetch_wiki_singly(batch))
                 except Exception:

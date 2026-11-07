@@ -35,7 +35,9 @@ def _client(
 ) -> MagicMock:
     """A TracClient mock: search_tickets answers an id=1|2 query with the
     ids that exist (or calls ``search``), get_ticket returns the attrs,
-    get_ticket_fields returns ``fields`` (default FIELDS)."""
+    get_tickets answers a batch by calling get_ticket per id and leaving
+    out the ids that raise (as the real one does), get_ticket_fields
+    returns ``fields`` (default FIELDS)."""
     client = MagicMock(spec=TracClient)
     client.get_ticket_fields.return_value = (
         FIELDS if fields is None else fields
@@ -55,6 +57,17 @@ def _client(
         None,
         tickets[tid],
     ]
+
+    def get_tickets(ids):
+        out = {}
+        for tid in ids:
+            try:
+                out[tid] = client.get_ticket(tid)
+            except Exception:
+                pass
+        return out
+
+    client.get_tickets.side_effect = get_tickets
     return client
 
 
@@ -518,6 +531,139 @@ def test_a_ticket_in_several_text_batches_is_fetched_once():
         6,
     ]
     assert [hit["id"] for hit in result["found"]["v20"]] == [5]
+
+
+def test_load_calls_get_tickets_once_per_chunk_with_uncached_ids():
+    tickets = {
+        5: {"summary": "v0 and v20"},
+        6: {"summary": "v1 and v21"},
+        7: {"summary": "v2"},
+    }
+
+    def search(query):
+        return [5, 6] if "v0" in query else [6, 5, 7]
+
+    client = _client(tickets, search)
+
+    result = _run(
+        client,
+        {"values": _batched_values(30), "match_field": "summary"},
+    ).structuredContent
+
+    assert client.search_tickets.call_count == 2
+    assert [c.args[0] for c in client.get_tickets.call_args_list] == [
+        [5, 6],
+        [7],
+    ]
+    assert [hit["id"] for hit in result["found"]["v20"]] == [5]
+
+
+def test_load_skips_get_tickets_when_everything_is_cached():
+    client = _client({5: {"summary": "v0 v20"}}, lambda query: [5])
+
+    _run(
+        client,
+        {"values": _batched_values(30), "match_field": "summary"},
+    )
+
+    assert client.get_tickets.call_count == 1
+
+
+def test_a_get_tickets_that_raises_is_reported_not_raised():
+    tickets = {5: {"summary": "x"}, 6: {"summary": "y"}}
+    client = _client(tickets, lambda query: [5, 6])
+    client.get_tickets.side_effect = RuntimeError("boom")
+
+    outcome = _run(
+        client,
+        {"values": "x, z", "match_field": "summary"},
+    )
+    result = outcome.structuredContent
+
+    assert not outcome.isError
+    assert result["failed_ids"] == [5, 6]
+    assert result["unresolved"] == ["x", "z"]
+    assert client.get_tickets.call_count == 1
+
+
+def test_a_get_tickets_that_raises_in_id_mode_is_reported_not_raised():
+    client = _client({1: {"summary": "One"}, 2: {"summary": "Two"}})
+    client.get_tickets.side_effect = RuntimeError("boom")
+
+    result = _run(client, {"values": "1, 2"}).structuredContent
+
+    assert result["failed_ids"] == [1, 2]
+    assert result["found"]["1"] == {
+        "id": 1,
+        "url": "https://trac.example/proj/ticket/1",
+    }
+
+
+def _id_mode_values(n):
+    return ",".join(str(i) for i in range(1, n + 1))
+
+
+def test_load_fetches_in_chunks_of_the_batch_size():
+    tickets = {i: {"summary": f"T{i}"} for i in range(1, 121)}
+    client = _client(tickets)
+
+    result = _run(client, {"values": _id_mode_values(120)})
+
+    assert not result.isError
+    calls = [c.args[0] for c in client.get_tickets.call_args_list]
+    assert [len(c) for c in calls] == [50, 50, 20]
+    assert sorted(i for c in calls for i in c) == list(range(1, 121))
+    assert result.structuredContent["failed_ids"] == []
+    assert result.structuredContent["found_count"] == 120
+
+
+def test_a_chunk_that_raises_fails_only_its_own_ids(caplog):
+    tickets = {i: {"summary": f"T{i}"} for i in range(1, 121)}
+    client = _client(tickets)
+    good = client.get_tickets.side_effect
+
+    def get_tickets(ids):
+        if 51 in ids:
+            raise RuntimeError("boom")
+        return good(ids)
+
+    client.get_tickets.side_effect = get_tickets
+
+    with caplog.at_level("WARNING"):
+        result = _run(client, {"values": _id_mode_values(120)})
+
+    assert not result.isError
+    assert result.structuredContent["failed_ids"] == list(
+        range(51, 101)
+    )
+    found = result.structuredContent["found"]
+    assert found["1"]["summary"] == "T1"
+    assert found["120"]["summary"] == "T120"
+    assert "summary" not in found["75"]
+    warned = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warned) == 1
+    assert warned[0].exc_info is not None
+
+
+def test_a_malformed_get_tickets_entry_counts_as_failed():
+    tickets = {
+        5: {"summary": "x"},
+        6: {"summary": "y"},
+        7: {"summary": "z"},
+    }
+    client = _client(tickets, lambda query: [5, 6, 7])
+    client.get_tickets.side_effect = lambda ids: {
+        5: [5, None, None, {"summary": "x"}],
+        6: [6, None, None],
+        7: [7, None, None, "not a dict"],
+    }
+
+    result = _run(
+        client, {"values": "x", "match_field": "summary"}
+    ).structuredContent
+
+    assert result["failed_ids"] == [6, 7]
+    assert [hit["id"] for hit in result["found"]["x"]] == [5]
 
 
 def test_a_failed_ticket_is_not_retried_within_the_call():
