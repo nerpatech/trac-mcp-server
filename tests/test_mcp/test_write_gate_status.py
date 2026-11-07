@@ -22,6 +22,10 @@ from trac_mcp_server.mcp.server import (
     _handle_ping,
     log_startup_settings,
 )
+from trac_mcp_server.mcp.tools.write_gate import (
+    gate_enabled,
+    write_gate_line,
+)
 
 LOGGER = "trac_mcp_server.mcp.server"
 
@@ -187,3 +191,64 @@ def test_registry_write_gate_follows_the_default_config():
     assert InstanceRegistry(config, {}).write_gate is True
     off = dataclasses.replace(config, write_gate=False)
     assert InstanceRegistry(off, {}).write_gate is False
+
+
+async def test_oidc_clients_carry_the_logged_write_gate(caplog):
+    """Startup builds OidcClientCache from the config the registry
+    reports: with TRAC_WRITE_GATE=0 the startup log says off, and so does
+    the per-user client that OIDC list_instances and every write use."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="",
+        password="",
+        oidc_only=True,
+        write_gate=False,
+    )
+    seen = {}
+
+    async def _fake_run_http(_server, _config):
+        client = server_module._oidc_cache.get_client("user-token")
+        seen["client_gate"] = gate_enabled(client)
+
+    caplog.set_level(logging.INFO, logger=LOGGER)
+    with (
+        patch.object(
+            server_module,
+            "bootstrap_server_config",
+            return_value=ServerConfig(
+                transport="http",
+                oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc",
+                file_access="off",
+            ),
+        ),
+        patch.object(server_module, "setup_logging"),
+        patch.object(
+            server_module,
+            "check_version_consistency",
+            return_value=(True, "ok"),
+        ),
+        patch.object(
+            server_module, "load_declared_instances", return_value=[]
+        ),
+        patch(
+            "trac_mcp_server.mcp.lifespan.bootstrap_config",
+            return_value=(config, []),
+        ),
+        patch(
+            "trac_mcp_server.mcp.lifespan.load_declared_instances",
+            return_value={},
+        ),
+        patch("trac_mcp_server.mcp.lifespan._stderr_print"),
+        patch.object(server_module, "run_http", _fake_run_http),
+    ):
+        await server_module.main()
+
+    (record,) = _records(caplog)
+    assert record.getMessage() == "write_gate=off"
+    assert seen["client_gate"] is False
+
+
+@pytest.mark.parametrize("state", [True, False])
+def test_ping_and_list_instances_share_the_line(state):
+    """One wording for one status: ping prints write_gate_line()."""
+    assert write_gate_line(state) in _ping(state).content[0].text

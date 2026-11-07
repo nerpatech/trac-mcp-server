@@ -307,6 +307,14 @@ GATE_OFF_LINE = (
 )
 
 
+def write_gate_line(write_gate: bool) -> str:
+    """The ``write_gate:`` status line of ``ping`` and ``list_instances``
+    (ticket #153), one wording for both."""
+    if write_gate:
+        return "write_gate: true"
+    return "write_gate: false -- OFF on this daemon: writes are NOT link-checked"
+
+
 def gate_off_lines(client: TracClient) -> list[str]:
     """``[GATE_OFF_LINE]`` when the gate is off, else ``[]``.
 

@@ -569,10 +569,12 @@ class InstanceRegistry:
 
         Read from the default config because every routed instance's
         config is a ``dataclasses.replace`` of it (``_synthesize``,
-        ticket #117), so this is the value every write through this
-        daemon sees -- and, unlike a resolved client, it exists for a
-        caller scoped away from the default instance. Same default and
-        same ``getattr`` tolerance as ``write_gate.gate_enabled``.
+        ticket #117), and under OIDC per-user auth ``OidcClientCache``
+        builds each caller's client from the same startup config, so this
+        is the value every write through this daemon sees -- and, unlike
+        a resolved client, it exists for a caller scoped away from the
+        default instance. Same default and same ``getattr`` tolerance as
+        ``write_gate.gate_enabled``.
         """
         return bool(getattr(self._default, "write_gate", True))
 

@@ -250,3 +250,41 @@ def test_list_instances_reports_the_one_endpoint_and_stays_offline(
         e["url"] for e in result.structuredContent["configured"]
     ] == [TRAC_URL]
     assert "discovered" not in result.structuredContent
+    assert result.structuredContent["write_gate"] is True
+
+
+def test_list_instances_reports_a_disabled_write_gate():
+    """Through the per-user client, so it also proves the setting survives
+    OidcClientCache building that client's config."""
+    set_oidc_cache(
+        OidcClientCache(
+            Config(
+                trac_url=TRAC_URL,
+                username="service-account",
+                password="service-secret",
+                write_gate=False,
+            ),
+            RPC_URL,
+        )
+    )
+    transport = _Transport(_EMPTY_ARRAY)
+    with (
+        patch(
+            "requests.adapters.HTTPAdapter.send",
+            lambda adapter, request, **kwargs: transport.send(
+                adapter, request, **kwargs
+            ),
+        ),
+        patch(
+            "trac_mcp_server.mcp.tools.instances.scrape_project_index"
+        ) as scrape,
+    ):
+        result = asyncio.run(handle_call_tool("list_instances", {}))
+
+    scrape.assert_not_called()
+    assert transport.sent == []
+    assert result.structuredContent["write_gate"] is False
+    assert (
+        "write_gate: false -- OFF on this daemon"
+        in result.content[0].text
+    )

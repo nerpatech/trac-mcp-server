@@ -197,6 +197,8 @@ class TestListInstancesHandler(unittest.TestCase):
     # could reach used to report.
 
     def _list(self, config):
+        # Client and registry share the config, as at startup.
+        self.client.config = config
         set_instance_registry(InstanceRegistry(config, {}))
         return asyncio.run(
             ToolRegistry(INSTANCE_SPECS).call_tool(
