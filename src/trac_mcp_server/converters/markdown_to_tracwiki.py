@@ -972,7 +972,15 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Set new state
                 state.list_ordered = ordered  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
                 state.list_depth = depth + 1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
-                state.list_item_num = 0  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+                # Ticket #150: number from the list's own start (mistune
+                # sets `start` only when it is not 1). Trac renders
+                # `<ol start="N">` from the FIRST item's number and counts
+                # on from there whatever the later items say (measured on
+                # /trac_test: ` 5.` / ` 7.` / ` 9.` and ` 3.` / ` 1.` both
+                # count up from the first), so consecutive numbers from
+                # `start` are what Trac shows.
+                start = (token.get("attrs") or {}).get("start", 1)
+                state.list_item_num = start - 1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
 
                 # Render children
                 if "children" in token:
