@@ -10,7 +10,7 @@ from mcp.server import Server
 from starlette.requests import Request
 from starlette.testclient import TestClient
 
-from trac_mcp_server import __version__
+from trac_mcp_server import __version__, version
 from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp.http_app import (
@@ -69,12 +69,44 @@ _MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 class TestHealthz:
     """The health endpoint is always reachable, with or without a token."""
 
-    def test_healthz_reachable_without_token_configured(self):
+    def test_healthz_reachable_without_token_configured(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(version, "release_sha", lambda: None)
         app = build_http_app(_make_mcp_server(), _make_server_config())
         with TestClient(app, base_url=_BASE_URL) as client:
             response = client.get("/healthz")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        assert response.json() == {
+            "status": "ok",
+            "release": "unknown",
+        }
+
+    def test_healthz_reports_the_release_when_one_is_stamped(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(version, "release_sha", lambda: "ab" * 20)
+        app = build_http_app(_make_mcp_server(), _make_server_config())
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "ok",
+            "release": "ab" * 20,
+        }
+
+    def test_healthz_release_is_readable_without_a_token(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(version, "release_sha", lambda: "ab" * 20)
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(auth_token="secret"),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json()["release"] == "ab" * 20
 
     def test_healthz_reachable_without_auth_header_when_token_configured(
         self,

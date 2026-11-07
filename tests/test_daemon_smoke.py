@@ -36,6 +36,7 @@ from mcp import types
 from mcp.server import Server
 
 from tests.test_mcp.test_http_identity import _free_port, _running_app
+from trac_mcp_server import version
 from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.mcp.server import PING_SPEC
 from trac_mcp_server.mcp.tools import ALL_SPECS, ToolRegistry
@@ -119,6 +120,71 @@ def test_normalise_base_error_never_echoes_the_url():
     with pytest.raises(ValueError) as caught:
         smoke.normalise_base("http://user:hunter2@h:8092")
     assert "hunter2" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "given", ["abcdef0", "0123456789abcdef", "a" * 40]
+)
+def test_expect_sha_accepts_7_to_40_lowercase_hex(given):
+    assert smoke.validate_expect_sha(given) == given
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "",
+        "abcdef",  # 6: too short to mean one commit
+        "a" * 41,
+        "ABCDEF0",  # uppercase
+        "abcdefg",  # not hex
+        "abc def0",
+        "HEAD",
+        "abcdef0\n",
+    ],
+)
+def test_expect_sha_rejects_anything_else(given):
+    with pytest.raises(ValueError):
+        smoke.validate_expect_sha(given)
+
+
+FULL = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_release_without_an_expectation_reports_what_it_got():
+    assert FULL in smoke.check_release(FULL, None)
+    assert "none reported" in smoke.check_release(None, None)
+    assert "unknown" in smoke.check_release("unknown", None)
+    assert FULL + "-dirty" in smoke.check_release(FULL + "-dirty", None)
+
+
+@pytest.mark.parametrize("expected", [FULL[:7], FULL[:12], FULL])
+def test_release_matches_by_prefix(expected):
+    assert expected in smoke.check_release(FULL, expected)
+
+
+@pytest.mark.parametrize(
+    "reported, shown",
+    [
+        ("f" * 40, "f" * 40),  # another commit
+        (FULL[:6] + "0" * 34, FULL[:6] + "0" * 34),  # prefix is 6 only
+        ("unknown", "unknown"),
+        (None, "none reported"),  # an older daemon: no key
+        (FULL + "-dirty", FULL + "-dirty"),
+        (12345, "12345"),
+    ],
+)
+def test_release_mismatch_fails_naming_both_values(reported, shown):
+    with pytest.raises(smoke.CheckFailed) as caught:
+        smoke.check_release(reported, FULL[:7])
+    assert (
+        str(caught.value)
+        == f"release {shown} is not the expected {FULL[:7]}"
+    )
+
+
+def test_a_dirty_release_fails_even_when_the_prefix_matches():
+    with pytest.raises(smoke.CheckFailed):
+        smoke.check_release(FULL + "-dirty", FULL)
 
 
 def test_compare_tools_reports_missing_and_extra_sorted():
@@ -666,7 +732,9 @@ def _config(port):
     )
 
 
-def _smoke_against(trac, path_suffix="", instance="/trac_test"):
+def _smoke_against(
+    trac, path_suffix="", instance="/trac_test", expect_sha=None
+):
     """Run the whole smoke against a real server; (exit, output)."""
     out = io.StringIO()
 
@@ -680,10 +748,48 @@ def _smoke_against(trac, path_suffix="", instance="/trac_test"):
                 TOKEN,
                 out,
                 instance,
+                expect_sha,
             )
 
     code = anyio.run(body)
     return code, out.getvalue()
+
+
+def test_expect_sha_passes_against_the_real_app_reporting_it(
+    trac, monkeypatch
+):
+    # the real app's /healthz, the real client: the stamp the daemon
+    # reports is the stamp check 1 compares
+    monkeypatch.setattr(version, "release_sha", lambda: FULL)
+    code, output = _smoke_against(trac, expect_sha=FULL[:7])
+    assert code == 0, output
+    assert f"PASS 1 healthz (release {FULL} matches" in output
+    assert "PASS 6 comment_plugin" in output
+
+
+def test_expect_sha_fails_against_the_real_app_of_another_commit(
+    trac, monkeypatch
+):
+    monkeypatch.setattr(version, "release_sha", lambda: "f" * 40)
+    code, output = _smoke_against(trac, expect_sha=FULL[:7])
+    assert code == 1, output
+    assert (
+        f"FAIL 1 healthz: release {'f' * 40} is not the expected "
+        f"{FULL[:7]}" in output
+    )
+    assert "PASS 2" not in output
+
+
+def test_expect_sha_fails_against_the_real_app_with_no_stamp(
+    trac, monkeypatch
+):
+    monkeypatch.setattr(version, "release_sha", lambda: None)
+    code, output = _smoke_against(trac, expect_sha=FULL[:7])
+    assert code == 1, output
+    assert (
+        f"FAIL 1 healthz: release unknown is not the expected "
+        f"{FULL[:7]}" in output
+    )
 
 
 def test_all_six_checks_pass_against_a_real_server(trac):
@@ -930,6 +1036,7 @@ def test_token_env_value_is_used_when_set(shell_env):
         ["--token-env", "X"],
         ["--daemon", "http://127.0.0.1:1", "--extra"],
         ["--daemon", "http://127.0.0.1:1", "--token-env"],
+        ["--daemon", "http://127.0.0.1:1", "--expect-sha"],
     ],
 )
 @pytestmark_shell
@@ -978,6 +1085,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     seen: list = []
     post_status = 200
     echo_authorization = False
+    healthz_body = {"status": "ok"}
 
     def log_message(self, *_args):
         pass
@@ -993,7 +1101,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.seen.append(("GET", self.path))
         if self.path == "/healthz":
-            self._send(200, json.dumps({"status": "ok"}))
+            self._send(200, json.dumps(self.healthz_body))
         else:
             self._send(404, "{}")
 
@@ -1036,6 +1144,125 @@ def test_an_open_daemon_fails_check_2(shell_env, fake_http):
     assert "not enforcing its bearer token" in result.stdout
     assert "DAEMON SMOKE FAILED at check 2" in result.stdout
     assert "PASS 3" not in result.stdout
+
+
+@pytestmark_shell
+def test_expect_sha_mismatch_fails_check_1_and_names_both(
+    shell_env, fake_http
+):
+    handler, base = fake_http
+    handler.healthz_body = {"status": "ok", "release": FULL}
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(
+        tmp_path, env, "--daemon", base, "--expect-sha", "f" * 12
+    )
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert (
+        f"FAIL 1 healthz: release {FULL} is not the expected "
+        + "f" * 12
+        in result.stdout
+    )
+    assert "DAEMON SMOKE FAILED at check 1" in result.stdout
+    assert ("POST", "/mcp") not in handler.seen  # stopped at check 1
+
+
+@pytestmark_shell
+def test_expect_sha_against_an_older_daemon_fails_check_1(
+    shell_env, fake_http
+):
+    handler, base = fake_http  # healthz is the old {"status": "ok"}
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(
+        tmp_path, env, "--daemon", base, "--expect-sha", FULL[:7]
+    )
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert (
+        f"FAIL 1 healthz: release none reported is not the expected "
+        f"{FULL[:7]}" in result.stdout
+    )
+
+
+@pytestmark_shell
+def test_expect_sha_match_passes_check_1(shell_env, fake_http):
+    handler, base = fake_http
+    handler.healthz_body = {"status": "ok", "release": FULL}
+    handler.post_status = 200  # check 2 then fails, as it should
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(
+        tmp_path, env, "--daemon", base, "--expect-sha", FULL[:12]
+    )
+    assert f"PASS 1 healthz (release {FULL} matches" in result.stdout
+    assert "FAIL 2 auth_enforced" in result.stdout
+
+
+@pytestmark_shell
+def test_without_expect_sha_the_release_is_only_reported(
+    shell_env, fake_http
+):
+    handler, base = fake_http
+    handler.healthz_body = {"status": "ok", "release": "unknown"}
+    handler.post_status = 200
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(tmp_path, env, "--daemon", base)
+    assert "PASS 1 healthz (release unknown)" in result.stdout
+
+
+@pytestmark_shell
+def test_without_expect_sha_an_older_daemon_still_passes_check_1(
+    shell_env, fake_http
+):
+    handler, base = fake_http
+    handler.post_status = 200
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(tmp_path, env, "--daemon", base)
+    assert "PASS 1 healthz (release none reported)" in result.stdout
+
+
+@pytestmark_shell
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"status": "degraded", "release": FULL},
+        {"release": FULL},
+        ["ok"],
+    ],
+)
+def test_healthz_must_still_say_status_ok(shell_env, fake_http, body):
+    handler, base = fake_http
+    handler.healthz_body = body
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    result = _ci_live(tmp_path, env, "--daemon", base)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert "FAIL 1 healthz" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "bad", ["abc", "ABCDEF0", "HEAD", "a" * 41, "xyz1234"]
+)
+@pytestmark_shell
+def test_a_bad_expect_sha_is_not_run_before_any_network_call(
+    shell_env, listener, bad
+):
+    tmp_path, env, _marker = shell_env
+    env[DEFAULT_ENV] = TOKEN
+    port = listener.getsockname()[1]
+    result = _ci_live(
+        tmp_path,
+        env,
+        "--daemon",
+        f"http://127.0.0.1:{port}",
+        "--expect-sha",
+        bad,
+    )
+    _assert_not_run(result)
+    assert "--expect-sha" in result.stderr
+    assert not _was_connected_to(listener)
 
 
 @pytestmark_shell

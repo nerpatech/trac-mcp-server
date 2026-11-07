@@ -10,6 +10,10 @@ build/
 *.egg-info/
 *.egg
 
+# Written into the build directory by setup.py; ignored in case anything
+# ever writes it into src/ (Trac #170)
+src/trac_mcp_server/_release.py
+
 # Virtual environments
 .venv/
 venv/

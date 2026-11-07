@@ -5,12 +5,18 @@ Covers __version__ attribute and check_version_consistency().
 """
 
 import re
+import sys
+import types
 from unittest.mock import mock_open, patch
 
 import tomllib
 
 import trac_mcp_server
-from trac_mcp_server.version import check_version_consistency
+from trac_mcp_server.version import (
+    check_version_consistency,
+    format_server_version,
+    release_sha,
+)
 
 
 class TestVersionAttribute:
@@ -125,3 +131,52 @@ class TestCheckVersionConsistency:
             # With real install, this should either succeed or fail gracefully
             assert isinstance(is_consistent, bool)
             assert isinstance(message, str)
+
+
+class TestReleaseSha:
+    """release_sha() reads the stamp setup.py writes at build time
+    (Trac /trac_mcp_server #170)."""
+
+    def test_none_when_the_build_wrote_no_stamp(self, monkeypatch):
+        # a None entry makes the import raise ImportError, as a
+        # checkout with no _release.py does
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", None
+        )
+        assert release_sha() is None
+
+    def test_the_stamped_value_when_there_is_one(self, monkeypatch):
+        fake = types.ModuleType("trac_mcp_server._release")
+        fake.RELEASE_SHA = "a" * 40
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", fake
+        )
+        assert release_sha() == "a" * 40
+
+    def test_a_dirty_stamp_is_returned_as_written(self, monkeypatch):
+        fake = types.ModuleType("trac_mcp_server._release")
+        fake.RELEASE_SHA = "a" * 40 + "-dirty"
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", fake
+        )
+        assert release_sha() == "a" * 40 + "-dirty"
+
+
+class TestFormatServerVersion:
+    """serverInfo.version carries the commit when one is known."""
+
+    def test_plain_version_without_a_sha(self):
+        assert format_server_version("2.2.0", None) == "2.2.0"
+
+    def test_local_segment_with_the_first_12_of_the_sha(self):
+        sha = "0123456789abcdef" * 2 + "01234567"
+        assert (
+            format_server_version("2.2.0", sha) == "2.2.0+g0123456789ab"
+        )
+
+    def test_a_dirty_sha_is_marked_dirty(self):
+        sha = "0123456789abcdef" * 2 + "01234567" + "-dirty"
+        assert (
+            format_server_version("2.2.0", sha)
+            == "2.2.0+g0123456789ab.dirty"
+        )

@@ -8,11 +8,18 @@ wheels it actually installed (``constraints/deploy.txt``), the config it
 actually ships, its rc script and its environment. This script talks to
 the daemon over HTTP, as a client would, and checks that the daemon is up,
 enforces its token, lists every tool this checkout defines, and can read,
-write and edit on the test instance. It cannot tell WHICH commit is
-running: the version string is the same on every commit, so a stale
-install with the same toolset passes. Check 3 proves only that the daemon
-lists every tool this checkout defines; a same-toolset stale install is not
-detectable by this suite.
+write and edit on the test instance. The version string is the same on
+every commit, so what says WHICH commit is running is the ``release`` in
+the ``/healthz`` body: the wheel's build stamps the commit it was built
+from (``setup.py``, Trac #170). With ``--expect-sha`` check 1 compares
+it, so a stale install is caught -- for a release built from a source
+checkout. A build with no checkout behind it (an sdist, an editable
+install) reports ``unknown`` and fails ``--expect-sha``, as does a build
+made from a tree with uncommitted changes to tracked files (``-dirty``)
+and a daemon too old to report a release at all. Without
+``--expect-sha`` the release is only shown. Check 3 proves only that the
+daemon lists every tool this checkout defines, so without
+``--expect-sha`` a same-toolset stale install is not detectable.
 
 The daemon must be started WITHOUT a permissions file. One started with
 ``--permissions-file`` filters its tool list, so check 3 fails on every
@@ -24,12 +31,19 @@ Usage:
     TRAC_MCP_AUTH_TOKEN_STAGE=... python scripts/daemon_smoke.py URL
     python scripts/daemon_smoke.py URL --token-env OTHER_VAR
     python scripts/daemon_smoke.py URL --instance /other --allow-instance-writes
+    python scripts/daemon_smoke.py URL --expect-sha SHA
+
+``--expect-sha SHA`` (7 to 40 lowercase hex characters, a commit sha or
+its prefix) makes check 1 fail unless ``/healthz`` reports a clean
+release starting with SHA; anything else is refused before any network
+call (exit 2, NOT RUN).
 
 ``URL`` is the daemon's base (``http://host:8092``); a trailing ``/mcp`` or
 ``/`` is accepted and removed. Checks run in order and stop at the first
 failure, one ``PASS <n> <name>`` / ``FAIL <n> <name>: <reason>`` line each:
 
-  1 healthz        GET /healthz is 200 {"status": "ok"}
+  1 healthz        GET /healthz is 200 with "status": "ok"; shows its
+                   "release"; with --expect-sha that must be the commit
   2 auth_enforced  POST /mcp with no Authorization is 401
   3 tools          initialize + tools/list; every tool this checkout
                    defines is listed by the daemon
@@ -55,7 +69,8 @@ ExitCodeContractHasThreeStates``:
      the connection: that is a finding about the release
   2  could not run: the token variable is unset or empty, the URL is
      malformed, a write target other than /trac_test was not explicitly
-     allowed, or a module the checks need (httpx, the MCP SDK, this
+     allowed, --expect-sha is not 7 to 40 lowercase hex characters, or a
+     module the checks need (httpx, the MCP SDK, this
      checkout's trac_mcp_server) cannot be imported. Decided before any
      network call, and says so ("NOT RUN").
 
@@ -91,6 +106,7 @@ DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN_STAGE"
 # Checks 4-6 read and write here, never at the daemon's default instance.
 DEFAULT_INSTANCE = "/trac_test"
 _INSTANCE_NAME = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_EXPECT_SHA = re.compile(r"[0-9a-f]{7,40}\Z")
 EXIT_PASSED = 0
 EXIT_FAILED = 1
 EXIT_NOT_RUN = 2
@@ -168,6 +184,42 @@ def instance_refusal(instance: str, allow_writes: bool) -> str | None:
             "pass --allow-instance-writes to say that is intended"
         )
     return None
+
+
+def validate_expect_sha(value: str) -> str:
+    """``--expect-sha`` as given when it is 7 to 40 lowercase hex
+    characters, else ``ValueError``: fewer than 7 does not name one
+    commit, and the daemon reports lowercase."""
+    if not _EXPECT_SHA.match(value or ""):
+        raise ValueError(
+            "--expect-sha must be 7 to 40 lowercase hex characters "
+            "(a commit sha or its prefix)"
+        )
+    return value
+
+
+def check_release(release: object, expect_sha: str | None) -> str:
+    """Judge the ``release`` /healthz reported; the PASS detail, or
+    ``CheckFailed``.
+
+    Without ``expect_sha`` anything passes and the reported value is the
+    detail (``none reported`` for an older daemon whose /healthz has no
+    ``release`` key). With it, the release must be present, not
+    ``unknown``, not ``-dirty``, and start with ``expect_sha``.
+    """
+    reported = "none reported" if release is None else str(release)[:80]
+    if expect_sha is None:
+        return f"release {reported}"
+    if (
+        not isinstance(release, str)
+        or release == "unknown"
+        or release.endswith("-dirty")
+        or not release.startswith(expect_sha)
+    ):
+        raise CheckFailed(
+            f"release {reported} is not the expected {expect_sha}"
+        )
+    return f"release {release} matches expected {expect_sha}"
 
 
 def compare_tools(
@@ -357,7 +409,9 @@ class Reporter:
 # ---------------------------------------------------------------------------
 
 
-async def check_healthz(base: str) -> str:
+async def check_healthz(
+    base: str, expect_sha: str | None = None
+) -> str:
     import httpx
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
@@ -370,12 +424,12 @@ async def check_healthz(base: str) -> str:
         body = response.json()
     except ValueError:
         raise CheckFailed("GET /healthz did not return JSON") from None
-    if body != {"status": "ok"}:
+    if not isinstance(body, dict) or body.get("status") != "ok":
         raise CheckFailed(
             f"GET /healthz returned {str(body)[:80]}, "
-            'expected {"status": "ok"}'
+            'expected {"status": "ok", ...}'
         )
-    return ""
+    return check_release(body.get("release"), expect_sha)
 
 
 _INITIALIZE = {
@@ -848,7 +902,11 @@ async def _session_checks(
 
 
 async def run_smoke(
-    base: str, token: str, out=None, instance: str = DEFAULT_INSTANCE
+    base: str,
+    token: str,
+    out=None,
+    instance: str = DEFAULT_INSTANCE,
+    expect_sha: str | None = None,
 ) -> int:
     """Run the checks against ``base``; the process exit code."""
     reporter = Reporter(token, out)
@@ -858,7 +916,7 @@ async def run_smoke(
         logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
     async def healthz():
-        return await check_healthz(base)
+        return await check_healthz(base, expect_sha)
 
     async def auth():
         return await check_auth_enforced(base)
@@ -952,6 +1010,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=f"permit an --instance other than {DEFAULT_INSTANCE}",
     )
+    parser.add_argument(
+        "--expect-sha",
+        default=None,
+        metavar="SHA",
+        help="fail check 1 unless /healthz reports a clean release "
+        "that starts with SHA (7 to 40 lowercase hex characters)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -963,6 +1028,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     if refusal:
         return _not_run(refusal)
+    if args.expect_sha is not None:
+        try:
+            validate_expect_sha(args.expect_sha)
+        except ValueError as exc:
+            return _not_run(str(exc))
     if not _ENV_NAME.match(args.token_env):
         return _not_run(
             "--token-env must name an environment variable "
@@ -989,7 +1059,14 @@ def main(argv: list[str] | None = None) -> int:
             "call; run it with the project's venv"
         )
 
-    return asyncio.run(run_smoke(base, token, instance=args.instance))
+    return asyncio.run(
+        run_smoke(
+            base,
+            token,
+            instance=args.instance,
+            expect_sha=args.expect_sha,
+        )
+    )
 
 
 if __name__ == "__main__":

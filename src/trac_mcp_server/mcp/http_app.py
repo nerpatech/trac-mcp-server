@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .. import version as _version
 from ..config_schema import ServerConfig
 from ..instances import Identity
 from .oidc import extract_bearer_token
@@ -223,7 +224,12 @@ class OidcTokenRequiredMiddleware:
 
 
 async def _healthz(_request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "release": _version.release_sha() or "unknown",
+        }
+    )
 
 
 class _SessionManagerASGIApp:
