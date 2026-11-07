@@ -2434,8 +2434,19 @@ def test_wiki_realm_slashed_target_is_not_a_captured_tail():
             "/#4/#5",
             "[auto_pm:#3 #3]/[auto_pm:#4 #4]/[auto_pm:#5 #5]",
         ),
-        # A `#` with no digits is not a ticket reference.
-        ("auto_pm:#3", "/#x", "[auto_pm:#3 #3]/#x"),
+        (
+            "auto_pm:#3",
+            "-#5/#6",
+            "[auto_pm:#3 #3]-[auto_pm:#5 #5]/[auto_pm:#6 #6]",
+        ),
+        # A tail holding `#` in any shape but the measured `[-/]#N`
+        # chain gets no suggestion: a bracket form we cannot vouch for
+        # is worse than none (review fixes, ticket #163).
+        ("auto_pm:#3", "/#x", None),
+        ("auto_pm:#3", "-x#12", None),
+        ("auto_pm:#3", "/#5abc", None),
+        ("auto_pm:#3", "-#5x", None),
+        ("auto_pm:#3", "#5", None),
         ("auto_pm:#3", "", None),
         ("nocolon", "'s", None),
         ("auto_pm:", "'s", None),
@@ -2447,3 +2458,222 @@ def test_bracket_form_for_captured_token(token, tail, expected):
     )
 
     assert _bracket_form_for_captured_token(token, tail) == expected
+
+
+# ---------------------------------------------------------------------
+# Ticket #163 review fixes.
+# ---------------------------------------------------------------------
+
+
+def _pragma_warnings(html, *allowed, local_intertrac_bases=frozenset()):
+    """`build_warnings` over `html` with one `allow` pragma per code, so
+    only the pragma filter differs between the cases below."""
+    tracwiki = "".join(
+        f"preview-checks: allow {code}\n" for code in allowed
+    )
+    return [
+        w
+        for w in build_warnings(
+            None,
+            tracwiki + "x\n",
+            extract_facts(html),
+            probes={},
+            check_targets=False,
+            source_format="tracwiki",
+            local_intertrac_bases=local_intertrac_bases,
+        )
+        if w["code"] != "target_check_disabled"
+    ]
+
+
+_TICKET_POSSESSIVE_HTML = (
+    '<p><a class="missing ticket">ticket:12\'s</a></p>'
+)
+_WIKI_POSSESSIVE_HTML = (
+    '<p><a class="missing wiki" href="http://h/p/wiki/WikiStart\'s" '
+    'rel="nofollow">wiki:WikiStart\'s</a></p>'
+)
+
+
+def _html_for_row(name):
+    return (FIXTURES_DIR / f"{name}.html").read_text()
+
+
+@pytest.mark.parametrize(
+    "html",
+    [_TICKET_POSSESSIVE_HTML, _WIKI_POSSESSIVE_HTML],
+)
+def test_old_missing_local_target_pragma_still_passes_a_captured_tail(
+    html,
+):
+    """`allow missing_local_target` let `ticket:12's` through before
+    #163 renamed the finding; the new code carries `replaces_code` so
+    the same pragma still does."""
+    assert _pragma_warnings(html) != []
+    assert _pragma_warnings(html, "missing_local_target") == []
+
+
+@pytest.mark.parametrize(
+    "html", [_TICKET_POSSESSIVE_HTML, _WIKI_POSSESSIVE_HTML]
+)
+def test_new_code_pragma_passes_a_local_captured_tail(html):
+    assert _pragma_warnings(html, "local_target_captured_tail") == []
+
+
+def test_local_captured_tail_names_the_code_it_replaces():
+    warnings = _missing_anchor_warnings(_TICKET_POSSESSIVE_HTML)
+    assert warnings[0]["evidence"]["replaces_code"] == (
+        "missing_local_target"
+    )
+
+
+@pytest.mark.parametrize("local", [frozenset(), _LOCAL_BASE])
+def test_old_realm_pragma_still_passes_a_slash_tail(local):
+    """Before #163 `auto_pm:#3/#4` was `missing_intertrac_realm` on a
+    local base and silent off-host; `allow missing_intertrac_realm`
+    reproduces the old pass in both."""
+    html = _html_for_row("row163d_intertrac_slash_tail")
+    assert _pragma_warnings(html, local_intertrac_bases=local) != []
+    assert (
+        _pragma_warnings(
+            html,
+            "missing_intertrac_realm",
+            local_intertrac_bases=local,
+        )
+        == []
+    )
+
+
+def test_slash_tail_names_the_code_it_replaces():
+    ev = _only(
+        "row163d_intertrac_slash_tail",
+        "intertrac_target_captured_punctuation",
+    )["evidence"]
+    assert ev["replaces_code"] == "missing_intertrac_realm"
+
+
+def test_own_code_pragma_still_passes_a_slash_tail():
+    html = _html_for_row("row163d_intertrac_slash_tail")
+    assert (
+        _pragma_warnings(
+            html,
+            "intertrac_target_captured_punctuation",
+            local_intertrac_bases=_LOCAL_BASE,
+        )
+        == []
+    )
+
+
+def test_realm_pragma_does_not_pass_a_dash_tail():
+    """A `-` tail was `intertrac_target_captured_punctuation` before
+    #163 too, so the realm pragma never covered it and must not now."""
+    html = _html_for_row("row163e_intertrac_dash_range")
+    codes = [
+        w["code"]
+        for w in _pragma_warnings(
+            html,
+            "missing_intertrac_realm",
+            local_intertrac_bases=_LOCAL_BASE,
+        )
+    ]
+    assert codes == ["intertrac_target_captured_punctuation"], codes
+
+
+def test_dash_tail_carries_no_replaces_code():
+    ev = _only(
+        "row163e_intertrac_dash_range",
+        "intertrac_target_captured_punctuation",
+    )["evidence"]
+    assert "replaces_code" not in ev
+
+
+def test_wiki_surname_apostrophe_is_a_missing_page_not_a_tail():
+    """`O'Brien`: the `'` is followed by a capital, so it is part of the
+    page name, not a possessive."""
+    html = (
+        '<p><a class="missing wiki" href="http://h/p/wiki/O\'Brien" '
+        'rel="nofollow">wiki:O\'Brien</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "tail", ["'s", "'t", "'ll", "'re", "'ve", "'d"]
+)
+def test_wiki_contraction_tails_are_still_captured(tail):
+    html = (
+        f'<p><a class="missing wiki" href="http://h/p/wiki/Foo{tail}" '
+        f'rel="nofollow">wiki:Foo{tail}</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == [
+        "local_target_captured_tail"
+    ]
+    assert warnings[0]["evidence"]["suggestion"] == f"[[Foo]]{tail}"
+
+
+@pytest.mark.parametrize(
+    "text", ["ticket:12:5", "ticket:12.5", "ticket:12,5", "ticket:12(x"]
+)
+def test_ticket_tail_outside_the_rendered_shapes_stays_missing(text):
+    """Only `-`, `/` and `'`+letter tails were rendered live; any other
+    punctuation after the number is not vouched for."""
+    html = f'<p><a class="missing ticket">{text}</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "text,suggestion",
+    [
+        ("ticket:12-ish", "#12-ish"),
+        ("ticket:12/13", "#12/13"),
+        ("ticket:12's", "#12's"),
+        ("ticket:12'x", "#12'x"),
+    ],
+)
+def test_ticket_tail_in_the_rendered_shapes_is_captured(
+    text, suggestion
+):
+    html = f'<p><a class="missing ticket">{text}</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == [
+        "local_target_captured_tail"
+    ]
+    assert warnings[0]["evidence"]["suggestion"] == suggestion
+
+
+def test_ticket_apostrophe_then_digit_stays_missing():
+    html = '<p><a class="missing ticket">ticket:12\'5</a></p>'
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "target", ["WikiStart's#Sec", "WikiStart's?action=x"]
+)
+def test_wiki_fragment_or_query_is_not_a_captured_tail(target):
+    """`wiki:WikiStart's#Sec`: the href carries a fragment/query after
+    the page, so the stem/tail split is not the whole story."""
+    html = (
+        f'<p><a class="missing wiki" href="http://h/p/wiki/{target}" '
+        f'rel="nofollow">wiki:{target}</a></p>'
+    )
+    warnings = _missing_anchor_warnings(html)
+    assert [w["code"] for w in warnings] == ["missing_local_target"]
+
+
+@pytest.mark.parametrize(
+    "token,tail",
+    [("auto_pm:#87", "'s"), ("auto_pm:#87", "-ish")],
+)
+def test_bracket_form_without_hash_in_tail_is_unchanged(token, tail):
+    from trac_mcp_server.preview.checks import (
+        _bracket_form_for_captured_token,
+    )
+
+    assert (
+        _bracket_form_for_captured_token(token, tail)
+        == f"[{token} #87]{tail}"
+    )

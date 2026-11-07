@@ -182,8 +182,8 @@ def is_missing_realm_href(href: str | None) -> bool:
     and are the form that resolves correctly even on this host, so they
     are excluded here.
 
-    A target that STARTS with the encoded ticket token ``%23`` is not
-    this shape (ticket #163). ``auto_pm:#3/#4`` dispatches on
+    A target that STARTS with the encoded ticket token ``%23`` plus a
+    digit is not this shape (ticket #163). ``auto_pm:#3/#4`` dispatches on
     ``%233/%234``: the ``#3`` is a ticket short link and the ``/#4`` is
     text Trac swallowed into the target, so inserting ``wiki:`` would not
     fix it. That is a captured tail, reported by
@@ -202,7 +202,7 @@ def is_missing_realm_href(href: str | None) -> bool:
     if not match:
         return False
     target = match.group(1)
-    if target.startswith("%23"):
+    if re.match(r"%23\d", target):
         return False
     slash_index = target.find("/")
     if slash_index == -1:

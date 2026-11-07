@@ -244,6 +244,14 @@ class TestIsMissingRealmHref(unittest.TestCase):
             )
         )
 
+    def test_percent23_page_name_is_still_flagged(self):
+        """Only `%23` plus a DIGIT is a ticket token. A page whose name
+        merely starts with `#a` (`%23a/b`) is the ticket-#86 shape and
+        must keep reporting the missing realm (review of #163)."""
+        self.assertTrue(
+            is_missing_realm_href("http://h/auto_pm/intertrac/%23a/b")
+        )
+
     def test_hash_inside_a_page_path_is_still_flagged(self):
         """Only a target that STARTS with the ticket token is exempt: a
         slashed page path that merely contains `%23` later is still the

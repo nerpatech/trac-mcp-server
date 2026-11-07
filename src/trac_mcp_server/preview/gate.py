@@ -38,7 +38,8 @@ BLOCKING_CODES = frozenset(
         "missing_cross_instance_target",
         # Ticket #163. The LOCAL sibling of
         # `intertrac_target_captured_punctuation`, blocking for the same
-        # argument: `ticket:12's` / `wiki:WikiStart's` render as a dead link the writer never meant, whatever the stem is.
+        # argument: `ticket:12's` / `wiki:WikiStart's` render as a dead
+        # link the writer never meant, whatever the stem is.
         # It REPLACES `missing_local_target` for those anchors at the same
         # severity (error to error), so the set of refused writes is
         # unchanged and only the diagnosis and the fix change -- the old

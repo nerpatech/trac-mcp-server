@@ -22,6 +22,7 @@ from ..converters.markdown_to_tracwiki import (
     find_list_item_splits,
 )
 from .facts import PreviewFacts
+from .targets import _INTERTRAC_TARGET_RE as _INTERTRAC_HREF_TARGET_RE
 from .targets import (
     ERROR,
     MISSING,
@@ -549,6 +550,15 @@ def _bare_autolink_counts(tracwiki: str) -> dict[str, int]:
     return counts
 
 
+def _wiki_href_page(href: str) -> str | None:
+    """The page name in a local wiki href, percent-decoded, or None.
+
+    One place for the unquote + first-`/wiki/` extraction that
+    `_autolinked_page_name` and `_local_captured_tail` both need."""
+    match = _WIKI_HREF_PAGE_RE.search(unquote(href))
+    return match.group(1) if match else None
+
+
 def _autolinked_page_name(anchor: Any) -> str | None:
     """The page name this anchor would have if Trac auto-linked it out
     of prose, or None if its shape rules that out.
@@ -562,10 +572,9 @@ def _autolinked_page_name(anchor: Any) -> str | None:
     """
     if not anchor.href or "wiki" not in anchor.classes:
         return None
-    match = _WIKI_HREF_PAGE_RE.search(unquote(anchor.href))
-    if not match:
+    page = _wiki_href_page(anchor.href)
+    if page is None:
         return None
-    page = match.group(1)
     if anchor.text.replace(_ZERO_WIDTH_ICON, "") != page:
         return None
     if not _is_autolink_page_name(page):
@@ -617,13 +626,18 @@ def _bare_attachment_counts(
 
 # An unlabelled local ticket short link as rendered: `ticket:12's`. The
 # digits are ASCII on purpose -- Trac's own `ticket:` pattern is.
-_LOCAL_TICKET_TEXT_RE = re.compile(r"ticket:([0-9]+)(.+)\Z", re.DOTALL)
+_LOCAL_TICKET_TEXT_RE = re.compile(r"ticket:([0-9]+)(.+)", re.DOTALL)
 
-# A `'` followed by a letter, after at least one stem character: where a
-# wiki page name stops being a page and starts being the writer's
-# suffix (`WikiStart's`). Hyphen and slash are deliberately NOT here:
-# real page names use both (`Projects/trac-mcp-server`).
-_WIKI_PAGE_TAIL_RE = re.compile(r"(?<=.)'[^\W\d_]")
+# A `'` followed by a LOWERCASE ASCII letter, after at least one stem
+# character: where a wiki page name stops being a page and starts being
+# the writer's suffix (`WikiStart's`, `'t`, `'ll`, `'re`, `'ve`, `'d`).
+# A capital is a name (`O'Brien`). Hyphen and slash are deliberately NOT
+# here: real page names use both (`Projects/trac-mcp-server`).
+_WIKI_PAGE_TAIL_RE = re.compile(r"(?<=.)'[a-z]")
+
+# The tail shapes of a local TICKET link that were rendered live: it
+# starts with `-` or `/`, or with `'` and a letter.
+_LOCAL_TICKET_TAIL_RE = re.compile(r"[-/]|'[^\W\d_]")
 
 
 def _local_captured_tail(
@@ -640,16 +654,20 @@ def _local_captured_tail(
     Two realms, two shapes:
 
     * `ticket:` -- the anchor text is `ticket:<digits><tail>` and the
-      tail starts with a character that is not alphanumeric, `_`, `#`
-      or `?`. Alphanumeric/`_` would be a longer, different token;
-      `#` and `?` are Trac's own fragment and query separators
-      (`ticket:99999#comment:1` is a dead comment link, not a captured
-      tail). A missing ticket anchor has no href, so the TEXT is read.
-      The suggestion is the bare form, `#12's`, which needs no bracket.
+      tail starts with `-` or `/`, or with `'` followed by a letter:
+      the shapes rendered live. Anything else (`ticket:12:5`,
+      `ticket:12.5`, a `#`/`?` fragment or query, an alphanumeric that
+      would be a longer token) is not vouched for and stays
+      `missing_local_target`. A missing ticket anchor has no href, so
+      the TEXT is read. The suggestion is the bare form, `#12's`, which
+      needs no bracket.
     * `wiki:` -- the anchor's text is exactly `wiki:` plus the page
       name from its href, and that name holds a `'` followed by a
-      letter after a non-empty stem. The tail starts at the `'`. The
-      suggestion is `[[stem]]tail`.
+      lowercase ASCII letter after a non-empty stem (`O'Brien` is a
+      name, not a possessive). The tail starts at the `'`. A `#`
+      fragment or `?` query in the href after the page gives None: the
+      split is not the whole story there. The suggestion is
+      `[[stem]]tail`.
 
     A LABELLED form (`[ticket:12's label]` renders `label`;
     `[wiki:WikiStart's]` renders `WikiStart's`) fails the text test, and
@@ -662,8 +680,7 @@ def _local_captured_tail(
         if not match:
             return None
         digits, tail = match.groups()
-        first = tail[0]
-        if first.isalnum() or first in "_#?":
+        if not _LOCAL_TICKET_TAIL_RE.match(tail):
             return None
         return (
             f"ticket:{digits}",
@@ -672,10 +689,11 @@ def _local_captured_tail(
             f"#{digits}{tail}",
         )
     if "wiki" in anchor.classes and anchor.href:
-        page_match = _WIKI_HREF_PAGE_RE.search(unquote(anchor.href))
-        if not page_match:
+        if re.search(r"[#?]", anchor.href):
             return None
-        page = page_match.group(1)
+        page = _wiki_href_page(anchor.href)
+        if page is None:
+            return None
         if text != f"wiki:{page}":
             return None
         cut = _WIKI_PAGE_TAIL_RE.search(page)
@@ -850,6 +868,10 @@ def _check_missing_local_target(
                         "token": token,
                         "resolved_as": resolved_as,
                         "suggestion": suggestion,
+                        # The code this finding replaced, so an existing
+                        # `allow missing_local_target` pragma still
+                        # passes it (`build_warnings`).
+                        "replaces_code": "missing_local_target",
                     },
                 )
             )
@@ -1109,11 +1131,15 @@ def _code_span_contains(raw: str, code_span_text: str) -> bool:
 # link dispatches on, which is why ticket #70's fix reads it instead of
 # comparing a source token against anchor text.
 #
-# EVERYTHING after `/intertrac/` up to a `?` or the end (ticket #163).
-# It used to stop at the next `/`, so for `auto_pm:#3/#4`, whose href is
-# ".../intertrac/%233/%234", the pattern saw only the LAST segment,
-# `%234`, a clean target, and the check stayed silent on a dead link.
-_INTERTRAC_HREF_TARGET_RE = re.compile(r"/intertrac/([^?#]+)")
+# EVERYTHING after `/intertrac/` up to a `?`, `#` or the end (ticket
+# #163). This is `targets._INTERTRAC_TARGET_RE`, imported rather than
+# copied. The pattern here used to be `/intertrac/([^/?#]+)\Z`, which
+# matched NOTHING for `auto_pm:#3/#4`, whose href is
+# ".../intertrac/%233/%234": the `[^/?#]+` group cannot span the `/`,
+# and the `\Z` then fails after `%233`, so the check never ran and
+# stayed silent on a dead link. Dropping the `\Z` also means an href
+# that carries a query string is now accepted (the target stops at `?`).
+# The name `_INTERTRAC_HREF_TARGET_RE` is an alias made at the import.
 
 # A clean short-link target: `#` and digits, nothing else.
 _CLEAN_TICKET_TARGET_RE = re.compile(r"\A#\d+\Z")
@@ -1160,10 +1186,13 @@ def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
     as `#3` plus `-#5`. `/` IS a legitimate target character after a
     wiki page (`wiki:Foo/Bar`), but such a target does not begin with
     `#N`, so it never reaches the prefix split. The href pattern used to
-    capture only the last path segment, which is why this was silent;
-    and on a same-host prefix the realm check read the slash as a page
-    path missing `wiki:` -- `is_missing_realm_href` now leaves a
-    `%23`-led target to this check, so there is one diagnosis, not two.
+    match NOTHING for such an href (`/intertrac/([^/?#]+)\\Z` cannot
+    span the inner `/`, and its `\\Z` then fails), which is why this was
+    silent; dropping the `\\Z` also means an href that carries a query
+    string is now accepted. On a same-host prefix the realm check read
+    the slash as a page path missing `wiki:` -- `is_missing_realm_href`
+    now leaves a `%23`-led target to this check, so there is one
+    diagnosis, not two.
 
     The LOCAL realm forms (`ticket:12's`) never render an InterTrac
     dispatcher href, so they are `_check_missing_local_target`'s, as
@@ -1194,6 +1223,11 @@ def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
         suggestion = _bracket_form_for_captured_token(token, tail)
         if suggestion is not None:
             evidence["suggestion"] = suggestion
+        if "/" in tail:
+            # Before #163 a `/` tail was `missing_intertrac_realm` (local
+            # base) or silent (off-host); an `allow` pragma for the realm
+            # code must reproduce that pass, so name it for the filter.
+            evidence["replaces_code"] = "missing_intertrac_realm"
         warnings.append(
             _warning(
                 "intertrac_target_captured_punctuation",
@@ -1212,6 +1246,10 @@ def _check_captured_punctuation(facts: PreviewFacts) -> list[dict]:
 # A `#N` ticket reference inside a captured tail.
 _TAIL_TICKET_REF_RE = re.compile(r"#(\d+)")
 
+# The only `#`-bearing tails whose bracket form was rendered live: one or
+# more `-#N` / `/#N` links in a row.
+_TAIL_TICKET_CHAIN_RE = re.compile(r"(?:[-/]#\d+)+")
+
 
 def _bracket_form_for_captured_token(
     token: str, tail: str
@@ -1225,13 +1263,17 @@ def _bracket_form_for_captured_token(
     The label is the token's own suffix (`#87`), which keeps the
     rendered text as close to what the author typed as the fix allows.
 
-    '''Every `#N` in the tail gets the SAME prefix bracket''' (ticket
+    '''Every `#N` in a `[-/]#N` tail gets the SAME prefix bracket''' (ticket
     #163): `auto_pm:#3-#5` becomes `[auto_pm:#3 #3]-[auto_pm:#5 #5]` and
     `auto_pm:#3/#4` becomes `[auto_pm:#3 #3]/[auto_pm:#4 #4]`. Leaving
     the tail's `#5` bare, as this builder first did, renders silent but
     links THIS instance's ticket 5 -- the wrong project -- which is
-    worse than the refusal it was meant to fix. A tail with no `#N`
-    (`'s`, `-ish`) is carried over untouched.
+    worse than the refusal it was meant to fix. The prefixing applies
+    only when the WHOLE tail is a chain of `-#N` / `/#N` (the measured
+    shapes). A tail with `#` in any other shape (`-x#12`, `/#5abc`)
+    gets NO suggestion: a bracket form that was never rendered is not
+    offered. A tail with no `#` (`'s`, `-ish`) is carried over
+    untouched.
 
     **Verified against the live daemon before being emitted as advice.**
     The `'s` and `-ish` forms (2026-09-04): the defect line reports
@@ -1249,10 +1291,14 @@ def _bracket_form_for_captured_token(
     label = token.split(":", 1)[1]
     if not label:
         return None
-    prefix = token[: len(token) - len(label)]
-    rest = _TAIL_TICKET_REF_RE.sub(
-        lambda m: f"[{prefix}#{m.group(1)} #{m.group(1)}]", tail
-    )
+    rest = tail
+    if "#" in tail:
+        if not _TAIL_TICKET_CHAIN_RE.fullmatch(tail):
+            return None
+        prefix = token[: len(token) - len(label)]
+        rest = _TAIL_TICKET_REF_RE.sub(
+            lambda m: f"[{prefix}#{m.group(1)} #{m.group(1)}]", tail
+        )
     return f"[{token} {label}]{rest}"
 
 
@@ -1987,5 +2033,14 @@ def build_warnings(
 
     allowed = _allowed_codes(markdown_source, tracwiki)
     if allowed:
-        warnings = [w for w in warnings if w["code"] not in allowed]
+        # A finding that replaces an older code (`replaces_code`, ticket
+        # #163) is passed by a pragma for either, so a page that opted
+        # out of the old code is not refused by the rename.
+        warnings = [
+            w
+            for w in warnings
+            if w["code"] not in allowed
+            and w.get("evidence", {}).get("replaces_code")
+            not in allowed
+        ]
     return warnings
