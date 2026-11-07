@@ -685,7 +685,7 @@ async def _run_stdio() -> None:
     ):
         init_options = InitializationOptions(
             server_name="trac-mcp-server",
-            server_version=__version__,
+            server_version=server.version,
             capabilities=server.get_capabilities(
                 notification_options=NotificationOptions(),
                 experimental_capabilities={},
