@@ -139,29 +139,28 @@ class TestRecallGate(unittest.TestCase):
         stored, _, _ = _round_trip(src)
         self.assertEqual(stored, src)
 
-    def test_nested_list_then_outer_level_continuation_is_untouched(
+    def test_nested_list_then_outer_level_continuation_stays_in_the_outer_item(
         self,
     ):
-        """A line deeper than the OUTER marker's column but not the inner
-        nested one still continues the outer item -- the stack-based
-        depth check has to pop only the levels this line doesn't clear,
-        not all of them.
+        """A line between the outer and the inner marker columns closes the
+        inner item and continues the OUTER one -- the stack-based depth
+        check has to drop only the levels this line closes, not all of them.
 
-        Not asserted byte-identical: like #75's own unaligned-continuation
-        seed, the write leg re-indents a continuation under the item text
-        rather than preserving its exact source column (ticket #75
-        section 4's slack). What matters here is that it stays a
-        continuation -- no blank line inserted, still indented deeper than
-        the outer marker -- not its exact column.
+        Ticket #149 changed this row: it used to assert no blank line was
+        inserted (the line stayed at its source column, which CommonMark
+        reads as a lazy continuation of the closed inner item's paragraph,
+        so the write leg put the text under `b`). Trac's measured rule (the
+        line at column 2 closes `b` and continues `a`) is now kept: the line
+        goes to `a`'s text column with a blank line first, and the write leg
+        gives it back at that column, still deeper than the outer marker.
+        The blank line is #125's list-item split, the accepted trade-off.
         """
         src = " * a\n   * b\n  outer continuation"
-        stored, _, _ = _round_trip(src)
-        self.assertNotIn("\n\n", stored)
-        lines = stored.split("\n")
-        self.assertTrue(
-            lines[-1].strip().startswith("outer continuation")
+        stored, md, _ = _round_trip(src)
+        self.assertEqual(md, " - a\n   - b\n\n   outer continuation")
+        self.assertEqual(
+            stored, " * a\n   * b\n\n   outer continuation"
         )
-        self.assertGreater(len(lines[-1]) - len(lines[-1].lstrip()), 1)
 
     def test_nested_list_fully_closed_gets_separated(self):
         src = " * a\n   * b\nend."

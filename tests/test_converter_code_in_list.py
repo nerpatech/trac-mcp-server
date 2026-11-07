@@ -549,10 +549,18 @@ DECLINED = {
         "ii. foo\n```\n\n{{{\nx\n}}}\n\n{{{\n```tracwiki-unconverted\n"
         " iii. bar\n}}}",
     ),
+    # Ticket #149 changed this row's bytes (the only one): the fence line
+    # sits AT the item's marker column (a tab is one character to the
+    # separator pass), which Trac's measured rule now reads as continuing
+    # the item, so the pass no longer ends the list before it and the blank
+    # line it adds lands inside the fence body instead. Both are the same
+    # unexpressible shape; master's were
+    # "\t* a\n\n\t```\nx\n```\n\t* b\n" and
+    # "{{{\n* a\n\n```\n}}}\n\nx\n\n{{{\n\t* b\n}}}".
     "TAB-indented marker line": (
         "\t* a\n\t{{{\nx\n\t}}}\n\t* b\n",
-        "\t* a\n\n\t```\nx\n```\n\t* b\n",
-        "{{{\n* a\n\n```\n}}}\n\nx\n\n{{{\n\t* b\n}}}",
+        "\t* a\n\t```\n\nx\n```\n\t* b\n",
+        "{{{\n* a\n```\n}}}\n\nx\n\n{{{\n\t* b\n}}}",
     ),
 }
 
