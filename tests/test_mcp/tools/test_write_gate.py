@@ -1325,7 +1325,7 @@ class TestWriteGateLive:
                 {
                     "page_name": page,
                     "content": (
-                        "Seeded for the #64 live gate row.\n\n"
+                        "Seeded for the write gate's live row.\n\n"
                         + BROKEN_SOURCE
                     ),
                     "version": info["version"],
@@ -1335,6 +1335,7 @@ class TestWriteGateLive:
 
         assert result.isError, _text(result)
         assert "missing_local_target" in _text(result)
+        assert "NoSuchPageHereAtAll" in _text(result)
         assert client.get_wiki_page(page) == before, (
             "the gate returned an error but the write still landed"
         )
@@ -1353,7 +1354,7 @@ class TestWriteGateLive:
         client, page = page
         info = client.get_wiki_page_info(page)
         body = (
-            "Seeded for the #64 live gate row. This body is clean: "
+            "Seeded for the write gate's live row. This body is clean: "
             "it links to trac_mcp_server:#64 and nothing else.\n"
         )
 
