@@ -426,16 +426,24 @@ def test_text_between_the_marker_and_text_columns_round_trips():
     assert markdown_to_tracwiki(_md(wiki)) == " * a\n   > q\n   d\n * e"
 
 
-def test_text_deeper_than_the_text_column_is_unchanged():
-    """Measured: ` * a` / `   > q` / `       deeper` renders OUTSIDE the
-    list (a double blockquote), so no item text to separate. master's
-    read-leg output (8702a5c), no blank line."""
-    assert _md(" * a\n   > q\n       deeper\n * b") == (
-        " - a\n   > q\n       deeper\n - b"
+def test_text_past_the_bound_after_a_citation_leaves_the_list():
+    """` * a` / `   > q` / `       deeper` renders OUTSIDE the list, as 2
+    blockquotes after the item's citation (Trac ends the list past marker
+    + 2). Measured on /trac_test on 2026-11-07: the source and the round
+    trip below render the same structure (ul > li a + citation q; 2
+    blockquotes; a new ul). Ticket #175 pins that reading: the line goes
+    through the `tracwiki-unconverted` fallback, set off by blank lines."""
+    wiki = " * a\n   > q\n       deeper\n * b"
+    read = " - a\n   > q\n\n```tracwiki-unconverted\n       deeper\n```\n\n - b"
+    assert _md(wiki) == read
+    assert markdown_to_tracwiki(read) == (
+        " * a\n   > q\n\n       deeper\n\n * b"
     )
-    assert _md(" * a\n   > q\n    d\n * e") == (
-        " - a\n   > q\n    d\n - e"
-    )
+
+    wiki = " * a\n   > q\n    d\n * e"
+    read = " - a\n   > q\n\n```tracwiki-unconverted\n    d\n```\n\n - e"
+    assert _md(wiki) == read
+    assert markdown_to_tracwiki(read) == " * a\n   > q\n\n    d\n\n * e"
 
 
 def test_citation_followed_by_the_next_item_gets_no_blank_line():
