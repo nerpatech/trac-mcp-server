@@ -673,6 +673,24 @@ class TracWikiRenderer(mistune.BaseRenderer):
             prev_paragraph = is_paragraph and bool(rendered.strip())
         return "".join(pieces)
 
+    def _render_after_run(
+        self, kind: str, run: list[dict[str, Any]], state: Any
+    ) -> tuple[str, str]:
+        """Render one non-quote run of a list item that follows the item's
+        own text, and name its kind for `_item_block_separator`: a ``text``
+        run that starts with a paragraph is ``para`` (ticket #143). The
+        rendering is the TracWiki before the global bracket restore, which is
+        what the separator's predicates see. One method for the writer and
+        for `find_list_item_splits` (#176), so the two cannot disagree."""
+        rendered = self._render_text_run(run, state).strip("\n")
+        if rendered:
+            first = next(
+                (c for c in run if c.get("type") != "blank_line"), {}
+            )
+            if kind == "text" and _is_paragraph_token(first):
+                kind = "para"
+        return kind, rendered
+
     def paragraph(self, text: str) -> str:
         """Render paragraph."""
         return f"{text}\n\n"
@@ -1142,22 +1160,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         if kind == "quote":
                             after_runs.append((kind, "", run))
                             continue
-                        rendered = self._render_text_run(
-                            run, state
-                        ).strip("\n")
+                        kind, rendered = self._render_after_run(
+                            kind, run, state
+                        )
                         if rendered:
-                            first = next(
-                                (
-                                    c
-                                    for c in run
-                                    if c.get("type") != "blank_line"
-                                ),
-                                {},
-                            )
-                            if kind == "text" and _is_paragraph_token(
-                                first
-                            ):
-                                kind = "para"
                             after_runs.append((kind, rendered, run))
                 else:
                     text = token.get("raw", "")
@@ -1569,28 +1575,6 @@ def _token_text(token: dict[str, Any]) -> str:
     return "".join(_token_text(c) for c in token.get("children", []))
 
 
-def _is_between_run(
-    run: list[dict[str, Any]], placeholders: list[str]
-) -> bool:
-    """True when the writer writes this text `run` (non-blank children, as
-    `_item_runs` grouped them) directly after a nested list as
-    ``_item_block_separator``'s ``"between"``, decided on the run's restored
-    token text instead of its rendering: every child is a paragraph (any
-    other child holds a blank line in the writer's output), no paragraph
-    has a passthrough line, and the first line does not start a block in
-    Trac. A paragraph's own text holds no ``"\\n\\n"``, and two paragraphs
-    join with ``" [[BR]][[BR]]"`` when neither has a passthrough line."""
-    if not run or not all(_is_paragraph_token(c) for c in run):
-        return False
-    texts = [
-        _restore_bracket_syntax(_token_text(c), placeholders)
-        for c in run
-    ]
-    return not any(
-        _has_passthrough_line(t) or "\n\n" in t for t in texts
-    ) and not _starts_a_block_in_trac(texts[0])
-
-
 def find_list_item_splits(markdown_text: str) -> list[dict]:
     """List items whose content continues after a nested list (#125).
 
@@ -1607,9 +1591,12 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     ``"between"``). It is not a finding, and the walk resets as the writer's
     does: the item is innermost again, so a block after it is the same as in
     an item with no nested list. The runs are `_item_runs`, the writer's own
-    grouping; a run the writer refuses (a passthrough line, a blank line of
-    its own, a first line that starts a block) is still a finding, and so is
-    any other block directly after a nested list.
+    grouping, and the decision is the writer's too: the run is rendered by
+    the same renderer method (`_render_after_run`) and put through the same
+    `_item_block_separator` call. A run the writer refuses (a passthrough
+    line, a blank line of its own, a first line that starts a block in the
+    TracWiki, not in the Markdown) is still a finding, and so is any other
+    block directly after a nested list.
 
     Parses the same way `markdown_to_tracwiki` does (mistune's AST with
     the same `_MISTUNE_PLUGINS`, over the text after `_stash_bracket_syntax`), so
@@ -1628,6 +1615,10 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     )
     tokens = parse(stashed)
     findings: list[dict] = []
+    # Renders a run as the writer would (#176); the placeholders stay
+    # stashed, as they are when the writer's separator reads the text.
+    renderer = TracWikiRenderer(placeholders=placeholders)
+    render_state = mistune.BlockState()
 
     def walk(nodes: list[dict[str, Any]], depth: int) -> None:
         for node in nodes:
@@ -1635,9 +1626,11 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
             children = node.get("children", [])
             if kind == "list_item":
                 seen_list = False
-                for run_kind, run in _item_runs(children):
+                for run_kind, whole_run in _item_runs(children):
                     run = [
-                        c for c in run if c.get("type") != "blank_line"
+                        c
+                        for c in whole_run
+                        if c.get("type") != "blank_line"
                     ]
                     if not run:
                         continue
@@ -1645,11 +1638,26 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
                     if run_kind == "list":
                         seen_list = True
                     elif seen_list:
-                        if run_kind == "text" and _is_between_run(
-                            run, placeholders
-                        ):
-                            seen_list = False
-                            continue
+                        if run_kind == "text":
+                            renderer._last_char = "\n"
+                            kind_after, rendered = (
+                                renderer._render_after_run(
+                                    run_kind, whole_run, render_state
+                                )
+                            )
+                            if (
+                                rendered
+                                and _item_block_separator(
+                                    "list",
+                                    kind_after,
+                                    True,
+                                    "",
+                                    rendered,
+                                )
+                                == "between"
+                            ):
+                                seen_list = False
+                                continue
                         lead = next(
                             (
                                 c

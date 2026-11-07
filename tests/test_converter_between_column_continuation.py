@@ -216,6 +216,95 @@ def test_c9_text_sits_in_the_middle_item_in_markdown():
     assert "text col3" not in _own_text(inner[0])
 
 
+# -- Code review fixes -------------------------------------------------------
+
+# (source, read-leg Markdown, round-trip TracWiki): master's bytes (e866fa7)
+# where the move is refused.
+REFUSED_MOVE_ROWS = {
+    # An ordered outer item whose nested list sits left of its Markdown text
+    # column (#179): moving the line to the text column made it an indented
+    # code block.
+    "ordered outer, nested left of the text column": (
+        " 1. a\n   * b\n  l1\n 2. c\n",
+        " 1. a\n   - b\n  l1\n 2. c\n",
+        " 1. a\n\n * b\n   l1\n\n 2. c",
+    ),
+    # A Markdown-only list marker would open a nested Markdown item.
+    "plus marker": (
+        " * a\n   * b\n  + plus\n * c\n",
+        " - a\n   - b\n  + plus\n - c\n",
+        " * a\n   * b\n\n * plus\n\n * c",
+    ),
+    "paren marker": (
+        " * a\n   * b\n  1) x\n * c\n",
+        " - a\n   - b\n  1) x\n - c\n",
+        " * a\n   * b\n\n 1. x\n\n * c",
+    ),
+    "bare marker": (
+        " * a\n   * b\n  -\n * c\n",
+        " - a\n   - b\n  -\n - c\n",
+        " * a\n   * b\n * \n * c",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(REFUSED_MOVE_ROWS))
+def test_a_refused_move_reads_and_round_trips_as_on_master(name):
+    wiki, read, written = REFUSED_MOVE_ROWS[name]
+    assert _md(wiki) == read
+    assert markdown_to_tracwiki(_md(wiki)) == written
+
+
+def test_the_writers_own_ordered_outer_output_never_reads_as_code():
+    """` 1. a` / `   * b` / `  l1` is what the write leg writes for an
+    ordered outer item; reading it back must not make `l1` a code block."""
+    wiki = markdown_to_tracwiki("1. a\n   - b\n\n   l1\n2. c\n")
+    assert wiki == " 1. a\n   * b\n  l1\n 2. c"
+    md = _md(wiki)
+    assert "    l1" not in md
+    assert "{{{" not in markdown_to_tracwiki(md)
+
+
+def test_an_ordered_outer_item_with_its_nested_list_at_the_text_column_moves():
+    """#105's shape: ` 1. x` has its text at column 4 and the nested list at
+    column 4, so Markdown keeps the line in the item (text column 4 is not
+    past marker 4)."""
+    wiki = " 1. x\n    * y\n  between\n 2. z\n"
+    assert _md(wiki) == " 1. x\n    - y\n\n    between\n 2. z\n"
+    assert (
+        markdown_to_tracwiki(_md(wiki))
+        == " 1. x\n   * y\n  between\n 2. z"
+    )
+
+
+def test_list_stack_step_checks_the_target_items_marker_line_too():
+    """A line at a middle item's marker column: a lettered middle marker
+    refuses the truncation (master's pop closes it too)."""
+    lettered = re.match(r"\s*", " a. x")
+    bullet = re.match(r"\s*", "")
+    stack = [(1, bullet), (3, lettered), (5, bullet)]
+    _list_stack_step(stack, "   t", upper_bound=False)
+    assert [c for c, _ in stack] == [1]
+
+
+@pytest.mark.parametrize(
+    "inline",
+    [
+        "`* x` c",
+        "**1. x** c",
+        "*- x* c",
+        "[* x](http://e.com) c",
+    ],
+)
+def test_finder_decides_on_the_rendered_text_as_the_writer_does(inline):
+    """Inline markup hides the marker-like first characters in the rendering
+    (a stashed span, quotes): the writer uses the between form, so the
+    finder has nothing to report."""
+    md = f" - a\n   - b\n\n   {inline}\n - c\n"
+    assert "\n\n" not in markdown_to_tracwiki(md)
+    assert find_list_item_splits(md) == []
+
+
 # -- Round trip -------------------------------------------------------------
 
 # tw -> md -> tw: the first between line comes back at the outer marker column + 1
