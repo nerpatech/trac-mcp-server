@@ -316,9 +316,14 @@ def _list_stack_step(
 
     A blank line empties the stack. A line matching `_LIST_MARKER_RE` pops
     every entry at or past its own column (Trac's tab-expanded
-    `_indent_width`) and then pushes itself. Any other line continues the
-    item `_continued_item` picks (ticket #149): the entries after it are
-    dropped, or the stack is emptied when the line ends the list.
+    `_indent_width`) and then pushes itself. Any other line is decided by
+    `_continued_item` (ticket #149): the list ends (empty stack), or the line
+    continues the INNERMOST item and the stack is kept (a line at its marker
+    column included), or it continues an outer item, deeper ones closing --
+    which keeps the pre-#149 pop of every entry at or past the line's column
+    (a line strictly between two markers pops the same entries; one at an
+    outer marker's own column pops that item too). That shape is left as it
+    was on purpose, for ticket #176.
     """
     if not line.strip():
         stack.clear()
@@ -333,8 +338,9 @@ def _list_stack_step(
     idx = _continued_item([c for c, _ in stack], column)
     if idx is None:
         stack.clear()
-    else:
-        del stack[idx + 1 :]
+    elif idx < len(stack) - 1:
+        while stack and stack[-1][0] >= column:
+            stack.pop()
 
 
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
@@ -343,12 +349,11 @@ def _open_list_item(lines: list[str]) -> re.Match[str] | None:
 
     The stack walk `_separate_list_from_trailing_paragraph` uses, over
     columns in Trac's tab-expanded width: a marker line pops every entry at
-    or past its own column and pushes itself; any other non-blank line
-    continues the item `_continued_item` picks (the deeper entries close;
-    one at or left of the outermost marker ends the list, #149); a blank
-    line empties the stack (Trac ends a list at any blank line, #143). What
-    is left on top is the
-    innermost open item, whose match the caller reads the marker's
+    or past its own column and pushes itself; any other non-blank line pops
+    every entry at or past its column, except that a line at the innermost
+    marker's column keeps that item (#149; `_list_stack_step` documents it);
+    a blank line empties the stack (Trac ends a list at any blank line,
+    #143). What is left on top is the innermost open item, whose match the caller reads the marker's
     indentation and width off (as `_enclosing_list_marker` documents).
     """
     stack: list[tuple[int, re.Match[str]]] = []
@@ -1048,9 +1053,10 @@ class TracWikiParser:
         line, continues a list item (ticket #143 review, F3).
 
         A list item must still be open above the block, and the line must
-        continue one of the open items by Trac's measured rule
-        (`_continued_item`, #149: a line AT the innermost marker's column
-        continues it too). `inside`
+        continue the innermost open item by Trac's measured rule
+        (`_continued_item`, #149: a line AT its marker's column continues
+        it too; a line that would close deeper items is not claimed, #176).
+        `inside`
         holds the indices of block content lines (`_lines_inside_blocks`),
         which are skipped: a blank or column-zero line in a code body does
         not end the list. `_open_list_item` empties its stack at a blank
@@ -1067,12 +1073,15 @@ class TracWikiParser:
         stack: list[tuple[int, re.Match[str]]] = []
         for line in above:
             _list_stack_step(stack, line)
+        # Only a line that continues the innermost item counts (#149); one
+        # that would close deeper items stays as it was, for ticket #176.
         return (
-            _continued_item(
+            stack != []
+            and _continued_item(
                 [c for c, _ in stack],
                 _indent_width(_indent_of(lines[start])),
             )
-            is not None
+            == len(stack) - 1
         )
 
     def _lines_inside_blocks(self, lines: list[str]) -> set[int]:
@@ -1857,39 +1866,35 @@ class TracWikiParser:
                 before = list(stack)
                 # Trac ended the list at a blank line directly above, so
                 # #149's measured rule (taken without one) does not apply:
-                # such a line keeps the pre-#149 reading, the deepest open
-                # item whose marker is left of it (pinned by #144's
+                # such a line keeps the pre-#149 reading (pinned by #144's
                 # REDUCED row, where the line at the marker column has to
                 # leave the list so the non-1 marker after it gets its
                 # separating blank line).
                 after_blank = bool(out) and not out[-1].strip()
-                if after_blank:
-                    idx = max(
-                        (i for i, c in enumerate(before) if c < column),
-                        default=None,
-                    )
-                else:
-                    idx = _continued_item(before, column)
-                if idx is None:
-                    stack.clear()
-                else:
-                    del stack[idx + 1 :]
-                # #149: a line that continues an item whose marker is at or
-                # past its own column (a line AT the marker column, cases A
-                # and B), or one that is not the innermost (deeper items
-                # closed, case C), is not kept in that item by Markdown as
-                # written: it moves to the item's text column. Case C also
-                # gets the blank line, or CommonMark reads it as a lazy
-                # continuation of the closed item's paragraph.
-                closed_deeper = (
-                    not after_blank
-                    and idx is not None
-                    and idx < len(before) - 1
+                idx = (
+                    None
+                    if after_blank
+                    else _continued_item(before, column)
                 )
+                if idx is None and not after_blank:
+                    stack.clear()
+                elif idx == len(before) - 1:
+                    # #149: the line continues the innermost item. At its
+                    # marker's column (cases A and B) Markdown would not
+                    # keep it in the item as written, so it moves to the
+                    # item's text column; deeper than the marker it stays.
+                    pass
+                else:
+                    # The pre-#149 pop. A line that would close deeper
+                    # items to continue an outer one (case C, and a line at
+                    # a middle marker's column) is left exactly as it was
+                    # on purpose, for ticket #176.
+                    while stack and stack[-1] >= column:
+                        stack.pop()
                 moved = (
-                    not after_blank
-                    and idx is not None
-                    and (column <= before[idx] or closed_deeper)
+                    idx is not None
+                    and idx == len(before) - 1
+                    and column <= before[idx]
                 )
                 after_quote = bool(out) and out[-1].lstrip(
                     " \t"
@@ -1915,9 +1920,7 @@ class TracWikiParser:
                         line.lstrip(" \t")
                     )
                 ):
-                    if after_quote or (
-                        closed_deeper and out[-1].strip()
-                    ):
+                    if after_quote:
                         out.append("")
                     line = " " * text_column[stack[-1]] + line.lstrip(
                         " \t"

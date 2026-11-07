@@ -25,7 +25,7 @@ The cases, and what Trac renders:
 * B `" * a\\n   * b\\n   text at inner marker col\\n * c\\n"`: the text
   continues the inner item b.
 * C `" * a\\n    * b\\n  text col2 between\\n * c\\n"`: b closes, the text
-  continues the outer item a.
+  continues the outer item a (left as on `master`, see below).
 * D `" * a\\n   * b\\n text at outer col\\n * c\\n"`: the list ends (the text
   is a blockquote, c starts a new list).
 * F `"   * a\\n text left of marker but indented\\n   * c\\n"`: the list
@@ -36,11 +36,15 @@ The cases, and what Trac renders:
 D and F, and the other shapes the rule does not touch, are pinned to the
 bytes `master` (cf92e87) produced before the change.
 
-**Round trip.** For C the write leg cannot give the text back inside ``a``:
-Markdown has the text after the nested list in a's item (a loose item), which
-TracWiki can only express by ending the list at a blank line (the #125
-list-item split, `find_list_item_splits`). The C round-trip rows are strict
-xfails recording that, so they turn loud if the write leg ever learns it.
+**Case C is NOT changed here (ticket #176).** A line that continues a
+non-innermost item, closing deeper ones (C, and a line at a middle marker's
+column in a three-level list), reads as on `master`, byte for byte, at every
+site: the Markdown has the text after the nested list in a's item, which the
+write leg can only give back below a blank line, ending the Trac list (the
+#125 list-item split). `master` instead puts the text in the inner item but
+keeps the list whole. #176 changes both legs together, so those rows are
+pinned to `master`'s read and round-trip bytes here. `_continued_item`'s
+answer for C is still right and is unit-tested.
 """
 
 import re
@@ -49,13 +53,13 @@ from html.parser import HTMLParser
 import mistune
 import pytest
 
-from trac_mcp_server.converters import find_list_item_splits
 from trac_mcp_server.converters.markdown_to_tracwiki import (
     _MISTUNE_PLUGINS,
     markdown_to_tracwiki,
 )
 from trac_mcp_server.converters.tracwiki_to_markdown import (
     _continued_item,
+    _list_stack_step,
     tracwiki_to_markdown,
 )
 
@@ -66,13 +70,13 @@ D = " * a\n   * b\n text at outer col\n * c\n"
 F = "   * a\n text left of marker but indented\n   * c\n"
 G = " * a\n   col3\n * c\n"
 J = " 1. a\n    col4\n 1. c\n"
+MIDDLE = " * a\n   * b\n     * c\n   mid\n * d\n"
 BLOCK = " 1. d\n{{{\nx\n}}}\n e at marker column after a block\n 1. f\n"
 
 # (source, expected read-leg Markdown)
 READ_ROWS = {
     "A": (A, " 1. a\n    b at marker column\n 1. c\n"),
     "B": (B, " - a\n   - b\n     text at inner marker col\n - c\n"),
-    "C": (C, " - a\n    - b\n\n   text col2 between\n - c\n"),
     "G": (G, " - a\n   col3\n - c\n"),
     "J": (J, " 1. a\n    col4\n 1. c\n"),
     "block": (
@@ -84,6 +88,12 @@ READ_ROWS = {
 
 # Shapes the rule leaves alone: the bytes master produced.
 UNCHANGED_ROWS = {
+    # #176: closes deeper items to continue an outer one (master's bytes).
+    "C": (C, " - a\n    - b\n  text col2 between\n - c\n"),
+    "middle": (
+        MIDDLE,
+        " - a\n   - b\n     - c\n   mid\n - d\n",
+    ),
     "D": (D, " - a\n   - b\n\n text at outer col\n - c\n"),
     "F": (F, "   - a\n\n text left of marker but indented\n   - c\n"),
 }
@@ -134,11 +144,31 @@ def test_shapes_the_rule_does_not_touch_read_as_on_master(name):
     assert _md(wiki) == expected
 
 
-def test_three_level_middle_item_closes_the_inner_one():
-    """A line at the middle marker's column closes the innermost item and
-    continues the middle one: a blank line, then the middle's text column."""
-    wiki = " * a\n   * b\n     * c\n   mid\n * d\n"
-    assert _md(wiki) == (" - a\n   - b\n     - c\n\n     mid\n - d\n")
+@pytest.mark.parametrize(
+    ("columns", "line", "kept"),
+    [
+        ([1], " b", [1]),  # A: the innermost item keeps the line (#149)
+        ([1, 3], "   t", [1, 3]),  # B
+        ([1, 3], "  t", [1]),  # C: the pre-#149 pop (#176)
+        ([1, 3, 5], "   t", [1]),  # a middle marker's column (#176)
+        ([1, 3], " t", []),  # D: the list ends
+    ],
+    ids=["A", "B", "C", "middle", "D"],
+)
+def test_list_stack_step_keeps_masters_pop_unless_the_line_is_innermost(
+    columns, line, kept
+):
+    stack = [(c, re.match(r"\s*", "")) for c in columns]
+    _list_stack_step(stack, line)
+    assert [c for c, _ in stack] == kept
+
+
+def test_a_line_that_closes_deeper_items_after_a_block_is_masters():
+    """#176: not claimed as the item's text after a block (bytes as master)."""
+    wiki = " * a\n   * b\n   {{{\n   x\n   }}}\n  text\n * c\n"
+    assert _md(wiki) == (
+        " - a\n   - b\n     ```\n     x\n     ```\n  text\n - c\n"
+    )
 
 
 def test_a_line_after_a_blank_line_keeps_the_pre_149_reading():
@@ -196,23 +226,9 @@ def test_b_text_sits_in_the_inner_item():
     assert "text at inner marker col" not in _own_text(outer[0])
 
 
-def test_c_text_sits_in_the_outer_item_not_the_inner_one():
-    outer = _parse(_md(C))[0]["children"]
-    assert len(outer) == 2
-    assert "text col2 between" in _own_text(outer[0])
-    inner = _nested_items(outer[0])
-    assert len(inner) == 1
-    assert "text col2 between" not in _own_text(inner[0])
-
-
 # -- Round trip ---------------------------------------------------------------
 
 ROUND_TRIPS = ["A", "B", "G", "J"]
-C_SPLIT = pytest.mark.xfail(
-    strict=True,
-    reason="C: text after a nested list in the outer item; TracWiki can only "
-    "write it after a blank line, which ends the list (#125 split)",
-)
 
 
 def _continuation_line(wiki: str, needle: str) -> tuple[int, str]:
@@ -236,11 +252,10 @@ def _marker_and_text_columns(wiki: str, idx: int) -> tuple[int, int]:
 NEEDLES = {
     "A": "b at marker column",
     "B": "text at inner marker col",
-    "C": "text col2 between",
     "G": "col3",
     "J": "col4",
 }
-SOURCES = {"A": A, "B": B, "C": C, "G": G, "J": J}
+SOURCES = {"A": A, "B": B, "G": G, "J": J}
 
 
 def _check_round_trip(name: str) -> None:
@@ -263,19 +278,20 @@ def test_round_trip_keeps_the_text_in_the_item_and_is_stable(name):
     _check_round_trip(name)
 
 
-@C_SPLIT
-def test_round_trip_c_keeps_the_text_in_the_outer_item_unsplit():
-    _check_round_trip("C")
-
-
-def test_round_trip_c_is_the_list_item_split_the_advisory_reports():
-    """The reason for the C xfail above, measured: the Markdown has the text
-    after the nested list in a's item, and `find_list_item_splits` says so."""
-    md = _md(C)
-    assert [s["item"] for s in find_list_item_splits(md)] == ["a"]
-    assert markdown_to_tracwiki(md) == (
-        " * a\n   * b\n\n   text col2 between\n * c"
-    )
+@pytest.mark.parametrize(
+    ("wiki", "written"),
+    [
+        # #176: master's bytes; the text lands in the inner item, the list
+        # stays whole.
+        (C, " * a\n   * b\n     text col2 between\n * c"),
+        (MIDDLE, " * a\n   * b\n     * c\n       mid\n * d"),
+    ],
+    ids=["C", "middle"],
+)
+def test_round_trip_of_a_line_closing_deeper_items_is_masters(
+    wiki, written
+):
+    assert markdown_to_tracwiki(_md(wiki)) == written
 
 
 def test_round_trip_of_the_block_case_keeps_e_in_the_item():
@@ -345,14 +361,6 @@ def test_structure_helper_tells_item_text_apart():
     [
         "A",
         "B",
-        pytest.param(
-            "C",
-            marks=pytest.mark.xfail(
-                strict=False,
-                reason="C round-trips through the #125 split (see module "
-                "docstring); the live render says whether Trac agrees",
-            ),
-        ),
         "G",
         "J",
     ],
