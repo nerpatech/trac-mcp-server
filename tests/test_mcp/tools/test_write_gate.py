@@ -29,7 +29,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.conftest import run_nonce_line
 from trac_mcp_server.mcp.tools.milestone import (
     _handle_create as _handle_milestone_create,
 )
@@ -1273,25 +1272,42 @@ def test_113_batch_update_keeps_its_strictness_when_the_list_raises():
 class TestWriteGateLive:
     """The gate watched refusing and allowing a REAL write.
 
-    Writes go to the scratch page ticket #84 seeded for exactly this
-    (`TRAC_TEST_WIKI_PAGE`, default `TracConvertLiveTest`), which is
-    reset rather than appended to, so repeated runs cannot accumulate.
+    Trac #159: each row gets its own per-run scratch page on
+    `/trac_test`, created before the row and deleted after it. The
+    shared scratch page (`TRAC_TEST_WIKI_PAGE`) raced with parallel
+    runs three ways: a fixed body identical to the last write ("Page
+    not modified"), a write between `get_wiki_page_info` and the
+    update (`version_conflict`), and a write between the update and
+    the read-back (equality failure). A nonce cured only the first.
     """
 
-    @staticmethod
-    def _live():
-        import os
+    @pytest.fixture
+    def page(self):
+        import uuid
 
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
-        page = os.environ.get(
-            "TRAC_TEST_WIKI_PAGE", "TracConvertLiveTest"
+        client = TracClient(
+            InstanceRegistry(config, {}).resolve("/trac_test")
         )
-        return TracClient(config), page
+        name = f"Scratch/Ticket159WriteGate{uuid.uuid4().hex[:8]}"
+        client.put_wiki_page(
+            name, "Seed for the live gate row.\n", "seed"
+        )
+        try:
+            yield client, name
+        finally:
+            try:
+                client.delete_wiki_page(name)
+            except Exception:
+                pass
 
-    def test_a_broken_link_is_refused_and_the_page_is_unchanged(self):
+    def test_a_broken_link_is_refused_and_the_page_is_unchanged(
+        self, page
+    ):
         """The half that matters: not just that an error came back, but
         that the store still holds what it held before. An error
         response over a completed write would be the worst of both."""
@@ -1299,7 +1315,7 @@ class TestWriteGateLive:
             _handle_update as handle_update,
         )
 
-        client, page = self._live()
+        client, page = page
         info = client.get_wiki_page_info(page)
         before = client.get_wiki_page(page)
 
@@ -1323,7 +1339,9 @@ class TestWriteGateLive:
             "the gate returned an error but the write still landed"
         )
 
-    def test_correct_content_is_allowed_through_to_the_store(self):
+    def test_correct_content_is_allowed_through_to_the_store(
+        self, page
+    ):
         """The other half. Asserted by reading the page back, because
         a success response is not evidence that anything was stored --
         the same distinction `Rules/testing/VerificationIsAHandoff`
@@ -1332,15 +1350,11 @@ class TestWriteGateLive:
             _handle_update as handle_update,
         )
 
-        client, page = self._live()
+        client, page = page
         info = client.get_wiki_page_info(page)
-        # Trac #159: Trac refuses a save that changes nothing, so a
-        # fixed body fails when a parallel run wrote it last. The
-        # nonce line makes each run's body unique and stays clean.
         body = (
             "Seeded for the #64 live gate row. This body is clean: "
             "it links to trac_mcp_server:#64 and nothing else.\n"
-            + run_nonce_line()
         )
 
         result = asyncio.run(

@@ -9,13 +9,14 @@
 
 import io
 import sys
+import uuid
 import xmlrpc.client
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
 import requests.exceptions  # noqa: F401
 
-from tests.conftest import run_nonce_line
 from trac_mcp_server.cli.convert import (
     EXIT_OK,
     EXIT_RUNTIME_ERROR,
@@ -1500,8 +1501,9 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 #   - TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD env vars pointing at a
 #     real Trac instance
 #   - Optional: TRAC_TEST_WIKI_PAGE env var (default:
-#     "TracConvertLiveTest") — the test OVERWRITES this page with a
-#     fixed seed body on every run, creating it if absent, so point
+#     "TracConvertLiveTest") — the test OVERWRITES this page with the
+#     seed body plus a per-run nonce line on every run, creating it
+#     if absent, so point
 #     it only at a scratch page the test user has WIKI_MODIFY on.
 #     Never point it at a page whose content matters.
 #   - Optional: TRAC_INSECURE=1 to disable SSL verification for
@@ -1512,7 +1514,8 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 # ---------------------------------------------------------------------------
 
 
-# Body the scratch page is reset to at the start of every live run.
+# Body the scratch page is reset to at the start of every live run,
+# followed by a per-run nonce line (_run_nonce_line()).
 # Authored as Markdown because it is written through --from md.
 _LIVE_SEED_BODY = (
     "Scratch page for `trac-convert`'s live round-trip test in\n"
@@ -1524,6 +1527,19 @@ _LIVE_SEED_BODY = (
     "\n"
     "Created for auto_pm:#93.\n"
 )
+
+
+def _run_nonce_line():
+    """A line unique to this run, appended to the live seed (Trac #159).
+
+    Trac refuses a save that changes nothing, so a seed identical to
+    the page's last write (another run's seed) fails with "Page not
+    modified". Colon-free like `make_nonce()` in
+    scripts/daemon_smoke.py (uuid hex plus a compact UTC stamp), and
+    clean for conversion: no link, no CamelCase word, no ``#N``.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"Run nonce {uuid.uuid4().hex} {stamp}\n"
 
 
 def _main_with_stdin(argv, text):
@@ -1547,10 +1563,11 @@ def test_live_round_trip_check_from_edit_to(capsys):
 
     Sequence:
       1. --check-trac → exit 0, stdout mentions "OK (Trac API version".
-      2. --to-wiki <page> with a fixed seed body → exit 0. Creates
-         the page when absent and resets it when present, so the
-         test is self-contained and the page cannot grow run over
-         run.
+      2. --to-wiki <page> with the seed body plus a per-run nonce
+         line → exit 0. Creates the page when absent and resets it
+         when present, so the test is self-contained and the page
+         cannot grow run over run. The nonce keeps the seed from
+         being identical to another run's last write (#159).
       3. --from-wiki <page> --to md → exit 0, MD content captured.
       4. Append a timestamped marker to the MD (proves edit fidelity).
       5. --to-wiki <page> --from md with edited MD on stdin →
@@ -1561,9 +1578,10 @@ def test_live_round_trip_check_from_edit_to(capsys):
 
     Seeds the page rather than deleting it. Trac keeps every version,
     so the page's history still grows one version per run, but the
-    rendered page stays at the seed body plus a single marker. This
-    departs from test_wiki_attachment.py's "pages persist, ops can
-    prune manually" convention, which nothing ever pruned — see #84.
+    rendered page stays at the seed body, a nonce line and a single
+    marker. This departs from test_wiki_attachment.py's "pages
+    persist, ops can prune manually" convention, which nothing ever
+    pruned — see #84.
 
     IMPORTANT: The test does NOT unset the real env vars. It reads
     them via os.environ.get and relies on the actual live Trac.
@@ -1600,7 +1618,7 @@ def test_live_round_trip_check_from_edit_to(capsys):
     #   steps re-read the page and never compare it to the constant.
     rc = _main_with_stdin(
         ["--to-wiki", page_name, "--from", "md"],
-        _LIVE_SEED_BODY + "\n" + run_nonce_line(),
+        _LIVE_SEED_BODY + "\n" + _run_nonce_line(),
     )
     assert rc == EXIT_OK, (
         f"live seed of {page_name} should succeed"
