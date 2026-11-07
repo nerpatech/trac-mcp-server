@@ -288,13 +288,60 @@ def _starts_a_block_in_trac(text: str) -> bool:
     )
 
 
+def _item_runs(
+    children: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group a list item's children into runs, in SOURCE order (#112): the
+    one grouping `render_token`'s list_item case and `find_list_item_splits`
+    share, so the two cannot drift.
+
+    The kinds are ``list`` (one nested list), ``table`` (#142: a GFM table,
+    rendered as a ``{{{#!div}}}`` block), ``quote`` (#145: a blockquote,
+    only once the item has content and only when it is not empty),
+    ``code`` (#144: a fenced block that is not the #63 fallback fence, whose
+    body is TracWiki source and stays in the text run) and ``text`` (every
+    other child, adjacent ones merged into one run). Every list, table, code
+    block and quote is a run of its own.
+    """
+    runs: list[tuple[str, list[dict[str, Any]]]] = []
+    content_seen = False
+    for child in children:
+        child_type = child.get("type")
+        kind = (
+            "list"
+            if child_type == "list"
+            else "table"
+            if child_type == "table"
+            else "quote"
+            if child_type == "block_quote"
+            and content_seen
+            and any(
+                c.get("type") != "blank_line"
+                for c in child.get("children") or []
+            )
+            else "code"
+            if child_type == "block_code"
+            and not _is_fallback_fence(
+                (child.get("attrs") or {}).get("info")
+            )
+            else "text"
+        )
+        if child_type != "blank_line":
+            content_seen = True
+        if runs and kind == "text" and runs[-1][0] == "text":
+            runs[-1][1].append(child)
+        else:
+            runs.append((kind, [child]))
+    return runs
+
+
 def _item_block_separator(
     prev_kind: str,
     next_kind: str,
     list_seen: bool,
     prev_text: str,
     next_text: str,
-) -> Literal["br", "adjacent", "blank", "quote_gap"]:
+) -> Literal["br", "adjacent", "blank", "quote_gap", "between"]:
     """How two neighbouring blocks of a list item are separated (#143, #145).
 
     Trac ends a list at any blank line, so the pre-#143 "blank" is the
@@ -306,17 +353,28 @@ def _item_block_separator(
     * ``"adjacent"``: the next paragraph goes on the line after a ``code``
       or ``table`` child, no blank line.
     * ``"blank"``: everything else (#63 fallback fence, a text run after a
-      nested list, ...).
+      nested list that ``"between"`` refuses, ...).
     * ``"quote_gap"`` (#145): a lone ``>`` line, between two sibling
       blockquotes of one item. Trac shows one blockquote with two paragraphs.
+    * ``"between"`` (#176): a ``para`` run directly after a nested list
+      (``prev_kind == "list"``): no blank line, every line at the item's
+      marker column + 1, strictly between its marker and the nested list's.
+      Trac then closes the nested list and continues the OUTER item
+      (measured on /trac_test), which is innermost again afterwards, so the
+      caller resets `list_seen`. Refused (``"blank"``, today's form) when
+      the run holds a passthrough line (any line, F1), holds a blank line
+      (``"\\n\\n"``: it would end the list) or starts a block in Trac
+      (``_starts_a_block_in_trac``: a list marker at that column opens an
+      item, ``>`` a citation).
 
     A ``quote`` (#145) is Trac's citation syntax, ``> `` lines at the item's
     continuation indent: ``"adjacent"`` after the item text (kind ``para``),
     a ``para``/``text`` run, or a ``code``/``table`` child, and a following
     paragraph is ``"adjacent"`` to it too. ``"blank"`` keeps the pre-#145
     form (blank line, two-space-indented quote) where Trac cannot take the
-    citation: once a nested list has appeared (it would attach to the
-    innermost nested item, #112/#125), and after a run with a passthrough
+    citation: once a nested list has appeared and no paragraph has closed it
+    since (it would attach to the innermost nested item, #112/#125; a
+    ``"between"`` run closes it, #176), and after a run with a passthrough
     line (F1 below).
 
     Review fixes (#145): a ``quote`` is also ``"blank"`` after a run whose
@@ -359,6 +417,14 @@ def _item_block_separator(
         return "blank"
     if next_kind != "para":
         return "blank"
+    if prev_kind == "list":
+        if (
+            _has_passthrough_line(next_text)
+            or "\n\n" in next_text
+            or _starts_a_block_in_trac(next_text)
+        ):
+            return "blank"
+        return "between"
     if prev_kind == "quote":
         if (
             list_seen
@@ -1027,10 +1093,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # Render children - check if there's a nested list
                 if "children" in token:
                     children = token["children"]
-                    # Split the children into runs, in SOURCE order: a run
-                    # of non-list blocks, or one nested list. Ticket #112:
-                    # collecting "all non-lists, then all lists" moved a
-                    # paragraph that follows a sub-list above it.
+                    # Split the children into runs, in SOURCE order
+                    # (`_item_runs`, shared with `find_list_item_splits`):
+                    # a run of non-list blocks, or one nested list. Ticket
+                    # #112: collecting "all non-lists, then all lists"
+                    # moved a paragraph that follows a sub-list above it.
                     # Ticket #142: a GFM table child is its own run kind
                     # ("table"): `||` rows indented under an item end the
                     # list in Trac (measured on /trac_test), so it is
@@ -1049,41 +1116,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # alone is not an item, ` * > q` renders a literal
                     # ">"), so it stays in the text run, as before. Nor
                     # when it is empty: nothing to cite.
-                    runs: list[tuple[str, list[dict[str, Any]]]] = []
-                    content_seen = False
-                    for child in children:
-                        child_type = child.get("type")
-                        kind = (
-                            "list"
-                            if child_type == "list"
-                            else "table"
-                            if child_type == "table"
-                            else "quote"
-                            if child_type == "block_quote"
-                            and content_seen
-                            and any(
-                                c.get("type") != "blank_line"
-                                for c in child.get("children") or []
-                            )
-                            else "code"
-                            if child_type == "block_code"
-                            and not _is_fallback_fence(
-                                (child.get("attrs") or {}).get("info")
-                            )
-                            else "text"
-                        )
-                        if child_type != "blank_line":
-                            content_seen = True
-                        # Adjacent plain blocks share a run; every list,
-                        # table, code block and quote is its own run.
-                        if (
-                            runs
-                            and kind == "text"
-                            and runs[-1][0] == "text"
-                        ):
-                            runs[-1][1].append(child)
-                        else:
-                            runs.append((kind, [child]))
+                    runs = _item_runs(children)
 
                     # The item's own text is the run before the first list.
                     if runs and runs[0][0] == "text":
@@ -1160,10 +1193,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     )
 
                 # Combine the item text with what follows it, in source
-                # order. A continuation paragraph after a sub-list is set
-                # off by a blank line and indented under the item text;
-                # Trac renders it as a blockquote (a Trac limit, #112), but
-                # the order is the author's.
+                # order. A continuation paragraph after a sub-list goes
+                # between the item's marker and the nested marker, with no
+                # blank line (`_item_block_separator`'s "between", #176):
+                # Trac closes the nested list and continues THIS item.
+                # Where that is refused it is set off by a blank line and
+                # indented under the item text; Trac renders it as a
+                # blockquote (a Trac limit, #112), but the order is the
+                # author's.
                 parts = [f"{prefix} {text}"]
                 prev_kind = "para" if text.strip() else ""
                 prev_text = text
@@ -1202,12 +1239,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         )
                     elif kind == "code":
                         # Ticket #144. Appended at THIS item's continuation
-                        # indent, in source order. After a nested list that
-                        # is a Trac limit, parallel to #112's continuation
-                        # paragraph: Trac attaches a block to the innermost
-                        # open item (measured, F5), so here it lands on the
-                        # nested item, and no TracWiki form attaches a
-                        # block to the outer item after a nested list.
+                        # indent, in source order. Directly after a nested
+                        # list that is a Trac limit, parallel to #112's
+                        # continuation paragraph: Trac attaches a block to
+                        # the innermost open item (measured, F5), so here it
+                        # lands on the nested item. After a "between"
+                        # paragraph (#176) this item is innermost again
+                        # (`list_seen` was reset), so the block joins it.
                         parts.extend(
                             _indent_nonblank(
                                 rendered.split("\n"),
@@ -1233,19 +1271,31 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         # before a text run is `_item_block_separator`'s
                         # call, in one place for this and for the join
                         # inside a run.
-                        if (
-                            _item_block_separator(
-                                prev_kind, kind, list_seen, "", rendered
-                            )
-                            != "adjacent"
-                        ):
-                            parts.append("")
-                        parts.extend(
-                            _indent_nonblank(
-                                rendered.split("\n"),
-                                continuation_indent,
-                            )
+                        separator = _item_block_separator(
+                            prev_kind, kind, list_seen, "", rendered
                         )
+                        if separator == "between":
+                            # #176: no blank line, one column past this
+                            # item's marker. The nested list is closed and
+                            # this item is innermost again (measured C10,
+                            # Q1, D1, N1), so what follows behaves as in an
+                            # item with no nested list.
+                            parts.extend(
+                                _indent_nonblank(
+                                    rendered.split("\n"),
+                                    " " * (len(indent) + 1),
+                                )
+                            )
+                            list_seen = False
+                        else:
+                            if separator != "adjacent":
+                                parts.append("")
+                            parts.extend(
+                                _indent_nonblank(
+                                    rendered.split("\n"),
+                                    continuation_indent,
+                                )
+                            )
                     prev_kind = emitted_kind
                     prev_text = rendered
                 result = "\n".join(parts) + "\n"
@@ -1508,15 +1558,47 @@ def _token_text(token: dict[str, Any]) -> str:
     return "".join(_token_text(c) for c in token.get("children", []))
 
 
+def _is_between_run(
+    run: list[dict[str, Any]], placeholders: list[str]
+) -> bool:
+    """True when the writer writes this text `run` (non-blank children, as
+    `_item_runs` grouped them) directly after a nested list as
+    ``_item_block_separator``'s ``"between"``, decided on the run's restored
+    token text instead of its rendering: every child is a paragraph (any
+    other child holds a blank line in the writer's output), no paragraph
+    has a passthrough line, and the first line does not start a block in
+    Trac. A paragraph's own text holds no ``"\\n\\n"``, and two paragraphs
+    join with ``" [[BR]][[BR]]"`` when neither has a passthrough line."""
+    if not run or not all(_is_paragraph_token(c) for c in run):
+        return False
+    texts = [
+        _restore_bracket_syntax(_token_text(c), placeholders)
+        for c in run
+    ]
+    return not any(
+        _has_passthrough_line(t) or "\n\n" in t for t in texts
+    ) and not _starts_a_block_in_trac(texts[0])
+
+
 def find_list_item_splits(markdown_text: str) -> list[dict]:
     """List items whose content continues after a nested list (#125).
 
-    Trac cannot continue a list item once a nested list has started: it
-    ends the list, renders the following block outside it (a paragraph
-    as a blockquote, a fenced block as a `<pre>`), and starts a new list
-    for the next item. Since #112 the converter keeps an item's children
+    Trac cannot continue a list item below a blank line once a nested list
+    has started: it ends the list, renders the following block outside it (a
+    paragraph as a blockquote, a fenced block as a `<pre>`), and starts a new
+    list for the next item. Since #112 the converter keeps an item's children
     in source order, so this shape converts faithfully and then renders
     split, with nothing to tell the author.
+
+    One form keeps the item whole (#176): a paragraph run directly after the
+    nested list, which the writer puts at a column between the item's marker
+    and the nested marker, with no blank line (`_item_block_separator`'s
+    ``"between"``). It is not a finding, and the walk resets as the writer's
+    does: the item is innermost again, so a block after it is the same as in
+    an item with no nested list. The runs are `_item_runs`, the writer's own
+    grouping; a run the writer refuses (a passthrough line, a blank line of
+    its own, a first line that starts a block) is still a finding, and so is
+    any other block directly after a nested list.
 
     Parses the same way `markdown_to_tracwiki` does (mistune's AST with
     the same `_MISTUNE_PLUGINS`, over the text after `_stash_bracket_syntax`), so
@@ -1542,13 +1624,21 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
             children = node.get("children", [])
             if kind == "list_item":
                 seen_list = False
-                for child in children:
-                    child_type = child.get("type")
-                    if child_type == "blank_line":
+                for run_kind, run in _item_runs(children):
+                    run = [
+                        c for c in run if c.get("type") != "blank_line"
+                    ]
+                    if not run:
                         continue
-                    if child_type == "list":
+                    child_type = run[0].get("type")
+                    if run_kind == "list":
                         seen_list = True
                     elif seen_list:
+                        if run_kind == "text" and _is_between_run(
+                            run, placeholders
+                        ):
+                            seen_list = False
+                            continue
                         lead = next(
                             (
                                 c
