@@ -135,7 +135,9 @@ def _md(wiki: str) -> str:
 )
 def test_continued_item(columns, width, expected, ordered):
     assert (
-        _continued_item(columns, width, innermost_ordered=ordered)
+        _continued_item(
+            columns, width, innermost_ordered=ordered, upper_bound=True
+        )
         == expected
     )
 
@@ -170,7 +172,7 @@ def test_list_stack_step_keeps_masters_pop_unless_the_line_is_innermost(
     columns, line, kept
 ):
     stack = [(c, re.match(r"\s*", "")) for c in columns]
-    _list_stack_step(stack, line)
+    _list_stack_step(stack, line, upper_bound=False)
     assert [c for c, _ in stack] == kept
 
 

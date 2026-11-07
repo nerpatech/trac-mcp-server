@@ -23,6 +23,11 @@ item's text column, inside the list.
   tail, which is ticket #182): one quote of 2 lines
 * B1 `" 1. d" / "{{{" / "x" / "}}}" / "      deep after block" / " 1. f"`:
   `<ol>` d with its `<pre>`, 2 blockquotes, a new `<ol>` f
+* K1 `" * a" / "   * b" / " {{{" / " x" / " }}}" / "     more" / " * c"`:
+  `<ul><li>a<ul><li>b<pre>x</pre>more</li></ul></li><li>c</li></ul>`; the
+  block and `more` are both inside item b. A block joins the innermost item
+  at any indent (#144), so the item stays open across it, and master, which
+  fenced `more`, was wrong here.
 
 and, at the bound, G `" * a" / "   col3" / " * c"`, J `" 1. a" / "    col4" /
 " 1. c"` and B2 (J's shape after a block, `"    col4 after block"`) still
@@ -46,6 +51,7 @@ The unchanged rows below are the bytes `master` (8218d53) produced before
 the change.
 """
 
+import inspect
 import re
 
 import mistune
@@ -58,8 +64,10 @@ from trac_mcp_server.converters.markdown_to_tracwiki import (
 from trac_mcp_server.converters.tracwiki_to_markdown import (
     TracWikiParser,
     _continued_item,
+    _items_open_above,
     _list_stack_step,
     _open_list_item,
+    _stack_continued_item,
     tracwiki_to_markdown,
 )
 
@@ -94,6 +102,17 @@ CASES = {
         1,
     ),
 }
+
+# K1 is measured the other way: Trac keeps `more` in item b, after the block
+# (no quote), so nothing is fenced. HEAD's bytes, pinned. Master fenced
+# `more`; the block joins the innermost item at any indent (#144).
+K1 = " * a\n   * b\n {{{\n x\n }}}\n     more\n * c"
+K1_MARKDOWN = (
+    " - a\n   - b\n     ```\n     x\n     ```\n     more\n - c"
+)
+K1_ROUND_TRIP = (
+    " * a\n   * b\n     {{{\n     x\n     }}}\n     more\n * c"
+)
 
 # Further shapes of the same rule (not measured on Trac, the same code path).
 EXTRA_CASES = {
@@ -195,7 +214,9 @@ def _parse(md: str) -> list[dict]:
 )
 def test_continued_item_upper_bound(columns, width, ordered, expected):
     assert (
-        _continued_item(columns, width, innermost_ordered=ordered)
+        _continued_item(
+            columns, width, innermost_ordered=ordered, upper_bound=True
+        )
         == expected
     )
 
@@ -208,7 +229,7 @@ def _stack(columns: list[int], marker_line: str):
 def test_list_stack_step_ends_the_list_past_the_bound():
     """Only the raw-TracWiki walks (`_items_open_above`, for
     `_split_past_bound` and `_continues_item_after_block`) pass
-    `upper_bound=True`; every other caller keeps the default, master's pop."""
+    `upper_bound=True`; every other caller passes False, master's pop."""
     stack = _stack([1], " * a")
     _list_stack_step(stack, "    col4", upper_bound=True)
     assert stack == []
@@ -399,10 +420,10 @@ def test_raw_only_rows_round_trip_is_masters(name):
 
 
 def test_list_stack_step_applies_the_bound_only_when_asked():
-    # Default (generated lines, `_open_list_item`, the table walk): master's
+    # False (generated lines, `_open_list_item`, the table walk): master's
     # pop, which removes nothing for a width past the bound.
     stack = _stack([1], " 10. a")
-    _list_stack_step(stack, "     x")
+    _list_stack_step(stack, "     x", upper_bound=False)
     assert [c for c, _ in stack] == [1]
     # The raw walks ask for it.
     stack = _stack([1], " 10. a")
@@ -412,12 +433,37 @@ def test_list_stack_step_applies_the_bound_only_when_asked():
 
 def test_continued_item_upper_bound_can_be_skipped():
     assert _continued_item([1], 9, upper_bound=False) == 0
-    assert _continued_item([1], 9) is None
+    assert _continued_item([1], 9, upper_bound=True) is None
+
+
+def test_every_caller_must_state_the_bound():
+    """`upper_bound` is keyword-only with no default (second #175 review)."""
+    with pytest.raises(TypeError):
+        _continued_item([1], 3)
+    with pytest.raises(TypeError):
+        _stack_continued_item(_stack([1], " * a"), 3)
+    with pytest.raises(TypeError):
+        _list_stack_step(_stack([1], " * a"), "   x")
+    assert (
+        "openers_transparent"
+        not in inspect.signature(_items_open_above).parameters
+    )
+
+
+def test_k1_block_and_text_after_it_stay_in_the_open_item():
+    assert _md(K1) == K1_MARKDOWN
+    assert [
+        t["type"] for t in _parse(_md(K1)) if t["type"] != "list"
+    ] == []
+
+
+def test_k1_round_trip_bytes():
+    assert markdown_to_tracwiki(_md(K1)) == K1_ROUND_TRIP
 
 
 def test_separator_keeps_masters_bytes_past_the_bound():
-    """`_split_past_bound` fences raw past-bound lines before the separator
-    runs, so the separator never applies the bound: it keeps master's bytes."""
+    """The separator never applies the bound: it keeps master's bytes
+    (`_split_past_bound` fences only indented quote text before it runs)."""
     parser = TracWikiParser()
     assert parser._separate_list_from_trailing_paragraph(
         " - a\n    col4\n - c"
@@ -474,7 +520,9 @@ def test_tag_shape_tells_a_quote_from_a_list_item():
     ) != _tag_shape("<ul><li>a<br/>q</li><li>c</li></ul>")
 
 
-LIVE_SOURCES = {name: CASES[name][0] for name in CASES}
+LIVE_SOURCES = {name: CASES[name][0] for name in CASES} | {"K1": K1}
+# Rows whose source Trac renders with no blockquote at all.
+LIVE_NO_QUOTE = {"K1"}
 
 
 @pytest.mark.live
@@ -497,5 +545,7 @@ def test_live_source_and_round_trip_render_the_same_structure(name):
     before = client.wiki_to_html(source)
     after = client.wiki_to_html(markdown_to_tracwiki(_md(source)))
 
-    assert "<blockquote" in before, before
+    assert ("<blockquote" in before) is (name not in LIVE_NO_QUOTE), (
+        before
+    )
     assert _tag_shape(before) == _tag_shape(after), (before, after)
