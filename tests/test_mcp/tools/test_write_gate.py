@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.conftest import run_nonce_line
 from trac_mcp_server.mcp.tools.milestone import (
     _handle_create as _handle_milestone_create,
 )
@@ -1333,9 +1334,13 @@ class TestWriteGateLive:
 
         client, page = self._live()
         info = client.get_wiki_page_info(page)
+        # Trac #159: Trac refuses a save that changes nothing, so a
+        # fixed body fails when a parallel run wrote it last. The
+        # nonce line makes each run's body unique and stays clean.
         body = (
             "Seeded for the #64 live gate row. This body is clean: "
             "it links to trac_mcp_server:#64 and nothing else.\n"
+            + run_nonce_line()
         )
 
         result = asyncio.run(

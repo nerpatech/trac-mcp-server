@@ -1,6 +1,8 @@
 """Shared pytest fixtures for trac-mcp-server tests."""
 
 import os
+import uuid
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import dotenv.main
@@ -25,6 +27,19 @@ def _disable_dotenv():
         # instead. load_dotenv() resolves find_dotenv through its own module
         # globals at call time, so this reaches every call site too.
         dotenv.main.find_dotenv = lambda *_args, **_kwargs: ""
+
+
+def run_nonce_line():
+    """A line unique to this run, to append to a live body (Trac #159).
+
+    Trac refuses a save that changes nothing, so a live row that writes
+    a FIXED body to the shared scratch page fails when a parallel run
+    wrote that exact body last. Appending this makes every run's body
+    distinct. Kept clean for the write gate and for wiki conversion: no
+    link, no CamelCase word, no ``#N``.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    return f"Run nonce: {uuid.uuid4().hex[:8]} {stamp} UTC\n"
 
 
 def pytest_addoption(parser):

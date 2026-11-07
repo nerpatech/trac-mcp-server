@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests.exceptions  # noqa: F401
 
+from tests.conftest import run_nonce_line
 from trac_mcp_server.cli.convert import (
     EXIT_OK,
     EXIT_RUNTIME_ERROR,
@@ -1593,8 +1594,13 @@ def test_live_round_trip_check_from_edit_to(capsys):
     # Step 2: seed the scratch page to a known body. Creates it if
     #   it does not exist, so the test needs no manual fixture, and
     #   resets it if it does, so markers cannot accumulate.
+    #   Trac #159: Trac refuses a save that changes nothing, so the
+    #   fixed seed fails when a parallel run's seed was the last
+    #   write. A per-run nonce line makes each seed distinct; later
+    #   steps re-read the page and never compare it to the constant.
     rc = _main_with_stdin(
-        ["--to-wiki", page_name, "--from", "md"], _LIVE_SEED_BODY
+        ["--to-wiki", page_name, "--from", "md"],
+        _LIVE_SEED_BODY + "\n" + run_nonce_line(),
     )
     assert rc == EXIT_OK, (
         f"live seed of {page_name} should succeed"
