@@ -725,6 +725,11 @@ _LIST_MARKER_COL0_RE = re.compile(
 # A column-zero digits-ordered marker line (ticket #190): the kind whose
 # continuation bound is column 3, where a bullet's is column 2.
 _DIGITS_ORDERED_COL0_RE = re.compile(rf"^{_NUMERIC_MARKER}(?=[ \t])")
+# Two shapes CommonMark reads as a block of their own where Trac reads text
+# (ticket #190): a thematic break of any width (`___`, `***`, wider than
+# `_LAZY_CONTINUATION_INTERRUPT_RE`'s `---`), and an HTML block start.
+_THEMATIC_BREAK_RE = re.compile(r"^(?:[-*_][ \t]*){3,}$")
+_HTML_BLOCK_START_RE = re.compile(r"^<[A-Za-z/!?]")
 # The three lines of a ``_stash_fallback`` stash, as ``_convert_indented_blocks``
 # sees them (ticket #182): the opening fence (indented when the block was),
 # the placeholder at column zero, and the closing fence.
@@ -1175,12 +1180,16 @@ class TracWikiParser:
 
         A column-zero continuation line ENDS the list, which stays true. An
         INDENTED line continues the item instead (measured on /trac_test,
-        ticket #190): Trac reads the marker at column 0, and an indented
-        line up to column 3 continues an ordered item.  Such lines straight
-        after a marker line join the stash, and a marker line after them
-        continues it.  A blank line, a column-zero non-marker line, a line
-        past column 3, a tab in the indent and a line holding a code-block
-        delimiter stop it.
+        ticket #190): Trac reads the marker at column 0, and the lines after
+        it are walked as Trac walks a list (``_lettered_item_extent``): an
+        indented marker line opens a nested item, and any other indented
+        line must continue one of the open items
+        (``_continued_item``, bound included).  Such lines straight after a
+        marker line join the stash, and a marker line at column zero after
+        them continues it.  A blank line, a column-zero non-marker line, a
+        line past the bound, a tab in the indent, a table row or heading, a
+        line holding a code-block delimiter and a line of an earlier stash
+        (a processor block's fence) stop it.
 
         Runs as its own top-level pass rather than a branch inside
         ``_convert_indented_blocks``, per the ticket: a column-zero marker
@@ -1193,6 +1202,7 @@ class TracWikiParser:
         """
         lines = text.split("\n")
         masked = self._verbatim_mask(text).split("\n")
+        stashed = self._stash_lines(lines, masked)
         out: list[str] = []
         index = 0
         n = len(lines)
@@ -1207,12 +1217,11 @@ class TracWikiParser:
             ):
                 index += 1
                 # Ticket #190: indented lines straight after the marker
-                # line continue the item (up to column 3), and a marker
-                # line after them continues the list.
-                while index < n and self._continues_lettered_item(
-                    masked[index]
-                ):
-                    index += 1
+                # line continue the item, and a marker line after them
+                # continues the list.
+                index = self._lettered_item_extent(
+                    masked, stashed, index
+                )
             out.append(
                 self._stash_fallback(
                     "\n".join(lines[start:index]),
@@ -1224,21 +1233,59 @@ class TracWikiParser:
             )
         return "\n".join(out)
 
-    def _continues_lettered_item(self, masked_line: str) -> bool:
-        """True for an indented line that continues a column-zero lettered
-        or roman item (ticket #190): non-blank, indented 1 to 3 columns
-        (Trac's bound for an ordered item, ``trac_continuation_bound(0,
-        ordered=True)``) with no tab, and not holding a code-block
-        delimiter, which would strand the other half of its block."""
-        if not masked_line.strip():
-            return False
-        indent = _indent_of(masked_line)
-        return (
-            bool(indent)
-            and "\t" not in indent
-            and len(indent) <= trac_continuation_bound(0, ordered=True)
-            and not self._line_holds_a_brace(masked_line)
-        )
+    def _lettered_item_extent(
+        self, masked: list[str], stashed: set[int], index: int
+    ) -> int:
+        """The index of the first line at or after `index` that does NOT
+        continue the column-zero lettered or roman item above it (ticket
+        #190), walking the lines as Trac walks a list.
+
+        The open items are a stack of marker columns, starting at
+        ``[0]`` (the item itself, ordered). An indented marker line pops
+        the items at or past its column and opens one (a bullet or an
+        ordered item, by its marker); any other indented line must
+        continue one of the open items (``_continued_item`` with the
+        upper bound, read off the innermost item), and closes the items
+        deeper than the one it continues. Stops at a blank line, a line at
+        column zero, a tab in the indent, a code-block delimiter (which
+        would strand the other half of its block), a line of an earlier
+        stash (`stashed`: a processor block's fence) and a table row or
+        heading, which Trac does not keep in a list."""
+        columns = [0]
+        ordered = [True]
+        while index < len(masked):
+            line = masked[index]
+            indent = _indent_of(line)
+            if (
+                not line.strip()
+                or not indent
+                or "\t" in indent
+                or index in stashed
+                or self._line_holds_a_brace(line)
+                or _INDENTED_TABLE_RE.match(line)
+                or _INDENTED_HEADING_RE.match(line)
+            ):
+                break
+            width = len(indent)
+            if _LIST_MARKER_RE.match(line):
+                while columns and columns[-1] >= width:
+                    columns.pop()
+                    ordered.pop()
+                columns.append(width)
+                ordered.append(line.lstrip(" ")[0] not in "*-")
+            else:
+                owner = _continued_item(
+                    columns,
+                    width,
+                    innermost_ordered=ordered[-1],
+                    upper_bound=True,
+                )
+                if owner is None:
+                    break
+                del columns[owner + 1 :]
+                del ordered[owner + 1 :]
+            index += 1
+        return index
 
     @staticmethod
     def _line_holds_a_brace(masked_line: str) -> bool:
@@ -1339,10 +1386,18 @@ class TracWikiParser:
         bullet, 3 under a digits item -- and the first line past it ends the
         list (measured on /trac_test).  The lines up to the bound go out as
         written, which CommonMark keeps in the item, and the rest of the run
-        goes through steps 4 and 5 as its own run.  Declined, with master's
-        bytes: a tab in a continuation line's indent, and a ``>`` line (a
-        citation under a column-zero item needs the owner and column the
-        list passes do not track for one).
+        goes through steps 4 and 5 as its own run.  When the head takes the
+        whole run and the next line is a column-zero line that ends the list
+        for Trac, one blank line follows the head, so CommonMark does not
+        read that line as a lazy continuation of the item; a column-zero
+        marker line, a code-block delimiter and a stash line get none (Trac
+        keeps a column-zero ``{{{`` block in the item).  Declined, with
+        master's bytes (``_column_zero_continuation`` lists them): a tab in
+        the indent of ANY line of the run, a line of an earlier stash, a
+        head line that is Markdown-only syntax (a ``>`` citation, ``#``
+        heading, fence, rule, ``+ x`` / ``1) x`` item, HTML block) or a
+        Trac table row or heading, and a run holding a list marker anywhere
+        (`` - a`` / ``  q`` / ``   r`` / ``      - x`` keeps master's path).
 
         Steps 2 and 3 run **before** step 4, which is the operator decision on
         ticket #63 applied twice: a run holding both a bullet and a definition
@@ -1434,13 +1489,20 @@ class TracWikiParser:
             # Ticket #190: a run straight after a column-0 item, with no
             # marker in it, continues that item up to Trac's bound.
             head = self._column_zero_continuation(
-                lines, masked, run, probes, start
+                masked, run, probes, stashed, start
             )
             if head:
                 stack = []
                 list_may_be_open = True
                 out.extend(run[:head])
                 index = start + head
+                # Trac ends the list at a column-zero line after the whole
+                # run; CommonMark would read it as a lazy continuation of
+                # the item, so a blank line goes between (F1).
+                if head == len(run) and self._item_run_ends_the_list(
+                    lines, masked, stashed, index
+                ):
+                    out.append("")
                 continue
 
             # Ticket #182: indented quote lines directly before the run's
@@ -1590,12 +1652,12 @@ class TracWikiParser:
                 out.append("")
         return "\n".join(out)
 
-    @staticmethod
     def _column_zero_continuation(
-        lines: list[str],
+        self,
         masked: list[str],
         run: list[str],
         probes: list[str],
+        stashed: set[int],
         start: int,
     ) -> int:
         """How many leading lines of the run at `start` continue the
@@ -1611,18 +1673,38 @@ class TracWikiParser:
         continuation of its paragraph), and the rest of the run goes on
         through the later steps as its own run.
 
-        0 (master's path) when the previous line, on the masked text, is
-        not a column-0 bullet or digits marker line; when the run holds a
-        list marker (the item's own nested list, which the later passes
-        place); when no line is within the bound; and when a line within
-        the bound has a tab in its indent or is a citation (``>``), whose
-        owner and column the list passes do not track for a column-0 item.
+        0 (master's path) when:
+
+        * the previous line, on the masked text, is not a column-0 bullet
+          or digits marker line;
+        * the run holds a list marker anywhere (the item's own nested
+          list, which the later passes place: `` - a`` / ``  q`` /
+          ``   r`` / ``      - x`` keeps master's bytes);
+        * a line of the run has a tab in its indent. Trac counts a tab as
+          ONE column, so a tab line may be inside the bound where the split
+          would fence it outside; the whole run declines, checked before
+          the walk;
+        * a line of the run is a line of a stash (`stashed`): the indented
+          opening fence of a processor block that
+          ``_fallback_processor_blocks`` already stashed is not text;
+        * no line is within the bound;
+        * a head line, stripped of its indent, is syntax that CommonMark
+          reads as something other than item text but Trac reads as text
+          (T5): a citation, heading, fence or rule
+          (``_LAZY_CONTINUATION_INTERRUPT_RE``), any thematic break, a
+          Markdown-only item start (``+ x``, ``1) x``), an HTML block, or
+          a Trac table row or heading (``_line_is_not_a_quote``: Trac ends
+          the list at a table row, so that run keeps step 4).
         """
         if start == 0 or not _LIST_MARKER_COL0_RE.match(
             masked[start - 1]
         ):
             return 0
         if any(_LIST_MARKER_RE.match(m) for m in probes):
+            return 0
+        if any("\t" in _indent_of(line) for line in run):
+            return 0
+        if any(start + i in stashed for i in range(len(run))):
             return 0
         bound = trac_continuation_bound(
             0,
@@ -1632,15 +1714,43 @@ class TracWikiParser:
         )
         head = 0
         for line in run:
-            indent = _indent_of(line)
-            if _indent_width(indent) > bound:
+            if len(_indent_of(line)) > bound:
                 break
-            # A tab expands to 8 columns, past every bound, so the tab
-            # test is a guard: a tab line ends the head above.
-            if "\t" in indent or line.lstrip().startswith(">"):
-                return 0
             head += 1
+        for line, probe in zip(run[:head], probes[:head], strict=True):
+            text = line.lstrip(" ")
+            if (
+                _LAZY_CONTINUATION_INTERRUPT_RE.match(text)
+                or _THEMATIC_BREAK_RE.match(text)
+                or _MARKDOWN_ITEM_START_RE.match(text)
+                or _HTML_BLOCK_START_RE.match(text)
+                or self._line_is_not_a_quote(probe)
+            ):
+                return 0
         return head
+
+    def _item_run_ends_the_list(
+        self,
+        lines: list[str],
+        masked: list[str],
+        stashed: set[int],
+        index: int,
+    ) -> bool:
+        """True when the line at `index`, straight after a head that took
+        the whole of a column-0 item's continuation run, ends the list for
+        Trac and so wants a blank line before it for CommonMark (ticket
+        #190): a non-blank line (at column zero, the run being maximal)
+        that is not a column-zero marker line (or the stash lookback
+        ``_is_column_zero_list_line``), a code-block delimiter, or a line
+        of a stash. Trac keeps a column-zero ``{{{`` block in the item
+        (measured, T3), so none of those gets the blank line."""
+        if index >= len(lines) or not masked[index].strip():
+            return False
+        return not (
+            self._is_column_zero_list_line(lines, masked[index], index)
+            or self._line_holds_a_brace(masked[index])
+            or index in stashed
+        )
 
     def _marker_run_after_blank_in_list(
         self,
