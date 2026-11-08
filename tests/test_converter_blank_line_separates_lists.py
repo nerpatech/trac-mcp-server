@@ -102,9 +102,13 @@ MASTER_ROWS = {
         ORDERED_THEN_BULLET,
         " 1. a\n\n - c\n",
     ),
-    "P4 is nested by CommonMark (#183)": (
+    # Not master's bytes any more (#183): `   * c` after the blank line
+    # opens a NEW top-level list in Trac, so the read leg carries it
+    # verbatim in a fence (master left it as `   - c`, which CommonMark
+    # nests in `a`).
+    "P4 is fenced, not nested (#183)": (
         P4,
-        " - a\n\n   - c\n - d\n",
+        " - a\n\n```tracwiki-unconverted\n   * c\n```\n - d\n",
     ),
     "one list, no blank line": (" * a\n * c\n", " - a\n - c\n"),
     "a code placeholder at column 0 ends the list": (

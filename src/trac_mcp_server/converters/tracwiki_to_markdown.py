@@ -567,6 +567,28 @@ def _shift_line(line: str, shift: int) -> str:
     return line[drop:]
 
 
+def _lines_above_since_blank(
+    lines: list[str],
+    inside: set[int],
+    start: int,
+) -> list[str]:
+    """The lines above line `start` since the last blank one, block content
+    and block opener lines left out (what `_items_open_above` walks)."""
+    above: list[str] = []
+    for idx in range(start - 1, -1, -1):
+        if idx in inside:
+            continue
+        if not lines[idx].strip():
+            break
+        if idx + 1 in inside and lines[idx].lstrip(" \t").startswith(
+            "{{{"
+        ):
+            continue
+        above.append(lines[idx])
+    above.reverse()
+    return above
+
+
 def _items_open_above(
     lines: list[str],
     inside: set[int],
@@ -583,20 +605,8 @@ def _items_open_above(
     list (ticket #175, the seed of `_split_past_bound`).
 
     `lines` are raw TracWiki, so the walk applies the upper bound (#175)."""
-    above: list[str] = []
-    for idx in range(start - 1, -1, -1):
-        if idx in inside:
-            continue
-        if not lines[idx].strip():
-            break
-        if idx + 1 in inside and lines[idx].lstrip(" \t").startswith(
-            "{{{"
-        ):
-            continue
-        above.append(lines[idx])
-    above.reverse()
     stack: list[tuple[int, re.Match[str]]] = []
-    for line in above:
+    for line in _lines_above_since_blank(lines, inside, start):
         _list_stack_step(stack, line, upper_bound=True)
     return stack
 
@@ -1335,10 +1345,22 @@ class TracWikiParser:
             )
             if marker_at is not None and inside is None:
                 inside = self._lines_inside_blocks(lines)
+            # Ticket #183: Trac ends a list at every blank line, so a run
+            # that starts straight after one has no list open above it
+            # for Trac, whatever `list_may_be_open` says. A raw line of
+            # spaces, tabs or `\r` is a blank line to Trac too (measured,
+            # #178); any other whitespace character is not measured and
+            # keeps master's bytes, and a `[[BR]]` line is text at this
+            # pass, so it never counts.
+            blank_before = (
+                marker_at is not None
+                and start > 0
+                and not masked[start - 1].strip(" \t\r")
+            )
             if (
                 marker_at is not None
                 and marker_at > 0
-                and not list_may_be_open
+                and (not list_may_be_open or blank_before)
                 and not self._first_marker_is_code_indented(
                     probes[marker_at]
                 )
@@ -1350,6 +1372,28 @@ class TracWikiParser:
                 index = start + marker_at
                 run = run[:marker_at]
                 probes = probes[:marker_at]
+
+            # Ticket #183: a marker line straight after a blank line that
+            # ended a list is a new top-level list to Trac, but CommonMark
+            # nests it in the open item when it sits at or past the item's
+            # text column. The run is carried verbatim up to the first
+            # marker left of that column.
+            if marker_at == 0 and blank_before:
+                fenced = self._marker_run_after_blank_in_list(
+                    lines, probes, inside, start
+                )
+                if fenced:
+                    stack = []
+                    list_may_be_open = True
+                    out.append(
+                        self._stash_fallback(
+                            "\n".join(run[:fenced]),
+                            "List marker after a blank line inside a "
+                            "list's text column",
+                        )
+                    )
+                    index = start + fenced
+                    continue
 
             # Ticket #175: Trac ends a list at an indented line past the
             # innermost item's upper bound and renders it as a blockquote.
@@ -1419,6 +1463,60 @@ class TracWikiParser:
                 # list that was cut from its run (ticket #182).
                 out.append("")
         return "\n".join(out)
+
+    def _marker_run_after_blank_in_list(
+        self,
+        lines: list[str],
+        probes: list[str],
+        inside: set[int],
+        start: int,
+    ) -> int:
+        """How many lines of the run at `start` to fence verbatim, or 0
+        (ticket #183). The run's first line is a list marker and the line
+        before it is a blank line.
+
+        The items open just before that blank line are walked
+        (`_items_open_above`, called at the blank line's index: the walk
+        empties its stack at a blank line, so it must be asked from
+        outside it). With an outermost item whose text column
+        (`_item_text_column`) the marker reaches, the fence runs to the
+        first later marker line left of that column, or to the end of the
+        run. Declined (0) when no item is open, when the outermost item is
+        lettered (that list is a fallback of its own, #74), when a tab
+        is in either indent (the text column is unknown), or when the
+        list above had a nested marker moved: `_shift_nested_markers`
+        (#179) then moves this marker to the list's own column, which is
+        a new list in Markdown too and keeps master's bytes. It is asked
+        about the list and this one line, and only this line counts."""
+        stack = _items_open_above(lines, inside, start - 1)
+        if not stack:
+            return 0
+        above = _lines_above_since_blank(lines, inside, start - 1)
+        moved = self._shift_nested_markers(
+            "\n".join([*above, "", lines[start]])
+        )
+        if moved.rsplit("\n", 1)[-1] != lines[start]:
+            return 0
+        outer = stack[0][1]
+        if _ALPHA_LIST_MARKER_RE.match(outer.string):
+            return 0
+        if "\t" in _indent_of(outer.string) or "\t" in _indent_of(
+            probes[0]
+        ):
+            return 0
+        text_column = _item_text_column(
+            outer.end(), outer.string[outer.end() :]
+        )
+        if _indent_width(_indent_of(probes[0])) < text_column:
+            return 0
+        for offset in range(1, len(probes)):
+            probe = probes[offset]
+            if (
+                _LIST_MARKER_RE.match(probe)
+                and _indent_width(_indent_of(probe)) < text_column
+            ):
+                return offset
+        return len(probes)
 
     def _is_column_zero_list_line(
         self, lines: list[str], probe: str, index: int

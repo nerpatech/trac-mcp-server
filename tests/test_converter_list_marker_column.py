@@ -193,9 +193,14 @@ def test_a_line_that_closes_deeper_items_after_a_block_continues_the_outer():
 def test_a_line_after_a_blank_line_keeps_the_pre_149_reading():
     """Trac ends the list at a blank line, which the measurement did not
     include: a line at the marker column right after one is read as before
-    (ticket #144's REDUCED row depends on it). Master's bytes."""
+    (ticket #144's REDUCED row depends on it). Not master's bytes any more
+    (#183): the line after the blank is a quote to Trac, and its indent
+    (one space) is not canonical, so it goes out through the fallback
+    fence; master left it as a bare indented line in the item."""
     wiki = " 2. a\n\n b\n 3. c\n"
-    assert _md(wiki) == " 2. a\n\n b\n\n 3. c\n"
+    assert _md(wiki) == (
+        " 2. a\n\n```tracwiki-unconverted\n b\n```\n\n 3. c\n"
+    )
 
 
 # -- The gate (code review of the first #149 branch) ---------------------------
@@ -238,12 +243,14 @@ GATE_ROWS = {
     ),
     # F6: the separator keeps its stack across a blank line (#52/#53), so a
     # line two below a blank one was judged against closed items.
+    # Not master's bytes any more (#183): Trac ends the list at the blank
+    # line, so the two lines after it are a quote (not canonical, so the
+    # fallback fence) and the item `e` a new list. Master kept `c` in the
+    # item and the round trip moved `c` and `d` into the list.
     "F6 line below a blank line": (
         " * a\n   * b\n\n   c\n d\n * e\n",
-        " - a\n   - b\n\n   c\n\n d\n - e\n",
-        # #176 changed the write leg: `c` follows b's nested list, so it
-        # now goes between the markers (the Markdown puts it in a).
-        " * a\n   * b\n  c\n\nd\n\n * e",
+        " - a\n   - b\n\n```tracwiki-unconverted\n   c\n d\n```\n\n - e\n",
+        " * a\n   * b\n\n   c\n d\n\n * e",
     ),
 }
 
