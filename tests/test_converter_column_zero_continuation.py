@@ -391,34 +391,32 @@ UNCHANGED = [
         id="citation-after-a-continuation-line-keeps-the-whole-run",
     ),
     # Review fix F3: the indented opening fence of a processor block's stash
-    # (`_fallback_processor_blocks` ran first) is not a continuation line,
-    # so the bullet path declines and the lettered walk stops at it. Master's
-    # bytes, which are not good (an empty quote and an empty fence beside the
-    # block) but are not this ticket's; the glued text and the leaked fence
-    # line the first cut produced are pinned out below.
+    # (`_fallback_processor_blocks` ran first) is not a continuation line.
+    # These two rows pinned master's bytes (an empty quote and an empty fence
+    # beside the block), which were "not this ticket's". They are ticket
+    # #192's shapes and are updated in place: under a bullet the block is now
+    # fenced at the item's text column and stays in the item; under a
+    # lettered item (declined) the opener's indent goes into the stash, so the
+    # fence, placeholder and closer are all at column 0 and nothing is left
+    # beside the block. The glued text and the leaked fence line the first cut
+    # of #190 produced stay pinned out below.
     pytest.param(
         "- a\n  {{{#!comment\n  x\n  }}}\n",
-        "- a\n> ```tracwiki-unconverted\n{{{#!comment\n  x\n  }}}\n```\n",
-        [
-            _ul(["a"]),
-            ("quote", ""),
-            "{{{#!comment\nx\n}}}",
-            ("code", ""),
-        ],
-        " * a\n\n  \n\n{{{#!comment\nx\n}}}\n\n{{{\n\n}}}",
+        "- a\n  ```tracwiki-unconverted\n  {{{#!comment\n  x\n  }}}\n"
+        "  ```\n",
+        [_ul(["a", ("code", "{{{#!comment\nx\n}}}")])],
+        " * a\n   {{{#!comment\n   x\n   }}}",
         id="processor-block-stash-under-a-bullet",
     ),
     pytest.param(
         "a. a\n  {{{#!comment\n  x\n  }}}\n",
         "```tracwiki-unconverted\na. a\n```\n"
-        "> ```tracwiki-unconverted\n{{{#!comment\n  x\n  }}}\n```\n",
+        "```tracwiki-unconverted\n  {{{#!comment\n  x\n  }}}\n```\n",
         [
             ("code", "a. a"),
-            ("quote", ""),
-            "{{{#!comment\nx\n}}}",
-            ("code", ""),
+            ("code", "  {{{#!comment\n  x\n  }}}"),
         ],
-        "a. a\n\n  \n\n{{{#!comment\nx\n}}}\n\n{{{\n\n}}}",
+        "a. a\n\n  {{{#!comment\n  x\n  }}}",
         id="processor-block-stash-under-a-lettered-item",
     ),
     # Review fix F4: Markdown-only syntax in a head line would restructure
@@ -560,8 +558,10 @@ def test_processor_block_stash_is_not_swallowed(tracwiki):
     of its own. Swallowed as a continuation line it glued the block to the
     item text (`a{{{#!comment`) or left a literal fence line behind."""
     markdown = _read(tracwiki)
-    # The fence line is not a continuation line of the item text.
-    assert "- a\n  ```" not in markdown
+    # The fence line is not a continuation line of the item text. A bullet
+    # item's block is now fenced at the item's text column (#192), a fence of
+    # its own right after the item text, so only the lettered form (declined)
+    # still has no indented fence line.
     assert "a. a\n  ```" not in markdown
     back = markdown_to_tracwiki(markdown)
     assert "a{{{" not in back

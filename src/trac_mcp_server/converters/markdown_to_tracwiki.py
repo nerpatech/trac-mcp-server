@@ -12,7 +12,12 @@ from .common import (
     markdown_to_tracwiki_lang,
     trac_continuation_bound,
 )
-from .tracwiki_to_markdown import _LIST_MARKER_RE, FALLBACK_FENCE_INFO
+from .tracwiki_to_markdown import (
+    _FALLBACK_PROCESSOR_RE,
+    _LIST_MARKER_RE,
+    FALLBACK_FENCE_INFO,
+    TracWikiParser,
+)
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -275,6 +280,31 @@ def _is_fallback_fence(info: str | None) -> bool:
     return bool(info) and info.strip() == FALLBACK_FENCE_INFO
 
 
+def _is_processor_run(raw: str) -> bool:
+    """True when `raw`, the body of a #63 fallback fence, is exactly one
+    coalesced run of ``{{{#!comment}}}`` / ``{{{#!table}}}`` blocks and
+    nothing else (ticket #192): the shape the read leg fences in a list
+    item. Checked with the read leg's own regex and brace matcher, so the
+    two cannot disagree. Anything else in the body (a td/th block at top
+    level, text before or after, an unterminated block) is False."""
+    pos = 0
+    while True:
+        found = _FALLBACK_PROCESSOR_RE.match(raw, pos)
+        if not found or found.group(1).lower() not in (
+            "comment",
+            "table",
+        ):
+            return False
+        end = TracWikiParser._matching_brace(raw, pos)
+        if end == -1:
+            return False
+        pos = end
+        while pos < len(raw) and raw[pos] in " \t\n":
+            pos += 1
+        if pos >= len(raw):
+            return True
+
+
 def _is_paragraph_token(token: dict[str, Any]) -> bool:
     """True for a paragraph-like block token (``paragraph``/``block_text``)."""
     return token.get("type") in ("paragraph", "block_text")
@@ -327,9 +357,12 @@ def _item_runs(
     rendered as a ``{{{#!div}}}`` block), ``quote`` (#145: a blockquote,
     only once the item has content and only when it is not empty),
     ``code`` (#144: a fenced block that is not the #63 fallback fence, whose
-    body is TracWiki source and stays in the text run) and ``text`` (every
-    other child, adjacent ones merged into one run). Every list, table, code
-    block and quote is a run of its own.
+    body is TracWiki source and stays in the text run; #192: except a
+    fallback fence whose body is exactly one run of ``{{{#!comment}}}`` /
+    ``{{{#!table}}}`` blocks, which Trac keeps inside the item as it keeps a
+    code block, so it takes the same no-blank-line placement) and ``text``
+    (every other child, adjacent ones merged into one run). Every list,
+    table, code block and quote is a run of its own.
     """
     runs: list[tuple[str, list[dict[str, Any]]]] = []
     content_seen = False
@@ -349,8 +382,11 @@ def _item_runs(
             )
             else "code"
             if child_type == "block_code"
-            and not _is_fallback_fence(
-                (child.get("attrs") or {}).get("info")
+            and (
+                not _is_fallback_fence(
+                    (child.get("attrs") or {}).get("info")
+                )
+                or _is_processor_run(child.get("raw") or "")
             )
             else "text"
         )
