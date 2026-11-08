@@ -599,3 +599,90 @@ def test_live_td_shape_keeps_the_later_item_a_list_item():
 
     assert "<pre" not in html, html
     assert re.search(r"<li[^>]*>\s*b\s*</li>", html), html
+
+
+# -- Code review fixes (F1-F5) ----------------------------------------------------
+
+T = "{{{#!table\n{{{#!td\nc\n}}}\n}}}"
+
+
+def _ind(text, n):
+    return "\n".join(" " * n + ln for ln in text.split("\n"))
+
+
+@pytest.mark.parametrize(
+    "wiki",
+    [
+        " 10. a\n{{{x}}}\n" + T + "\n",
+        " * a\n   * b\n{{{x}}}\n" + T + "\n",
+    ],
+    ids=["numbered 10", "nested"],
+)
+def test_f1_a_one_line_block_is_prose_to_the_lookback(wiki):
+    """A one-line `{{{x}}}` first on its line is a column-0 paragraph line
+    that ends the list, not a block: the table after it is not in an item.
+    Master's bytes: the list, a blank line, `{{{x}}}`, a column-0 fence
+    holding the table. (Dropped from the lookback as a block, the table was
+    fenced at column 5 and read back as indented code, then an inline
+    span.)"""
+    md = _md(wiki)
+    head, _, tail = md.partition("{{{x}}}")
+    assert tail == f"\n```{F}\n{T}\n```\n", md
+    assert head.endswith("\n\n"), md
+    back = markdown_to_tracwiki(md)
+    assert back.endswith("{{{x}}}\n\n" + T), back
+    assert "`" not in back, back
+
+
+def test_f2_text_after_the_closer_takes_the_column_zero_path():
+    wiki = " * a\n   {{{#!comment\n   x\n   }}} tail\n * d\n"
+    md = _md(wiki)
+    assert not any(
+        re.match(r" +```.", line) for line in md.split("\n")
+    ), md
+    back = markdown_to_tracwiki(md)
+    assert "a{{{" not in back, back
+    assert " * d" in back.split("\n"), back
+    assert markdown_to_tracwiki(_md(back)) == back
+
+
+def test_f3_an_indented_table_row_ends_the_list_for_the_lookback():
+    """Measured on /trac_test: ` * a` / `   * b` / `   || c ||` renders the
+    list, then a table outside it, then a new list."""
+    wiki = " * a\n   * b\n   || c ||\n" + _ind(T, 5) + "\n"
+    back = _rt(wiki)
+    assert "tracwiki-unconverted" not in back, back
+    assert "{{{#!table\n" in back and "{{{#!td\n" in back, back
+    lines = back.split("\n")
+    assert not any(ln.strip() == "{{{" for ln in lines), back
+    assert "c\n" in back + "\n"
+
+
+def test_f4_any_lettered_item_in_the_stack_declines():
+    wiki = "a. x\n  - b\n" + _ind(T, 4) + "\n"
+    back = _rt(wiki)
+    assert "tracwiki-unconverted" not in back, back
+    assert not any(ln.strip() == "{{{" for ln in back.split("\n")), back
+    assert "{{{#!table" in back, back
+
+
+def test_f5_a_blank_line_between_blocks_ends_the_run():
+    """Trac ends the list at the blank line: the first table is in `a`, the
+    second is outside the list, and ` * b` is a NEW list."""
+    wiki = " * a\n" + _ind(T, 3) + "\n\n" + _ind(T, 3) + "\n * b\n"
+    md = _md(wiki)
+    fences = [
+        i for i, ln in enumerate(md.split("\n")) if ln.endswith(F)
+    ]
+    assert len(fences) == 2, md
+    lines = md.split("\n")
+    assert lines[fences[0]].startswith("   ```"), md
+    assert lines[fences[1]].startswith("```"), md
+    lists = [t for t in _parse(md) if t["type"] == "list"]
+    assert len(lists) == 2, md
+    # Byte-identical to the source except one blank line: the write leg
+    # always puts a blank line between a top-level block and the list after
+    # it (` * b` is a new list either way).
+    assert markdown_to_tracwiki(md) == wiki.rstrip("\n").replace(
+        "\n * b", "\n\n * b"
+    )
