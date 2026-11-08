@@ -499,10 +499,12 @@ class TestReadLegMovesTheLineToTheTextColumn:
     def test_line_after_a_nested_list_that_closes_it(
         self, number, depth
     ):
-        # The write leg's "between" form. The nested marker line and the
-        # first between line are #179's and keep master's bytes (the nested
-        # list sits left of the text column); a LATER line continues the
-        # outer item, which is innermost by then, and is moved.
+        # The write leg's "between" form. The nested list sits left of the
+        # outer item's text column, so since #179 its marker moves to that
+        # column, and #176's rule then keeps the first between line in the
+        # outer item (a blank line, then the text column); a LATER line
+        # continues the outer item, which is innermost by then, and is
+        # moved too.
         ind, bound, text, marker = self._text(number, depth)
         nested = " " * (2 * depth + 3)
         first = " " * (2 * depth + 2)
@@ -515,7 +517,7 @@ class TestReadLegMovesTheLineToTheTextColumn:
         ]
         md = _tail(_read("\n".join(head + tail) + "\n"), marker)
         assert md == (
-            f"{ind}{marker} j\n{nested}- nested\n{first}between1   \n  \n"
+            f"{ind}{marker} j\n{text}- nested\n\n{text}between1   \n  \n"
             f"{text}between2\n{ind}{number + 1}. k\n"
         )
 

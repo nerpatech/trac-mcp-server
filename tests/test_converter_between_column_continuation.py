@@ -219,16 +219,11 @@ def test_c9_text_sits_in_the_middle_item_in_markdown():
 # -- Code review fixes -------------------------------------------------------
 
 # (source, read-leg Markdown, round-trip TracWiki): master's bytes (e866fa7)
-# where the move is refused.
+# where the move is refused. (An ordered outer item whose nested list sat left
+# of its Markdown text column was a row here until #179: the read leg now moves
+# that list to the text column, so the line moves too, see
+# `test_an_ordered_outer_item_with_its_nested_list_left_of_the_text_column`.)
 REFUSED_MOVE_ROWS = {
-    # An ordered outer item whose nested list sits left of its Markdown text
-    # column (#179): moving the line to the text column made it an indented
-    # code block.
-    "ordered outer, nested left of the text column": (
-        " 1. a\n   * b\n  l1\n 2. c\n",
-        " 1. a\n   - b\n  l1\n 2. c\n",
-        " 1. a\n\n * b\n   l1\n\n 2. c",
-    ),
     # A Markdown-only list marker would open a nested Markdown item.
     "plus marker": (
         " * a\n   * b\n  + plus\n * c\n",
@@ -261,8 +256,28 @@ def test_the_writers_own_ordered_outer_output_never_reads_as_code():
     wiki = markdown_to_tracwiki("1. a\n   - b\n\n   l1\n2. c\n")
     assert wiki == " 1. a\n   * b\n  l1\n 2. c"
     md = _md(wiki)
-    assert "    l1" not in md
+    # #179: the nested list moves to the outer item's text column (4), and
+    # `l1` goes there after a blank line, the outer item's own paragraph.
+    assert md == " 1. a\n    - b\n\n    l1\n 2. c"
+    assert not [
+        token
+        for token in _parse(md)[0]["children"][0]["children"]
+        if token["type"] == "block_code"
+    ]
     assert "{{{" not in markdown_to_tracwiki(md)
+
+
+def test_an_ordered_outer_item_with_its_nested_list_left_of_the_text_column():
+    """Ticket #179: ` 1. a` / `   * b` / `  l1` kept master's bytes (the
+    move was refused, the nested list sat left of the text column and `l1`
+    at the text column would have been an indented code block). The nested
+    list now moves to column 4, so `l1` stays in `a`, after it, and the
+    round trip is the write leg's own form again."""
+    wiki = " 1. a\n   * b\n  l1\n 2. c\n"
+    assert _md(wiki) == " 1. a\n    - b\n\n    l1\n 2. c\n"
+    assert (
+        markdown_to_tracwiki(_md(wiki)) == " 1. a\n   * b\n  l1\n 2. c"
+    )
 
 
 def test_an_ordered_outer_item_with_its_nested_list_at_the_text_column_moves():

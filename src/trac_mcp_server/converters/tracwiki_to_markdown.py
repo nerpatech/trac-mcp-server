@@ -3,7 +3,7 @@
 import bisect
 import re
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from .common import (
     ConversionResult,
@@ -508,6 +508,55 @@ def _list_stack_step(
         stack.pop()
 
 
+class _ShiftItem(NamedTuple):
+    """An open list item as `_shift_nested_markers` tracks it (ticket #179).
+
+    `column` is the marker's source column (what Trac's rules read), `shift`
+    how many columns the item's lines move on output, `text_column` the
+    Markdown text column of the item AFTER the move, and `frozen` marks an
+    item whose subtree is never moved (a tab-indented marker, a root marker
+    at column 4 or more, a nested ordered marker not numbered 1 that follows
+    its parent's text, or anything under a `tab_gap` item: master's reading,
+    kept byte for byte). `tab_gap` is set when a tab sits between the marker
+    and the text: `_item_text_column` counts it as one column, so the text
+    column is unknown and the item's children are frozen (review fix 2).
+    `no_one` marks a frozen nested ordered item not numbered 1 and the
+    siblings that follow it (review fix 3)."""
+
+    column: int
+    shift: int
+    text_column: int
+    frozen: bool
+    tab_gap: bool = False
+    no_one: bool = False
+
+
+def _matched_blocks(lines: list[str]) -> dict[int, int]:
+    """Opener index -> closer index of every `{{{` ... `}}}` block that is
+    still in the lines (a processor block passed through, not stashed like
+    code), by `_passthrough_containers`' discipline: a closer pops the most
+    recent unmatched opener, a closer with no opener is an ordinary line, and
+    an opener nobody closes is left out (`_shift_nested_markers` leaves its
+    lines to the per-line rules)."""
+    openers: list[int] = []
+    pairs: dict[int, int] = {}
+    for idx, line in enumerate(lines):
+        if _BLOCK_OPEN_RE.match(line):
+            openers.append(idx)
+        elif _BLOCK_CLOSE_RE.match(line) and openers:
+            pairs[openers.pop()] = idx
+    return pairs
+
+
+def _shift_line(line: str, shift: int) -> str:
+    """`line` moved `shift` columns right (left when negative: leading
+    spaces are removed, never more than the line has)."""
+    if shift >= 0:
+        return " " * shift + line
+    drop = min(-shift, len(line) - len(line.lstrip(" ")))
+    return line[drop:]
+
+
 def _items_open_above(
     lines: list[str],
     inside: set[int],
@@ -703,6 +752,7 @@ class TracWikiParser:
         self._link_placeholders: list[str] = []
         self._code_placeholders: list[str] = []
         self._br_marks_active = False
+        self._item_fence_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -721,6 +771,7 @@ class TracWikiParser:
         self._link_placeholders = []
         self._code_placeholders = []
         self._br_marks_active = False
+        self._item_fence_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -1672,6 +1723,11 @@ class TracWikiParser:
         read the block as the item's continuation (F3). The first shown
         line is carried by the placeholder itself, so the stash holds it
         without O.
+
+        Ticket #179: the later lines of the stash carry O, so the stash is
+        recorded in `_item_fence_stashes`: when `_shift_nested_markers` moves
+        the item (a list nested left of its parent's text column), it moves
+        the placeholder line and those lines by the same shift.
         """
         line_start = text.rfind("\n", 0, start) + 1
         indent = text[line_start:start]
@@ -1697,6 +1753,9 @@ class TracWikiParser:
         # A blank first line leaves the placeholder line whitespace-only.
         first = shown[0][len(out_indent) :] if shown[0] else ""
         self._code_placeholders.append("\n".join([first] + shown[1:]))
+        # The stash holds lines at O: `_shift_nested_markers` (#179) moves
+        # them with the item.
+        self._item_fence_stashes.add(len(self._code_placeholders) - 1)
         placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
         return (
             f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
@@ -1880,17 +1939,23 @@ class TracWikiParser:
             text,
             flags=re.IGNORECASE,
         )
-        if br_tag and br_tag in text:
+
+        def settle_marks(body: str) -> str:
             # A tag on a line that holds anything else is just dropped; a
-            # line left with whitespace only keeps ONE, at its end.
+            # line left with whitespace only keeps ONE, at its end. A line
+            # left EMPTY (no indentation) is an empty line, which ends a
+            # list in Trac and in Markdown alike, and stays unmarked.
             kept: list[str] = []
-            for line in text.split("\n"):
+            for line in body.split("\n"):
                 if br_tag in line:
                     line = line.replace(br_tag, "")
-                    if not line.strip():
+                    if line and not line.strip():
                         line += br_tag
                 kept.append(line)
-            text = "\n".join(kept)
+            return "\n".join(kept)
+
+        if br_tag and br_tag in text:
+            text = settle_marks(text)
 
         # TracLinks: Keep as-is since Markdown has no equivalent
         # Examples: #123, ticket:1, wiki:Page, changeset:abc123
@@ -1917,8 +1982,15 @@ class TracWikiParser:
             if args or name.lower() in _KNOWN_MACROS:
                 match self._unknown_macros:
                     case "drop":
-                        # Silently omit the macro from the output.
-                        return ""
+                        # Silently omit the macro from the output. Ticket
+                        # #179 review: a line the macro was alone on is
+                        # left whitespace-only, which is item CONTENT to
+                        # Trac (the macro was on it). `br_tag` marks the
+                        # spot, and `settle_marks` below keeps ONE mark on a
+                        # line that ends up whitespace-only, as for
+                        # `[[BR]]` alone, so the list walks do not take it
+                        # for a blank line.
+                        return br_tag
                     case _:
                         # "preserve" (default): leave [[MacroName(args)]]
                         # literal. markdown_to_tracwiki's _BRACKET_SYNTAX_RE
@@ -1944,6 +2016,8 @@ class TracWikiParser:
             text,
             flags=re.IGNORECASE,
         )
+        if br_tag and self._unknown_macros == "drop" and br_tag in text:
+            text = settle_marks(text)
         return text
 
     def _convert_headings(self, text: str) -> str:
@@ -2041,7 +2115,16 @@ class TracWikiParser:
         (the only thing the separator reads) is untouched by swapping
         ``*`` for ``-``, but running it first keeps this method's own
         order matching the order the two defects were found in.
+
+        Ticket #179: first of all, `_shift_nested_markers` moves a list
+        nested left of its parent's Markdown text column to that column. It
+        runs after `_split_past_bound` (`_apply_fallbacks`, which reads raw
+        columns) and after `_convert_code_blocks` (which fences a block at
+        its item's raw text column, so the fence moves with the item), and
+        before `_separate_list_from_trailing_paragraph`, whose text columns
+        are then read off the moved markers.
         """
+        text = self._shift_nested_markers(text)
         text = self._separate_list_from_trailing_paragraph(text)
 
         def convert_list_marker(match):
@@ -2059,6 +2142,243 @@ class TracWikiParser:
             flags=re.MULTILINE,
         )
         return self._separate_adjacent_lists(text)
+
+    def _shift_nested_markers(self, text: str) -> str:
+        """Move a list nested left of its parent's Markdown text column to
+        that column (ticket #179).
+
+        Trac nests a list marker indented past its parent's marker at ANY
+        deeper column (measured on /trac_test, 2026-11-07 and 11-08, down to
+        m + 1 and up to m + 5). CommonMark nests a marker only at or past the
+        parent's text column (`_item_text_column`: 4 under ` 1. `, 5 under
+        ` 10. `, 3 under ` * `) and reads one four or more columns past it as
+        indented code. The read leg copied the source column, so ` 1. outer`
+        / `   * inner` / ` 2. outer2` left the item (the bullets became a
+        second list, the outer list restarted; a nested ordered list joined
+        the outer one).
+
+        A stack of the open items (`_ShiftItem`: source marker column, shift,
+        output text column) is walked over the lines, with the same rules
+        as the later list walks (`_continued_item`, `_LIST_MARKER_RE`):
+
+        * a blank line ends the list (the stack empties), except a
+          whitespace-only line `_convert_macros` marked with
+          `_BR_LINE_MARK`: what `[[BR]]` alone on a line makes (#178) and
+          what a dropped macro (`unknown_macros="drop"`) leaves of its line
+          (review fix 4). Both are item content to Trac;
+        * a MARKER line pops the items at or past its column. A root marker
+          stays where it is. Under a parent it goes to `column + parent
+          shift`, raised to the parent's output text column when that is
+          left of it, and clamped to that column + 3 when it is past it (a
+          marker at column + 4 is indented code to CommonMark). Its own
+          shift, output column minus source column, is its children's
+          starting point;
+        * any other line goes to the item Trac continues it with
+          (`_continued_item`, lower side; a line outside every item ends the
+          list) and moves by that item's shift, so the columns inside an item
+          keep their distances and the bound and text-column rules of #149,
+          #176 and #178 read the same distances on the moved text. A fence,
+          a table row and the lines of a processor block move with their
+          item; the body of a block fenced at the item's text column (#144)
+          is in the code stash, and moves with it (`_item_fence_stashes`).
+          A `>` line moves by its item's shift too, but CommonMark does not
+          let a quote continue a paragraph, so after a nested item the quote
+          lands in the PARENT's item, not that item's (Trac keeps it in the
+          nested one). That gap is already on `master` and is not fixed
+          here (#187);
+        * a `{{{#!processor ...}}}` block that is still in the text (a
+          container passed through, not stashed like code) is walked as one
+          unit, from its opener to its MATCHING closer, nested blocks
+          included (`_matched_blocks`): every line in it, blank lines
+          included, belongs to the item that owns the opener, so the stack
+          does not change and each line moves by that item's shift, and a
+          marker-shaped line inside is the block's content, not an item
+          (review fix 5). An opener nobody closes is not a unit here: its
+          lines take the per-line rules.
+
+        Declined shapes keep `master`'s bytes (shift 0, frozen: the subtree
+        is never moved either):
+
+        * a tab-indented marker line, a root marker at column 4 or more
+          (indented code already) and everything nested under either; a
+          tab-indented continuation line is not moved;
+        * the children of an item whose marker-to-text gap holds a tab
+          (review fix 2: `_item_text_column` counts a tab as one column);
+        * a nested ORDERED marker whose number is not 1 that follows its
+          parent's text line directly (review fix 3: CommonMark does not let
+          such a list interrupt the parent's paragraph, so moving it to the
+          text column makes paragraph text. Ticket #180 owns making these
+          real nested lists).
+
+        Shift 0 is byte-identical to `master`: a nesting already at or past
+        the parent's text column (a bullet under a bullet at column 3,
+        column 4 to 7 under ` 1. `) moves nothing, and neither does a list
+        with no nesting.
+
+        A root marker after a blank line opens a NEW list in Trac at any
+        column. Once the previous list's nested markers were moved, a root
+        marker at or past that list's output text column would be read by
+        CommonMark as nested in its last item (` * a` / `  * b` / blank /
+        `   * c`: `c` next to `b`, in `a`), and the round trip would lose the
+        blank line and re-nest it (review fix 1). It is moved to the
+        previous list's marker column instead, where
+        `_separate_adjacent_lists` (#177: a marker left of the open list's
+        text column after a blank line) starts a new Markdown list as it
+        does for any two Trac lists. Only a previous list this pass changed
+        (a moved item in it) counts: the same shape after an unmoved list
+        (` * a` / blank / `   * c`) is #183's and keeps `master`'s bytes. The
+        later root markers of that list (no blank line between) go to the
+        same column.
+        """
+        lines = text.split("\n")
+        pairs = _matched_blocks(lines)
+        out: list[str] = []
+        stack: list[_ShiftItem] = []
+        # The last list that ended in a blank line, when this pass moved
+        # something in it: (output column, output text column) of its last
+        # root item. Valid until the next non-blank line.
+        prev_list: tuple[int, int] | None = None
+        # The open list holds an item this pass moved.
+        list_shifted = False
+        # Output column of the roots of an open list whose first root this
+        # pass moved (review fix 1).
+        root_target: int | None = None
+        # The extent of the processor block being walked.
+        block_end = -1
+        block_shift = 0
+        prev_text = False  # the previous line was a line with text
+
+        def end_list() -> None:
+            nonlocal prev_list, list_shifted, root_target
+            if stack:
+                root = stack[0]
+                prev_list = (
+                    (root.column + root.shift, root.text_column)
+                    if list_shifted
+                    and not root.frozen
+                    and not root.tab_gap
+                    else None
+                )
+            stack.clear()
+            list_shifted = False
+            root_target = None
+
+        for idx, line in enumerate(lines):
+            if idx <= block_end:
+                out.append(
+                    self._move_line(line, block_shift)
+                    if line.strip()
+                    else line
+                )
+                prev_text = bool(line.strip())
+                continue
+            if not line.strip():
+                if not (
+                    self._br_marks_active
+                    and line.endswith(_BR_LINE_MARK)
+                ):
+                    end_list()
+                prev_text = False
+                out.append(line)
+                continue
+            was_text, prev_text = prev_text, True
+            indent = _indent_of(line)
+            column = _indent_width(indent)
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                before = len(stack)
+                popped: _ShiftItem | None = None
+                while stack and stack[-1].column >= column:
+                    popped = stack.pop()
+                parent = stack[-1] if stack else None
+                after = line[marker.end() :]
+                gap = after[: len(after) - len(after.lstrip(" \t"))]
+                tab_gap = bool(after.strip()) and "\t" in gap
+                no_one = False
+                start = prev_list if parent is None else None
+                prev_list = None
+                if "\t" in indent:
+                    shift, frozen = 0, True
+                elif parent is None:
+                    if start is not None and column >= start[1]:
+                        # CommonMark would nest this new list in the
+                        # previous one's last item.
+                        root_target = start[0]
+                    if root_target is not None:
+                        shift, frozen = root_target - column, False
+                    else:
+                        shift, frozen = 0, column >= 4
+                elif parent.frozen or parent.tab_gap:
+                    shift, frozen = 0, True
+                elif (
+                    before == len(stack)
+                    and was_text
+                    and _NON_ONE_ORDERED_RE.match(
+                        marker.group(0).strip()
+                    )
+                ) or (popped is not None and popped.no_one):
+                    # The item and the siblings after it: one list that
+                    # CommonMark will not start inside the parent's text.
+                    shift, frozen, no_one = 0, True, True
+                else:
+                    target = column + parent.shift
+                    target = max(target, parent.text_column)
+                    target = min(target, parent.text_column + 3)
+                    shift, frozen = target - column, False
+                if shift:
+                    list_shifted = True
+                stack.append(
+                    _ShiftItem(
+                        column,
+                        shift,
+                        shift + _item_text_column(marker.end(), after),
+                        frozen,
+                        tab_gap,
+                        no_one,
+                    )
+                )
+                out.append(self._move_line(line, shift))
+                continue
+            shift = 0
+            if stack:
+                owner = _continued_item(
+                    [item.column for item in stack],
+                    column,
+                    upper_bound=False,
+                )
+                if owner is None:
+                    end_list()
+                    prev_list = None
+                else:
+                    del stack[owner + 1 :]
+                    shift = 0 if "\t" in indent else stack[-1].shift
+            else:
+                prev_list = None
+            if idx in pairs:
+                block_end, block_shift = pairs[idx], shift
+            out.append(self._move_line(line, shift))
+        return "\n".join(out)
+
+    def _move_line(self, line: str, shift: int) -> str:
+        """`line` moved `shift` columns (`_shift_nested_markers`). A line
+        that is the placeholder of a block fenced inside a list item (#144)
+        takes the lines of its stash along: they carry the item's text
+        column too."""
+        if shift == 0:
+            return line
+        if "\x00CODE" in line:
+            found = re.fullmatch(r"[ ]*\x00CODE(\d+)\x00", line)
+            if (
+                found
+                and int(found.group(1)) in self._item_fence_stashes
+            ):
+                index = int(found.group(1))
+                head, *rest = self._code_placeholders[index].split("\n")
+                self._code_placeholders[index] = "\n".join(
+                    [head]
+                    + [_shift_line(r, shift) if r else r for r in rest]
+                )
+        return _shift_line(line, shift)
 
     def _separate_adjacent_lists(self, text: str) -> str:
         """Keep two Trac lists that only a blank line separates two lists
@@ -2391,7 +2711,11 @@ class TracWikiParser:
           as an empty one does (measured on /trac_test, 2026-11-08), so a
           line after one keeps ``master``'s bytes, as in #149.
 
-        Nested list MARKER lines are out of scope (ticket #179). The wider
+        Nested list MARKER lines are not moved here: since ticket #179
+        `_shift_nested_markers` runs first and puts a marker nested left of
+        its parent's text column at that column, so this pass reads the moved
+        columns (and #176's gate on the nested list passes for the shapes
+        that moved). The wider
         shape (a bullet continued at marker + 1, or an item 1-9 at marker +
         1 or + 2, after ``[[BR]][[BR]]``) is not fixed here either.
         """
