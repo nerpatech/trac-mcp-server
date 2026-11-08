@@ -1179,6 +1179,23 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                 text = text.rstrip("\n")
                 continuation_indent = " " * (len(prefix) + 1)
+                # Ticket #178: where a TEXT continuation line goes. The item
+                # text column (`len(prefix) + 1`) is marker column + 2 for a
+                # bullet, within Trac's bound, but marker + 4 for an ordered
+                # item numbered 10 or more (+ 5 from 100): Trac continues an
+                # ordered item only up to marker + 3 (measured on /trac_test,
+                # depth 0 and 1), and a text line past that ends the list. So
+                # an ordered item's text lines are capped at marker + 3. Only
+                # text: a code or table block joins at any indent (#144), and
+                # a `>` citation line stays inside the item at marker + 4
+                # (measured), so those keep the text column
+                # (`continuation_indent`). The read leg moves a line at this
+                # column back to the Markdown text column.
+                text_indent = (
+                    " " * min(len(prefix) + 1, len(indent) + 3)
+                    if ordered
+                    else continuation_indent
+                )
 
                 # A soft break inside the item (or a blank line between two
                 # loose paragraphs) lands in `text` as a literal "\n": at
@@ -1194,9 +1211,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     lines = text.split("\n")
                     text = "\n".join(
                         [lines[0]]
-                        + _indent_nonblank(
-                            lines[1:], continuation_indent
-                        )
+                        + _indent_nonblank(lines[1:], text_indent)
                     )
 
                 # Combine the item text with what follows it, in source
@@ -1291,17 +1306,18 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             # indent (measured C6: both paragraphs stay in
                             # the item), and what follows behaves as in an
                             # item with no nested list. The read leg needs
-                            # the later lines at the text column: it turns
-                            # `[[BR]][[BR]]` into a blank line, and a line
-                            # at marker + 1 after one would leave the item.
+                            # the later lines at `text_indent`, the text
+                            # column (marker + 3 for an ordered item numbered
+                            # 10 or more, #178, which it moves to the text
+                            # column): it turns `[[BR]][[BR]]` into a blank
+                            # line, and a line at marker + 1 after one would
+                            # leave the item.
                             first, *rest = rendered.split("\n")
                             parts.append(
                                 " " * (len(indent) + 1) + first
                             )
                             parts.extend(
-                                _indent_nonblank(
-                                    rest, continuation_indent
-                                )
+                                _indent_nonblank(rest, text_indent)
                             )
                             list_seen = False
                         else:
@@ -1309,8 +1325,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                                 parts.append("")
                             parts.extend(
                                 _indent_nonblank(
-                                    rendered.split("\n"),
-                                    continuation_indent,
+                                    rendered.split("\n"), text_indent
                                 )
                             )
                     prev_kind = emitted_kind

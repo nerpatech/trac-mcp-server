@@ -347,6 +347,21 @@ def _is_digits_ordered(marker_line: str) -> bool:
     return bool(_DIGITS_ORDERED_RE.match(marker_line))
 
 
+def _text_column_past_trac_bound(
+    marker_column: int, marker_line: str, text_column: int, width: int
+) -> bool:
+    """True when a line `width` columns wide, deeper than the item's marker
+    column `marker_column`, is still inside Trac's continuation bound for
+    the item whose marker line is `marker_line` (marker column + 3 for a
+    digits-only ordered item, + 2 for a bullet; `_continued_item`), while
+    the item's Markdown text column `text_column` is past that bound
+    (ticket #178)."""
+    bound = marker_column + (
+        3 if _is_digits_ordered(marker_line) else 2
+    )
+    return width <= bound < text_column
+
+
 def _stack_continued_item(
     stack: list[tuple[int, re.Match[str]]],
     width: int,
@@ -2299,6 +2314,40 @@ class TracWikiParser:
         check before the split, and a line ``_line_is_not_a_quote`` names
         (a table row, a heading) is not split either. Those keep master's
         reading here.
+
+        Ticket #178: a line that continues the INNERMOST open item, left of
+        a Markdown text column that Trac's bound keeps it from reaching, is
+        moved to that text column (``text_column``, ``_item_text_column``). Trac
+        continues an ordered item only up to marker column + 3 (a bullet's
+        is + 2), and an ordered item numbered 10 or more has its Markdown
+        text column at + 4 (+ 5 from 100), so no column Trac accepts is
+        also a column CommonMark keeps in the item: ` 10. j` / `    b` is
+        one item in Trac, but after a blank line the read leg makes from
+        ``[[BR]][[BR]]`` the `b` at column 4 was an indented code block
+        outside the list. The rule is narrow (the operator's decision on
+        the ticket) and all of these must hold, else the line keeps
+        ``master``'s bytes:
+
+        * the line sits deeper than the innermost item's marker column and
+          no deeper than Trac's bound for it (marker + 3 for a digits-only
+          ordered item, + 2 for a bullet; ``_continued_item``);
+        * the item's text column is PAST that bound (ordered items 10 or
+          more, or a wider gap after the marker; every one-space bullet and
+          one-space item 1-9 is within it and untouched);
+        * ``_marker_column_rule_applies`` and not
+          ``_MARKDOWN_ITEM_START_RE``, as for #176 (a list interrupter or a
+          line that would become a nested item keeps its bytes);
+        * no EMPTY line has passed since the innermost marker line. This is
+          not ``blank_since_marker``: that flag also counts the
+          whitespace-only line ``[[BR]][[BR]]`` becomes (``_convert_macros``
+          runs first), which is a hard break inside the item and not a
+          blank line to Trac, so gating on it would exclude the very case
+          this rule is for. A line after a real blank line was ended by
+          Trac, as in #149.
+
+        Nested list MARKER lines are out of scope (ticket #179). The wider
+        shape (a bullet continued at marker + 1, or an item 1-9 at marker +
+        1 or + 2, after ``[[BR]][[BR]]``) is not fixed here either.
         """
         lines = text.split("\n")
         out: list[str] = []
@@ -2306,14 +2355,18 @@ class TracWikiParser:
         text_column: dict[int, int] = {}  # marker column -> text column
         marker_lines: dict[int, str] = {}  # marker column -> its line
         blank_since_marker = False
+        empty_since_marker = False  # #178: only a truly EMPTY line
         for line in lines:
             if not line.strip():
                 blank_since_marker = True
+                if not line:
+                    empty_since_marker = True
                 out.append(line)
                 continue
             marker = _LIST_MARKER_RE.match(line)
             if marker:
                 blank_since_marker = False
+                empty_since_marker = False
                 if (
                     not stack
                     and out
@@ -2345,6 +2398,29 @@ class TracWikiParser:
                     )
                     else None
                 )
+                # #178: the line continues the innermost item in Trac (it
+                # is deeper than its marker, so nothing below pops) but sits
+                # left of that item's Markdown text column, which no column
+                # Trac accepts reaches. Judged on the stack as it is NOW: a
+                # line that closes deeper items and continues an outer one
+                # is #176's (and #179's) business, not this rule's. It moves
+                # to the text column below.
+                widened = (
+                    not empty_since_marker
+                    and stack[-1] < column
+                    and _text_column_past_trac_bound(
+                        stack[-1],
+                        marker_lines[stack[-1]],
+                        text_column[stack[-1]],
+                        column,
+                    )
+                    and _marker_column_rule_applies(
+                        marker_lines[stack[-1]], line
+                    )
+                    and not _MARKDOWN_ITEM_START_RE.match(
+                        line.lstrip(" \t")
+                    )
+                )
                 if answer == len(stack) - 1:
                     # #149: the line continues the innermost item. At its
                     # marker's column Markdown would not keep it there as
@@ -2370,6 +2446,7 @@ class TracWikiParser:
                 else:
                     while stack and stack[-1] >= column:
                         stack.pop()
+                moved = moved or widened
                 if outer is not None:
                     del stack[outer + 1 :]
                     out.append("")
