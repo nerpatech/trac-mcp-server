@@ -16,6 +16,7 @@ from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp.http_app import (
     BearerAuthMiddleware,
     OidcTokenRequiredMiddleware,
+    _bearer_token_expired,
     build_http_app,
 )
 
@@ -525,3 +526,109 @@ class TestOidcDuplicateAuthorizationHeaders:
         )
         assert seen == ["Bearer AAA"]
         assert statuses == []
+
+
+# ---------------------------------------------------------------------------
+# Expired OIDC tokens
+# ---------------------------------------------------------------------------
+
+
+def _jwt(claims: dict) -> str:
+    import base64
+    import json
+
+    def part(obj: dict) -> str:
+        raw = json.dumps(obj).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    return f"{part({'alg': 'RS256', 'typ': 'JWT'})}.{part(claims)}.c2ln"
+
+
+class TestOidcExpiredToken:
+    """An expired JWT gets a 401 from the MCP endpoint, so the client
+    refreshes it, instead of a tool result that only quotes Trac's 401."""
+
+    _OIDC_URL = "https://trac.example.com/trac-api/login/xmlrpc"
+
+    def _post(self, token: str):
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(oidc_rpc_url=self._OIDC_URL),
+        )
+        with TestClient(app, base_url=_BASE_URL) as client:
+            return client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+    def test_expired_jwt_rejected_with_invalid_token(self):
+        import time
+
+        response = self._post(_jwt({"exp": int(time.time()) - 60}))
+        assert response.status_code == 401
+        assert (
+            'error="invalid_token"'
+            in response.headers["www-authenticate"]
+        )
+
+    def test_valid_jwt_accepted(self):
+        import time
+
+        response = self._post(_jwt({"exp": int(time.time()) + 3600}))
+        assert response.status_code == 200
+
+    def test_opaque_token_accepted(self):
+        response = self._post("opaque-token-value")
+        assert response.status_code == 200
+
+    def test_not_configured_ignores_expiry(self):
+        import time
+
+        app = build_http_app(_make_mcp_server(), _make_server_config())
+        with TestClient(app, base_url=_BASE_URL) as client:
+            response = client.post(
+                "/mcp",
+                json=_INITIALIZE_PAYLOAD,
+                headers={
+                    **_MCP_HEADERS,
+                    "Authorization": "Bearer "
+                    + _jwt({"exp": int(time.time()) - 60}),
+                },
+            )
+        assert response.status_code == 200
+
+
+class TestBearerTokenExpired:
+    def test_past_exp(self):
+        assert _bearer_token_expired(_jwt({"exp": 1000}), now=2000)
+
+    def test_future_exp(self):
+        assert not _bearer_token_expired(_jwt({"exp": 5000}), now=2000)
+
+    def test_within_leeway_counts_as_expired(self):
+        assert _bearer_token_expired(_jwt({"exp": 2010}), now=2000)
+
+    def test_no_exp(self):
+        assert not _bearer_token_expired(_jwt({"sub": "x"}), now=2000)
+
+    def test_non_numeric_exp(self):
+        assert not _bearer_token_expired(
+            _jwt({"exp": "soon"}), now=2000
+        )
+        assert not _bearer_token_expired(_jwt({"exp": True}), now=2000)
+
+    def test_not_a_jwt(self):
+        assert not _bearer_token_expired("abc", now=2000)
+        assert not _bearer_token_expired("a.!!!.c", now=2000)
+        assert not _bearer_token_expired("a.bm90IGpzb24.c", now=2000)
+
+    def test_deeply_nested_payload_passes_through(self):
+        import base64
+
+        nested = b"[" * 100000 + b"]" * 100000
+        payload = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        assert not _bearer_token_expired(f"a.{payload}.c", now=2000)

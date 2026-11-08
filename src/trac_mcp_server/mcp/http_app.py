@@ -6,9 +6,13 @@ the stdio path -- the default, most heavily used transport -- stays free of
 HTTP-specific imports and complexity.
 """
 
+import base64
+import binascii
 import contextlib
+import json
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator
 
 import anyio
@@ -163,6 +167,35 @@ class BearerAuthMiddleware:
         await self._app(scope, receive, send)
 
 
+# A token this close to its expiry is treated as expired: the request it
+# authorizes may still be running when it lapses.
+_OIDC_EXPIRY_LEEWAY_SECONDS = 30
+
+
+def _bearer_token_expired(token: str, now: float | None = None) -> bool:
+    """True if ``token`` is a JWT whose ``exp`` claim has passed.
+
+    The signature is not checked: Trac's web server validates the token, and
+    this only decides whether forwarding it is pointless. A token that is not
+    a JWT, or has no numeric ``exp``, counts as not expired.
+    """
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (binascii.Error, ValueError, RecursionError):
+        # RecursionError: json.loads on a deeply nested payload. This runs
+        # before any validation, so it must not turn into a 500.
+        return False
+    exp = claims.get("exp") if isinstance(claims, dict) else None
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)):
+        return False
+    current = time.time() if now is None else now
+    return exp <= current + _OIDC_EXPIRY_LEEWAY_SECONDS
+
+
 class OidcTokenRequiredMiddleware:
     """Requires ``Authorization: Bearer <token>`` when OIDC per-user auth is
     configured.
@@ -172,10 +205,16 @@ class OidcTokenRequiredMiddleware:
     fallback to a shared identity, ever": every request to the MCP endpoint
     (not ``/healthz``) must carry a bearer token, checked here at the
     transport boundary rather than deep in tool-dispatch logic, so no
-    future code path can accidentally skip it. The token's value is not
+    future code path can accidentally skip it. The token's signature is not
     validated here -- that happens downstream when Trac's own web server
     (mod_auth_openidc) receives it forwarded as its own ``Authorization:
     Bearer`` header.
+
+    A JWT whose ``exp`` has passed is answered with 401 and
+    ``error="invalid_token"`` here, instead of being forwarded. Trac would
+    reject it too, but that 401 only reaches the client as text inside a
+    tool result, and an MCP client refreshes its token only on a 401 from
+    the MCP endpoint itself.
 
     This reuses the standard ``Authorization`` header rather than a custom
     one: an MCP client's own OAuth flow per server (e.g. LibreChat's
@@ -216,6 +255,18 @@ class OidcTokenRequiredMiddleware:
                 "fallback identity.",
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+
+        if _bearer_token_expired(token):
+            response = Response(
+                "Unauthorized: the access token has expired.",
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": 'Bearer error="invalid_token", '
+                    'error_description="The access token expired"'
+                },
             )
             await response(scope, receive, send)
             return
