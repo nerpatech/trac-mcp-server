@@ -567,6 +567,28 @@ def _shift_line(line: str, shift: int) -> str:
     return line[drop:]
 
 
+def _lines_above_since_blank(
+    lines: list[str],
+    inside: set[int],
+    start: int,
+) -> list[str]:
+    """The lines above line `start` since the last blank one, block content
+    and block opener lines left out (what `_items_open_above` walks)."""
+    above: list[str] = []
+    for idx in range(start - 1, -1, -1):
+        if idx in inside:
+            continue
+        if not lines[idx].strip():
+            break
+        if idx + 1 in inside and lines[idx].lstrip(" \t").startswith(
+            "{{{"
+        ):
+            continue
+        above.append(lines[idx])
+    above.reverse()
+    return above
+
+
 def _items_open_above(
     lines: list[str],
     inside: set[int],
@@ -583,20 +605,8 @@ def _items_open_above(
     list (ticket #175, the seed of `_split_past_bound`).
 
     `lines` are raw TracWiki, so the walk applies the upper bound (#175)."""
-    above: list[str] = []
-    for idx in range(start - 1, -1, -1):
-        if idx in inside:
-            continue
-        if not lines[idx].strip():
-            break
-        if idx + 1 in inside and lines[idx].lstrip(" \t").startswith(
-            "{{{"
-        ):
-            continue
-        above.append(lines[idx])
-    above.reverse()
     stack: list[tuple[int, re.Match[str]]] = []
-    for line in above:
+    for line in _lines_above_since_blank(lines, inside, start):
         _list_stack_step(stack, line, upper_bound=True)
     return stack
 
@@ -1223,7 +1233,10 @@ class TracWikiParser:
            through step 5 on their own, followed by one blank line.  The
            cut is declined when that marker is indented 4 or more columns
            or by a tab (the blank line would make it indented code), and
-           after a stashed processor block in an open item.
+           after a stashed processor block in an open item.  A head that
+           is itself a heading or table row stays as written, and the
+           blank line follows it only before an ordered marker that does
+           not start at 1, which cannot interrupt a paragraph (#183).
         5. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
            byte-for-byte.  Converted.  Anything else -- one space, three,
@@ -1335,10 +1348,22 @@ class TracWikiParser:
             )
             if marker_at is not None and inside is None:
                 inside = self._lines_inside_blocks(lines)
+            # Ticket #183: Trac ends a list at every blank line, so a run
+            # that starts straight after one has no list open above it
+            # for Trac, whatever `list_may_be_open` says. A raw line of
+            # spaces, tabs or `\r` is a blank line to Trac too (measured,
+            # #178); any other whitespace character is not measured and
+            # keeps master's bytes, and a `[[BR]]` line is text at this
+            # pass, so it never counts.
+            blank_before = (
+                marker_at is not None
+                and start > 0
+                and not masked[start - 1].strip(" \t\r")
+            )
             if (
                 marker_at is not None
                 and marker_at > 0
-                and not list_may_be_open
+                and (not list_may_be_open or blank_before)
                 and not self._first_marker_is_code_indented(
                     probes[marker_at]
                 )
@@ -1350,6 +1375,28 @@ class TracWikiParser:
                 index = start + marker_at
                 run = run[:marker_at]
                 probes = probes[:marker_at]
+
+            # Ticket #183: a marker line straight after a blank line that
+            # ended a list is a new top-level list to Trac, but CommonMark
+            # nests it in the open item when it sits at or past the item's
+            # text column. The run is carried verbatim up to the first
+            # marker left of that column.
+            if marker_at == 0 and blank_before:
+                fenced = self._marker_run_after_blank_in_list(
+                    lines, masked, probes, inside, start
+                )
+                if fenced:
+                    stack = []
+                    list_may_be_open = True
+                    out.append(
+                        self._stash_fallback(
+                            "\n".join(run[:fenced]),
+                            "List marker after a blank line inside a "
+                            "list's text column",
+                        )
+                    )
+                    index = start + fenced
+                    continue
 
             # Ticket #175: Trac ends a list at an indented line past the
             # innermost item's upper bound and renders it as a blockquote.
@@ -1383,6 +1430,18 @@ class TracWikiParser:
             if any(self._line_is_not_a_quote(m) for m in probes):
                 stack = []
                 out.extend(run)
+                if cut_head and _NON_ONE_ORDERED_RE.match(
+                    _LIST_MARKER_RE.match(masked[index])
+                    .group(0)
+                    .strip()
+                ):
+                    # The head stays as written. A list that does not
+                    # start at 1 cannot interrupt the head's paragraph
+                    # and would read as its text (`2.` after `  = h =`),
+                    # so the blank line the cut owes it is added then
+                    # (#183 review). A bullet or `1.` interrupts, and
+                    # #182's bytes for it stay.
+                    out.append("")
                 continue
 
             # Ticket #143 review (F3): a run that starts straight after the
@@ -1419,6 +1478,92 @@ class TracWikiParser:
                 # list that was cut from its run (ticket #182).
                 out.append("")
         return "\n".join(out)
+
+    def _marker_run_after_blank_in_list(
+        self,
+        lines: list[str],
+        masked: list[str],
+        probes: list[str],
+        inside: set[int],
+        start: int,
+    ) -> int:
+        """How many lines of the run at `start` to fence verbatim, or 0
+        (ticket #183). The run's first line is a list marker and the line
+        before it is a blank line.
+
+        The items open above the blank lines are found with ONE upward
+        walk, started above every consecutive blank line before the run (a
+        line of spaces, tabs or `\\r` is one; Trac ends the list at the
+        first of them, so the number does not matter). The outermost item
+        decides:
+
+        * A marker indented 4 or more columns, or by a tab, is fenced
+          whatever the item: CommonMark reads it as indented code or as
+          nested in the item even LEFT of the item's text column, and
+          after a lettered item (a fallback of its own, #74) as indented
+          code. The extent is as below, with an unknown text column
+          (lettered item, or a tab in the item's indent) taken as
+          unreachable by any plain marker.
+        * Any other marker is fenced when it reaches the item's text
+          column (`_item_text_column`). Declined (0) when the item is
+          lettered or a tab is in its indent (`_marker_column_rule_applies`
+          is False for both): the column is unknown, and neither item is
+          an open Markdown list to nest a plain marker in (a lettered list
+          is a fallback of its own, a tab-indented line is code), so a
+          plain marker after it is already a new list.
+
+        The fence runs to the first later PLAIN marker line (not
+        code-indented) left of the text column, or to the end of the run.
+        Last, declined when the list above had a nested marker moved:
+        `_shift_nested_markers` (#179) then moves this marker to the
+        list's own column, which is a new list in Markdown too and keeps
+        master's bytes. That probe is the costly step, so it runs after
+        every other decline; it is asked about the list and this one line,
+        and only this line counts."""
+        first = probes[0]
+        code_indented = self._first_marker_is_code_indented(first)
+        top = start - 1
+        while top > 0 and not masked[top - 1].strip(" \t\r"):
+            top -= 1
+        above = _lines_above_since_blank(lines, inside, top)
+        stack: list[tuple[int, re.Match[str]]] = []
+        for line in above:
+            _list_stack_step(stack, line, upper_bound=True)
+        if not stack:
+            return 0
+        outer = stack[0][1]
+        # The helper's lettered and tab tests are the "is the item's text
+        # column known" question; its interrupter test cannot match the
+        # item's own marker line.
+        text_column = (
+            _item_text_column(outer.end(), outer.string[outer.end() :])
+            if _marker_column_rule_applies(outer.string, outer.string)
+            else None
+        )
+        if not code_indented and (
+            text_column is None
+            or _indent_width(_indent_of(first)) < text_column
+        ):
+            return 0
+        moved = self._shift_nested_markers(
+            "\n".join([*above, "", lines[start]])
+        )
+        if moved.rsplit("\n", 1)[-1] != lines[start]:
+            return 0
+        fenced = len(probes)
+        for offset in range(1, len(probes)):
+            probe = probes[offset]
+            if (
+                _LIST_MARKER_RE.match(probe)
+                and not self._first_marker_is_code_indented(probe)
+                and (
+                    text_column is None
+                    or _indent_width(_indent_of(probe)) < text_column
+                )
+            ):
+                fenced = offset
+                break
+        return fenced
 
     def _is_column_zero_list_line(
         self, lines: list[str], probe: str, index: int

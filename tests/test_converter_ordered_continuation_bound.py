@@ -359,7 +359,15 @@ def test_the_blank_separator_repro_round_trips_stably():
     md = "10. j\n\n    # h\n\n    after\n11. k\n"
     first = markdown_to_tracwiki(md)
     assert first == " 10. j\n\n     = h =\n     after\n 11. k"
-    assert markdown_to_tracwiki(_read(first)) == first
+    # #183 review finding 3: the heading after the blank line is not item
+    # text to Trac, so the read leg cuts it from the next item and puts one
+    # blank line between them (`11.` is a list that does not start at 1 and
+    # could not interrupt the heading's paragraph). The next write keeps
+    # `11.` a list item and gains that one blank line; from there it is
+    # stable.
+    second = markdown_to_tracwiki(_read(first))
+    assert second == " 10. j\n\n     = h =\n     after\n\n 11. k"
+    assert markdown_to_tracwiki(_read(second)) == second
 
 
 def test_the_documented_example_literally():
@@ -534,26 +542,35 @@ class TestReadLegMovesTheLineToTheTextColumn:
             f"{' ' * (bound + 1)}past\n```\n\n{ind}{number + 1}. k\n"
         )
 
-    def test_line_after_a_real_blank_line_keeps_masters_bytes(
+    def test_line_after_a_real_blank_line_is_a_quote_not_item_text(
         self, number, depth
     ):
+        # Not master's bytes any more (#183): Trac ends the list at the
+        # blank line, so `after` is a quote (its indent is not canonical:
+        # the fallback fence) and the next item a new list. Master left it
+        # at the bound inside the item.
         ind, bound, _, marker = self._text(number, depth)
         md = _tail(
             _read(_tw_list(number, depth, bound, ["", "after"])), marker
         )
         assert md == (
-            f"{ind}{marker} j\n\n{' ' * bound}after\n{ind}{number + 1}. k\n"
+            f"{ind}{marker} j\n\n```tracwiki-unconverted\n"
+            f"{' ' * bound}after\n```\n\n{ind}{number + 1}. k\n"
         )
 
     def test_line_after_br_br_then_a_real_blank_line_is_not_moved(
         self, number, depth
     ):
+        # Still not moved to the text column; since #183 it is fenced as a
+        # quote after the blank line instead of left in the item.
         ind, bound, _, marker = self._text(number, depth)
         tw = _tw_list(
             number, depth, bound, ["a [[BR]][[BR]]", "", "after"]
         )
         md = _tail(_read(tw), marker)
-        assert f"\n\n{' ' * bound}after\n" in md
+        assert (
+            f"\n\n```tracwiki-unconverted\n{' ' * bound}after\n```\n"
+        ) in md
 
     def test_a_line_that_would_become_a_nested_item_is_not_moved(
         self, number, depth
@@ -596,10 +613,12 @@ class TestOnlyAMacroMadeLineKeepsTheItemOpen:
         ind, bound, text, marker = self._setup(number, depth)
         tw = _tw_lines(number, depth, [f"{bound}a", "   ", f"{bound}b"])
         md = _tail(_read(tw), marker)
-        # `a` continues the item and is moved; `b` is after a blank: master's
-        # bytes, still at the bound.
+        # `a` continues the item and is moved; `b` is after a blank, so
+        # it is not item text: a quote, fenced since #183 (master left it
+        # at the bound).
         assert md == (
-            f"{ind}{marker} j\n{text}a\n   \n{bound}b\n"
+            f"{ind}{marker} j\n{text}a\n   \n"
+            f"```tracwiki-unconverted\n{bound}b\n```\n\n"
             f"{ind}{number + 1}. k\n"
         )
 
@@ -607,8 +626,10 @@ class TestOnlyAMacroMadeLineKeepsTheItemOpen:
         ind, bound, text, marker = self._setup(number, depth)
         tw = _tw_lines(number, depth, [f"{bound}a", "\t", f"{bound}b"])
         md = _tail(_read(tw), marker)
+        # Fenced since #183, as after any raw blank line.
         assert md == (
-            f"{ind}{marker} j\n{text}a\n\t\n{bound}b\n"
+            f"{ind}{marker} j\n{text}a\n\t\n"
+            f"```tracwiki-unconverted\n{bound}b\n```\n\n"
             f"{ind}{number + 1}. k\n"
         )
 
@@ -623,8 +644,11 @@ class TestOnlyAMacroMadeLineKeepsTheItemOpen:
             number, depth, [f"{bound}a", blank, f"{bound}b"]
         ).replace("\n", "\r\n")
         md = _tail(_read(tw), marker)
+        # `b` is a quote after the blank line, fenced since #183: the
+        # fence lines are `\n` lines, its body keeps the document's `\r`.
         assert md == (
-            f"{ind}{marker} j\r\n{text}a\r\n{blank}\r\n{bound}b\r\n"
+            f"{ind}{marker} j\r\n{text}a\r\n{blank}\r\n"
+            f"```tracwiki-unconverted\n{bound}b\r\n```\n\n"
             f"{ind}{number + 1}. k\r\n"
         )
 
@@ -662,8 +686,10 @@ class TestOnlyAMacroMadeLineKeepsTheItemOpen:
             [f"{bound}a [[BR]][[BR]]", "   ", f"{bound}b"],
         )
         md = _tail(_read(tw), marker)
+        # Fenced since #183, as after any raw blank line.
         assert md == (
-            f"{ind}{marker} j\n{text}a   \n  \n   \n{bound}b\n"
+            f"{ind}{marker} j\n{text}a   \n  \n   \n"
+            f"```tracwiki-unconverted\n{bound}b\n```\n\n"
             f"{ind}{number + 1}. k\n"
         )
 
@@ -759,7 +785,6 @@ SHAPES = {
     # Review fix 1: a run after an EMPTY line keeps master's text column.
     "heading": ["", "# h", "", "after"],
     "heading_only": ["", "# h"],
-    "hr_only": ["", "---"],
 }
 
 
@@ -774,10 +799,52 @@ def test_markdown_to_tracwiki_to_markdown_to_tracwiki_is_stable(
     md = _md_list("ordered", number, depth, SHAPES[shape])
     first = markdown_to_tracwiki(md)
     second = markdown_to_tracwiki(_read(first))
-    assert second == first
+    if shape in ("heading", "heading_only") and depth == 0:
+        # #183 review finding 3: the heading after the blank line is not
+        # item text to Trac (the list ended at the blank line), and the
+        # item after it, numbered 10 or more, needs a blank line to stay a
+        # list item. The second write gains that one blank line (the read
+        # leg's cut, as for a quote, #182/#183) and is stable from there.
+        # At depth 1 the next item is nested in an item left open and the
+        # bytes do not move.
+        assert [x for x in second.split("\n") if x.strip()] == [
+            x for x in first.split("\n") if x.strip()
+        ]
+        assert second.count("\n\n") == first.count("\n\n") + 1
+        assert markdown_to_tracwiki(_read(second)) == second
+    else:
+        assert second == first
     # And the text did not leave the item: no fence, no column-0 line.
     assert "tracwiki-unconverted" not in _read(first)
     assert "{{{" not in first
+
+
+@pytest.mark.parametrize(("number", "depth"), ORDERED, ids=IDS)
+def test_a_rule_after_a_blank_line_is_a_quote_once_trac_reads_it(
+    number, depth
+):
+    """The "hr_only" row of the stability test above, taken out of it by
+    #183. The write leg puts a Markdown rule inside an item as a blank line
+    and the indented `----`, and Trac ends the list at that blank line: the
+    rule is a quote after the list, not item text. The read leg now says so
+    (the fallback fence), and the next write gains the one blank line #183
+    accepts before the following item. From there it is stable. Before #183
+    the read leg left the rule indented in the item, and the first
+    round trip was already stable at the cost of the wrong structure."""
+    md = _md_list("ordered", number, depth, ["", "---"])
+    first = markdown_to_tracwiki(md)
+    assert "\n\n" in first and "{{{" not in first
+    read = _read(first)
+    assert "```tracwiki-unconverted\n" in read
+    second = markdown_to_tracwiki(read)
+    # The same text lines. At depth 1 the item after the rule is a new
+    # top-level list in Trac (the blank line ended the nested one), so the
+    # write leg writes it at the root column: the render is the same.
+    assert [x.strip() for x in second.split("\n") if x.strip()] == [
+        x.strip() for x in first.split("\n") if x.strip()
+    ]
+    assert second.count("\n\n") == first.count("\n\n") + 1
+    assert markdown_to_tracwiki(_read(second)) == second
 
 
 # -- live -----------------------------------------------------------------

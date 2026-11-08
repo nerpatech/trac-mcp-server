@@ -628,12 +628,15 @@ def test_round_trip_of_the_ticket_repro_is_exact():
 
 def test_a_list_after_a_blank_line_after_an_unshifted_list_is_masters():
     """P4 of #177 (a marker after the blank line at or past the previous
-    item's text column, no nesting moved) is #183's and keeps `master`'s
-    bytes: only a list whose own nesting #179 moved is separated."""
-    assert (
-        _read(" * a\n   * b\n\n   * c\n") == " - a\n   - b\n\n   - c\n"
+    item's text column, no nesting moved) is #183's: only a list whose own
+    nesting #179 moved is separated here. #183 carries the marker run
+    verbatim in a fence (master's bytes were `   - c`, which CommonMark
+    nests in `a`; the name is kept, the bytes are not master's)."""
+    fenced = "```tracwiki-unconverted\n   * c\n```\n"
+    assert _read(" * a\n   * b\n\n   * c\n") == (
+        " - a\n   - b\n\n" + fenced
     )
-    assert _read(" * a\n\n   * c\n") == " - a\n\n   - c\n"
+    assert _read(" * a\n\n   * c\n") == " - a\n\n" + fenced
 
 
 def test_a_marker_left_of_the_previous_text_column_is_not_moved():
@@ -764,11 +767,13 @@ def test_dropped_macro_line_before_a_sibling_keeps_both_nested():
 def test_a_raw_whitespace_only_line_still_ends_the_list():
     """Only the dropped macro's remains are marked: a raw whitespace-only
     source line is a blank line to Trac (measured, #178) and empties the
-    stack, so `more of b` is outside `b` as before."""
+    stack, so `more of b` is outside `b`. Not master's bytes any more
+    (#183): the line after the blank is a quote to Trac and goes out
+    through the fallback fence, with a blank line before ` 2. c`."""
     source = " 1. a\n   * b\n     \n     more of b\n 2. c\n"
-    assert (
-        _read(source)
-        == " 1. a\n    - b\n     \n     more of b\n 2. c\n"
+    assert _read(source) == (
+        " 1. a\n    - b\n     \n"
+        "```tracwiki-unconverted\n     more of b\n```\n\n 2. c\n"
     )
 
 

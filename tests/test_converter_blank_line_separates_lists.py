@@ -102,9 +102,13 @@ MASTER_ROWS = {
         ORDERED_THEN_BULLET,
         " 1. a\n\n - c\n",
     ),
-    "P4 is nested by CommonMark (#183)": (
+    # Not master's bytes any more (#183): `   * c` after the blank line
+    # opens a NEW top-level list in Trac, so the read leg carries it
+    # verbatim in a fence (master left it as `   - c`, which CommonMark
+    # nests in `a`).
+    "P4 is fenced, not nested (#183)": (
         P4,
-        " - a\n\n   - c\n - d\n",
+        " - a\n\n```tracwiki-unconverted\n   * c\n```\n - d\n",
     ),
     "one list, no blank line": (" * a\n * c\n", " - a\n - c\n"),
     "a code placeholder at column 0 ends the list": (
@@ -235,16 +239,26 @@ def test_a_dropped_macro_at_column_0_between_items():
 # -- Indented code and tabs (code review) ------------------------------------
 
 
-def test_a_marker_at_column_4_is_indented_code_and_is_not_switched():
-    assert _md(" 10. a\n\n    10. b\n") == " 10. a\n\n    10. b\n"
-    assert _tw(_md(" 10. a\n\n    10. b\n")) == (
-        " 10. a\n\n{{{\n10. b\n}}}"
+def test_a_marker_at_column_4_is_fenced_and_is_not_switched():
+    # #183 review finding 2: after a blank line a marker indented 4+
+    # columns is indented code to CommonMark, but a new top-level list to
+    # Trac, so it is carried verbatim through the fallback. The row used to
+    # pin master's bytes, which round-tripped into a `{{{` block.
+    fence = "```tracwiki-unconverted\n"
+    assert _md(" 10. a\n\n    10. b\n") == (
+        f" 10. a\n\n{fence}    10. b\n```\n"
     )
+    assert _tw(_md(" 10. a\n\n    10. b\n")) == " 10. a\n\n    10. b"
 
 
-def test_a_tab_indented_marker_is_not_switched():
-    assert _md("\t* a\n\n\t* c\n") == "\t* a\n\n\t* c\n"
-    assert _tw(_md("\t* a\n\n\t* c\n")) == "{{{\n* a\n\n* c\n}}}"
+def test_a_tab_indented_marker_is_fenced_and_is_not_switched():
+    # #183 review finding 2: as above for a tab-indented marker. The tab
+    # item line above it is still read as code (an older, separate defect:
+    # the first item round-trips into a `{{{` block); only the marker line
+    # after the blank is fenced here.
+    fence = "```tracwiki-unconverted\n"
+    assert _md("\t* a\n\n\t* c\n") == f"\t* a\n\n{fence}\t* c\n```\n"
+    assert _tw(_md("\t* a\n\n\t* c\n")) == "{{{\n* a\n}}}\n\n\t* c"
 
 
 # -- Write leg: unchanged ---------------------------------------------------

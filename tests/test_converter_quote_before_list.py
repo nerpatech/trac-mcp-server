@@ -26,9 +26,12 @@ head from the list, so CommonMark ends the quote and the list is not a lazy
 continuation of it. The write leg does not change: the round trip gains that
 one blank line, which renders the same in Trac.
 
-Unchanged, with the bytes ``master`` (11e5512) produced: a quote run after a
-list (#181/#183), a run whose first line is a marker, a head that is a table
-row, and a run that starts straight after a block inside an open item.
+Unchanged, with the bytes ``master`` (11e5512) produced: a quote run straight
+after a list line (no blank line between), a run whose first line is a
+marker, a head that is a table row, and a run that starts straight after a
+block inside an open item. A quote run after a BLANK line that ended a list
+is #183's: it is a quote to Trac as well, so it is cut like the first one
+(``CHANGED_BY_183`` below pins the new bytes of the rows that were here).
 """
 
 import mistune
@@ -137,14 +140,16 @@ CASES = {
         "</blockquote>\n<ul>\n<li>c</li>\n</ul>\n",
         "{{{\n- a\n}}}\n\n  q\n\n * c",
     ),
-    # The second run follows a list, so it is out of scope (#181/#183) and
-    # keeps master's bytes; only the first head is a quote.
-    "a later quote run after the list is left alone": (
+    # The second run follows a list, but a blank line ended it: Trac reads
+    # `r` as a quote too, so it is cut (#183). On master (#182) only the
+    # first head was a quote and `r` stayed in the list's run.
+    "a later quote run after a blank line is a quote too": (
         "P\n\n  q\n * c\n\n  r\n * d\n",
-        "P\n\n> q\n\n - c\n\n  r\n - d\n",
+        "P\n\n> q\n\n - c\n\n> r\n\n - d\n",
         "<p>P</p>\n<blockquote>\n<p>q</p>\n</blockquote>\n"
-        "<ul>\n<li>c</li>\n</ul>\n<p>r</p>\n<ul>\n<li>d</li>\n</ul>\n",
-        "P\n\n  q\n\n * c\n\nr\n\n * d",
+        "<ul>\n<li>c</li>\n</ul>\n<blockquote>\n<p>r</p>\n</blockquote>\n"
+        "<ul>\n<li>d</li>\n</ul>\n",
+        "P\n\n  q\n\n * c\n\n  r\n\n * d",
     ),
     "the list's run needs a past-bound split": (
         "P\n\n  q\n * c\n      past\n",
@@ -163,11 +168,6 @@ UNCHANGED = {
         "P\n\n - a\n  q\n - c\n",
         "P\n\n * a\n   q\n * c",
     ),
-    "a quote run after a list, blank line between": (
-        "P\n\n * a\n\n  q\n * c\n",
-        "P\n\n - a\n\n  q\n - c\n",
-        "P\n\n * a\n\nq\n\n * c",
-    ),
     "a head that is a table row": (
         "P\n\n  ||t||\n * c\n",
         "P\n\n| t |\n|---|\n - c\n",
@@ -177,18 +177,6 @@ UNCHANGED = {
         "P\n\n * c\n  more\n",
         "P\n\n - c\n  more\n",
         "P\n\n * c\n   more",
-    ),
-    # The block's lines are not prose: they leave the open-list flag alone,
-    # so a quote run further on is still after a list.
-    "after text that follows a block in an open item": (
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b\n",
-        " - a\n   ```\n   c\n   ```\n   tail\n\n   more\n - b\n",
-        " * a\n   {{{\n   c\n   }}}\n   tail [[BR]][[BR]]\n   more\n * b",
-    ),
-    "a quote run two lines after a block in an open item": (
-        " * a\n {{{\n c\n }}}\n tail\n\n  more\n * b\n",
-        " - a\n   ```\n   c\n   ```\n   tail\n\n  more\n - b\n",
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\nmore\n\n * b",
     ),
     # A column-0 line that Trac reads as a list item (`- `, `* `, `1. `,
     # `a. `) keeps its list open: an indented line after it is the item's
@@ -293,6 +281,34 @@ UNCHANGED = {
 }
 
 
+# name -> (source, the read-leg bytes, the round trip): rows that pinned
+# master's bytes in this file and are #183's shape (an indented quote run
+# after the blank line that ended a list, then a marker). They are quotes to
+# Trac, so they are cut like the first head (blank line, then the list); the
+# blank line they gain is the one #182 accepted.
+CHANGED_BY_183 = {
+    "a quote run after a list, blank line between": (
+        "P\n\n * a\n\n  q\n * c\n",
+        "P\n\n - a\n\n> q\n\n - c\n",
+        "P\n\n * a\n\n  q\n\n * c",
+    ),
+    # The block's lines are not prose, so the blank line after `tail` is
+    # what ends the list: `more` is a quote to Trac. (Master read it as a
+    # paragraph of the item and the round trip joined it with `[[BR]]`.)
+    "after text that follows a block in an open item": (
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b\n",
+        " - a\n   ```\n   c\n   ```\n   tail\n\n"
+        "```tracwiki-unconverted\n   more\n```\n\n - b\n",
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n\n * b",
+    ),
+    "a quote run two lines after a block in an open item": (
+        " * a\n {{{\n c\n }}}\n tail\n\n  more\n * b\n",
+        " - a\n   ```\n   c\n   ```\n   tail\n\n> more\n\n - b\n",
+        " * a\n   {{{\n   c\n   }}}\n   tail\n\n  more\n\n * b",
+    ),
+}
+
+
 def _md(wiki: str) -> str:
     return tracwiki_to_markdown(wiki).text
 
@@ -340,5 +356,14 @@ def test_the_head_is_a_quote_not_a_paragraph_or_a_code_block():
 @pytest.mark.parametrize("name", UNCHANGED)
 def test_out_of_scope_shapes_keep_masters_bytes(name):
     source, markdown, trip = UNCHANGED[name]
+    assert _md(source) == markdown
+    assert markdown_to_tracwiki(markdown) == trip
+
+
+@pytest.mark.parametrize("name", CHANGED_BY_183)
+def test_quote_runs_after_a_blank_line_are_cut_like_the_first_head(
+    name,
+):
+    source, markdown, trip = CHANGED_BY_183[name]
     assert _md(source) == markdown
     assert markdown_to_tracwiki(markdown) == trip

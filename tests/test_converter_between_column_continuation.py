@@ -112,11 +112,14 @@ def test_the_blank_line_is_not_doubled_after_a_quote_line():
 
 # Gate refusals: master's bytes.
 GATE_ROWS = {
-    # A blank line since the marker: Trac ended the list at the blank.
+    # A blank line since the marker: Trac ended the list at the blank. Not
+    # master's bytes any more (#183): `text` after the blank is a
+    # blockquote to Trac, so the read leg gives `> text` (master left it
+    # indented in the item, and the round trip made it a paragraph).
     "blank since marker": (
         " * a\n   * b\n\n  text\n * c\n",
-        " - a\n   - b\n\n  text\n - c\n",
-        " * a\n   * b\n\ntext\n\n * c",
+        " - a\n   - b\n\n> text\n\n - c\n",
+        " * a\n   * b\n\n  text\n\n * c",
     ),
     # A tab in the line's indentation: a declined shape.
     "tab in the line": (
