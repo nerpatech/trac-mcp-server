@@ -17,6 +17,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from trac_mcp_server.core.client import (
+    WikiPageConflict,
+    WikiPageStoredReadbackFailed,
+)
 from trac_mcp_server.instances import (
     InstanceNotAllowedError,
     UnknownInstanceError,
@@ -607,10 +611,13 @@ class TestWikiConventionsLive:
     Trac #173: the probe page names carry a per-run suffix, so two
     overlapping runs cannot overwrite or delete each other's pages.
     WikiStart cannot be per-run (the tool reads WikiStart's declaration
-    by design), so it is guarded instead: the row skips when WikiStart
-    is no longer what it first read (another run is mid-row), and the
-    restore only fires when WikiStart still holds exactly what this
-    run wrote.
+    by design), so its writes are version-checked instead: the row
+    re-reads WikiStart's version and content right before the append
+    and appends with that version (`put_wiki_page(version=...)`), so a
+    write that landed in between is refused, not overwritten; the row
+    then skips (another run is mid-row). The restore is checked against
+    the version the append produced, and reports a cleanup error,
+    WikiStart left as found, when anything was written since.
     """
 
     def test_declared_style_and_template_round_trip(self):
@@ -651,78 +658,115 @@ class TestWikiConventionsLive:
             assert not result.isError
             return result.structuredContent
 
+        class _Skip(Exception):
+            """Another run is mid-row: leave the try, clean up, skip."""
+
         wrote_wikistart = False
-        wikistart_written = None
+        wikistart_version = None
+        skip_reason = None
         cleanup_errors: list[str] = []
         try:
-            client.put_wiki_page(
-                template, template_body, "ticket 123 probe"
-            )
-            out = run()
-            if out["style"] != "undeclared" and (
-                client.get_wiki_page("WikiStart") != original
-            ):
-                # Another run appended its declaration after this
-                # run's first read of WikiStart (seen in an overlap
-                # repro, #173): its row, not a defect here.
-                pytest.skip(
-                    "/trac_test WikiStart gained a declaration since "
-                    "this run read it: another run is mid-row"
+            try:
+                client.put_wiki_page(
+                    template, template_body, "ticket 123 probe"
                 )
-            assert out["style"] == "undeclared"
-            assert out["style_page"] is None
-            probe = [
-                t for t in out["templates"] if t["name"] == template
-            ]
-            assert len(probe) == 1
-            assert probe[0]["body"] == template_body
+                out = run()
+                if out["style"] != "undeclared" and (
+                    client.get_wiki_page("WikiStart") != original
+                ):
+                    # Another run appended its declaration after this
+                    # run's first read of WikiStart (seen in an overlap
+                    # repro, #173): its row, not a defect here.
+                    raise _Skip(
+                        "/trac_test WikiStart gained a declaration "
+                        "since this run read it: another run is "
+                        "mid-row"
+                    )
+                assert out["style"] == "undeclared"
+                assert out["style_page"] is None
+                probe = [
+                    t for t in out["templates"] if t["name"] == template
+                ]
+                assert len(probe) == 1
+                assert probe[0]["body"] == template_body
 
-            client.put_wiki_page(
-                style_page, style_body, "ticket 123 probe"
-            )
-            sep = "" if original.endswith("\n") else "\n"
-            wikistart_written = f"{original}{sep}\n{line}\n"
-            # Immediately before the append: WikiStart is the one
-            # shared page, so a declaration or any change since the
-            # first read means another run is between its append and
-            # its restore. Skipping leaves the probe pages to the
-            # finally below.
-            current = client.get_wiki_page("WikiStart")
-            if "'''Wiki style:'''" in current or current != original:
-                pytest.skip(
-                    "/trac_test WikiStart changed since this run read "
-                    "it: another run is mid-row (this run's probe "
-                    "pages are cleaned up first)"
+                client.put_wiki_page(
+                    style_page, style_body, "ticket 123 probe"
                 )
-            wrote_wikistart = True
-            client.put_wiki_page(
-                "WikiStart", wikistart_written, "ticket 123 probe"
-            )
-            out = run()
-            assert out["style"] == "probe"
-            assert out["declaration_lines"] == [line]
-            assert out["style_page"]["name"] == style_page
-            assert out["style_page"]["body"] == style_body
-            probe = [
-                t for t in out["templates"] if t["name"] == template
-            ]
-            assert probe and probe[0]["body"] == template_body
+                sep = "" if original.endswith("\n") else "\n"
+                wikistart_written = f"{original}{sep}\n{line}\n"
+                # WikiStart is the one shared page. Re-read its version
+                # and, at that version, its content, right before the
+                # append, then append with that version: the write
+                # itself refuses when anything landed since, so there
+                # is no gap between the check and the write. Any change
+                # since the first read means another run is between its
+                # append and its restore; skipping leaves the probe
+                # pages to the finally below.
+                info = client.get_wiki_page_info("WikiStart")
+                read_version = info["version"]
+                current = client.get_wiki_page(
+                    "WikiStart", version=read_version
+                )
+                if current != original:
+                    raise _Skip(
+                        "/trac_test WikiStart changed since this run "
+                        "read it: another run is mid-row (this run's "
+                        "probe pages are cleaned up first)"
+                    )
+                try:
+                    stored = client.put_wiki_page(
+                        "WikiStart",
+                        wikistart_written,
+                        "ticket 123 probe",
+                        version=read_version,
+                    )
+                except WikiPageConflict:
+                    raise _Skip(
+                        "/trac_test WikiStart changed between this "
+                        "run's re-read and its append: another run is "
+                        "mid-row (this run's probe pages are cleaned "
+                        "up first)"
+                    ) from None
+                except WikiPageStoredReadbackFailed:
+                    # Stored, version unknown: assume nothing else
+                    # wrote in between; the restore is version-checked
+                    # and reports if that was wrong.
+                    wrote_wikistart = True
+                    wikistart_version = read_version + 1
+                    raise
+                wrote_wikistart = True
+                wikistart_version = stored["version"]
+                out = run()
+                assert out["style"] == "probe"
+                assert out["declaration_lines"] == [line]
+                assert out["style_page"]["name"] == style_page
+                assert out["style_page"]["body"] == style_body
+                probe = [
+                    t for t in out["templates"] if t["name"] == template
+                ]
+                assert probe and probe[0]["body"] == template_body
+            except _Skip as skip:
+                skip_reason = str(skip)
         finally:
             steps = []
 
             def restore_wikistart():
-                # Only undo what this run did. If WikiStart now holds
-                # anything else, a later write is not ours to revert.
-                if (
-                    client.get_wiki_page("WikiStart")
-                    != wikistart_written
-                ):
+                # Only undo what this run did: restore at the version
+                # this run's append produced. If anything has been
+                # written since, the write is refused and not ours to
+                # revert.
+                try:
+                    client.put_wiki_page(
+                        "WikiStart",
+                        original,
+                        "ticket 123 restore",
+                        version=wikistart_version,
+                    )
+                except WikiPageConflict:
                     raise RuntimeError(
                         "WikiStart changed under the run; left as found"
-                    )
-                client.put_wiki_page(
-                    "WikiStart", original, "ticket 123 restore"
-                )
+                    ) from None
 
             if wrote_wikistart:
                 steps.append(("restore WikiStart", restore_wikistart))
@@ -743,9 +787,18 @@ class TestWikiConventionsLive:
                     step()
                 except Exception as exc:
                     cleanup_errors.append(f"{label}: {exc!r}")
-        # Reached only when the body passed: an earlier failure is
-        # not masked by (and does not wait on) a cleanup report.
+        # Reached only when the body passed or skipped: an earlier
+        # failure is not masked by (and does not wait on) a cleanup
+        # report. A skip does not hide a dirty instance, though.
         if cleanup_errors:
             pytest.fail(
-                "/trac_test left dirty: " + "; ".join(cleanup_errors)
+                "/trac_test left dirty: "
+                + "; ".join(cleanup_errors)
+                + (
+                    f" (the row also wanted to skip: {skip_reason})"
+                    if skip_reason
+                    else ""
+                )
             )
+        if skip_reason:
+            pytest.skip(skip_reason)

@@ -5,7 +5,6 @@ round-trip test marked ``@pytest.mark.live`` is also included; gate it
 behind ``--run-live`` (see conftest.py).
 """
 
-import os
 import xmlrpc.client
 from unittest.mock import MagicMock
 
@@ -525,24 +524,14 @@ async def test_live_round_trip(tmp_path):
     TRAC_URL store, and skipped without one.
     """
     import uuid
-    from urllib.parse import urlparse
 
-    from trac_mcp_server.config import Config
-    from trac_mcp_server.core.client import TracClient
+    from tests.live_helpers import trac_test_client
 
     filename = f"live-fixture-{uuid.uuid4().hex[:8]}.bin"
 
     # The destructive-test instance on the same host, whatever project
     # or sub-path TRAC_URL itself names.
-    parsed = urlparse(os.environ["TRAC_URL"])
-    config = Config(
-        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = TracClient(config)
+    client = trac_test_client()
 
     fixture = tmp_path / filename
     payload = b"trac-mcp-server live attachment test \x00\x01\x02"
@@ -552,6 +541,7 @@ async def test_live_round_trip(tmp_path):
         "Ticket173AttachmentLive",
         "Throwaway; deleted by the test.",
     )
+    cleanup_error = None
     try:
         # Push
         push_result = await handle_ticket_attachment_tool(
@@ -602,5 +592,12 @@ async def test_live_round_trip(tmp_path):
     finally:
         try:
             client.delete_ticket(ticket_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            cleanup_error = exc
+    # Reached only when the body passed: a body failure propagates
+    # unchanged out of the finally above.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"ticket {ticket_id} left behind on /trac_test: "
+            f"{cleanup_error!r}"
+        )

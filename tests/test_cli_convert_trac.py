@@ -1499,9 +1499,9 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 # Requires:
 #   - `pytest --run-live` on the command line
 #   - TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD env vars pointing at a
-#     real Trac host. The test re-points TRAC_URL at that host's
-#     /trac_test instance, so it never writes to the project TRAC_URL
-#     itself names (Trac #173).
+#     real Trac host. Every CLI call in the test passes --trac-url
+#     for that host's /trac_test instance, so it never writes to the
+#     project TRAC_URL itself names (Trac #173).
 #   - The scratch page is per-run (Scratch/TracConvertLive<hex8>),
 #     created by the test and deleted when it ends; there is no page
 #     to configure.
@@ -1556,11 +1556,12 @@ def test_live_round_trip_check_from_edit_to(capsys, monkeypatch):
     """Live round-trip: --check-trac → --from-wiki → edit → --to-wiki.
 
     Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars
-    pointing at a real Trac host. Runs on /trac_test ONLY: TRAC_URL
-    is re-pointed at the /trac_test instance of that host before the
-    CLI runs (`trac-convert` has no --instance; `bootstrap_config`
-    reads the env var, which beats .env, as `load_dotenv()` does not
-    override). The scratch target is a per-run page,
+    pointing at a real Trac host. Runs on /trac_test ONLY:
+    `trac-convert` has no --instance, but it has --trac-url, the
+    highest-precedence override of the Trac URL, and every CLI call
+    in this row passes it the /trac_test URL of that host (TRAC_URL
+    is also re-pointed, as a second layer). The scratch target is a
+    per-run page,
     Scratch/TracConvertLive<hex8>, deleted at the end, so no existing
     page, WikiStart included, and no other instance is written.
 
@@ -1584,13 +1585,12 @@ def test_live_round_trip_check_from_edit_to(capsys, monkeypatch):
     was reseeded run after run and shared by overlapping runs).
 
     IMPORTANT: The test does NOT unset the real env vars. It reads
-    them via os.environ.get, then overrides only TRAC_URL (restored
-    by monkeypatch) and relies on the actual live Trac.
+    them via os.environ.get, passes --trac-url on each CLI call, and
+    also overrides TRAC_URL (restored by monkeypatch).
     """
     import os
-    from urllib.parse import urlparse
 
-    from trac_mcp_server.config import Config
+    from tests.live_helpers import trac_test_client, trac_test_url
 
     if not (
         os.environ.get("TRAC_URL")
@@ -1605,35 +1605,36 @@ def test_live_round_trip_check_from_edit_to(capsys, monkeypatch):
     page_name = f"Scratch/TracConvertLive{uuid.uuid4().hex[:8]}"
 
     # The destructive-test instance on the same host, whatever project
-    # or sub-path TRAC_URL itself names. The CLI reads TRAC_URL; the
-    # env var beats .env and the YAML, so this is the whole lever.
-    parsed = urlparse(os.environ["TRAC_URL"])
-    test_url = f"{parsed.scheme}://{parsed.netloc}/trac_test"
+    # or sub-path TRAC_URL itself names. --trac-url on every CLI call
+    # is the lever (it beats the env var, .env and the YAML); the
+    # setenv is a second layer.
+    test_url = trac_test_url()
     monkeypatch.setenv("TRAC_URL", test_url)
-    cleaner = TracClient(
-        Config(
-            trac_url=test_url,
-            username=os.environ["TRAC_USERNAME"],
-            password=os.environ["TRAC_PASSWORD"],
-            insecure=os.environ.get("TRAC_INSECURE", "").lower()
-            in ("1", "true", "yes"),
-        )
-    )
+    cleaner = trac_test_client()
+    cleanup_error = None
     try:
-        _live_round_trip_steps(capsys, page_name)
+        _live_round_trip_steps(capsys, page_name, test_url)
     finally:
         try:
             cleaner.delete_wiki_page(page_name)
-        except Exception:
-            pass
+        except Exception as exc:
+            cleanup_error = exc
+    # Reached only when the body passed: a body failure propagates
+    # unchanged out of the finally above.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"page {page_name} left behind on /trac_test: "
+            f"{cleanup_error!r}"
+        )
 
 
-def _live_round_trip_steps(capsys, page_name):
-    """Steps 1-6 of the live round-trip, against `page_name`."""
+def _live_round_trip_steps(capsys, page_name, test_url):
+    """Steps 1-6 of the live round-trip, against `page_name`, every
+    CLI call carrying `--trac-url <test_url>`."""
     import time
 
     # Step 1: --check-trac
-    rc = main(["--check-trac"])
+    rc = main(["--check-trac", "--trac-url", test_url])
     assert rc == EXIT_OK, "live --check-trac should succeed"
     captured = capsys.readouterr()
     assert "OK (Trac API version" in captured.out
@@ -1646,7 +1647,14 @@ def _live_round_trip_steps(capsys, page_name):
     #   write. A per-run nonce line makes each seed distinct; later
     #   steps re-read the page and never compare it to the constant.
     rc = _main_with_stdin(
-        ["--to-wiki", page_name, "--from", "md"],
+        [
+            "--to-wiki",
+            page_name,
+            "--from",
+            "md",
+            "--trac-url",
+            test_url,
+        ],
         _LIVE_SEED_BODY + "\n" + _run_nonce_line(),
     )
     assert rc == EXIT_OK, (
@@ -1656,7 +1664,9 @@ def _live_round_trip_steps(capsys, page_name):
     capsys.readouterr()
 
     # Step 3: --from-wiki → md on stdout
-    rc = main(["--from-wiki", page_name, "--to", "md"])
+    rc = main(
+        ["--from-wiki", page_name, "--to", "md", "--trac-url", test_url]
+    )
     assert rc == EXIT_OK, f"live --from-wiki {page_name} should succeed"
     md_original = capsys.readouterr().out
     assert md_original, (
@@ -1670,7 +1680,16 @@ def _live_round_trip_steps(capsys, page_name):
     # Step 5: --to-wiki with edited MD on stdin, verbose to check
     #   "info: wrote" line surfaces on stderr.
     rc = _main_with_stdin(
-        ["--to-wiki", page_name, "--from", "md", "-v"], md_edited
+        [
+            "--to-wiki",
+            page_name,
+            "--from",
+            "md",
+            "-v",
+            "--trac-url",
+            test_url,
+        ],
+        md_edited,
     )
     assert rc == EXIT_OK, (
         f"live --to-wiki {page_name} should succeed"
@@ -1681,7 +1700,9 @@ def _live_round_trip_steps(capsys, page_name):
     assert page_name in captured.err
 
     # Step 6: re-fetch and verify the marker landed.
-    rc = main(["--from-wiki", page_name, "--to", "md"])
+    rc = main(
+        ["--from-wiki", page_name, "--to", "md", "--trac-url", test_url]
+    )
     assert rc == EXIT_OK
     md_reread = capsys.readouterr().out
     assert marker.strip() in md_reread, (

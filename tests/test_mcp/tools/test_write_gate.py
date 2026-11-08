@@ -1429,14 +1429,32 @@ class TestMilestoneWriteGateLive:
         try:
             yield
         finally:
-            self._remove(client)
+            left = self._remove(client)
+        # A body failure is reported on its own by the test phase;
+        # this only adds a leftover the delete could not remove.
+        if left is not None:
+            pytest.fail(
+                f"milestone {self.NAME} left behind on /trac_test: "
+                f"{left!r}"
+            )
 
     def _remove(self, client):
+        """Delete the row's milestone; the error when it is still
+        there afterwards, else ``None``."""
         try:
             client.delete_milestone(self.NAME)
-        except Exception:
-            # Absent is the desired state; not existing is not an error.
-            pass
+            return None
+        except Exception as exc:
+            delete_error = exc
+        # Absent is the desired state (a refused create makes none), so
+        # a failed delete only counts when the milestone is readable.
+        try:
+            client.get_milestone(self.NAME)
+        except xmlrpc.client.Fault:
+            return None
+        except Exception as exc:
+            return exc
+        return delete_error
 
     def test_a_broken_link_is_refused_and_no_milestone_is_created(self):
         """Not just that an error came back, but that the store did not
@@ -1859,13 +1877,21 @@ class TestTicket105ChecksLive:
         client = self._live()
         self.PAGE = f"Scratch/Ticket105WriteGate{uuid.uuid4().hex[:8]}"
         client.put_wiki_page(self.PAGE, "seed", "seed")
+        cleanup_error = None
         try:
             yield client
         finally:
             try:
                 client.delete_wiki_page(self.PAGE)
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_error = exc
+        # A body failure is reported on its own by the test phase;
+        # this only adds the leftover.
+        if cleanup_error is not None:
+            pytest.fail(
+                f"page {self.PAGE} left behind on /trac_test: "
+                f"{cleanup_error!r}"
+            )
 
     def test_pr_number_as_ticket_is_refused_and_the_page_is_unchanged(
         self, page
