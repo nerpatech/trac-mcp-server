@@ -10,6 +10,7 @@ from .common import (
     TRACLINK_SCHEMES,
     ConversionResult,
     markdown_to_tracwiki_lang,
+    trac_continuation_bound,
 )
 from .tracwiki_to_markdown import _LIST_MARKER_RE, FALLBACK_FENCE_INFO
 
@@ -238,6 +239,33 @@ def _indent_nonblank(lines: list[str], indent: str) -> list[str]:
     """Prefix every non-blank line with `indent`; a blank line stays blank
     rather than picking up trailing whitespace (tickets #75, #112)."""
     return [indent + line if line else line for line in lines]
+
+
+def _indent_text_lines(
+    lines: list[str],
+    text_indent: str,
+    continuation_indent: str,
+    *,
+    list_open: bool,
+) -> list[str]:
+    """Indent the non-blank `lines` of a text run: with `text_indent` while
+    Trac still has the list open, with `continuation_indent` (master's text
+    column) from the first EMPTY line on, or from the start when `list_open`
+    is False (an empty line was already emitted before the run). Trac ends a
+    list at an empty line, so the marker + 3 cap (`text_indent`, #178) means
+    nothing after one, and the read leg reads those lines as the next
+    block's. A blank line stays blank."""
+    out: list[str] = []
+    for line in lines:
+        if not line:
+            list_open = False
+            out.append(line)
+        else:
+            out.append(
+                (text_indent if list_open else continuation_indent)
+                + line
+            )
+    return out
 
 
 def _is_fallback_fence(info: str | None) -> bool:
@@ -1179,6 +1207,28 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                 text = text.rstrip("\n")
                 continuation_indent = " " * (len(prefix) + 1)
+                # Ticket #178: where a TEXT continuation line goes. The item
+                # text column (`len(prefix) + 1`) is marker column + 2 for a
+                # bullet, within Trac's bound, but marker + 4 for an ordered
+                # item numbered 10 or more (+ 5 from 100): Trac continues an
+                # ordered item only up to marker + 3 (measured on /trac_test,
+                # depth 0 and 1), and a text line past that ends the list. So
+                # an ordered item's text lines are capped at marker + 3. Only
+                # text: a code or table block joins at any indent (#144), and
+                # a `>` citation line stays inside the item at marker + 4
+                # (measured), so those keep the text column
+                # (`continuation_indent`). The read leg moves a line at this
+                # column back to the Markdown text column. The cap holds only
+                # while Trac still has the list open: a line after an EMPTY
+                # line keeps `continuation_indent` (`_indent_text_lines`).
+                # For a bullet the bound IS the text column, so the `min` is
+                # a no-op there.
+                text_indent = " " * min(
+                    len(prefix) + 1,
+                    trac_continuation_bound(
+                        len(indent), ordered=ordered
+                    ),
+                )
 
                 # A soft break inside the item (or a blank line between two
                 # loose paragraphs) lands in `text` as a literal "\n": at
@@ -1194,8 +1244,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     lines = text.split("\n")
                     text = "\n".join(
                         [lines[0]]
-                        + _indent_nonblank(
-                            lines[1:], continuation_indent
+                        + _indent_text_lines(
+                            lines[1:],
+                            text_indent,
+                            continuation_indent,
+                            list_open=True,
                         )
                     )
 
@@ -1291,26 +1344,32 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             # indent (measured C6: both paragraphs stay in
                             # the item), and what follows behaves as in an
                             # item with no nested list. The read leg needs
-                            # the later lines at the text column: it turns
-                            # `[[BR]][[BR]]` into a blank line, and a line
-                            # at marker + 1 after one would leave the item.
+                            # the later lines at `text_indent`, the text
+                            # column (marker + 3 for an ordered item numbered
+                            # 10 or more, #178, which it moves to the text
+                            # column): it turns `[[BR]][[BR]]` into a blank
+                            # line, and a line at marker + 1 after one would
+                            # leave the item.
                             first, *rest = rendered.split("\n")
                             parts.append(
                                 " " * (len(indent) + 1) + first
                             )
                             parts.extend(
-                                _indent_nonblank(
-                                    rest, continuation_indent
-                                )
+                                _indent_nonblank(rest, text_indent)
                             )
                             list_seen = False
                         else:
+                            # The #178 cap only while no empty line has
+                            # ended the list: not after this separator's
+                            # own blank line, nor after one inside the run.
                             if separator != "adjacent":
                                 parts.append("")
                             parts.extend(
-                                _indent_nonblank(
+                                _indent_text_lines(
                                     rendered.split("\n"),
+                                    text_indent,
                                     continuation_indent,
+                                    list_open=separator == "adjacent",
                                 )
                             )
                     prev_kind = emitted_kind
