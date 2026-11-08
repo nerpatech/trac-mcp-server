@@ -434,9 +434,11 @@ def _check_trac(args) -> int:
     Password is NEVER written to stdout or stderr.
 
     All wire errors are routed through the shared error helper with
-    page_name=None and action="Trac ping". The permission-denied branch
-    fires for PERMISSION_DENIED-style faultStrings; the generic fault
-    branch fires for other auth/protocol errors (e.g. Forbidden).
+    page_name=None and action="Trac ping". Faults are classified by
+    ``classify_fault``: a 403 (TracXMLRPC's PermissionError), or a
+    permission word outside any quoted name, gives the
+    permission-denied message; any other fault gives the generic
+    "Trac fault" message.
     """
     overrides = _build_trac_overrides(args)
     if overrides is None:

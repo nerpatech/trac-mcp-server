@@ -240,8 +240,11 @@ def test_check_trac_auth_missing_prints_friendly_error_and_exits_4(
 
 
 def test_check_trac_ping_auth_fault_classified(monkeypatch, capsys):
-    """XML-RPC generic fault is classified as 'Trac fault' (Phase 23: refactored
-    from 'authentication failed' to the shared helper's generic Fault branch)."""
+    """A fault with no recognised code or text is the generic 'Trac fault'.
+
+    Here that is Fault(500, "Forbidden"). A 403 is permission denied:
+    see test_check_trac_ping_403_fault_is_permission_denied.
+    """
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
         validate_side_effect=xmlrpc.client.Fault(500, "Forbidden")
