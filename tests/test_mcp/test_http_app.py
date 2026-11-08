@@ -5,6 +5,11 @@ the lifespan runs and the StreamableHTTPSessionManager starts.
 """
 
 import asyncio
+import base64
+import json
+import logging
+import re
+import time
 
 from mcp.server import Server
 from starlette.requests import Request
@@ -14,6 +19,7 @@ from trac_mcp_server import __version__, version
 from trac_mcp_server.config_schema import ServerConfig
 from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp.http_app import (
+    _OIDC_EXPIRY_LEEWAY_SECONDS,
     BearerAuthMiddleware,
     OidcTokenRequiredMiddleware,
     _bearer_token_expired,
@@ -534,9 +540,6 @@ class TestOidcDuplicateAuthorizationHeaders:
 
 
 def _jwt(claims: dict) -> str:
-    import base64
-    import json
-
     def part(obj: dict) -> str:
         raw = json.dumps(obj).encode()
         return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
@@ -566,8 +569,6 @@ class TestOidcExpiredToken:
             )
 
     def test_expired_jwt_rejected_with_invalid_token(self):
-        import time
-
         response = self._post(_jwt({"exp": int(time.time()) - 60}))
         assert response.status_code == 401
         assert (
@@ -575,9 +576,30 @@ class TestOidcExpiredToken:
             in response.headers["www-authenticate"]
         )
 
-    def test_valid_jwt_accepted(self):
-        import time
+    def test_rejection_is_logged_without_the_token(self, caplog):
+        token = _jwt({"exp": int(time.time()) - 60, "sub": "alice"})
+        with caplog.at_level(
+            logging.INFO, logger="trac_mcp_server.mcp.http_app"
+        ):
+            response = self._post(token)
+        assert response.status_code == 401
+        records = [
+            r
+            for r in caplog.records
+            if r.name == "trac_mcp_server.mcp.http_app"
+            and "expired" in r.getMessage()
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.INFO
+        message = records[0].getMessage()
+        assert token not in caplog.text
+        assert token.split(".")[1] not in caplog.text
+        assert "alice" not in caplog.text
+        match = re.search(r"expired (\d+) s ago", message)
+        assert match is not None
+        assert 60 <= int(match.group(1)) <= 65
 
+    def test_valid_jwt_accepted(self):
         response = self._post(_jwt({"exp": int(time.time()) + 3600}))
         assert response.status_code == 200
 
@@ -586,8 +608,6 @@ class TestOidcExpiredToken:
         assert response.status_code == 200
 
     def test_not_configured_ignores_expiry(self):
-        import time
-
         app = build_http_app(_make_mcp_server(), _make_server_config())
         with TestClient(app, base_url=_BASE_URL) as client:
             response = client.post(
@@ -612,6 +632,27 @@ class TestBearerTokenExpired:
     def test_within_leeway_counts_as_expired(self):
         assert _bearer_token_expired(_jwt({"exp": 2010}), now=2000)
 
+    def test_leeway_is_thirty_seconds(self):
+        assert _OIDC_EXPIRY_LEEWAY_SECONDS == 30
+
+    def test_exp_exactly_at_the_leeway_edge_is_expired(self):
+        exp = 2000 + _OIDC_EXPIRY_LEEWAY_SECONDS
+        assert (
+            _bearer_token_expired(_jwt({"exp": exp}), now=2000) is True
+        )
+
+    def test_exp_one_second_past_the_leeway_edge_is_not_expired(self):
+        exp = 2000 + _OIDC_EXPIRY_LEEWAY_SECONDS + 1
+        assert (
+            _bearer_token_expired(_jwt({"exp": exp}), now=2000) is False
+        )
+
+    def test_characters_outside_base64url_are_not_a_jwt(self):
+        # urlsafe_b64decode drops these silently, which decoded this to
+        # {"exp":1} and answered 401.
+        token = "x.eyJ~!*leHAiOjF9.y"
+        assert _bearer_token_expired(token, now=2000) is False
+
     def test_no_exp(self):
         assert not _bearer_token_expired(_jwt({"sub": "x"}), now=2000)
 
@@ -627,8 +668,6 @@ class TestBearerTokenExpired:
         assert not _bearer_token_expired("a.bm90IGpzb24.c", now=2000)
 
     def test_deeply_nested_payload_passes_through(self):
-        import base64
-
         nested = b"[" * 100000 + b"]" * 100000
         payload = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
         assert not _bearer_token_expired(f"a.{payload}.c", now=2000)
