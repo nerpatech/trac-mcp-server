@@ -600,11 +600,22 @@ class TestHandler:
 
 @pytest.mark.live
 class TestWikiConventionsLive:
-    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Writes two probe
-    pages on /trac_test and appends one line to WikiStart, all restored or
-    deleted afterwards."""
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Writes two
+    per-run probe pages on /trac_test and appends one line to WikiStart,
+    all restored or deleted afterwards.
+
+    Trac #173: the probe page names carry a per-run suffix, so two
+    overlapping runs cannot overwrite or delete each other's pages.
+    WikiStart cannot be per-run (the tool reads WikiStart's declaration
+    by design), so it is guarded instead: the row skips when WikiStart
+    is no longer what it first read (another run is mid-row), and the
+    restore only fires when WikiStart still holds exactly what this
+    run wrote.
+    """
 
     def test_declared_style_and_template_round_trip(self):
+        import uuid
+
         from trac_mcp_server.config import Config
         from trac_mcp_server.core.client import TracClient
         from trac_mcp_server.instances import InstanceRegistry
@@ -625,28 +636,23 @@ class TestWikiConventionsLive:
                 "/trac_test WikiStart already has a Wiki style line"
             )
 
-        template = "PageTemplates/Probe123"
+        run_id = uuid.uuid4().hex[:8]
+        template = f"PageTemplates/Probe{run_id}"
         template_body = (
             "= Probe 123 =\n\n  * '''bold''' and ''italic''\n"
             "{{{\nraw\n}}}\n"
         )
-        style_page = "Probe/WikiConventions123/Style"
+        style_page = f"Probe/WikiConventions{run_id}/Style"
         style_body = "= Probe style =\n\nUse probes; ünïcode ok.\n"
-        line = "'''Wiki style:''' [wiki:Probe/WikiConventions123/Style probe]"
+        line = f"'''Wiki style:''' [wiki:{style_page} probe]"
 
         def run():
             result = asyncio.run(_handle_conventions(client, {}))
             assert not result.isError
             return result.structuredContent
 
-        # A rerun after an interrupted run starts clean.
-        for leftover in (template, style_page):
-            try:
-                client.delete_wiki_page(leftover)
-            except Exception:
-                pass
-
         wrote_wikistart = False
+        wikistart_written = None
         cleanup_errors: list[str] = []
         try:
             client.put_wiki_page(
@@ -665,11 +671,22 @@ class TestWikiConventionsLive:
                 style_page, style_body, "ticket 123 probe"
             )
             sep = "" if original.endswith("\n") else "\n"
+            wikistart_written = f"{original}{sep}\n{line}\n"
+            # Immediately before the append: WikiStart is the one
+            # shared page, so a declaration or any change since the
+            # first read means another run is between its append and
+            # its restore. Skipping leaves the probe pages to the
+            # finally below.
+            current = client.get_wiki_page("WikiStart")
+            if "'''Wiki style:'''" in current or current != original:
+                pytest.skip(
+                    "/trac_test WikiStart changed since this run read "
+                    "it: another run is mid-row (this run's probe "
+                    "pages are cleaned up first)"
+                )
             wrote_wikistart = True
             client.put_wiki_page(
-                "WikiStart",
-                f"{original}{sep}\n{line}\n",
-                "ticket 123 probe",
+                "WikiStart", wikistart_written, "ticket 123 probe"
             )
             out = run()
             assert out["style"] == "probe"
@@ -682,15 +699,23 @@ class TestWikiConventionsLive:
             assert probe and probe[0]["body"] == template_body
         finally:
             steps = []
-            if wrote_wikistart:
-                steps.append(
-                    (
-                        "restore WikiStart",
-                        lambda: client.put_wiki_page(
-                            "WikiStart", original, "ticket 123 restore"
-                        ),
+
+            def restore_wikistart():
+                # Only undo what this run did. If WikiStart now holds
+                # anything else, a later write is not ours to revert.
+                if (
+                    client.get_wiki_page("WikiStart")
+                    != wikistart_written
+                ):
+                    raise RuntimeError(
+                        "WikiStart changed under the run; left as found"
                     )
+                client.put_wiki_page(
+                    "WikiStart", original, "ticket 123 restore"
                 )
+
+            if wrote_wikistart:
+                steps.append(("restore WikiStart", restore_wikistart))
             steps.append(
                 (
                     f"delete {template}",

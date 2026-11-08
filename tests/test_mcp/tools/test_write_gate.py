@@ -1396,7 +1396,10 @@ class TestWriteGateLive:
 class TestMilestoneWriteGateLive:
     """The gate watched refusing and allowing a REAL milestone write."""
 
-    NAME = "Ticket87WriteGateLive"
+    # Trac #173: the name is per-run (set by `_scratch`), so two
+    # overlapping live runs cannot create, update or delete one
+    # another's milestone.
+    NAME = None
 
     @staticmethod
     def _live():
@@ -1411,25 +1414,26 @@ class TestMilestoneWriteGateLive:
 
     @pytest.fixture(autouse=True)
     def _scratch(self):
-        """Delete the scratch milestone before AND after each row.
+        """Give each row its own milestone name and delete it after.
 
-        Before as well as after: a previous run interrupted between
-        create and cleanup would otherwise leave a milestone behind,
-        and its presence would make
+        The name carries a per-run suffix, so it cannot pre-exist and
+        there is no delete-before: an interrupted earlier run left a
+        different name behind and cannot make
         `test_a_broken_link_is_refused_and_no_milestone_is_created`
-        pass for entirely the wrong reason.
+        pass for the wrong reason.
         """
+        import uuid
+
+        self.NAME = f"Ticket87WriteGateLive{uuid.uuid4().hex[:8]}"
         client = self._live()
-        self._remove(client)
         try:
             yield
         finally:
             self._remove(client)
 
-    @classmethod
-    def _remove(cls, client):
+    def _remove(self, client):
         try:
-            client.delete_milestone(cls.NAME)
+            client.delete_milestone(self.NAME)
         except Exception:
             # Absent is the desired state; not existing is not an error.
             pass
@@ -1833,7 +1837,9 @@ class TestTicketCommentWriteGateLive:
 
 @pytest.mark.live
 class TestTicket105ChecksLive:
-    PAGE = "Ticket105WriteGateLive"
+    # Trac #173: the page name is per-run (set by the `page` fixture),
+    # so two overlapping live runs cannot write the same page.
+    PAGE = None
 
     @staticmethod
     def _live():
@@ -1848,7 +1854,10 @@ class TestTicket105ChecksLive:
 
     @pytest.fixture
     def page(self):
+        import uuid
+
         client = self._live()
+        self.PAGE = f"Scratch/Ticket105WriteGate{uuid.uuid4().hex[:8]}"
         client.put_wiki_page(self.PAGE, "seed", "seed")
         try:
             yield client

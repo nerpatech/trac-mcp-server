@@ -517,23 +517,26 @@ async def test_unknown_tool_name():
 async def test_live_round_trip(tmp_path):
     """End-to-end: push a fixture file, list, get, verify bytes, delete.
 
-    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars pointing
-    at a live Trac instance with at least one ticket the test user can
-    attach to.
+    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars. Runs
+    on `/trac_test` (the host of TRAC_URL, whatever project TRAC_URL
+    itself names) against a scratch ticket it creates first and
+    deletes at the end (Trac #173). It used to need a
+    TRAC_TEST_TICKET_ID and attach to that ticket on the default
+    TRAC_URL store, and skipped without one.
     """
+    import uuid
+    from urllib.parse import urlparse
+
     from trac_mcp_server.config import Config
     from trac_mcp_server.core.client import TracClient
 
-    ticket_id_env = os.environ.get("TRAC_TEST_TICKET_ID")
-    if not ticket_id_env:
-        pytest.skip(
-            "TRAC_TEST_TICKET_ID env var required for live attachment test"
-        )
-    ticket_id = int(ticket_id_env)
+    filename = f"live-fixture-{uuid.uuid4().hex[:8]}.bin"
 
-    # Use the same env-driven config the server uses
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names.
+    parsed = urlparse(os.environ["TRAC_URL"])
     config = Config(
-        trac_url=os.environ["TRAC_URL"],
+        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
         username=os.environ["TRAC_USERNAME"],
         password=os.environ["TRAC_PASSWORD"],
         insecure=os.environ.get("TRAC_INSECURE", "").lower()
@@ -541,51 +544,63 @@ async def test_live_round_trip(tmp_path):
     )
     client = TracClient(config)
 
-    fixture = tmp_path / "live-fixture.bin"
+    fixture = tmp_path / filename
     payload = b"trac-mcp-server live attachment test \x00\x01\x02"
     fixture.write_bytes(payload)
 
-    # Push
-    push_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_put",
-        {
-            "ticket_id": ticket_id,
-            "file_path": str(fixture),
-            "description": "live round-trip fixture",
-            "replace": True,
-        },
-        client,
+    ticket_id = client.create_ticket(
+        "Ticket173AttachmentLive",
+        "Throwaway; deleted by the test.",
     )
-    assert push_result.isError is None or push_result.isError is False
+    try:
+        # Push
+        push_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_put",
+            {
+                "ticket_id": ticket_id,
+                "file_path": str(fixture),
+                "description": "live round-trip fixture",
+                "replace": True,
+            },
+            client,
+        )
+        assert (
+            push_result.isError is None or push_result.isError is False
+        )
 
-    # List — confirm it appears
-    list_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_list", {"ticket_id": ticket_id}, client
-    )
-    filenames = [
-        a["filename"]
-        for a in list_result.structuredContent["attachments"]
-    ]
-    assert "live-fixture.bin" in filenames
+        # List -- confirm it appears
+        list_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_list", {"ticket_id": ticket_id}, client
+        )
+        filenames = [
+            a["filename"]
+            for a in list_result.structuredContent["attachments"]
+        ]
+        assert filename in filenames
 
-    # Get — confirm byte-identical retrieval
-    out_file = tmp_path / "downloaded.bin"
-    get_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_get",
-        {
-            "ticket_id": ticket_id,
-            "filename": "live-fixture.bin",
-            "output_path": str(out_file),
-        },
-        client,
-    )
-    assert get_result.isError is None or get_result.isError is False
-    assert out_file.read_bytes() == payload
+        # Get -- confirm byte-identical retrieval
+        out_file = tmp_path / "downloaded.bin"
+        get_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_get",
+            {
+                "ticket_id": ticket_id,
+                "filename": filename,
+                "output_path": str(out_file),
+            },
+            client,
+        )
+        assert get_result.isError is None or get_result.isError is False
+        assert out_file.read_bytes() == payload
 
-    # Delete — clean up
-    del_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_delete",
-        {"ticket_id": ticket_id, "filename": "live-fixture.bin"},
-        client,
-    )
-    assert del_result.isError is None or del_result.isError is False
+        # Delete -- clean up
+        del_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": ticket_id, "filename": filename},
+            client,
+        )
+        assert del_result.isError is None or del_result.isError is False
+    finally:
+        try:
+            client.delete_ticket(ticket_id)
+        except Exception:
+            pass

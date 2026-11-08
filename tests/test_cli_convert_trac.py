@@ -1499,13 +1499,12 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 # Requires:
 #   - `pytest --run-live` on the command line
 #   - TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD env vars pointing at a
-#     real Trac instance
-#   - Optional: TRAC_TEST_WIKI_PAGE env var (default:
-#     "TracConvertLiveTest") — the test OVERWRITES this page with the
-#     seed body plus a per-run nonce line on every run, creating it
-#     if absent, so point
-#     it only at a scratch page the test user has WIKI_MODIFY on.
-#     Never point it at a page whose content matters.
+#     real Trac host. The test re-points TRAC_URL at that host's
+#     /trac_test instance, so it never writes to the project TRAC_URL
+#     itself names (Trac #173).
+#   - The scratch page is per-run (Scratch/TracConvertLive<hex8>),
+#     created by the test and deleted when it ends; there is no page
+#     to configure.
 #   - Optional: TRAC_INSECURE=1 to disable SSL verification for
 #     self-signed test servers
 #
@@ -1553,13 +1552,17 @@ def _main_with_stdin(argv, text):
 
 
 @pytest.mark.live
-def test_live_round_trip_check_from_edit_to(capsys):
+def test_live_round_trip_check_from_edit_to(capsys, monkeypatch):
     """Live round-trip: --check-trac → --from-wiki → edit → --to-wiki.
 
     Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars
-    pointing at a real Trac instance. Uses TRAC_TEST_WIKI_PAGE
-    (default 'TracConvertLiveTest') as the scratch target so
-    WikiStart and production pages are never modified.
+    pointing at a real Trac host. Runs on /trac_test ONLY: TRAC_URL
+    is re-pointed at the /trac_test instance of that host before the
+    CLI runs (`trac-convert` has no --instance; `bootstrap_config`
+    reads the env var, which beats .env, as `load_dotenv()` does not
+    override). The scratch target is a per-run page,
+    Scratch/TracConvertLive<hex8>, deleted at the end, so no existing
+    page, WikiStart included, and no other instance is written.
 
     Sequence:
       1. --check-trac → exit 0, stdout mentions "OK (Trac API version".
@@ -1576,18 +1579,18 @@ def test_live_round_trip_check_from_edit_to(capsys):
          the marker written in step 5 (proves the round-trip actually
          persisted).
 
-    Seeds the page rather than deleting it. Trac keeps every version,
-    so the page's history still grows one version per run, but the
-    rendered page stays at the seed body, a nonce line and a single
-    marker. This departs from test_wiki_attachment.py's "pages
-    persist, ops can prune manually" convention, which nothing ever
-    pruned — see #84.
+    The page is created by step 2 and deleted in a finally, so the
+    instance is left as found (Trac #173; before it, one fixed page
+    was reseeded run after run and shared by overlapping runs).
 
     IMPORTANT: The test does NOT unset the real env vars. It reads
-    them via os.environ.get and relies on the actual live Trac.
+    them via os.environ.get, then overrides only TRAC_URL (restored
+    by monkeypatch) and relies on the actual live Trac.
     """
     import os
-    import time
+    from urllib.parse import urlparse
+
+    from trac_mcp_server.config import Config
 
     if not (
         os.environ.get("TRAC_URL")
@@ -1599,9 +1602,35 @@ def test_live_round_trip_check_from_edit_to(capsys):
             " for --run-live tests"
         )
 
-    page_name = os.environ.get(
-        "TRAC_TEST_WIKI_PAGE", "TracConvertLiveTest"
+    page_name = f"Scratch/TracConvertLive{uuid.uuid4().hex[:8]}"
+
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names. The CLI reads TRAC_URL; the
+    # env var beats .env and the YAML, so this is the whole lever.
+    parsed = urlparse(os.environ["TRAC_URL"])
+    test_url = f"{parsed.scheme}://{parsed.netloc}/trac_test"
+    monkeypatch.setenv("TRAC_URL", test_url)
+    cleaner = TracClient(
+        Config(
+            trac_url=test_url,
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
     )
+    try:
+        _live_round_trip_steps(capsys, page_name)
+    finally:
+        try:
+            cleaner.delete_wiki_page(page_name)
+        except Exception:
+            pass
+
+
+def _live_round_trip_steps(capsys, page_name):
+    """Steps 1-6 of the live round-trip, against `page_name`."""
+    import time
 
     # Step 1: --check-trac
     rc = main(["--check-trac"])
