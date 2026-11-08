@@ -1848,9 +1848,15 @@ def test_classifying_a_fault_does_not_import_the_mcp_tools():
         ")\n"
         "assert not leaked, leaked\n"
     )
+    existing = os.environ.get("PYTHONPATH")
     result = subprocess.run(
         [sys.executable, "-c", code],
-        env={**os.environ, "PYTHONPATH": src},
+        env={
+            **os.environ,
+            "PYTHONPATH": (
+                src + os.pathsep + existing if existing else src
+            ),
+        },
         capture_output=True,
         text=True,
         timeout=60,

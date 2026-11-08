@@ -4678,6 +4678,26 @@ class TestHandleTicketActions:
             assert result.isError is True
             assert "method_not_available" in result.content[0].text
 
+    def test_actions_unprefixed_missing_method_fault(self):
+        """A server whose text omits the service prefix ("No such
+        method: getActions") still counts as a missing method (Trac
+        #191)."""
+        client = MagicMock(spec=TracClient)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                1, "No such method: getActions"
+            )
+
+            result = self._run(
+                _handle_actions(client, {"ticket_id": 5})
+            )
+
+            assert result.isError is True
+            assert "method_not_available" in result.content[0].text
+
     def test_actions_resource_fault_is_not_a_missing_method(self):
         """A resource fault whose text says "not found" (here a missing
         ticket) is no missing method: it propagates instead of

@@ -792,7 +792,7 @@ async def _handle_actions(
         # If getActions is not available, provide helpful error. Only a
         # missing-method fault counts: a resource fault whose text says
         # "not found" (a missing ticket) must propagate (Trac #191).
-        if is_missing_method_fault(e, "ticket.getActions"):
+        if is_missing_method_fault(e, "getActions"):
             return build_error_response(
                 "method_not_available",
                 "ticket.getActions() not available on this Trac instance",

@@ -17,6 +17,7 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
+from ...core.faults import is_missing_method_fault
 from .errors import build_error_response
 from .registry import ToolSpec
 
@@ -80,15 +81,16 @@ TIMELINE_TOOLS = [
 ]
 
 
-def _translate_missing_method(err: xmlrpc.client.Fault):
+def _translate_missing_method(err: xmlrpc.client.Fault, method: str):
     """Turn 'no such method' into an actionable message, or re-raise.
 
     Without this the caller sees a bare MethodNotFound and has no way to
     know the server simply lacks the plugin -- which is the single most
-    likely reason this tool fails.
+    likely reason this tool fails. ``method`` is the bare name of the RPC
+    method that was in flight (``getFilters`` or ``getEvents``); see
+    ``core.faults.is_missing_method_fault`` for what counts.
     """
-    text = err.faultString.lower()
-    if "not found" in text and "method" in text:
+    if is_missing_method_fault(err, method):
         return build_error_response(
             "method_not_available",
             err.faultString,
@@ -118,6 +120,8 @@ async def _handle_search(
     max_results = args.get("max_results", DEFAULT_MAX_RESULTS)
     max_results = min(max(1, max_results), MAX_RESULTS_CAP)
 
+    # The RPC method in flight, for the missing-method check below.
+    method = "getFilters"
     try:
         # An explicitly empty filters list means "select nothing"
         # server-side; only a genuinely omitted filters key resolves to
@@ -128,6 +132,7 @@ async def _handle_search(
             available = await run_sync(client.get_timeline_filters)
             filters = [name for name, _label in available]
 
+        method = "getEvents"
         events = await run_sync(
             client.get_timeline_events,
             start_ts,
@@ -136,7 +141,7 @@ async def _handle_search(
             max_results,
         )
     except xmlrpc.client.Fault as e:
-        translated = _translate_missing_method(e)
+        translated = _translate_missing_method(e, method)
         if translated:
             return translated
         raise

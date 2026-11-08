@@ -1807,7 +1807,9 @@ class TracClient:
         unchanged, or the re-read failed -- the original fault is
         re-raised, with TracXMLRPC's "while executing" wrapper removed
         (``unwrap_tracrpc_fault``). The fault text is never consulted
-        for that decision (Trac /trac_mcp_server #185).
+        for that decision (Trac /trac_mcp_server #185). A fault from
+        the ``version`` pre-check's ``getPageInfo`` that is not a
+        missing page is re-raised the same way, unwrapped.
         """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
@@ -1820,9 +1822,10 @@ class TracClient:
                 # A fault classify_fault reads as not_found (its code
                 # 404, or its text with quoted names removed) means the
                 # page is missing, same as the 0 return below; any other
-                # Fault propagates (Trac /trac_mcp_server #191).
+                # Fault propagates, unwrapped like the putPage faults
+                # below (Trac /trac_mcp_server #191).
                 if classify_fault(err) != "not_found":
-                    raise
+                    raise unwrap_tracrpc_fault(err) from None
                 info = None
             # Some Trac instances return 0 (int) instead of raising a
             # Fault for a non-existent page.
@@ -2150,7 +2153,7 @@ class TracClient:
             # not available. Only a missing-method fault counts: a
             # resource fault whose text says "not found" is re-raised
             # (Trac /trac_mcp_server #191).
-            if is_missing_method_fault(e, "wiki.getRecentChanges"):
+            if is_missing_method_fault(e, "getRecentChanges"):
                 pages = self.list_wiki_pages()
                 changes = []
                 for page in pages:

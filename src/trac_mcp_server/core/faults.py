@@ -1,8 +1,10 @@
 """Reading XML-RPC faults: what a Trac fault says went wrong.
 
-Pure helpers over ``xmlrpc.client.Fault``, with nothing but the standard
-library behind them, so the client, the MCP tool handlers and the CLI
+Pure helpers over ``xmlrpc.client.Fault``. The module itself imports only
+the standard library, so the client, the MCP tool handlers and the CLI
 can all share one reading of a fault without importing one another.
+Importing it still runs ``trac_mcp_server.core/__init__.py``, which loads
+``core.client``; what it avoids is ``mcp.tools`` (and ``mcp.types``).
 """
 
 import re
@@ -24,11 +26,13 @@ def is_missing_method_fault(
     """True when ``err`` says the server has no RPC method ``method``.
 
     TracXMLRPC raises ``MethodNotFound('RPC method "<name>" not found')``
-    with fault code -32601. The text fallback matches the same heuristic as
-    the ticket_comment tools' ``_translate_missing_method``, narrowed to the
-    method name so that a "page not found" fault can never pass for it.
-    "No such method" (some servers' wording) counts on the same terms: the
-    text must name ``method``.
+    with fault code -32601. The text fallback is the "not found" with
+    "method" heuristic, narrowed to the method name so that a "page not
+    found" fault can never pass for it. "No such method" (some servers'
+    wording) counts on the same terms: the text must name ``method``.
+    Pass the bare name (``getActions``), not ``ticket.getActions``: a
+    server whose text omits the service prefix still matches, and a
+    dotted text contains the bare name.
     """
     if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
         return True
