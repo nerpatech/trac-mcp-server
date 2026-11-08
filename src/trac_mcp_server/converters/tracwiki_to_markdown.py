@@ -511,9 +511,11 @@ def _list_stack_step(
 def _is_block_line(line: str) -> bool:
     """True for an output line that is not paragraph text: a code-block
     placeholder (`\\x00CODE<n>\\x00`), a fence line or a table row. A list
-    after one needs no blank line to be a list in CommonMark (ticket #180)."""
+    after one needs no blank line to be a list in CommonMark (ticket #180).
+    The list passes run before `_convert_tables`, so a TracWiki table row is
+    still `||...||`; a line that starts with ONE pipe is paragraph text."""
     stripped = line.strip()
-    return stripped.startswith(("\x00CODE", "```", "~~~", "|"))
+    return stripped.startswith(("\x00CODE", "```", "~~~", "||"))
 
 
 class _ShiftItem(NamedTuple):
@@ -528,8 +530,9 @@ class _ShiftItem(NamedTuple):
     marker and the text: `_item_text_column` counts it as one column, so the
     text column is unknown and the item's children are frozen (review fix 2).
     A nested ordered item not numbered 1 is an ordinary item here (ticket
-    #180): it moves to the parent's text column, and the blank line CommonMark
-    needs before it is added by `_separate_list_from_trailing_paragraph`."""
+    #180): it moves to the parent's text column, and `_shift_nested_markers`
+    adds the blank line CommonMark needs before it, where it knows the item
+    and its parent are not frozen."""
 
     column: int
     shift: int
@@ -2213,12 +2216,37 @@ class TracWikiParser:
           (review fix 2: `_item_text_column` counts a tab as one column).
 
         A nested ORDERED marker whose number is not 1 is moved like any
-        other (ticket #180). CommonMark does not let such a list interrupt
-        its parent's paragraph, so right after the parent's text it would be
-        paragraph text at the text column; the blank line that makes it a
-        list is added later, by `_separate_list_from_trailing_paragraph`,
-        which also keeps the marker from being read as a sibling item when it
-        stood left of the text column (` 1. a` / `   4. x`).
+        other (ticket #180): the clamp to `parent.text_column` is what keeps
+        ` 1. a` / `   4. x` from being read as a sibling item. CommonMark does
+        not let such a list interrupt its parent's paragraph, so right after
+        the parent's text it would be paragraph text at the text column, and
+        this pass also writes the blank line that makes it a list, in the
+        one place that knows whether the item and its parent are frozen
+        (freezing propagates down the stack here, and only here). The blank
+        line goes right before the moved marker line when ALL of these hold:
+
+        * the marker is an ordered number other than 1 (`_NON_ONE_ORDERED_RE`)
+          and opens a new level directly under its parent: the stack is not
+          empty and no item was popped on arrival;
+        * neither the item nor its parent is frozen or has a tab gap (the
+          ordinary move above): a frozen subtree keeps `master`'s bytes;
+        * the previous line is paragraph text of that parent: its own marker
+          line with text after the marker (an empty item, ` * ` or
+          ` 1. [[BR]]`, is none: the blank line would end it), or a
+          continuation line it owns that is not a block line
+          (`_is_block_line`: a code placeholder, a fence, a table row);
+        * the previous line does not end in a hard break (two trailing
+          spaces, what `[[BR]]` becomes). CommonMark drops a hard break at
+          the end of a paragraph, so the blank line would lose the `[[BR]]`
+          on the round trip. Declined: that shape keeps `master`'s bytes and
+          the nested list stays paragraph text in Markdown.
+
+        The blank line is a plain empty line (it carries no
+        `_BR_LINE_MARK`) and leaves the stack alone. The later list walks
+        (`_separate_list_from_trailing_paragraph`, `_separate_adjacent_lists`)
+        read it as the blank line a Trac author may write there (` * a` /
+        blank / `   4. x`), which they already pass through; the marker
+        after it clears their blank-line flags.
 
         Shift 0 is byte-identical to `master`: a nesting already at or past
         the parent's text column (a bullet under a bullet at column 3,
@@ -2256,6 +2284,9 @@ class TracWikiParser:
         # The extent of the processor block being walked.
         block_end = -1
         block_shift = 0
+        # Stack depth of the item whose paragraph text the previous output
+        # line is (#180), None when it is not text of an open item.
+        text_owner: int | None = None
 
         def end_list() -> None:
             nonlocal prev_list, list_shifted, root_target
@@ -2279,6 +2310,7 @@ class TracWikiParser:
                     if line.strip()
                     else line
                 )
+                text_owner = None
                 continue
             if not line.strip():
                 if not (
@@ -2286,12 +2318,14 @@ class TracWikiParser:
                     and line.endswith(_BR_LINE_MARK)
                 ):
                     end_list()
+                text_owner = None
                 out.append(line)
                 continue
             indent = _indent_of(line)
             column = _indent_width(indent)
             marker = _LIST_MARKER_RE.match(line)
             if marker:
+                depth = len(stack)
                 while stack and stack[-1].column >= column:
                     stack.pop()
                 parent = stack[-1] if stack else None
@@ -2318,6 +2352,17 @@ class TracWikiParser:
                     target = max(target, parent.text_column)
                     target = min(target, parent.text_column + 3)
                     shift, frozen = target - column, False
+                    if (
+                        len(stack) == depth
+                        and text_owner == depth - 1
+                        and _NON_ONE_ORDERED_RE.match(
+                            marker.group(0).strip()
+                        )
+                        and not out[-1].endswith("  ")
+                    ):
+                        # #180: a nested ordered list not starting at 1
+                        # straight after the parent's paragraph text.
+                        out.append("")
                 if shift:
                     list_shifted = True
                 stack.append(
@@ -2330,8 +2375,10 @@ class TracWikiParser:
                     )
                 )
                 out.append(self._move_line(line, shift))
+                text_owner = len(stack) - 1 if after.strip() else None
                 continue
             shift = 0
+            owned: int | None = None
             if stack:
                 owner = _continued_item(
                     [item.column for item in stack],
@@ -2344,11 +2391,14 @@ class TracWikiParser:
                 else:
                     del stack[owner + 1 :]
                     shift = 0 if "\t" in indent else stack[-1].shift
+                    if idx not in pairs and not _is_block_line(line):
+                        owned = len(stack) - 1
             else:
                 prev_list = None
             if idx in pairs:
                 block_end, block_shift = pairs[idx], shift
             out.append(self._move_line(line, shift))
+            text_owner = owned
         return "\n".join(out)
 
     def _move_line(self, line: str, shift: int) -> str:
@@ -2528,31 +2578,6 @@ class TracWikiParser:
             out.append(line)
         return "\n".join(out)
 
-    @staticmethod
-    def _nested_at_a_known_text_column(
-        line: str,
-        column: int,
-        stack: list[int],
-        marker_lines: dict[int, str],
-        text_column: dict[int, int],
-    ) -> bool:
-        """True when the nested marker `line` (at `column`, under the open
-        items `stack`) is where `_shift_nested_markers` left a moved marker:
-        in the parent's Markdown text column or up to 3 columns past it, in
-        a list whose columns are known. A frozen shape (a root at column 4
-        or more, a tab in the indentation or between the parent's marker and
-        its text) keeps `master`'s bytes: the blank line there would also
-        make `_separate_adjacent_lists` read the marker as a new sibling list
-        (ticket #180)."""
-        parent = stack[-1]
-        parent_text = text_column[parent]
-        return (
-            stack[0] < 4
-            and "\t" not in _indent_of(line)
-            and "\t" not in marker_lines[parent][:parent_text]
-            and parent_text <= column <= parent_text + 3
-        )
-
     def _separate_list_from_trailing_paragraph(self, text: str) -> str:
         """Insert a blank line where a list ends with nothing marking it
         (ticket #90).
@@ -2614,24 +2639,12 @@ class TracWikiParser:
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
 
-        Ticket #180: the nested counterpart. A marker that is an ordered
-        number other than 1 and opens a NEW nested level (the stack is not
-        empty and its column is past the innermost open item's, so it pops
-        no sibling) gets a blank line first when the previous output line
-        is the parent item's paragraph text, its marker line or a
-        continuation line of it, i.e. not blank and not a code placeholder, fence
-        line or table row (``_is_block_line``). CommonMark lets only a list that
-        starts at 1 interrupt a paragraph, so without the blank line the
-        nested list is the parent's text (` - a` / `   4. x`) and the write
-        leg loses it. ``_shift_nested_markers`` has already moved the marker
-        to the parent's text column, so ``_separate_adjacent_lists`` (which
-        runs afterwards) reads it as nested whatever precedes it: the
-        inserted line is not one this pass reads back, so the stack is
-        untouched. The Markdown becomes loose (``<li><p>``), the accepted
-        cost; the write leg collapses the blank line. A nested ``1.``, a
-        bullet, and an ordered marker that pops a sibling (it follows a
-        deeper item) interrupt a paragraph already or are not after
-        paragraph text, so they get none.
+        Ticket #180: the nested counterpart is not here. The blank line a
+        nested ordered list not starting at 1 needs after its parent's text
+        is written by ``_shift_nested_markers``, which runs first and knows
+        which items are frozen. This pass passes it through as the blank line
+        it reads in a Trac-authored ` * a` / blank / `   4. x`; the marker
+        after it clears the blank-line flags.
 
         Ticket #145: a continuation line (non-empty stack) that follows a
         citation line, i.e. a line starting with ``>``, also gets a blank
@@ -2780,27 +2793,16 @@ class TracWikiParser:
             if marker:
                 blank_since_marker = False
                 trac_blank_since_marker = False
+                if (
+                    not stack
+                    and out
+                    and out[-1].strip()
+                    and _NON_ONE_ORDERED_RE.match(
+                        marker.group(0).strip()
+                    )
+                ):
+                    out.append("")
                 column = len(_indent_of(line))
-                non_one = bool(
-                    _NON_ONE_ORDERED_RE.match(marker.group(0).strip())
-                )
-                if non_one and out and out[-1].strip():
-                    if not stack:
-                        out.append("")
-                    elif (
-                        column > stack[-1]
-                        and not _is_block_line(out[-1])
-                        and self._nested_at_a_known_text_column(
-                            line,
-                            column,
-                            stack,
-                            marker_lines,
-                            text_column,
-                        )
-                    ):
-                        # #180: a nested ordered list not starting at 1
-                        # straight after the parent's paragraph text.
-                        out.append("")
                 while stack and stack[-1] >= column:
                     stack.pop()
                 stack.append(column)

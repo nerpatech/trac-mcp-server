@@ -14,10 +14,13 @@ The rule, read leg only:
 * `_shift_nested_markers` no longer freezes such a marker: it moves to its
   parent's text column like any nested marker (` 1. a` / `   4. x` becomes
   ` 1. a` / `    4. x`);
-* `_separate_list_from_trailing_paragraph` puts a blank line before a nested
-  marker that is an ordered number other than 1 and opens a deeper level
-  straight after the parent's paragraph text, the nested counterpart of its
-  top-level rule (#144). A blank line is the only CommonMark form: the list
+* the same pass puts a blank line before a nested marker that is an ordered
+  number other than 1 and opens a deeper level straight after the parent's
+  paragraph text, the nested counterpart of the top-level rule of
+  `_separate_list_from_trailing_paragraph` (#144). It is written there, where
+  freezing is known: no blank line under a frozen or tab-gap item, after an
+  empty parent item, after a block line, or after a hard break (declined,
+  review fixes below). A blank line is the only CommonMark form: the list
   cannot interrupt the paragraph. The Markdown becomes loose (`<li><p>`), the
   accepted cost. The write leg already collapses that blank line, so it is
   not touched.
@@ -205,7 +208,7 @@ def test_round_trip(tracwiki, round_trip):
 def test_the_column_3_shape_no_longer_becomes_a_sibling_item():
     """On `master` ` 1. a` / `   4. x` read as a sibling item (the marker is
     left of the text column 4) and the round trip wrote ` 1. a` / ` 2. x`."""
-    assert _round_trip(" 1. a\n   4. x\n") != " 1. a\n 2. x"
+    assert _round_trip(" 1. a\n   4. x\n") == " 1. a\n   4. x"
 
 
 # -- the shapes that keep their bytes ---------------------------------------
@@ -274,8 +277,7 @@ def test_a_blank_line_that_is_already_there_is_not_doubled():
 
 def test_a_tab_gap_parent_keeps_its_bytes():
     """The children of an item whose marker-to-text gap holds a tab are
-    frozen (#179 review fix 2): the blank line would also make
-    `_separate_adjacent_lists` switch the marker's delimiter."""
+    frozen (#179 review fix 2), so no blank line is added for them."""
     assert _read(" 1.\ta\n   4. x\n") == " 1.\ta\n   4. x\n"
 
 
@@ -283,12 +285,16 @@ def test_a_tab_indented_marker_keeps_its_bytes():
     assert _read(" * a\n\t4. x\n") == " - a\n\t4. x\n"
 
 
-def test_a_table_row_before_the_marker_gets_no_extra_blank_line():
-    """The previous line is a table row, not paragraph text."""
-    assert (
-        _read(" * a\n   ||t||\n   4. x\n")
-        == " - a\n\n| t |\n|---|\n   4. x\n"
-    )
+def test_a_table_row_inside_the_item_before_the_marker_gets_no_blank():
+    """Pins what a TracWiki table row (`||t||`, still that form when the list
+    passes run) inside the item does today, the same bytes as on `master`:
+    the table converter pulls the table out of the item, so the marker after
+    it is a list in its own right and no blank line is added for it (a table
+    row is not the parent's paragraph text, `_is_block_line`). The item's
+    nested list is not kept nested; that is not this ticket's."""
+    markdown = _read(" * a\n   ||t||\n   4. x\n")
+    assert markdown == " - a\n\n| t |\n|---|\n   4. x\n"
+    assert "\n\n\n" not in markdown
 
 
 def test_a_quote_line_before_the_marker_gets_the_blank_line():
@@ -310,6 +316,120 @@ def test_a_root_at_column_4_keeps_its_bytes():
 
 def test_a_marker_far_past_the_text_column_is_clamped_and_separated():
     assert _read(" * a\n         4. x\n") == " - a\n\n      4. x\n"
+
+
+# -- review fixes: shapes that keep master's bytes ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown", "round_trip"),
+    [
+        # Finding 1: an empty parent item is no paragraph text; the blank
+        # line ended the item and the nested list became a code block.
+        (
+            " 1. [[BR]]\n    4. x\n    5. y\n",
+            " 1.   \n    4. x\n    5. y\n",
+            " 1. \n   4. x\n   5. y",
+        ),
+        (" * \n   4. x\n", " - \n   4. x\n", " * \n   4. x"),
+    ],
+    ids=["ordered-parent-br-only", "bullet-parent-empty"],
+)
+def test_an_empty_parent_item_keeps_its_bytes(
+    tracwiki, markdown, round_trip
+):
+    assert _read(tracwiki) == markdown
+    assert _round_trip(tracwiki) == round_trip
+    assert '<ol start="4">' in _render(markdown)
+    assert "<pre>" not in _render(markdown)
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown", "round_trip"),
+    [
+        (
+            " * a[[BR]]\n   4. x\n",
+            " - a  \n   4. x\n",
+            " * a [[BR]]\n   4. x",
+        ),
+        (
+            " * a\n   more[[BR]]\n   4. x\n",
+            " - a\n   more  \n   4. x\n",
+            " * a\n   more [[BR]]\n   4. x",
+        ),
+    ],
+    ids=["marker-line", "continuation-line"],
+)
+def test_a_hard_break_before_the_marker_declines_the_blank_line(
+    tracwiki, markdown, round_trip
+):
+    """Finding 2, DECLINED: CommonMark drops a hard break at the end of a
+    paragraph, so the blank line would lose the `[[BR]]` on the round trip.
+    `master`'s bytes come back, `[[BR]]` survives, and the Markdown list stays
+    lost for this shape (#180's defect, accepted here)."""
+    assert _read(tracwiki) == markdown
+    assert _round_trip(tracwiki) == round_trip
+    assert "[[BR]]" in _round_trip(tracwiki)
+
+
+def test_a_subtree_frozen_by_a_grandparents_tab_gap_keeps_its_bytes():
+    """Finding 3: ` *\ta` freezes `b` and everything under it, so the
+    nested `4.` keeps `master`'s bytes (no blank line)."""
+    tracwiki = " *\ta\n  * b\n    4. x\n"
+    assert _read(tracwiki) == " *\ta\n  - b\n    4. x\n"
+    assert _round_trip(tracwiki) == " * a\n\n * b\n   4. x"
+
+
+def test_a_single_pipe_line_is_paragraph_text_not_a_table_row():
+    """Finding 4: TracWiki table rows start with `||`; a line starting with
+    one pipe is paragraph text, so the nested list gets its blank line."""
+    tracwiki = " * a\n   | b\n   4. x\n"
+    markdown = _read(tracwiki)
+    assert markdown == " - a\n   | b\n\n   4. x\n"
+    assert _render(markdown) == (
+        '<ul>\n<li><p>a\n| b</p>\n<ol start="4">\n<li>x</li>\n</ol>\n'
+        "</li>\n</ul>\n"
+    )
+    assert _round_trip(tracwiki) == " * a\n   | b\n   4. x"
+
+
+# -- the later passes leave the inserted blank line alone ---------------------
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown"),
+    [
+        # A deeper bullet under the nested item.
+        (
+            " * a\n   4. x\n     * y\n * b\n",
+            " - a\n\n   4. x\n      - y\n - b\n",
+        ),
+        # A continuation line of the nested item.
+        (
+            " * a\n   4. x\n     more\n * b\n",
+            " - a\n\n   4. x\n     more\n - b\n",
+        ),
+        # A `[[BR]]` alone on a line after the nested item: the inserted
+        # blank line carries no mark (the whitespace-only line below does).
+        (
+            " * a\n   4. x\n   [[BR]]\n   more\n * b\n",
+            " - a\n\n   4. x\n     \n   more\n - b\n",
+        ),
+    ],
+    ids=["deeper-bullet", "continuation", "br-mark-line"],
+)
+def test_the_later_passes_leave_the_blank_line_and_what_follows(
+    tracwiki, markdown
+):
+    assert _read(tracwiki) == markdown
+
+
+def test_a_processor_block_after_the_nested_list_moves_with_its_item():
+    markdown = _read(" * a\n   4. x\n     {{{#!div\n     z\n     }}}\n")
+    assert markdown == (
+        " - a\n\n   4. x\n      ```div\n      z\n      ```\n"
+    )
+    assert '<ol start="4">' in _render(markdown)
 
 
 # -- the write leg is untouched ---------------------------------------------
