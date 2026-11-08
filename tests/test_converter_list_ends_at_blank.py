@@ -34,16 +34,29 @@ it:
    next run. The operator accepted the added blank line (the round trip gains
    one between the quote and the next list; the render is identical), as on
    #182.
-2. *A marker after the blank line* (C3, C8, C11): a run that starts after a
-   blank line with a list open above it, and whose first line is a list
-   marker at or past the OUTERMOST open item's text column, is carried
-   verbatim through the fallback, up to the first marker line left of that
-   column or the end of the run. CommonMark would nest the marker inside the
-   open item; Trac opens a new top-level list. No blank line is added after
-   the fence, so the round trip is byte-exact. The fence is the only way to
-   keep Trac's stored indent: dedenting the run to the top level was rejected
-   because it rewrites the indent and merges C3's ``c`` and ``d``, two lists
-   in Trac, into one.
+2. *A marker after the blank line* (C3, C8, C11): a run that starts after
+   one or more blank lines with a list open above them, and whose first line
+   is a list marker at or past the OUTERMOST open item's text column, is
+   carried verbatim through the fallback, up to the first marker line left
+   of that column or the end of the run. CommonMark would nest the marker
+   inside the open item; Trac opens a new top-level list. A marker indented
+   4 or more columns, or by a tab, is fenced whatever the item (CommonMark
+   reads it as indented code or nested even left of the text column, and
+   after a lettered item as indented code); the fence then runs to the
+   first later plain marker left of the text column (a lettered item or a
+   tab-indented one has no known column: the first later plain marker).
+   The fence adds no blank line of its own, but the write leg puts one
+   between a code block and a list that follows it, so the round trip is
+   NOT byte-exact: it gains that one blank line before the next list (pinned
+   below), and is byte-exact only when nothing follows the fence. The fence
+   is the only way to keep Trac's stored indent: dedenting the run to the
+   top level was rejected because it rewrites the indent and merges C3's
+   ``c`` and ``d``, two lists in Trac, into one.
+3. *A head that is not a quote* (a heading or a table row, cut by the
+   blank line): carried unchanged, and one blank line follows it when the
+   next marker is an ordered one that does not start at 1 (it cannot
+   interrupt the head's paragraph and would read as its text). A bullet or
+   ``1.`` interrupts, and #182's bytes for it stay.
 
 Unchanged: a marker LEFT of the text column (#177's sibling case, C1), the
 no-marker shapes (already fenced), a marker indented 4+ columns after the head
@@ -186,6 +199,98 @@ CASES = {
         "<ol>\n<li>d</li>\n</ol>\n",
         " 1. a\n\n    * c\n\n 1. d",
     ),
+    # --- review fixes (#183 review) ---------------------------------------
+    # Finding 1: Trac ends the list at the first blank line, so any number of
+    # blank lines (a whitespace-only one too) before the marker leaves no
+    # list open for Trac. Measured: three `<ul>`.
+    "several blank lines before a marker": (
+        " * a\n\n\n   * c\n * d\n",
+        f" - a\n\n\n{_FENCE}   * c\n```\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}   * c\n</code></pre>\n{_UL_D}",
+        " * a\n\n   * c\n\n * d",
+    ),
+    "several blank lines, some of spaces or a tab, before a marker": (
+        " * a\n\n \n\t\n   * c\n * d\n",
+        f" - a\n\n \n\t\n{_FENCE}   * c\n```\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}   * c\n</code></pre>\n{_UL_D}",
+        " * a\n\n   * c\n\n * d",
+    ),
+    "several blank lines before a paragraph": (
+        " * a\n\n\n   c\n * d\n",
+        f" - a\n\n\n{_FENCE}   c\n```\n\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}   c\n</code></pre>\n{_UL_D}",
+        " * a\n\n   c\n\n * d",
+    ),
+    # Finding 2: after a blank line a marker indented 4+ columns, or by a
+    # tab, is indented code or nested to CommonMark even left of the
+    # outermost item's text column. Same fence, same extent rule.
+    # Measured: `<ol start=10>` a, `<ul>` c, `<ol start=11>` d.
+    "marker 4 columns, left of the text column of an ordered item": (
+        " 10. a\n\n    * c\n 11. d\n",
+        # a later pass puts a blank line before an ordered list that does
+        # not start at 1
+        f" 10. a\n\n{_FENCE}    * c\n```\n\n 11. d\n",
+        '<ol start="10">\n<li>a</li>\n</ol>\n'
+        f"{_PRE}    * c\n</code></pre>\n"
+        '<ol start="11">\n<li>d</li>\n</ol>\n',
+        " 10. a\n\n    * c\n\n 11. d",
+    ),
+    "marker 4 columns, a second 4-column marker stays in the fence": (
+        " 10. a\n\n    * c\n    * e\n 11. d\n",
+        f" 10. a\n\n{_FENCE}    * c\n    * e\n```\n\n 11. d\n",
+        '<ol start="10">\n<li>a</li>\n</ol>\n'
+        f"{_PRE}    * c\n    * e\n</code></pre>\n"
+        '<ol start="11">\n<li>d</li>\n</ol>\n',
+        " 10. a\n\n    * c\n    * e\n\n 11. d",
+    ),
+    "the fence stops at a plain marker, after a 4-column marker": (
+        " * a\n\n    * c\n  * e\n * d\n",
+        f" - a\n\n{_FENCE}    * c\n```\n  - e\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}    * c\n</code></pre>\n"
+        "<ul>\n<li>e</li>\n<li>d</li>\n</ul>\n",
+        " * a\n\n    * c\n\n * e\n * d",
+    ),
+    "tab-indented marker after the blank line": (
+        " * a\n\n\t* c\n * d\n",
+        f" - a\n\n{_FENCE}\t* c\n```\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}\t* c\n</code></pre>\n{_UL_D}",
+        " * a\n\n\t* c\n\n * d",
+    ),
+    "tab-indented marker after several blank lines": (
+        " * a\n\n\n\t* c\n * d\n",
+        f" - a\n\n\n{_FENCE}\t* c\n```\n - d\n",
+        f"<ul>\n<li>a</li>\n</ul>\n{_PRE}\t* c\n</code></pre>\n{_UL_D}",
+        " * a\n\n\t* c\n\n * d",
+    ),
+    # A lettered list is a fenced fallback of its own (#74), so the marker
+    # after it was left as `     - c`, indented code to CommonMark. Trac:
+    # `<ol class=loweralpha>` a, `<ul>` c.
+    "lettered outer item, marker 5 columns after the blank line": (
+        " a. a\n\n     * c\n",
+        f"{_FENCE} a. a\n```\n\n{_FENCE}     * c\n```\n",
+        f"{_PRE} a. a\n</code></pre>\n{_PRE}     * c\n</code></pre>\n",
+        " a. a\n\n     * c",
+    ),
+    # The column of a lettered item is unknown, so the fence stops at the
+    # first later plain marker (the render of `d` was not measured: this
+    # pins the extent only).
+    "lettered outer item, the fence stops at a plain marker": (
+        " a. a\n\n     * c\n   * d\n",
+        f"{_FENCE} a. a\n```\n\n{_FENCE}     * c\n```\n   - d\n",
+        f"{_PRE} a. a\n</code></pre>\n{_PRE}     * c\n</code></pre>\n"
+        "<ul>\n<li>d</li>\n</ul>\n",
+        " a. a\n\n     * c\n\n * d",
+    ),
+    # Finding 3: a head that is not a quote (a heading here) is carried
+    # unchanged, and the blank line after it keeps `2.` from being paragraph
+    # text. Measured: `<ol>` a, `<h1>` h, `<ol start=2>` d.
+    "a heading head after the blank line": (
+        " 1. a\n\n  = h =\n 2. d\n",
+        " 1. a\n\n  = h =\n\n 2. d\n",
+        "<ol>\n<li>a</li>\n</ol>\n<p>= h =</p>\n"
+        '<ol start="2">\n<li>d</li>\n</ol>\n',
+        " 1. a\n\n= h =\n\n 2. d",
+    ),
 }
 
 # name -> (source, master's read-leg bytes, master's round trip): the
@@ -241,12 +346,6 @@ UNCHANGED = {
         " - a\n\n  q\n\t* c\n",
         " * a\n\nq\n* c",
     ),
-    # A tab-indented marker has no known text column: master's bytes.
-    "a tab-indented marker after the blank line": (
-        " * a\n\n\t* c\n",
-        " - a\n\n\t* c\n",
-        " * a\n   * c",
-    ),
     # The marker is moved to the list's own column by #179 when the list
     # above had a nested marker moved; that is a new list in Markdown too.
     "a list whose nested marker #179 moved": (
@@ -263,20 +362,26 @@ UNCHANGED = {
         " * a\n   c\n * d",
     ),
     # A lettered item is itself carried through the fallback (#74), so no
-    # Markdown list is open above the marker and the rule is not applied.
-    # The second row pins master's bytes, which are wrong (a marker past
-    # column 4 is indented code to CommonMark, so the round trip makes a
-    # `{{{` block): the same shape after a lettered item, left for a
-    # ticket of its own.
+    # Markdown list is open above a plain marker and it is not fenced. A
+    # marker indented 4+ columns is: see CASES.
     "a lettered outer item": (
         " a. a\n\n   * c\n",
         f"{_FENCE} a. a\n```\n\n   - c\n",
         " a. a\n\n * c",
     ),
-    "a lettered outer item, marker at its text column": (
-        " a. a\n\n     * c\n",
-        f"{_FENCE} a. a\n```\n\n     - c\n",
-        " a. a\n\n{{{\n - c\n}}}",
+    # A head that is not a quote (a heading) gets the blank line after it
+    # only when the next marker is an ordered one not starting at 1, which
+    # cannot interrupt a paragraph. A bullet or `1.` interrupts, so
+    # #182's bytes for it stay (see CASES for the `2.` row).
+    "a heading head before a bullet": (
+        " * a\n\n  = h =\n * d\n",
+        " - a\n\n  = h =\n - d\n",
+        " * a\n\n= h =\n\n * d",
+    ),
+    "a heading head before a 1.": (
+        " 1. a\n\n  = h =\n 1. d\n",
+        " 1. a\n\n  = h =\n 1. d\n",
+        " 1. a\n\n= h =\n\n 1. d",
     ),
     # `[[BR]]` is text at this pass, not a blank line: a line that holds
     # only `[[BR]]` continues the item, and so does what follows it.
@@ -384,6 +489,22 @@ def test_markdown_authored_loose_items_stay_one_item(name):
     markdown, stored = LOOSE[name]
     assert markdown_to_tracwiki(markdown) == stored
     assert markdown_to_tracwiki(_md(stored)) == stored
+
+
+def test_a_tab_indented_outer_item_does_not_fence_a_plain_marker():
+    """A tab in the outermost item's indent leaves its text column unknown,
+    and CommonMark reads that item line as indented code, so no Markdown
+    list is open to nest a plain marker: master's bytes (the item line's own
+    round trip is a separate, older defect and is not pinned)."""
+    assert _md("\t* a\n\n   * c\n") == "\t* a\n\n   - c\n"
+
+
+def test_a_tab_indented_outer_item_fences_a_code_indented_marker():
+    """A marker indented 4+ columns would join the code block that the
+    tab-indented item line already is."""
+    assert _md("\t* a\n\n     * c\n") == (
+        f"\t* a\n\n{_FENCE}     * c\n```\n"
+    )
 
 
 def test_a_quote_head_after_a_blank_warns_nothing_for_canonical_indent():
