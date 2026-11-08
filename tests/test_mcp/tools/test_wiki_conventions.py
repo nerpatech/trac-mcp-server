@@ -465,6 +465,20 @@ class TestHandler:
         out = _run(client, _registry(other))
         assert out["style_page"]["reason"] == "not_found"
 
+    def test_style_page_code_1_quoted_name_is_error(self):
+        # A quoted name is not evidence (Trac #188).
+        other = FakeClient(
+            {STYLE_PAGE: ("x", 1)},
+            faults={
+                STYLE_PAGE: xmlrpc.client.Fault(
+                    1, "Invalid page name 'PermissionNotes'"
+                )
+            },
+        )
+        client = FakeClient({"WikiStart": (AGENT + "\n", 1)})
+        out = _run(client, _registry(other))
+        assert out["style_page"]["reason"] == "error"
+
     def test_style_page_other_failure_is_error(self):
         other = FakeClient(
             {STYLE_PAGE: ("x", 1)},

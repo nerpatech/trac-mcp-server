@@ -17,7 +17,7 @@ from pydantic_core import Url
 
 from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
-from ..tools.errors import format_timestamp
+from ..tools.errors import classify_fault, format_timestamp
 
 # Resource definitions for list_resources()
 WIKI_RESOURCES = [
@@ -121,14 +121,25 @@ async def handle_read_wiki_resource(
         return _format_page_response(page_name, content, info)
 
     except xmlrpc.client.Fault as e:
-        fault_str = e.faultString.lower()
-
-        if "not found" in fault_str or e.faultCode == 1:
-            return await _build_not_found_error(client, page_name)
-        elif "version" in fault_str:
-            return f"Error (invalid_version): Version {version} not found for page '{page_name}'.\n\nHint: Use trac://wiki/{page_name} to see the latest version."
-        else:
-            return f"Error (server_error): {e.faultString}"
+        match classify_fault(e, "wiki"):
+            case "permission_denied":
+                return f"Error (permission_denied): {e.faultString}"
+            case "not_found" if version is None:
+                return await _build_not_found_error(client, page_name)
+            case "not_found":
+                # A version is missing, or the page is: only the page's
+                # own info tells which.
+                try:
+                    info = await run_sync_limited(
+                        client.get_wiki_page_info, page_name
+                    )
+                except Exception:
+                    info = None
+                if info and isinstance(info, dict):
+                    return f"Error (invalid_version): Version {version} not found for page '{page_name}'.\n\nHint: Use trac://wiki/{page_name} to see the latest version."
+                return await _build_not_found_error(client, page_name)
+            case _:
+                return f"Error (server_error): {e.faultString}"
 
     except Exception as e:
         return f"Error (server_error): {str(e)}"

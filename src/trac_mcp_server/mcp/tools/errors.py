@@ -5,12 +5,15 @@ to help AI agents recover from errors without human intervention, plus
 shared formatting utilities used across tool modules.
 """
 
+import re
 import time
 import xmlrpc.client
 from datetime import datetime, timezone
 from typing import Any
 
 import mcp.types as types
+
+from ...core.client import _unwrap_tracrpc_fault
 
 
 def build_error_response(
@@ -120,6 +123,66 @@ _DOMAIN_MESSAGES: dict[str, dict[str, str]] = {
 }
 
 
+# A quoted span in a fault's text is a NAME the fault mentions (Trac
+# quotes page, milestone and ticket names: 'X' or "X"), not evidence of
+# what went wrong. Single quotes count only where the quote is not inside
+# a word, so "don't" is left alone.
+_DOUBLE_QUOTED = re.compile(r'"[^"]*"')
+_SINGLE_QUOTED = re.compile(r"(?<!\w)'[^']*'(?!\w)")
+
+
+def _fault_text(fault: xmlrpc.client.Fault) -> str:
+    """A fault's text for keyword tests: TracXMLRPC's "while executing"
+    wrapper removed, every quoted name replaced by a placeholder, then
+    lower-cased."""
+    text = _unwrap_tracrpc_fault(fault).faultString
+    text = _DOUBLE_QUOTED.sub("<name>", text)
+    text = _SINGLE_QUOTED.sub("<name>", text)
+    return text.lower()
+
+
+def classify_fault(
+    fault: xmlrpc.client.Fault, domain: str | None = None
+) -> str | None:
+    """Classify an XML-RPC fault: ``"version_conflict"``, ``"not_found"``,
+    ``"permission_denied"``, ``"already_exists"`` or ``None``.
+
+    Fault codes classify first, in this order: 409 (the conflict code of
+    the ``wiki.putPageIfVersion`` plugin), 404 (TracXMLRPC's
+    ``ResourceNotFound``) and 403 (its ``PermissionError``). Any other
+    code is classified by its text, with TracXMLRPC's wrapper removed and
+    every quoted name replaced first, because a quoted name is not
+    evidence (Trac #188): ``'Invalid Wiki page name 'PermissionNotes'``
+    is no permission fault. Then ``not found``/``does not exist`` is
+    ``not_found``, ``permission``/``denied`` is ``permission_denied``,
+    and, in the ``milestone`` domain only, ``exists``/``already`` is
+    ``already_exists``. The text tests are still needed for the code-1
+    faults TracXMLRPC sends for the plugin's ``TracError`` and Trac's
+    ``ResourceExistsError``.
+
+    An UNQUOTED name in a fault with none of the codes above can still
+    match a token.
+    """
+    match fault.faultCode:
+        case 409:
+            return "version_conflict"
+        case 404:
+            return "not_found"
+        case 403:
+            return "permission_denied"
+
+    text = _fault_text(fault)
+    if "not found" in text or "does not exist" in text:
+        return "not_found"
+    if "permission" in text or "denied" in text:
+        return "permission_denied"
+    if domain == "milestone" and (
+        "exists" in text or "already" in text
+    ):
+        return "already_exists"
+    return None
+
+
 def translate_xmlrpc_error(
     error: xmlrpc.client.Fault,
     domain: str,
@@ -128,13 +191,14 @@ def translate_xmlrpc_error(
     """Translate XML-RPC fault to structured error response.
 
     Provides domain-specific corrective action messages for ticket,
-    wiki, and milestone operations. Fault codes classify first, before
-    any text is read, where TracXMLRPC and the wiki plugin set them (409
-    version conflict from wiki.putPageIfVersion, 404 not found, 403
-    permission), so a fault's text, which may carry a page or milestone
-    name, never overrides its code. A fault with none of those codes is
-    matched on its text for not found, permission and milestone
-    already-exists, never for version conflicts.
+    wiki, and milestone operations. The fault is classified by
+    :func:`classify_fault`: codes first (409 version conflict from
+    wiki.putPageIfVersion, 404 not found, 403 permission), so a fault's
+    text, which may carry a page or milestone name, never overrides its
+    code; then its text with quoted names removed, because a quoted name
+    is not evidence (Trac #188). Text is matched for not found,
+    permission and milestone already-exists, never for version
+    conflicts.
 
     Args:
         error: XML-RPC fault exception
@@ -146,7 +210,6 @@ def translate_xmlrpc_error(
         CallToolResult with isError=True and corrective action
     """
     msgs = _DOMAIN_MESSAGES.get(domain, _DOMAIN_MESSAGES["ticket"])
-    fault_str = error.faultString.lower()
 
     def version_conflict() -> types.CallToolResult:
         action = msgs.get("version", msgs["server"])
@@ -179,33 +242,19 @@ def translate_xmlrpc_error(
             "permission_denied", perm_msg, msgs["permission"]
         )
 
-    # Codes first (Trac #186): 409 is wiki.putPageIfVersion's conflict
-    # code, matched by code and never by text, since a name containing
-    # "version" is no conflict.
-    match error.faultCode:
-        case 409:
+    match classify_fault(error, domain):
+        case "version_conflict":
             return version_conflict()
-        case 404:
+        case "not_found":
             return not_found()
-        case 403:
+        case "permission_denied":
             return permission_denied()
-
-    match fault_str:
-        case s if "not found" in s or "does not exist" in s:
-            return not_found()
-
-        case s if "permission" in s or "denied" in s:
-            return permission_denied()
-
-        case s if domain == "milestone" and (
-            "exists" in s or "already" in s
-        ):
+        case "already_exists":
             return build_error_response(
                 "already_exists",
                 error.faultString,
                 msgs["already_exists"],
             )
-
         case _:
             return build_error_response(
                 "server_error", error.faultString, msgs["server"]
