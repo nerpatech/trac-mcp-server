@@ -174,6 +174,79 @@ def test_a_lettered_list_is_never_switched():
     assert ") y" not in out and "* y" not in out
 
 
+# -- A whitespace-only line is not a Trac blank line (code review) ----------
+
+# The read leg rewrites a `[[BR]]` alone on a continuation line, and a macro
+# dropped with unknown_macros="drop", to a whitespace-only Markdown line. It
+# is item content, not the blank line that ends a Trac list, so one Trac list
+# stays one list: the round trip is master's.
+BR_ITEM = " * a\n   [[BR]]\n * b\n"
+BR_ORDERED = " 1. a\n   [[BR]]\n 2. b\n"
+DROPPED_MACRO = " * a\n   [[PageOutline]]\n * b\n"
+WHITESPACE_BLANK = " * a\n \n * b\n"
+
+
+def _md_drop(wiki: str) -> str:
+    return tracwiki_to_markdown(wiki, unknown_macros="drop").text
+
+
+@pytest.mark.parametrize(
+    "wiki,read",
+    [
+        (BR_ITEM, " - a\n     \n - b\n"),
+        (BR_ORDERED, " 1. a\n     \n 2. b\n"),
+        (WHITESPACE_BLANK, " - a\n \n - b\n"),
+        ("\r\n".join(P2.split("\n")), " - a\r\n\r\n - c\r\n"),
+    ],
+    ids=["br", "br ordered", "whitespace-only blank", "crlf"],
+)
+def test_a_whitespace_only_line_keeps_masters_read_leg(wiki, read):
+    assert _md(wiki) == read
+
+
+@pytest.mark.parametrize(
+    "wiki,written",
+    [
+        (BR_ITEM, " * a\n * b"),
+        (BR_ORDERED, " 1. a\n 2. b"),
+        (WHITESPACE_BLANK, " * a\n * b"),
+    ],
+    ids=["br", "br ordered", "whitespace-only blank"],
+)
+def test_a_whitespace_only_line_round_trips_as_one_list(wiki, written):
+    assert _tw(_md(wiki)) == written
+
+
+def test_a_dropped_macro_inside_an_item_round_trips_as_one_list():
+    md = _md_drop(DROPPED_MACRO)
+    assert md == " - a\n   \n - b\n"
+    assert _tw(md) == " * a\n * b"
+
+
+def test_a_dropped_macro_at_column_0_between_items():
+    """Trac ends the list at a column-0 line, so two lists. The dropped macro
+    leaves an EMPTY line, which is a blank line to this pass: `b` switches
+    and the round trip keeps two lists, as Trac renders them."""
+    md = _md_drop(" * a\n[[PageOutline]]\n * b\n")
+    assert md == " - a\n\n * b\n"
+    assert _tw(md) == " * a\n\n * b"
+
+
+# -- Indented code and tabs (code review) ------------------------------------
+
+
+def test_a_marker_at_column_4_is_indented_code_and_is_not_switched():
+    assert _md(" 10. a\n\n    10. b\n") == " 10. a\n\n    10. b\n"
+    assert _tw(_md(" 10. a\n\n    10. b\n")) == (
+        " 10. a\n\n{{{\n10. b\n}}}"
+    )
+
+
+def test_a_tab_indented_marker_is_not_switched():
+    assert _md("\t* a\n\n\t* c\n") == "\t* a\n\n\t* c\n"
+    assert _tw(_md("\t* a\n\n\t* c\n")) == "{{{\n* a\n\n* c\n}}}"
+
+
 # -- Write leg: unchanged ---------------------------------------------------
 
 
