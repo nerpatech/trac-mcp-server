@@ -625,3 +625,10 @@ class TestBearerTokenExpired:
         assert not _bearer_token_expired("abc", now=2000)
         assert not _bearer_token_expired("a.!!!.c", now=2000)
         assert not _bearer_token_expired("a.bm90IGpzb24.c", now=2000)
+
+    def test_deeply_nested_payload_passes_through(self):
+        import base64
+
+        nested = b"[" * 100000 + b"]" * 100000
+        payload = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        assert not _bearer_token_expired(f"a.{payload}.c", now=2000)

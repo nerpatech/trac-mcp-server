@@ -185,7 +185,9 @@ def _bearer_token_expired(token: str, now: float | None = None) -> bool:
     try:
         payload = parts[1] + "=" * (-len(parts[1]) % 4)
         claims = json.loads(base64.urlsafe_b64decode(payload))
-    except (binascii.Error, ValueError):
+    except (binascii.Error, ValueError, RecursionError):
+        # RecursionError: json.loads on a deeply nested payload. This runs
+        # before any validation, so it must not turn into a 500.
         return False
     exp = claims.get("exp") if isinstance(claims, dict) else None
     if isinstance(exp, bool) or not isinstance(exp, (int, float)):
@@ -203,7 +205,7 @@ class OidcTokenRequiredMiddleware:
     fallback to a shared identity, ever": every request to the MCP endpoint
     (not ``/healthz``) must carry a bearer token, checked here at the
     transport boundary rather than deep in tool-dispatch logic, so no
-    future code path can accidentally skip it. The token's value is not
+    future code path can accidentally skip it. The token's signature is not
     validated here -- that happens downstream when Trac's own web server
     (mod_auth_openidc) receives it forwarded as its own ``Authorization:
     Bearer`` header.
