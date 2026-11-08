@@ -492,6 +492,55 @@ class TestDelete:
         assert "permission_denied" in result.content[0].text
         assert "TICKET_ADMIN" in result.content[0].text
 
+    async def test_delete_real_403_shape_is_permission_denied(self):
+        """TracXMLRPC's real PermissionError, Fault(403, ...), gets the
+        handler's own corrective action (Trac #191)."""
+        client = _make_client()
+        client.delete_ticket_attachment.side_effect = (
+            xmlrpc.client.Fault(
+                403,
+                "TICKET_ADMIN privileges are required to perform this "
+                "operation on Ticket #5",
+            )
+        )
+
+        result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": 5, "filename": "x"},
+            client,
+        )
+        assert result.isError is True
+        assert "permission_denied" in result.content[0].text
+        assert "Deleting ticket attachments requires" in (
+            result.content[0].text
+        )
+
+    async def test_delete_code_1_quoted_name_is_not_permission(self):
+        """A code-1 fault is any TracError, and a name it quotes that
+        contains 'Permission' is no evidence of a permission fault: the
+        handler re-raises it, so the dispatcher reports a server error
+        and not the handler's permission_denied (Trac #191)."""
+        client = _make_client()
+        client.delete_ticket_attachment.side_effect = (
+            xmlrpc.client.Fault(
+                1,
+                "'Invalid attachment 'PermissionNotes'' while "
+                "executing 'ticket.deleteAttachment()'",
+            )
+        )
+
+        result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": 5, "filename": "PermissionNotes"},
+            client,
+        )
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "permission_denied" not in result.content[0].text
+        assert "Deleting ticket attachments requires" not in (
+            result.content[0].text
+        )
+
 
 # =============================================================================
 # Unknown tool

@@ -566,3 +566,27 @@ class TestFormatTimestamp:
         assert (
             format_timestamp("some date string") == "some date string"
         )
+
+
+# ---------------------------------------------------------------------------
+# The fault readers live in core.faults (Trac #191)
+# ---------------------------------------------------------------------------
+
+
+class TestFaultReadersLiveInCoreFaults:
+    """classify_fault and unwrap_tracrpc_fault moved to core/faults.py,
+    which imports only the standard library; the old import paths are
+    the same objects."""
+
+    def test_errors_re_exports_classify_fault(self):
+        from trac_mcp_server.core import faults
+        from trac_mcp_server.mcp.tools import errors
+
+        assert errors.classify_fault is faults.classify_fault
+
+    def test_client_re_exports_unwrap_tracrpc_fault(self):
+        from trac_mcp_server.core import client, faults
+
+        assert (
+            client.unwrap_tracrpc_fault is faults.unwrap_tracrpc_fault
+        )

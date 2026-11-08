@@ -745,6 +745,43 @@ class TestPushReadbackAfterWrite:
         client.put_wiki_page.assert_called_once()
         assert client.put_wiki_page.call_args[0][3] is None
 
+    async def test_probe_real_404_means_absent_and_creates(self):
+        """TracXMLRPC's missing-page fault, Fault(404, 'Wiki page "X"
+        does not exist'), is classified by its code (Trac #191)."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "X" does not exist'
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.structuredContent["action"] == "created"
+        client.put_wiki_page.assert_called_once()
+
+    async def test_probe_code_1_quoted_name_is_not_absence(self):
+        """A code-1 fault is any TracError, and the name it quotes,
+        'Not Found Notes', is no evidence that the page is missing:
+        the probe's fault propagates (the dispatcher's server error)
+        and nothing is written (Trac #191)."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPageInfo()'",
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "Not Found Notes"},
+            client,
+        )
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "not_found" not in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
     async def test_write_fault_is_not_retried_as_a_create(self):
         """A not-found fault raised by the write itself (not the probe)
         is an error, never a second write."""
@@ -1221,6 +1258,56 @@ class TestPull:
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
         assert "validation_error" in result.content[0].text
+
+    async def test_pull_real_404_is_not_found(self, tmp_path):
+        """TracXMLRPC's missing-page fault, Fault(404, 'Wiki page "X"
+        does not exist'), is classified by its code (Trac #191)."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "NoSuchPage" does not exist'
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "NoSuchPage", "file_path": str(out_file)},
+            client,
+        )
+
+        assert result.isError is True
+        assert "Error (not_found)" in result.content[0].text
+        assert not out_file.exists()
+
+    async def test_pull_code_1_quoted_name_is_not_not_found(
+        self, tmp_path
+    ):
+        """A code-1 fault is any TracError, and the name it quotes,
+        'Not Found Notes', is no evidence that the page is missing: the
+        fault propagates to the dispatcher, which reports a server
+        error, not a not_found (Trac #191)."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPage()'",
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "Not Found Notes",
+                "file_path": str(out_file),
+            },
+            client,
+        )
+
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "not_found" not in result.content[0].text
+        assert not out_file.exists()
 
     async def test_pull_other_fault_reraises(self, tmp_path):
         """Non-not-found Fault is caught by the registry error handler."""

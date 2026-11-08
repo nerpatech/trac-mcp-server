@@ -290,7 +290,7 @@ def _classify_trac_error(
 
     import requests.exceptions
 
-    from ..mcp.tools.errors import classify_fault
+    from ..core.faults import classify_fault
 
     if isinstance(exc, xmlrpc.client.Fault):
         fault_str = exc.faultString

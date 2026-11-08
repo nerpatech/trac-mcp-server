@@ -1820,3 +1820,45 @@ def _live_round_trip_steps(capsys, page_name, test_url):
     assert marker.strip() in md_reread, (
         "marker written in step 5 must appear in the re-read page"
     )
+
+
+def test_classifying_a_fault_does_not_import_the_mcp_tools():
+    """trac-convert's error path imports classify_fault from
+    core.faults, a stdlib-only module, not from mcp.tools.errors: that
+    import ran the whole mcp.tools package (every tool handler) just to
+    read one fault. Checked in a fresh interpreter, since this process
+    has long since imported the package (Trac #191)."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    code = (
+        "import sys, xmlrpc.client\n"
+        "from trac_mcp_server.cli.convert import _classify_trac_error\n"
+        "msg = _classify_trac_error(\n"
+        "    xmlrpc.client.Fault(1, 'x'),\n"
+        "    'https://trac.example.com',\n"
+        ")\n"
+        "assert msg == 'Trac fault (wiki operation): x', msg\n"
+        "leaked = sorted(\n"
+        "    m for m in sys.modules\n"
+        "    if m == 'trac_mcp_server.mcp.tools'\n"
+        "    or m.startswith('trac_mcp_server.mcp.tools.')\n"
+        ")\n"
+        "assert not leaked, leaked\n"
+    )
+    existing = os.environ.get("PYTHONPATH")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={
+            **os.environ,
+            "PYTHONPATH": (
+                src + os.pathsep + existing if existing else src
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

@@ -36,7 +36,7 @@ from ...core.client import (
 )
 from ...file_handler import detect_file_format
 from ...preview.checks import _allowed_codes
-from .errors import build_error_response
+from .errors import build_error_response, classify_fault
 from .file_io import (
     check_output_path,
     deliver_output,
@@ -414,11 +414,7 @@ async def _handle_push(
     try:
         info = await run_sync(client.get_wiki_page_info, page_name)
     except xmlrpc.client.Fault as e:
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" not in fault_lower
-            and "does not exist" not in fault_lower
-        ):
+        if classify_fault(e) != "not_found":
             raise
         info = None
     # Some Trac instances return 0 (int) instead of raising Fault
@@ -584,11 +580,7 @@ async def _handle_pull(
             client.get_wiki_page, page_name, version
         )
     except xmlrpc.client.Fault as e:
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" in fault_lower
-            or "does not exist" in fault_lower
-        ):
+        if classify_fault(e) == "not_found":
             return build_error_response(
                 "not_found",
                 f"Wiki page '{page_name}' does not exist",

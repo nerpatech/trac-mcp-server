@@ -212,6 +212,53 @@ class TimelineFaultTranslationTestCase(unittest.TestCase):
         self.assertTrue(result.isError)
         self.assertIn("tracrpc_comment", text_of(result))
 
+    def test_method_not_found_code_is_enough(self):
+        """-32601 is TracXMLRPC's MethodNotFound whatever the text
+        says: wording without "not found" still counts (Trac #191)."""
+        client = MagicMock()
+        client.get_timeline_filters = MagicMock(
+            side_effect=xmlrpc.client.Fault(
+                -32601, "No such method 'timeline.getFilters'"
+            )
+        )
+        result = run(
+            _handle_search(client, {"start": 100, "stop": 200})
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("tracrpc_comment", text_of(result))
+
+    def test_missing_get_events_is_explained(self):
+        client = MagicMock()
+        client.get_timeline_filters = MagicMock(
+            return_value=[("ticket", "Tickets")]
+        )
+        client.get_timeline_events = MagicMock(
+            side_effect=xmlrpc.client.Fault(
+                1, 'RPC method "timeline.getEvents" not found'
+            )
+        )
+        result = run(
+            _handle_search(client, {"start": 100, "stop": 200})
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("tracrpc_comment", text_of(result))
+
+    def test_a_resource_fault_naming_a_method_is_not_swallowed(self):
+        """A "not found" resource fault that merely quotes a name
+        containing "method" is no missing method: it propagates
+        (Trac #191)."""
+        client = MagicMock()
+        client.get_timeline_filters = MagicMock(
+            return_value=[("ticket", "Tickets")]
+        )
+        client.get_timeline_events = MagicMock(
+            side_effect=xmlrpc.client.Fault(
+                1, "Timeline filter 'MethodNotes' not found"
+            )
+        )
+        with self.assertRaises(xmlrpc.client.Fault):
+            run(_handle_search(client, {"start": 100, "stop": 200}))
+
     def test_an_unrelated_fault_is_not_swallowed(self):
         """Only the missing-method fault is translated; the rest must
         propagate. A blanket except here would turn a permission error

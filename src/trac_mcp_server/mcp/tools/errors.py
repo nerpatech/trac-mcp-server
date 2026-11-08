@@ -5,7 +5,6 @@ to help AI agents recover from errors without human intervention, plus
 shared formatting utilities used across tool modules.
 """
 
-import re
 import time
 import xmlrpc.client
 from datetime import datetime, timezone
@@ -13,7 +12,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.client import unwrap_tracrpc_fault
+from ...core.faults import classify_fault
 
 
 def build_error_response(
@@ -121,80 +120,6 @@ _DOMAIN_MESSAGES: dict[str, dict[str, str]] = {
         "server": "Contact Trac administrator or retry later.",
     },
 }
-
-
-# A quoted span in a fault's text is a NAME the fault mentions (Trac
-# quotes page, milestone and ticket names: 'X' or "X"), not evidence of
-# what went wrong. Single quotes count only where the quote is not inside
-# a word, so "don't" is left alone. A single-quoted span may itself hold
-# apostrophes (``'Bob's/Notes'``): it ends at the first quote not
-# followed by a word character. Typographic quote pairs count too.
-_DOUBLE_QUOTED = re.compile(r'"[^"]*"')
-_SINGLE_QUOTED = re.compile(r"(?<!\w)'.*?'(?!\w)")
-_TYPOGRAPHIC_SINGLE = re.compile("\u2018[^\u2019]*\u2019")
-_TYPOGRAPHIC_DOUBLE = re.compile("\u201c[^\u201d]*\u201d")
-
-
-def _fault_text(fault: xmlrpc.client.Fault) -> str:
-    """A fault's text for keyword tests: TracXMLRPC's "while executing"
-    wrapper removed, one outer pair of quotes around the whole message
-    removed, every quoted name replaced by a placeholder, then
-    lower-cased."""
-    text = unwrap_tracrpc_fault(fault).faultString
-    stripped = text.strip()
-    if (
-        len(stripped) >= 2
-        and stripped[0] in "'\""
-        and stripped[-1] == stripped[0]
-    ):
-        text = stripped[1:-1]
-    text = _DOUBLE_QUOTED.sub("<name>", text)
-    text = _SINGLE_QUOTED.sub("<name>", text)
-    text = _TYPOGRAPHIC_SINGLE.sub("<name>", text)
-    text = _TYPOGRAPHIC_DOUBLE.sub("<name>", text)
-    return text.lower()
-
-
-def classify_fault(
-    fault: xmlrpc.client.Fault, domain: str | None = None
-) -> str | None:
-    """Classify an XML-RPC fault: ``"version_conflict"``, ``"not_found"``,
-    ``"permission_denied"``, ``"already_exists"`` or ``None``.
-
-    Fault codes classify first, in this order: 409 (the conflict code of
-    the ``wiki.putPageIfVersion`` plugin), 404 (TracXMLRPC's
-    ``ResourceNotFound``) and 403 (its ``PermissionError``). Any other
-    code is classified by its text, with TracXMLRPC's wrapper removed and
-    every quoted name replaced first, because a quoted name is not
-    evidence (Trac #188): ``'Invalid Wiki page name 'PermissionNotes'``
-    is no permission fault. Then ``not found``/``does not exist`` is
-    ``not_found``, ``permission``/``denied`` is ``permission_denied``,
-    and, in the ``milestone`` domain only, ``exists``/``already`` is
-    ``already_exists``. The text tests are still needed for the code-1
-    faults TracXMLRPC sends for the plugin's ``TracError`` and Trac's
-    ``ResourceExistsError``.
-
-    An UNQUOTED name in a fault with none of the codes above can still
-    match a token.
-    """
-    match fault.faultCode:
-        case 409:
-            return "version_conflict"
-        case 404:
-            return "not_found"
-        case 403:
-            return "permission_denied"
-
-    text = _fault_text(fault)
-    if "not found" in text or "does not exist" in text:
-        return "not_found"
-    if "permission" in text or "denied" in text:
-        return "permission_denied"
-    if domain == "milestone" and (
-        "exists" in text or "already" in text
-    ):
-        return "already_exists"
-    return None
 
 
 def translate_xmlrpc_error(

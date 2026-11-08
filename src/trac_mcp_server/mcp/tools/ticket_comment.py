@@ -29,6 +29,7 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
+from ...core.faults import is_missing_method_fault
 from .errors import build_error_response
 from .registry import ToolSpec
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
@@ -221,15 +222,16 @@ def _require(args: dict, *names: str):
     return [args.get(n) for n in names], None
 
 
-def _translate_missing_method(err: xmlrpc.client.Fault):
+def _translate_missing_method(err: xmlrpc.client.Fault, method: str):
     """Turn 'no such method' into an actionable message, or re-raise.
 
     Without this the caller sees a bare MethodNotFound and has no way to know
     the server simply lacks the plugin -- which is the single most likely
-    reason any of these tools fails.
+    reason any of these tools fails. ``method`` is the bare name of the RPC
+    method the caller invoked (``editComment``); see
+    ``core.faults.is_missing_method_fault`` for what counts.
     """
-    text = err.faultString.lower()
-    if "not found" in text and "method" in text:
+    if is_missing_method_fault(err, method):
         return build_error_response(
             "method_not_available",
             err.faultString,
@@ -331,7 +333,7 @@ async def _handle_edit(
             client.edit_ticket_comment, ticket_id, cnum, comment
         )
     except xmlrpc.client.Fault as e:
-        translated = _translate_missing_method(e)
+        translated = _translate_missing_method(e, "editComment")
         if translated:
             return translated
         raise
@@ -365,7 +367,7 @@ async def _handle_delete(
             client.delete_ticket_comment, ticket_id, cnum, force
         )
     except xmlrpc.client.Fault as e:
-        translated = _translate_missing_method(e)
+        translated = _translate_missing_method(e, "deleteComment")
         if translated:
             return translated
         # The server's guard refusal. Surface it as a structured error with
@@ -431,7 +433,7 @@ async def _handle_reply(
             quote,
         )
     except xmlrpc.client.Fault as e:
-        translated = _translate_missing_method(e)
+        translated = _translate_missing_method(e, "replyToComment")
         if translated:
             return translated
         raise
@@ -461,7 +463,7 @@ async def _handle_history(
             client.get_ticket_comment_history, ticket_id, cnum
         )
     except xmlrpc.client.Fault as e:
-        translated = _translate_missing_method(e)
+        translated = _translate_missing_method(e, "getCommentHistory")
         if translated:
             return translated
         raise
