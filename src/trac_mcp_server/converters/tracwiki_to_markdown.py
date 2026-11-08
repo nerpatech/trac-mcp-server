@@ -651,6 +651,25 @@ _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
 # leading-whitespace requirement.
 _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 
+# Any list marker at column zero (ticket #182), from the same fragments:
+# Trac's list indent is ``\s*``, so ``- a``, ``* a`` and ``1. a`` at column
+# zero are list items (measured on the WikiFormatting page: one ``<ul>``
+# with a nested ``<ul>``), and an indented line after one continues it.
+# No lettered alternative: a column-zero lettered line is the stash
+# lookback's (``_col0_list_stashes``), as ``_fallback_column_zero_lists``
+# stashes it before ``_convert_indented_blocks`` runs.
+_LIST_MARKER_COL0_RE = re.compile(
+    rf"^(?:{_BULLET_MARKER}|{_NUMERIC_MARKER})(?=[ \t])"
+)
+# The three lines of a ``_stash_fallback`` stash, as ``_convert_indented_blocks``
+# sees them (ticket #182): the opening fence (indented when the block was),
+# the placeholder at column zero, and the closing fence.
+_STASH_PLACEHOLDER_RE = re.compile(r"^\x00CODE(\d+)\x00$")
+_STASH_FENCE_OPEN_RE = re.compile(
+    rf"^[ \t]*`{{3,}}{re.escape(FALLBACK_FENCE_INFO)}$"
+)
+_STASH_FENCE_CLOSE_RE = re.compile(r"^`{3,}(?!`)")
+
 # A line shape that CommonMark already treats as "interrupting" -- it starts
 # a new sibling block on its own, without needing a blank line, rather than
 # being read as a lazy continuation of the preceding list item's paragraph
@@ -763,6 +782,7 @@ class TracWikiParser:
         self._code_placeholders: list[str] = []
         self._br_marks_active = False
         self._item_fence_stashes: set[int] = set()
+        self._col0_list_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -782,6 +802,7 @@ class TracWikiParser:
         self._code_placeholders = []
         self._br_marks_active = False
         self._item_fence_stashes = set()
+        self._col0_list_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -1118,6 +1139,9 @@ class TracWikiParser:
                     "Lettered or roman ordered list",
                 )
             )
+            self._col0_list_stashes.add(
+                len(self._code_placeholders) - 1
+            )
         return "\n".join(out)
 
     @staticmethod
@@ -1193,6 +1217,13 @@ class TracWikiParser:
            which is also what keeps a multi-line list item working: its
            continuation line is indented too, and claiming it would take the
            item apart.
+           Indented lines directly before the run's first marker, with no
+           list open above (ticket #182), are cut off first: they are a
+           quote to Trac, and the list after them is the next run.  They go
+           through step 5 on their own, followed by one blank line.  The
+           cut is declined when that marker is indented 4 or more columns
+           or by a tab (the blank line would make it indented code), and
+           after a stashed processor block in an open item.
         5. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
            byte-for-byte.  Converted.  Anything else -- one space, three,
@@ -1220,6 +1251,11 @@ class TracWikiParser:
         out: list[str] = []
         stack: list[int] = []
         inside: set[int] | None = None
+        # Ticket #182: True once an earlier indented run held a list marker,
+        # a brace, a definition list or a lettered list, until a column-zero
+        # line; a list may then still be open above the next run.
+        list_may_be_open = False
+        stashed = self._stash_lines(lines, masked)
         index = 0
         while index < len(lines):
             probe = masked[index]
@@ -1227,6 +1263,22 @@ class TracWikiParser:
                 # Blank lines leave the stack alone; column zero clears it.
                 if probe.strip():
                     stack = []
+                    # A block's lines are not prose (the mask fills its
+                    # interior and its closing line; a stashed processor
+                    # block's fence, placeholder and closing line stand for
+                    # one), and a block joins an open item, so they leave
+                    # the flag alone (ticket #182).
+                    if self._is_column_zero_list_line(
+                        lines, probe, index
+                    ):
+                        # A column-zero item keeps its list open (#182).
+                        list_may_be_open = True
+                    elif not (
+                        probe.startswith("\x01")
+                        or self._line_holds_a_brace(probe)
+                        or index in stashed
+                    ):
+                        list_may_be_open = False
                 out.append(lines[index])
                 index += 1
                 continue
@@ -1243,11 +1295,13 @@ class TracWikiParser:
 
             if any(self._line_holds_a_brace(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.extend(run)
                 continue
 
             if any(_DEFINITION_LIST_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Definition list"
@@ -1257,6 +1311,7 @@ class TracWikiParser:
 
             if any(_ALPHA_LIST_MARKER_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Lettered or roman ordered list"
@@ -1264,12 +1319,43 @@ class TracWikiParser:
                 )
                 continue
 
+            # Ticket #182: indented quote lines directly before the run's
+            # first marker are a blockquote to Trac and the list after
+            # them a top-level list. The run is cut at the marker (the
+            # rest is the next run) when no list can be open above it, so
+            # the head is classified on its own below.
+            cut_head = False
+            marker_at = next(
+                (
+                    i
+                    for i, m in enumerate(probes)
+                    if _LIST_MARKER_RE.match(m)
+                ),
+                None,
+            )
+            if marker_at is not None and inside is None:
+                inside = self._lines_inside_blocks(lines)
+            if (
+                marker_at is not None
+                and marker_at > 0
+                and not list_may_be_open
+                and not self._first_marker_is_code_indented(
+                    probes[marker_at]
+                )
+                and not self._starts_inside_open_item(
+                    lines, masked, inside, stashed, start
+                )
+            ):
+                cut_head = True
+                index = start + marker_at
+                run = run[:marker_at]
+                probes = probes[:marker_at]
+
             # Ticket #175: Trac ends a list at an indented line past the
             # innermost item's upper bound and renders it as a blockquote.
             # The run is split there; the quote part goes out verbatim.
-            if any(_LIST_MARKER_RE.match(m) for m in probes):
-                if inside is None:
-                    inside = self._lines_inside_blocks(lines)
+            if marker_at is not None and not cut_head:
+                list_may_be_open = True
                 segments = self._split_past_bound(
                     lines, masked, inside, start, index
                 )
@@ -1328,7 +1414,103 @@ class TracWikiParser:
                         "\n".join(run), self._indent_kind(run)
                     )
                 )
+            if cut_head:
+                # One blank line ends the quote (or the fence) before the
+                # list that was cut from its run (ticket #182).
+                out.append("")
         return "\n".join(out)
+
+    def _is_column_zero_list_line(
+        self, lines: list[str], probe: str, index: int
+    ) -> bool:
+        """True for a column-zero line that Trac reads as a list item, or
+        that closes the fence a column-zero lettered list was stashed in
+        (ticket #182).  `probe` is the masked `lines[index]`, which is not
+        indented."""
+        if _LIST_MARKER_COL0_RE.match(probe):
+            return True
+        for look in (index, index - 1):
+            m = (
+                _STASH_PLACEHOLDER_RE.match(lines[look])
+                if look >= 0
+                else None
+            )
+            if m and int(m.group(1)) in self._col0_list_stashes:
+                return True
+        return False
+
+    @staticmethod
+    def _stash_lines(lines: list[str], masked: list[str]) -> set[int]:
+        """Indices of the lines of every `_stash_fallback` stash: the
+        placeholder (column zero, not inside a block), the opening fence
+        before it and the closing fence after it (ticket #182).
+
+        `_fallback_processor_blocks` stashes `#!comment`, `#!table`, `#!td`
+        and `#!th` blocks before `_convert_indented_blocks` runs, so a
+        block there is these three lines with no braces. They are the
+        block's lines, as the masked interior and closing line of a
+        `{{{` block are."""
+        stashed: set[int] = set()
+        for idx, probe in enumerate(masked):
+            if not _STASH_PLACEHOLDER_RE.match(probe):
+                continue
+            stashed.add(idx)
+            if idx > 0 and _STASH_FENCE_OPEN_RE.match(lines[idx - 1]):
+                stashed.add(idx - 1)
+            if idx + 1 < len(lines) and _STASH_FENCE_CLOSE_RE.match(
+                lines[idx + 1]
+            ):
+                stashed.add(idx + 1)
+        return stashed
+
+    @staticmethod
+    def _first_marker_is_code_indented(marker_probe: str) -> bool:
+        """True when a list marker is indented 4 or more columns, or by a
+        tab (ticket #182). A blank line before such a marker makes
+        CommonMark read it as indented code, so the cut, which adds that
+        blank line, is declined and master's bytes stay."""
+        indent = _indent_of(marker_probe)
+        return "\t" in indent or len(indent) >= 4
+
+    def _item_stack_after_block(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        start: int,
+    ) -> list[tuple[int, re.Match[str]]]:
+        """The list items open above the run at `start` when it begins
+        straight after a block's closing line, else empty: the seed
+        `_split_past_bound` walks from, and `_starts_inside_open_item`
+        reads (ticket #182).
+
+        `_closes_block_line` sees only an indented closing line (its indent
+        is masked); `inside` also holds a flush-left one."""
+        if not (
+            self._closes_block_line(masked, start)
+            or start - 1 in inside
+        ):
+            return []
+        return _items_open_above(lines, inside, start)
+
+    def _starts_inside_open_item(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        stashed: set[int],
+        start: int,
+    ) -> bool:
+        """True when the run at `start` begins straight after a block's
+        closing line with a list item open above the block (ticket #182).
+        A block is a `{{{` block (the seed `_split_past_bound` uses) or a
+        stashed processor block, whose lines `_items_open_above` then
+        skips as it skips a block's content."""
+        if self._item_stack_after_block(lines, masked, inside, start):
+            return True
+        if start - 1 not in stashed:
+            return False
+        return bool(_items_open_above(lines, inside | stashed, start))
 
     def _split_past_bound(
         self,
@@ -1361,14 +1543,10 @@ class TracWikiParser:
         pos = start
         while pos < end:
             stack: list[tuple[int, re.Match[str]]] = []
-            if pos == start and (
-                self._closes_block_line(masked, start)
-                or start - 1 in inside
-            ):
-                # `_closes_block_line` sees only an indented closing line
-                # (its indent is masked); `inside` also holds a flush-left
-                # one.
-                stack = _items_open_above(lines, inside, start)
+            if pos == start:
+                stack = self._item_stack_after_block(
+                    lines, masked, inside, start
+                )
             split = None
             for idx in range(pos, end):
                 probe = masked[idx]
