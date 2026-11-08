@@ -1446,56 +1446,6 @@ class TracClient:
             )
         return result
 
-    def get_wiki_page_with_metadata(
-        self, page_name: str
-    ) -> dict[str, Any]:
-        """
-        Get wiki page content with full metadata.
-        This method provides helpful error messages with suggestions for missing pages.
-
-        Args:
-            page_name: Name of wiki page
-
-        Returns:
-            Dict with keys: name, content, version, author, lastModified
-
-        Raises:
-            ValueError: If page not found, includes suggestions for similar pages
-            xmlrpc.client.Fault: For other server errors
-        """
-        try:
-            content = self.get_wiki_page(page_name)
-            info = self.get_wiki_page_info(page_name)
-
-            return {
-                "name": page_name,
-                "content": content,
-                "version": info.get("version"),
-                "author": info.get("author"),
-                "lastModified": info.get("lastModified"),
-            }
-        except xmlrpc.client.Fault as err:
-            if err.faultCode == 1:  # Page not found
-                # Find similar pages by substring matching
-                all_pages = self.list_wiki_pages()
-                query_lower = page_name.lower()
-                suggestions = [
-                    p for p in all_pages if query_lower in p.lower()
-                ][:5]
-
-                suggestion_text = ""
-                if suggestions:
-                    suggestion_text = (
-                        f" Similar pages: {', '.join(suggestions)}"
-                    )
-
-                raise ValueError(
-                    f"Page '{page_name}' not found.{suggestion_text}"
-                ) from None
-            else:
-                # Re-raise other faults
-                raise
-
     def search_wiki_pages_by_title(
         self, query: str, max_results: int = 10
     ) -> list[dict[str, Any]]:

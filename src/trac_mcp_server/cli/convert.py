@@ -261,13 +261,16 @@ def _classify_trac_error(
 
     Sub-classification precedence:
       1. xmlrpc.client.Fault:
-         - faultCode == 1 OR "not found"/"does not exist" in faultString
-           -> "wiki page not found: <page_name>" (falls back to
-              "resource not found (fault 1): <faultString>" when
-              page_name is None)
-         - "permission"/"denied" in faultString (case-insensitive)
+         Classified by ``classify_fault`` (codes first: 404/403; then
+         the fault text with TracXMLRPC's wrapper and every quoted name
+         removed). Code 1 alone is no evidence: TracXMLRPC sends it for
+         ANY TracError (Trac #189).
+         - "not_found" -> "wiki page not found: <page_name>" (falls
+           back to "resource not found (fault <code>): <faultString>"
+           when page_name is None)
+         - "permission_denied"
            -> "Trac permission denied (<action>): <faultString>"
-         - default -> "Trac fault (<action>): <faultString>"
+         - anything else -> "Trac fault (<action>): <faultString>"
       2. requests.exceptions.SSLError -> "SSL error: <exc>"
       3. requests.exceptions.Timeout  -> "Trac request timed out (host: <url>): <exc>"
          MUST be tested before ConnectionError because ConnectTimeout
@@ -287,20 +290,19 @@ def _classify_trac_error(
 
     import requests.exceptions
 
+    from ..mcp.tools.errors import classify_fault
+
     if isinstance(exc, xmlrpc.client.Fault):
         fault_str = exc.faultString
-        fault_str_lower = fault_str.lower()
-        if getattr(exc, "faultCode", None) == 1 or (
-            "not found" in fault_str_lower
-            or "does not exist" in fault_str_lower
-        ):
+        kind = classify_fault(exc)
+        if kind == "not_found":
             if page_name is not None:
                 return f"wiki page not found: {page_name}"
-            return f"resource not found (fault 1): {fault_str}"
-        if (
-            "permission" in fault_str_lower
-            or "denied" in fault_str_lower
-        ):
+            return (
+                f"resource not found (fault {exc.faultCode}): "
+                f"{fault_str}"
+            )
+        if kind == "permission_denied":
             return f"Trac permission denied ({action}): {fault_str}"
         return f"Trac fault ({action}): {fault_str}"
 
@@ -432,9 +434,11 @@ def _check_trac(args) -> int:
     Password is NEVER written to stdout or stderr.
 
     All wire errors are routed through the shared error helper with
-    page_name=None and action="Trac ping". The permission-denied branch
-    fires for PERMISSION_DENIED-style faultStrings; the generic fault
-    branch fires for other auth/protocol errors (e.g. Forbidden).
+    page_name=None and action="Trac ping". Faults are classified by
+    ``classify_fault``: a 403 (TracXMLRPC's PermissionError), or a
+    permission word outside any quoted name, gives the
+    permission-denied message; any other fault gives the generic
+    "Trac fault" message.
     """
     overrides = _build_trac_overrides(args)
     if overrides is None:
