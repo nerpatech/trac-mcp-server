@@ -1396,7 +1396,10 @@ class TestWriteGateLive:
 class TestMilestoneWriteGateLive:
     """The gate watched refusing and allowing a REAL milestone write."""
 
-    NAME = "Ticket87WriteGateLive"
+    # Trac #173: the name is per-run (set by `_scratch`), so two
+    # overlapping live runs cannot create, update or delete one
+    # another's milestone.
+    NAME = None
 
     @staticmethod
     def _live():
@@ -1411,28 +1414,47 @@ class TestMilestoneWriteGateLive:
 
     @pytest.fixture(autouse=True)
     def _scratch(self):
-        """Delete the scratch milestone before AND after each row.
+        """Give each row its own milestone name and delete it after.
 
-        Before as well as after: a previous run interrupted between
-        create and cleanup would otherwise leave a milestone behind,
-        and its presence would make
+        The name carries a per-run suffix, so it cannot pre-exist and
+        there is no delete-before: an interrupted earlier run left a
+        different name behind and cannot make
         `test_a_broken_link_is_refused_and_no_milestone_is_created`
-        pass for entirely the wrong reason.
+        pass for the wrong reason.
         """
+        import uuid
+
+        self.NAME = f"Ticket87WriteGateLive{uuid.uuid4().hex[:8]}"
         client = self._live()
-        self._remove(client)
         try:
             yield
         finally:
-            self._remove(client)
+            left = self._remove(client)
+        # A body failure is reported on its own by the test phase;
+        # this only adds a leftover the delete could not remove.
+        if left is not None:
+            pytest.fail(
+                f"milestone {self.NAME} left behind on /trac_test: "
+                f"{left!r}"
+            )
 
-    @classmethod
-    def _remove(cls, client):
+    def _remove(self, client):
+        """Delete the row's milestone; the error when it is still
+        there afterwards, else ``None``."""
         try:
-            client.delete_milestone(cls.NAME)
-        except Exception:
-            # Absent is the desired state; not existing is not an error.
-            pass
+            client.delete_milestone(self.NAME)
+            return None
+        except Exception as exc:
+            delete_error = exc
+        # Absent is the desired state (a refused create makes none), so
+        # a failed delete only counts when the milestone is readable.
+        try:
+            client.get_milestone(self.NAME)
+        except xmlrpc.client.Fault:
+            return None
+        except Exception as exc:
+            return exc
+        return delete_error
 
     def test_a_broken_link_is_refused_and_no_milestone_is_created(self):
         """Not just that an error came back, but that the store did not
@@ -1833,7 +1855,9 @@ class TestTicketCommentWriteGateLive:
 
 @pytest.mark.live
 class TestTicket105ChecksLive:
-    PAGE = "Ticket105WriteGateLive"
+    # Trac #173: the page name is per-run (set by the `page` fixture),
+    # so two overlapping live runs cannot write the same page.
+    PAGE = None
 
     @staticmethod
     def _live():
@@ -1848,15 +1872,26 @@ class TestTicket105ChecksLive:
 
     @pytest.fixture
     def page(self):
+        import uuid
+
         client = self._live()
+        self.PAGE = f"Scratch/Ticket105WriteGate{uuid.uuid4().hex[:8]}"
         client.put_wiki_page(self.PAGE, "seed", "seed")
+        cleanup_error = None
         try:
             yield client
         finally:
             try:
                 client.delete_wiki_page(self.PAGE)
-            except Exception:
-                pass
+            except Exception as exc:
+                cleanup_error = exc
+        # A body failure is reported on its own by the test phase;
+        # this only adds the leftover.
+        if cleanup_error is not None:
+            pytest.fail(
+                f"page {self.PAGE} left behind on /trac_test: "
+                f"{cleanup_error!r}"
+            )
 
     def test_pr_number_as_ticket_is_refused_and_the_page_is_unchanged(
         self, page

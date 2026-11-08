@@ -12,7 +12,6 @@ required by the wiki XML-RPC API:
 - Rename-on-collision returns a path string; we extract the basename.
 """
 
-import os
 import xmlrpc.client
 from unittest.mock import MagicMock
 
@@ -583,66 +582,86 @@ async def test_unknown_tool_name():
 async def test_live_round_trip(tmp_path):
     """End-to-end: push a fixture file, list, get, verify bytes, delete.
 
-    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars pointing
-    at a live Trac instance with a wiki page the test user can attach to.
+    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars. Runs
+    on `/trac_test` (the host of TRAC_URL, whatever project TRAC_URL
+    itself names) against a per-run scratch page it creates first and
+    deletes at the end (Trac #173): this row used to attach to
+    `WikiStart` on the default TRAC_URL store.
     """
-    from trac_mcp_server.config import Config
-    from trac_mcp_server.core.client import TracClient
+    import uuid
 
-    page_name = os.environ.get("TRAC_TEST_WIKI_PAGE", "WikiStart")
+    from tests.live_helpers import trac_test_client
 
-    # Use the same env-driven config the server uses
-    config = Config(
-        trac_url=os.environ["TRAC_URL"],
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = TracClient(config)
+    run = uuid.uuid4().hex[:8]
+    page_name = f"Scratch/Ticket173WikiAttachment{run}"
+    filename = f"live-wiki-fixture-{run}.bin"
 
-    fixture = tmp_path / "live-wiki-fixture.bin"
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names.
+    client = trac_test_client()
+
+    fixture = tmp_path / filename
     payload = b"trac-mcp-server live wiki attachment test \x00\x01\x02"
     fixture.write_bytes(payload)
 
-    # Push
-    push_result = await handle_wiki_attachment_tool(
-        "wiki_attachment_put",
-        {
-            "page_name": page_name,
-            "file_path": str(fixture),
-            "description": "live round-trip fixture",
-            "replace": True,
-        },
-        client,
+    client.put_wiki_page(
+        page_name, "Seed for the live attachment row.\n", "seed"
     )
-    assert push_result.isError is None or push_result.isError is False
+    cleanup_error = None
+    try:
+        # Push
+        push_result = await handle_wiki_attachment_tool(
+            "wiki_attachment_put",
+            {
+                "page_name": page_name,
+                "file_path": str(fixture),
+                "description": "live round-trip fixture",
+                "replace": True,
+            },
+            client,
+        )
+        assert (
+            push_result.isError is None or push_result.isError is False
+        )
 
-    # List — confirm it appears
-    list_result = await handle_wiki_attachment_tool(
-        "wiki_attachment_list", {"page_name": page_name}, client
-    )
-    paths = list_result.structuredContent["attachments"]
-    assert f"{page_name}/live-wiki-fixture.bin" in paths
+        # List -- confirm it appears
+        list_result = await handle_wiki_attachment_tool(
+            "wiki_attachment_list", {"page_name": page_name}, client
+        )
+        paths = list_result.structuredContent["attachments"]
+        assert f"{page_name}/{filename}" in paths
 
-    # Get — confirm byte-identical retrieval
-    out_file = tmp_path / "downloaded.bin"
-    get_result = await handle_wiki_attachment_tool(
-        "wiki_attachment_get",
-        {
-            "page_name": page_name,
-            "filename": "live-wiki-fixture.bin",
-            "output_path": str(out_file),
-        },
-        client,
-    )
-    assert get_result.isError is None or get_result.isError is False
-    assert out_file.read_bytes() == payload
+        # Get -- confirm byte-identical retrieval
+        out_file = tmp_path / "downloaded.bin"
+        get_result = await handle_wiki_attachment_tool(
+            "wiki_attachment_get",
+            {
+                "page_name": page_name,
+                "filename": filename,
+                "output_path": str(out_file),
+            },
+            client,
+        )
+        assert get_result.isError is None or get_result.isError is False
+        assert out_file.read_bytes() == payload
 
-    # Delete — clean up
-    del_result = await handle_wiki_attachment_tool(
-        "wiki_attachment_delete",
-        {"page_name": page_name, "filename": "live-wiki-fixture.bin"},
-        client,
-    )
-    assert del_result.isError is None or del_result.isError is False
+        # Delete -- the row's own assertion; the page delete below
+        # removes the attachment anyway.
+        del_result = await handle_wiki_attachment_tool(
+            "wiki_attachment_delete",
+            {"page_name": page_name, "filename": filename},
+            client,
+        )
+        assert del_result.isError is None or del_result.isError is False
+    finally:
+        try:
+            client.delete_wiki_page(page_name)
+        except Exception as exc:
+            cleanup_error = exc
+    # Reached only when the body passed: a body failure propagates
+    # unchanged out of the finally above.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"page {page_name} left behind on /trac_test: "
+            f"{cleanup_error!r}"
+        )
