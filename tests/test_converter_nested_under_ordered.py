@@ -857,19 +857,19 @@ def test_an_unterminated_item_div_keeps_masters_reading():
     )
 
 
-# -- review fix 6: an interrupter line (a known gap, #187) ---------------------
+# -- review fix 6: an interrupter line (#187) --------------------------------
 
 
-def test_an_interrupter_line_after_a_nested_item_is_a_known_gap():
-    """KNOWN GAP, ticket #187 (already wrong on `master`, not fixed here).
-    ` * a` / `  * b` / `  > q`: Trac puts `q` in `b`. The `>` line moves with
-    its item (one column, like the item), but CommonMark does not let a
-    quote continue a paragraph: it ends item `b`, and `q` lands in `a`. This
-    pins the bytes as they are so a fix for #187 shows up as a change here."""
+def test_an_interrupter_line_after_a_nested_item_goes_to_that_item():
+    """Ticket #187, fixed (this pin was a KNOWN GAP). ` * a` / `  * b` /
+    `  > q`: Trac puts `q` in `b`. The `>` line used to move with its item by
+    the item's shift (` - a` / `   - b` / `   > q`), and CommonMark does not
+    let a quote continue a paragraph: it ended item `b`, and `q` landed in
+    `a`. It is now written at `b`'s text column."""
     source = " * a\n  * b\n  > q\n"
-    assert _read(source) == " - a\n   - b\n   > q\n"
+    assert _read(source) == " - a\n   - b\n     > q\n"
     assert _shape(_read(source)) == [
-        ("ul", [["a", ("ul", [["b"]]), ("quote", "q")]])
+        ("ul", [["a", ("ul", [["b", ("quote", "q")]])]])
     ]
 
 

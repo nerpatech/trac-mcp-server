@@ -127,11 +127,15 @@ GATE_ROWS = {
         " - a\n   - b\n \ttext\n - c\n",
         " * a\n   * b\n     text\n * c",
     ),
-    # A list interrupter keeps #90/#145's reading.
+    # A list interrupter is not plain text. Since #187 the `>` at column 2
+    # goes to item `a` (the deepest item whose marker is at or left of it,
+    # Trac's `handle_quote_block`) at a's text column: master read it at
+    # column 2 (` - a` / `   - b` / `  > q`, outside the list) and the round
+    # trip wrote a blank line after the quote.
     "interrupter": (
         " * a\n   * b\n  > q\n * c\n",
-        " - a\n   - b\n  > q\n - c\n",
-        " * a\n   * b\n\n  q\n\n * c",
+        " - a\n   - b\n   > q\n - c\n",
+        " * a\n   * b\n\n     q\n * c",
     ),
 }
 

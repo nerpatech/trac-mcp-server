@@ -147,17 +147,20 @@ def test_a_paragraph_after_a_blank_line_ends_the_list_after_a_lazy_line():
 
 
 def test_a_quote_at_column_1_after_the_item_ends_the_list():
-    """A `>` line interrupts the paragraph. Master's own pass puts a blank
-    line before it, and the quote then ends the Markdown list, so `c` is a
-    new list on its own and keeps master's bytes."""
-    assert _md(" * a\n > q\n\n * c\n") == " - a\n\n > q\n\n - c\n"
+    """A `>` line at the item's marker column stays in the item (#187:
+    Trac's `handle_quote_block`; master wrote a blank line and left the list
+    at column 1, `" - a\\n\\n > q\\n\\n - c\\n"`). The quote is the item's, so
+    the blank line after it is inside the Markdown list and `c` is switched
+    to a new list (#177), as Trac, which ends the list there, reads it."""
+    assert _md(" * a\n > q\n\n * c\n") == " - a\n   > q\n\n * c\n"
 
 
 def test_a_quote_at_column_2_after_the_item_ends_the_list():
-    """`>` at column 2 (left of the text column) interrupts the paragraph
-    with no blank line before it: it is no lazy continuation, the list ends,
-    and `c` keeps master's bytes."""
-    assert _md(" * a\n  > q\n\n * c\n") == " - a\n  > q\n\n - c\n"
+    """`>` at column 2 (left of the text column) is the item's quote, written
+    at its text column (#187; master left it at column 2, ending the
+    Markdown list, `" - a\\n  > q\\n\\n - c\\n"`). `c` is switched to a new
+    list (#177) as in the column 1 row."""
+    assert _md(" * a\n  > q\n\n * c\n") == " - a\n   > q\n\n * c\n"
 
 
 def test_a_rule_at_column_2_after_the_item_ends_the_list():
