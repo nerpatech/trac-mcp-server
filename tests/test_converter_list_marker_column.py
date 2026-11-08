@@ -25,7 +25,7 @@ The cases, and what Trac renders:
 * B `" * a\\n   * b\\n   text at inner marker col\\n * c\\n"`: the text
   continues the inner item b.
 * C `" * a\\n    * b\\n  text col2 between\\n * c\\n"`: b closes, the text
-  continues the outer item a (left as on `master`, see below).
+  continues the outer item a (ticket #176, see below).
 * D `" * a\\n   * b\\n text at outer col\\n * c\\n"`: the list ends (the text
   is a blockquote, c starts a new list).
 * F `"   * a\\n text left of marker but indented\\n   * c\\n"`: the list
@@ -41,15 +41,18 @@ innermost item, with no tab in either line's indentation, and a line that is
 not a list interrupter; the separator also needs no blank line since the
 marker. Outside it the sites keep `master`'s pop (GATE_ROWS below).
 
-**Case C is NOT changed here (ticket #176).** A line that continues a
-non-innermost item, closing deeper ones (C, and a line at a middle marker's
-column in a three-level list), reads as on `master`, byte for byte, at every
-site: the Markdown has the text after the nested list in a's item, which the
-write leg can only give back below a blank line, ending the Trac list (the
-#125 list-item split). `master` instead puts the text in the inner item but
-keeps the list whole. #176 changes both legs together, so those rows are
-pinned to `master`'s read and round-trip bytes here. `_continued_item`'s
-answer for C is still right and is unit-tested.
+**Case C was left as on `master` here and is changed by ticket #176.** A
+line that continues a non-innermost item, closing deeper ones (C, and a line
+at a middle marker's column in a three-level list), was pinned to `master`'s
+bytes by #149, because the Markdown for it (the text after the nested list
+in a's item) could only be written back below a blank line, ending the Trac
+list. #176 changes both legs together: the read leg moves the line into the
+outer item below a blank line, and the write leg writes a paragraph after a
+nested list one column past the item's marker with no blank line, which Trac
+keeps in the outer item. Those rows are in
+tests/test_converter_between_column_continuation.py, and C and the middle
+row below carry the new bytes. `_continued_item`'s answer for C is
+unit-tested here.
 """
 
 import re
@@ -84,6 +87,13 @@ READ_ROWS = {
     "B": (B, " - a\n   - b\n     text at inner marker col\n - c\n"),
     "G": (G, " - a\n   col3\n - c\n"),
     "J": (J, " 1. a\n    col4\n 1. c\n"),
+    # #176: closes deeper items to continue an outer one; a blank line and
+    # that item's text column.
+    "C": (C, " - a\n    - b\n\n   text col2 between\n - c\n"),
+    "middle": (
+        MIDDLE,
+        " - a\n   - b\n     - c\n\n     mid\n - d\n",
+    ),
     "block": (
         BLOCK,
         " 1. d\n    ```\n    x\n    ```\n"
@@ -93,12 +103,6 @@ READ_ROWS = {
 
 # Shapes the rule leaves alone: the bytes master produced.
 UNCHANGED_ROWS = {
-    # #176: closes deeper items to continue an outer one (master's bytes).
-    "C": (C, " - a\n    - b\n  text col2 between\n - c\n"),
-    "middle": (
-        MIDDLE,
-        " - a\n   - b\n     - c\n   mid\n - d\n",
-    ),
     "D": (D, " - a\n   - b\n\n text at outer col\n - c\n"),
     "F": (F, "   - a\n\n text left of marker but indented\n   - c\n"),
 }
@@ -162,13 +166,14 @@ def test_shapes_the_rule_does_not_touch_read_as_on_master(name):
     [
         ([1], " b", [1]),  # A: the innermost item keeps the line (#149)
         ([1, 3], "   t", [1, 3]),  # B
-        ([1, 3], "  t", [1]),  # C: the pre-#149 pop (#176)
-        ([1, 3, 5], "   t", [1]),  # a middle marker's column (#176)
+        ([1, 3], "  t", [1]),  # C: b closes, a stays open (#176)
+        # a middle marker's column: the middle item stays open (#176)
+        ([1, 3, 5], "   t", [1, 3]),
         ([1, 3], " t", []),  # D: the list ends
     ],
     ids=["A", "B", "C", "middle", "D"],
 )
-def test_list_stack_step_keeps_masters_pop_unless_the_line_is_innermost(
+def test_list_stack_step_keeps_the_continued_item_open(
     columns, line, kept
 ):
     stack = [(c, re.match(r"\s*", "")) for c in columns]
@@ -176,11 +181,12 @@ def test_list_stack_step_keeps_masters_pop_unless_the_line_is_innermost(
     assert [c for c, _ in stack] == kept
 
 
-def test_a_line_that_closes_deeper_items_after_a_block_is_masters():
-    """#176: not claimed as the item's text after a block (bytes as master)."""
+def test_a_line_that_closes_deeper_items_after_a_block_continues_the_outer():
+    """#176: `_continues_item_after_block` still does not claim it, but the
+    separator moves it into a's item below a blank line."""
     wiki = " * a\n   * b\n   {{{\n   x\n   }}}\n  text\n * c\n"
     assert _md(wiki) == (
-        " - a\n   - b\n     ```\n     x\n     ```\n  text\n - c\n"
+        " - a\n   - b\n     ```\n     x\n     ```\n\n   text\n - c\n"
     )
 
 
@@ -235,7 +241,9 @@ GATE_ROWS = {
     "F6 line below a blank line": (
         " * a\n   * b\n\n   c\n d\n * e\n",
         " - a\n   - b\n\n   c\n\n d\n - e\n",
-        " * a\n   * b\n\n   c\n\nd\n\n * e",
+        # #176 changed the write leg: `c` follows b's nested list, so it
+        # now goes between the markers (the Markdown puts it in a).
+        " * a\n   * b\n  c\n\nd\n\n * e",
     ),
 }
 
@@ -378,14 +386,15 @@ def test_round_trip_keeps_the_text_in_the_item_and_is_stable(name):
 @pytest.mark.parametrize(
     ("wiki", "written"),
     [
-        # #176: master's bytes; the text lands in the inner item, the list
-        # stays whole.
-        (C, " * a\n   * b\n     text col2 between\n * c"),
-        (MIDDLE, " * a\n   * b\n     * c\n       mid\n * d"),
+        # #176: the text comes back between the outer item's marker and the
+        # nested one's, with no blank line, so the list stays whole and the
+        # text stays in the outer item.
+        (C, " * a\n   * b\n  text col2 between\n * c"),
+        (MIDDLE, " * a\n   * b\n     * c\n    mid\n * d"),
     ],
     ids=["C", "middle"],
 )
-def test_round_trip_of_a_line_closing_deeper_items_is_masters(
+def test_round_trip_of_a_line_closing_deeper_items_keeps_the_outer_item(
     wiki, written
 ):
     assert markdown_to_tracwiki(_md(wiki)) == written

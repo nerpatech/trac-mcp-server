@@ -252,6 +252,15 @@ def _enclosing_list_marker(
 _NON_ONE_ORDERED_RE = re.compile(r"^(?!0*1\.$)\d+\.$")
 
 
+# A line CommonMark reads as the start of a list item: a bullet (`+` too,
+# which TracWiki has no marker for) or digits with `.` or `)`, then a space or
+# the end of the line (ticket #176: a moved line that starts like this would
+# become a nested Markdown item).
+_MARKDOWN_ITEM_START_RE = re.compile(
+    r"^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)"
+)
+
+
 def _lines_since_blank(pieces: list[str]) -> list[str]:
     """The complete lines of `"".join(pieces)` after its last blank line
     (all of them if there is none), the partial last line excluded.
@@ -395,9 +404,13 @@ def _list_stack_step(
     at or past its column, with one exception (ticket #149): when
     `_marker_column_rule_applies` holds for the innermost item and
     `_continued_item` says the line continues that innermost item, the stack
-    is kept (a line at its marker column included). Every other shape,
-    including a line that continues an outer item and closes deeper ones
-    (ticket #176), keeps that pop, as on `master`.
+    is kept (a line at its marker column included). When the gate holds and
+    `_continued_item` answers an OUTER item (ticket #176: the line closes the
+    deeper ones and continues that item) whose marker line passes the gate
+    too, the stack is truncated to that item. For a line strictly between two markers that is the stack the pop
+    leaves; it differs only for a line AT a middle item's marker column in a
+    list of three or more levels, which keeps that middle item open (the pop
+    closed it). Every other shape keeps that pop, as on `master`.
 
     Ticket #175: Trac's upper bound (a line past the innermost item's marker
     column + 2, or + 3 for a digits-only ordered item, ends the list) is a
@@ -421,7 +434,12 @@ def _list_stack_step(
         answer = _stack_continued_item(
             stack, column, upper_bound=upper_bound
         )
-        if answer == len(stack) - 1:
+        if answer is not None and _marker_column_rule_applies(
+            stack[answer][1].string, line
+        ):
+            # The innermost item (nothing to close) or an outer one (#176;
+            # its marker line passes the gate too, as in the separator).
+            del stack[answer + 1 :]
             return
         if answer is None and upper_bound:
             # The list ends: a line at or left of the outermost marker, or
@@ -2069,10 +2087,28 @@ class TracWikiParser:
           but Trac ended every list at the blank, so a line below one was
           being judged against items Trac had already closed.
 
-        A line that continues a NON-innermost item and closes deeper ones
-        (case C: ``_continued_item`` answers an outer item) is not changed
-        here: the Markdown for it can only be written below a blank line,
-        which ends the Trac list on the way back; that is ticket #176. A
+        Ticket #176 (case C, and a line at a middle item's marker column in
+        a three-level list): a line for which ``_continued_item`` (lower
+        side, ``upper_bound=False``) answers an item OUTSIDE the innermost
+        one continues that outer item and closes the deeper ones; Trac
+        renders it inside that item, after the nested list. The stack is
+        truncated to that item, the line gets a blank line first and is
+        moved to that item's text column, which keeps it in the item in
+        Markdown. The write leg reads the blank line back as the item's
+        paragraph after a nested list and writes it in Trac's form again
+        (``_item_block_separator``'s ``"between"``). The gates are #149's,
+        all required: no blank line since the innermost marker, and
+        ``_marker_column_rule_applies`` for the innermost item's marker line
+        and again for the target item's (which also refuses the list
+        interrupters); plus two of #176's own: the nested list is not left
+        of the target item's text column (an ordered item's nested list can
+        be, #179: the moved line would be an indented code block), and the
+        line does not start like a Markdown list item
+        (``_MARKDOWN_ITEM_START_RE``: ``+ x``, ``1) x``). When one fails the
+        line keeps ``master``'s pop and bytes.
+        A following line of the same paragraph (case C5's second line, at
+        the outer item's column + 1) is not moved: CommonMark reads it as a
+        lazy continuation of the paragraph above, which is where it is. A
         line deeper than the innermost marker is unchanged. Trac's upper
         bound (ticket #175: marker column + 2 for a bullet, + 3 for an
         ordered item) is not applied here: this pass reads lines the
@@ -2122,23 +2158,48 @@ class TracWikiParser:
             if stack:
                 column = len(_indent_of(line))
                 moved = False
-                if (
-                    not blank_since_marker
+                outer = None
+                answer = (
+                    _continued_item(stack, column, upper_bound=False)
+                    if not blank_since_marker
                     and _marker_column_rule_applies(
                         marker_lines[stack[-1]], line
                     )
-                    and _continued_item(
-                        stack, column, upper_bound=False
-                    )
-                    == len(stack) - 1
-                ):
+                    else None
+                )
+                if answer == len(stack) - 1:
                     # #149: the line continues the innermost item. At its
                     # marker's column Markdown would not keep it there as
                     # written, so it moves to the text column below.
                     moved = column <= stack[-1]
+                elif (
+                    answer is not None
+                    and _marker_column_rule_applies(
+                        marker_lines[stack[answer]], line
+                    )
+                    # The nested list must not sit left of the item's
+                    # Markdown text column (an ordered item, #179): the
+                    # moved line would be an indented code block there.
+                    and text_column[stack[answer]] <= stack[answer + 1]
+                    and not _MARKDOWN_ITEM_START_RE.match(
+                        line.lstrip(" \t")
+                    )
+                ):
+                    # #176: the line closes the deeper items and continues
+                    # an outer one (Trac: it renders inside that item,
+                    # after the nested list). It is handled below.
+                    outer = answer
                 else:
                     while stack and stack[-1] >= column:
                         stack.pop()
+                if outer is not None:
+                    del stack[outer + 1 :]
+                    out.append("")
+                    out.append(
+                        " " * text_column[stack[-1]]
+                        + line.lstrip(" \t")
+                    )
+                    continue
                 after_quote = bool(out) and out[-1].lstrip(
                     " \t"
                 ).startswith(">")
