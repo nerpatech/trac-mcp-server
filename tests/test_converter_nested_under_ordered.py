@@ -528,6 +528,345 @@ def test_nothing_nested_left_of_the_text_column_keeps_masters_bytes(
     assert _read(tracwiki) == markdown
 
 
+# -- review fix 1: a list after a blank line stays a separate list ------------
+
+# (id, TracWiki, Markdown, the structure CommonMark must read out of it).
+# Trac ends a list at every blank line, so a marker after one opens a NEW
+# top-level list at any column. Once the previous list's nested markers have
+# been moved to its text column, a root marker at or past that column would
+# be read as nested in the previous list's item: it is moved to the previous
+# list's marker column, where #177's `_separate_adjacent_lists` (a marker left
+# of the open list's text column, after a blank line) starts a new list.
+AFTER_BLANK = [
+    (
+        "bullets",
+        " * a\n  * b\n\n   * c\n",
+        " - a\n   - b\n\n * c\n",
+        [("ul", [["a", ("ul", [["b"]])]]), ("ul", [["c"]])],
+    ),
+    (
+        "bullet-after-an-ordered-list",
+        " 1. a\n   * b\n\n     * c\n",
+        " 1. a\n    - b\n\n - c\n",
+        [("ol", [["a", ("ul", [["b"]])]]), ("ul", [["c"]])],
+    ),
+    (
+        "ordered-switches-its-delimiter",
+        " 1. a\n   1. b\n\n    1. c\n",
+        " 1. a\n    1. b\n\n 1) c\n",
+        [("ol", [["a", ("ol", [["b"]])]]), ("ol", [["c"]])],
+    ),
+    (
+        "two-blank-lines",
+        " * a\n  * b\n\n\n   * c\n",
+        " - a\n   - b\n\n\n * c\n",
+        [("ul", [["a", ("ul", [["b"]])]]), ("ul", [["c"]])],
+    ),
+    (
+        "later-items-of-the-new-list",
+        " * a\n  * b\n\n   * c\n   * d\n",
+        " - a\n   - b\n\n * c\n * d\n",
+        [("ul", [["a", ("ul", [["b"]])]]), ("ul", [["c"], ["d"]])],
+    ),
+    (
+        "its-own-nested-list-and-continuation",
+        " * a\n  * b\n\n   * c\n     more\n     * d\n",
+        " - a\n   - b\n\n * c\n   more\n   - d\n",
+        [
+            ("ul", [["a", ("ul", [["b"]])]]),
+            ("ul", [["c\nmore", ("ul", [["d"]])]]),
+        ],
+    ),
+    (
+        "a-third-list",
+        " * a\n  * b\n\n   * c\n\n   * e\n",
+        " - a\n   - b\n\n * c\n\n - e\n",
+        [
+            ("ul", [["a", ("ul", [["b"]])]]),
+            ("ul", [["c"]]),
+            ("ul", [["e"]]),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown", "shape"),
+    [(t, m, s) for _, t, m, s in AFTER_BLANK],
+    ids=[i for i, _, _, _ in AFTER_BLANK],
+)
+def test_a_root_list_after_a_blank_line_stays_a_separate_list(
+    tracwiki, markdown, shape
+):
+    """Review fix 1 (high). ` * a` / `  * b` / blank / `   * c` is TWO lists
+    in Trac. The moved `b` put the text column of `a` at 3, so `c` at column 3
+    was read by CommonMark as nested in `a`, next to `b`, and the round trip
+    lost the blank line and re-nested it."""
+    assert _read(tracwiki) == markdown
+    assert _shape(markdown) == shape
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown", "shape"),
+    [(t, m, s) for _, t, m, s in AFTER_BLANK],
+    ids=[i for i, _, _, _ in AFTER_BLANK],
+)
+def test_the_round_trip_of_a_list_after_a_blank_line_keeps_two_lists(
+    tracwiki, markdown, shape
+):
+    once = _round_trip(tracwiki)
+    assert "\n\n" in once, once
+    assert _shape(_read(once)) == shape
+    assert markdown_to_tracwiki(_read(once)) == once
+
+
+def test_round_trip_of_the_ticket_repro_is_exact():
+    assert _round_trip(" * a\n  * b\n\n   * c\n") == (
+        " * a\n   * b\n\n * c"
+    )
+
+
+def test_a_list_after_a_blank_line_after_an_unshifted_list_is_masters():
+    """P4 of #177 (a marker after the blank line at or past the previous
+    item's text column, no nesting moved) is #183's and keeps `master`'s
+    bytes: only a list whose own nesting #179 moved is separated."""
+    assert (
+        _read(" * a\n   * b\n\n   * c\n") == " - a\n   - b\n\n   - c\n"
+    )
+    assert _read(" * a\n\n   * c\n") == " - a\n\n   - c\n"
+
+
+def test_a_marker_left_of_the_previous_text_column_is_not_moved():
+    """Column 3 under ` 1. ` (text column 4) is already a separate list to
+    CommonMark; #177 switches its delimiter as before."""
+    assert _read(" 1. a\n   1. b\n\n   1. c\n") == (
+        " 1. a\n    1. b\n\n   1) c\n"
+    )
+
+
+def test_a_list_after_a_paragraph_is_not_moved():
+    """A paragraph between the lists means the next list cannot attach to
+    the previous one."""
+    assert _read(" * a\n  * b\nplain\n\n   * c\n") == (
+        " - a\n   - b\n\nplain\n\n   - c\n"
+    )
+
+
+# -- review fix 2: a tab after the parent's marker (frozen) -----------------
+
+
+def test_a_tab_gap_after_the_parents_marker_freezes_its_children():
+    """Review fix 2. `_item_text_column` counts a tab as ONE column, so the
+    parent's text column is unknown and the nested bullet was folded into
+    the item's text ("a - b"). FROZEN: a parent whose marker-to-text gap holds
+    a tab gives its children shift 0, `master`'s bytes for the subtree."""
+    source = " 1.\ta\n   * b\n 2. d\n"
+    assert _read(source) == " 1.\ta\n   - b\n 2. d\n"
+    # `master`'s round trip, unchanged.
+    assert _round_trip(source) == " 1. a\n\n * b\n\n 2. d"
+
+
+def test_a_tab_gap_freezes_the_whole_subtree():
+    source = " 1.\ta\n   * b\n     * c\n 2. d\n"
+    assert _read(source) == " 1.\ta\n   - b\n     - c\n 2. d\n"
+
+
+def test_a_tab_gap_in_a_bullet_parent_freezes_its_children_too():
+    source = " *\ta\n  * b\n * c\n"
+    assert _read(source) == " *\ta\n  - b\n - c\n"
+
+
+# -- review fix 3: a nested ordered list not starting at 1 (frozen) ---------
+
+
+@pytest.mark.parametrize(
+    ("tracwiki", "markdown"),
+    [
+        (
+            " 1. a\n   10. b\n   11. c\n 2. d\n",
+            " 1. a\n   10. b\n   11. c\n 2. d\n",
+        ),
+        (" * a\n  3. b\n", " - a\n  3. b\n"),
+        (
+            " 1. a\n   10. b\n      * c\n 2. d\n",
+            " 1. a\n   10. b\n      - c\n 2. d\n",
+        ),
+    ],
+    ids=["ordered-10-11", "bullet-parent-3", "its-subtree"],
+)
+def test_a_nested_ordered_marker_not_1_keeps_masters_bytes(
+    tracwiki, markdown
+):
+    """Review fix 3, FROZEN. CommonMark does not let an ordered list that
+    starts at a number other than 1 interrupt the parent's paragraph, so
+    moving ` 1. a` / `   10. b` to the text column made `10. b` paragraph text
+    (`master` kept list items). A nested ordered marker whose number is not 1
+    and which follows the parent's text line directly gets shift 0, and so
+    does its subtree: `master`'s bytes. Ticket #180 owns making these real
+    nested lists; this pins the frozen behaviour until it does."""
+    assert _read(tracwiki) == markdown
+
+
+def test_a_nested_ordered_marker_1_after_the_parents_text_still_moves():
+    assert (
+        _read(" 1. a\n   1. b\n 2. d\n") == " 1. a\n    1. b\n 2. d\n"
+    )
+
+
+def test_a_nested_ordered_marker_not_1_after_a_blank_line_is_a_root():
+    """After a blank line (not a direct follower of the parent's text) the
+    marker is a root and is not frozen by this rule: master's bytes anyway."""
+    assert _read(" 1. a\n\n   10. b\n") == " 1. a\n\n   10) b\n"
+
+
+# -- review fix 4: a dropped macro's whitespace-only line is item content ----
+
+
+def test_dropped_macro_line_keeps_the_item_open():
+    """Review fix 4. With `unknown_macros="drop"` the macro leaves a
+    whitespace-only line, which is item content to Trac (the macro was on
+    it). The pass took it for a blank line, emptied the stack, and `more of
+    b` fell into item `a`. The macro-drop path marks its whitespace-only
+    remains with `_BR_LINE_MARK` and the list walks treat the marked line as
+    non-blank."""
+    source = " 1. a\n   * b\n     [[RecentChanges(x)]]\n     more of b\n 2. c\n"
+    out = tracwiki_to_markdown(source, unknown_macros="drop").text
+    assert out == " 1. a\n    - b\n     \n      more of b\n 2. c\n"
+    assert "\x1f" not in out
+    assert _shape(out) == [
+        (
+            "ol",
+            [["a", ("ul", [["b", "more of b"]])], ["c"]],
+        )
+    ]
+    again = markdown_to_tracwiki(out)
+    assert _shape(_read(again)) == _shape(out)
+
+
+def test_dropped_macro_line_before_a_sibling_keeps_both_nested():
+    source = (
+        " 1. a\n   * b\n     [[RecentChanges(x)]]\n     more of b\n"
+        "   * c\n 2. d\n"
+    )
+    out = tracwiki_to_markdown(source, unknown_macros="drop").text
+    assert out == (
+        " 1. a\n    - b\n     \n      more of b\n    - c\n 2. d\n"
+    )
+    assert _shape(out) == [
+        (
+            "ol",
+            [["a", ("ul", [["b", "more of b"], ["c"]])], ["d"]],
+        )
+    ]
+
+
+def test_a_raw_whitespace_only_line_still_ends_the_list():
+    """Only the dropped macro's remains are marked: a raw whitespace-only
+    source line is a blank line to Trac (measured, #178) and empties the
+    stack, so `more of b` is outside `b` as before."""
+    source = " 1. a\n   * b\n     \n     more of b\n 2. c\n"
+    assert (
+        _read(source)
+        == " 1. a\n    - b\n     \n     more of b\n 2. c\n"
+    )
+
+
+def test_a_dropped_macro_alone_at_column_zero_stays_a_blank_line():
+    """No indentation left, so an empty line, not a marked one: it ends the
+    list (the bytes are the same as before the fix)."""
+    source = " 1. a\n   * b\n[[RecentChanges(x)]]\n   * c\n"
+    out = tracwiki_to_markdown(source, unknown_macros="drop").text
+    assert out == " 1. a\n    - b\n\n   - c\n"
+
+
+def test_dropped_macro_in_preserve_mode_is_untouched():
+    source = " 1. a\n   * b\n     [[RecentChanges(x)]]\n 2. c\n"
+    assert _read(source) == (
+        " 1. a\n    - b\n      [[RecentChanges(x)]]\n 2. c\n"
+    )
+
+
+# -- review fix 5: a processor block inside an item --------------------------
+
+
+def _closer_aligned(tracwiki: str) -> None:
+    lines = tracwiki.split("\n")
+    opener = next(ln for ln in lines if ln.lstrip().startswith("{{{"))
+    closer = next(ln for ln in reversed(lines) if ln.strip() == "}}}")
+    assert len(opener) - len(opener.lstrip()) == len(closer) - len(
+        closer.lstrip()
+    ), tracwiki
+
+
+def test_a_blank_line_in_an_item_div_keeps_the_block_in_the_item():
+    """Review fix 5. A blank line inside `{{{#!div ...}}}` emptied the
+    stack partway: the opener and `x` moved, `y`, the closer and the next
+    sibling did not. Every line from the opener to its matching closer
+    belongs to the owning item: no stack change, the same shift."""
+    source = (
+        " 1. a\n   * b\n     {{{#!div class=x\n     x\n\n     y\n"
+        "     }}}\n   * c\n 2. d\n"
+    )
+    assert _read(source) == (
+        " 1. a\n    - b\n      {{{#!div class=x\n      x\n\n      y\n"
+        "      }}}\n    - c\n 2. d\n"
+    )
+    once = _round_trip(source)
+    _closer_aligned(once)
+    assert _shape(_read(once)) == _shape(_read(source))
+    assert markdown_to_tracwiki(_read(once)) == once
+
+
+def test_nested_blocks_and_blank_lines_in_an_item_div_move_together():
+    source = (
+        " 1. a\n   * b\n     {{{#!div class=x\n     {{{#!div class=y\n"
+        "     p\n\n     q\n     }}}\n\n     r\n     }}}\n   * c\n 2. d\n"
+    )
+    assert _read(source) == (
+        " 1. a\n    - b\n      {{{#!div class=x\n      {{{#!div class=y\n"
+        "      p\n\n      q\n      }}}\n\n      r\n      }}}\n"
+        "    - c\n 2. d\n"
+    )
+    _closer_aligned(_round_trip(source))
+
+
+def test_a_list_marker_inside_an_item_div_is_not_an_item_of_the_outer_list():
+    """Lines inside the block are the block's content: a marker-shaped line
+    there neither pops nor pushes."""
+    source = (
+        " 1. a\n   * b\n     {{{#!div class=x\n * not\n     }}}\n   * c\n"
+        " 2. d\n"
+    )
+    assert _read(source) == (
+        " 1. a\n    - b\n      {{{#!div class=x\n  - not\n      }}}\n"
+        "    - c\n 2. d\n"
+    )
+
+
+def test_an_unterminated_item_div_keeps_masters_reading():
+    """No closer: the block is not a container this pass skips over."""
+    source = " 1. a\n   * b\n     {{{#!div class=x\n     x\n 2. d\n"
+    assert _read(source) == (
+        " 1. a\n    - b\n      {{{#!div class=x\n      x\n 2. d\n"
+    )
+
+
+# -- review fix 6: an interrupter line (a known gap, #187) ---------------------
+
+
+def test_an_interrupter_line_after_a_nested_item_is_a_known_gap():
+    """KNOWN GAP, ticket #187 (already wrong on `master`, not fixed here).
+    ` * a` / `  * b` / `  > q`: Trac puts `q` in `b`. The `>` line moves with
+    its item (one column, like the item), but CommonMark does not let a
+    quote continue a paragraph: it ends item `b`, and `q` lands in `a`. This
+    pins the bytes as they are so a fix for #187 shows up as a change here."""
+    source = " * a\n  * b\n  > q\n"
+    assert _read(source) == " - a\n   - b\n   > q\n"
+    assert _shape(_read(source)) == [
+        ("ul", [["a", ("ul", [["b"]]), ("quote", "q")]])
+    ]
+
+
 # -- live: the real renderer on /trac_test -------------------------------------
 
 
