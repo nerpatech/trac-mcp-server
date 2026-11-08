@@ -128,7 +128,11 @@ def translate_xmlrpc_error(
     """Translate XML-RPC fault to structured error response.
 
     Provides domain-specific corrective action messages for ticket,
-    wiki, and milestone operations.
+    wiki, and milestone operations. Fault codes classify first where
+    TracXMLRPC sets them (404 not found, 403 permission, 409 version
+    conflict from wiki.putPageIfVersion); the fault text is matched only
+    for not found, permission and milestone already-exists, never for
+    version conflicts.
 
     Args:
         error: XML-RPC fault exception
@@ -143,7 +147,11 @@ def translate_xmlrpc_error(
     fault_str = error.faultString.lower()
 
     match fault_str:
-        case s if "not found" in s or "does not exist" in s:
+        case s if (
+            "not found" in s
+            or "does not exist" in s
+            or error.faultCode == 404
+        ):
             if entity_name and "not_found_named" in msgs:
                 action = msgs["not_found_named"].format(
                     entity_name=entity_name
@@ -159,9 +167,7 @@ def translate_xmlrpc_error(
             )
 
         case s if (
-            "permission" in s
-            or "denied" in s
-            or (domain == "milestone" and error.faultCode == 403)
+            "permission" in s or "denied" in s or error.faultCode == 403
         ):
             perm_msg = error.faultString
             if domain == "milestone":
@@ -179,7 +185,9 @@ def translate_xmlrpc_error(
                 msgs["already_exists"],
             )
 
-        case s if "version" in s:
+        # Matched by code, not text: a name containing "version" is not
+        # a conflict (Trac #186). 409 is wiki.putPageIfVersion's code.
+        case _ if error.faultCode == 409:
             action = msgs.get("version", msgs["server"])
             if entity_name:
                 action = action.format(entity_name=entity_name)
