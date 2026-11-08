@@ -2033,9 +2033,15 @@ class TracWikiParser:
         switches its first marker only.
 
         A non-marker, non-blank line indented left of the open list's text
-        column ends the list (a code placeholder at column 0 included), so
-        a later list keeps ``master``'s bytes; a line at or past the text
-        column continues the item. A bullet list followed by an ordered one
+        column ends the list when a blank line precedes it (a code
+        placeholder or paragraph at column 0 included) or when it
+        interrupts a paragraph (``_LAZY_CONTINUATION_INTERRUPT_RE``: a
+        heading, ``>``, a fence, a rule), so a later list keeps
+        ``master``'s bytes. Any other such line (` * a` / `  text`) is a lazy
+        continuation of the item's paragraph in CommonMark, and Trac keeps it
+        in the item too: the list stays open and the next list after a blank
+        line switches as usual. A line at or past the text column continues
+        the item. A bullet list followed by an ordered one
         (or the reverse) keeps ``master``'s bytes, since CommonMark already
         reads two lists there, and so does a list after a paragraph. P4 (a
         marker after the blank line at or past the previous item's text
@@ -2063,6 +2069,12 @@ class TracWikiParser:
                 if (
                     kind is not None
                     and len(_indent_of(line)) < text_col
+                    and (
+                        blank_since
+                        or _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                            line.lstrip(" \t")
+                        )
+                    )
                 ):
                     kind = None
                 blank_since = False

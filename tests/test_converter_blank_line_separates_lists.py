@@ -120,10 +120,44 @@ def test_outside_the_pass_the_read_leg_is_masters(name):
     assert _md(wiki) == expected
 
 
-def test_a_plain_line_left_of_the_text_column_ends_the_list():
-    """` * a` / `  text` (column 2, left of text column 3) / blank / ` * c`:
-    the open list is closed by the line, so `c` keeps master's bytes."""
-    assert _md(" * a\n  text\n\n * c\n") == " - a\n  text\n\n - c\n"
+LAZY = " * a\n  text\n\n * c\n"
+
+
+def test_a_lazy_continuation_line_keeps_the_list_open():
+    """` * a` / `  text` (column 2, left of text column 3, no blank line
+    before it) is a lazy continuation of the item's paragraph in CommonMark,
+    and Trac keeps it in the item: the Markdown list is still open, so `c`,
+    after the blank line, is a new list and switches."""
+    assert _md(LAZY) == " - a\n  text\n\n * c\n"
+
+
+def test_a_lazy_continuation_line_round_trips_apart():
+    assert _tw(_md(LAZY)) == " * a\n   text\n\n * c"
+
+
+def test_a_paragraph_after_a_blank_line_ends_the_list_after_a_lazy_line():
+    """The lazy line keeps the list open, but a column-0 paragraph after a
+    blank line ends it: the next list is not a sibling, so no switch."""
+    wiki = " * a\n  text\n\npara\n\n * c\n"
+    assert _md(wiki) == " - a\n  text\n\npara\n\n - c\n"
+
+
+def test_a_quote_at_column_1_after_the_item_ends_the_list():
+    """A `>` line interrupts the paragraph. Master's own pass puts a blank
+    line before it, and the quote then ends the Markdown list, so `c` is a
+    new list on its own and keeps master's bytes."""
+    assert _md(" * a\n > q\n\n * c\n") == " - a\n\n > q\n\n - c\n"
+
+
+def test_a_quote_at_column_2_after_the_item_ends_the_list():
+    """`>` at column 2 (left of the text column) interrupts the paragraph
+    with no blank line before it: it is no lazy continuation, the list ends,
+    and `c` keeps master's bytes."""
+    assert _md(" * a\n  > q\n\n * c\n") == " - a\n  > q\n\n - c\n"
+
+
+def test_a_rule_at_column_2_after_the_item_ends_the_list():
+    assert _md(" * a\n  ----\n\n * c\n") == " - a\n  ----\n\n - c\n"
 
 
 def test_a_plain_line_at_the_text_column_keeps_the_list_open():
@@ -216,13 +250,14 @@ def test_second_cycle_gives_the_first_markdown_byte_for_byte(wiki):
 
 @pytest.mark.parametrize(
     "wiki",
-    [P1, P3, NESTED_FORM],
-    ids=["P1", "P3", "nested"],
+    [P1, P3, NESTED_FORM, LAZY],
+    ids=["P1", "P3", "nested", "lazy"],
 )
 def test_second_cycle_is_stable_once_the_writer_has_normalised(wiki):
-    """P1's `1. 1.` is renumbered `1. 2.`, P3's column 2 becomes column 1 and
-    the one-line nested form becomes two lines: the writer's own, unchanged
-    choices. After that first normalisation both legs are a fixed point."""
+    """P1's `1. 1.` is renumbered `1. 2.`, P3's column 2 becomes column 1,
+    the lazy line moves to the text column and the one-line nested form
+    becomes two lines: the writer's own, unchanged choices. After that first
+    normalisation both legs are a fixed point."""
     first_wiki = _tw(_md(wiki.rstrip("\n")))
     second_md = _md(first_wiki)
     assert _tw(second_md) == first_wiki
