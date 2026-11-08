@@ -93,10 +93,10 @@ def test_round_trip_of_non_consecutive_numbers_is_what_trac_shows():
 
 
 def test_nested_list_from_4_under_a_bullet_keeps_its_tracwiki_bytes():
-    """The read leg emits `4.`/`5.` as lazy paragraph text, because
-    CommonMark lets only a list starting at 1 interrupt a paragraph; so this
-    row passes on master too and pins only that the stored TracWiki stays
-    byte-stable. The Markdown view losing the nested list is ticket #180."""
+    """The stored TracWiki stays byte-stable, and since #180 the Markdown
+    view keeps the nested list too: the read leg puts a blank line before
+    `4.` (CommonMark lets only a list starting at 1 interrupt a paragraph),
+    so mistune reads an ordered list starting at 4 inside the first item."""
     source = " * outer\n   4. inner a\n   5. inner b\n * outer2\n"
     assert _round_trip(source) == source.rstrip("\n")
 
@@ -108,12 +108,16 @@ def test_nested_list_from_4_under_a_bullet_keeps_its_tracwiki_bytes():
         for item in tokens[0]["children"]
         if item["type"] == "list_item"
     )
-    # Current, known behaviour: #180 will flip this assertion.
-    assert not any(
-        child["type"] == "list"
+    nested = [
+        child
         for block in first_item["children"]
         for child in [block, *block.get("children", [])]
-    )
+        if child["type"] == "list"
+    ]
+    assert len(nested) == 1
+    assert nested[0]["attrs"]["ordered"] is True
+    assert nested[0]["attrs"]["start"] == 4
+    assert len(nested[0]["children"]) == 2
 
 
 def _list_shape(html: str) -> list[str]:

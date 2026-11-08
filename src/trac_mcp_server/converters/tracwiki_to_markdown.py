@@ -508,6 +508,16 @@ def _list_stack_step(
         stack.pop()
 
 
+def _is_block_line(line: str) -> bool:
+    """True for an output line that is not paragraph text: a code-block
+    placeholder (`\\x00CODE<n>\\x00`), a fence line or a table row. A list
+    after one needs no blank line to be a list in CommonMark (ticket #180).
+    The list passes run before `_convert_tables`, so a TracWiki table row is
+    still `||...||`; a line that starts with ONE pipe is paragraph text."""
+    stripped = line.strip()
+    return stripped.startswith(("\x00CODE", "```", "~~~", "||"))
+
+
 class _ShiftItem(NamedTuple):
     """An open list item as `_shift_nested_markers` tracks it (ticket #179).
 
@@ -515,20 +525,20 @@ class _ShiftItem(NamedTuple):
     how many columns the item's lines move on output, `text_column` the
     Markdown text column of the item AFTER the move, and `frozen` marks an
     item whose subtree is never moved (a tab-indented marker, a root marker
-    at column 4 or more, a nested ordered marker not numbered 1 that follows
-    its parent's text, or anything under a `tab_gap` item: master's reading,
-    kept byte for byte). `tab_gap` is set when a tab sits between the marker
-    and the text: `_item_text_column` counts it as one column, so the text
-    column is unknown and the item's children are frozen (review fix 2).
-    `no_one` marks a frozen nested ordered item not numbered 1 and the
-    siblings that follow it (review fix 3)."""
+    at column 4 or more, or anything under a `tab_gap` item: master's
+    reading, kept byte for byte). `tab_gap` is set when a tab sits between the
+    marker and the text: `_item_text_column` counts it as one column, so the
+    text column is unknown and the item's children are frozen (review fix 2).
+    A nested ordered item not numbered 1 is an ordinary item here (ticket
+    #180): it moves to the parent's text column, and `_shift_nested_markers`
+    adds the blank line CommonMark needs before it, where it knows the item
+    and its parent are not frozen."""
 
     column: int
     shift: int
     text_column: int
     frozen: bool
     tab_gap: bool = False
-    no_one: bool = False
 
 
 def _matched_blocks(lines: list[str]) -> dict[int, int]:
@@ -2203,12 +2213,40 @@ class TracWikiParser:
           (indented code already) and everything nested under either; a
           tab-indented continuation line is not moved;
         * the children of an item whose marker-to-text gap holds a tab
-          (review fix 2: `_item_text_column` counts a tab as one column);
-        * a nested ORDERED marker whose number is not 1 that follows its
-          parent's text line directly (review fix 3: CommonMark does not let
-          such a list interrupt the parent's paragraph, so moving it to the
-          text column makes paragraph text. Ticket #180 owns making these
-          real nested lists).
+          (review fix 2: `_item_text_column` counts a tab as one column).
+
+        A nested ORDERED marker whose number is not 1 is moved like any
+        other (ticket #180): the clamp to `parent.text_column` is what keeps
+        ` 1. a` / `   4. x` from being read as a sibling item. CommonMark does
+        not let such a list interrupt its parent's paragraph, so right after
+        the parent's text it would be paragraph text at the text column, and
+        this pass also writes the blank line that makes it a list, in the
+        one place that knows whether the item and its parent are frozen
+        (freezing propagates down the stack here, and only here). The blank
+        line goes right before the moved marker line when ALL of these hold:
+
+        * the marker is an ordered number other than 1 (`_NON_ONE_ORDERED_RE`)
+          and opens a new level directly under its parent: the stack is not
+          empty and no item was popped on arrival;
+        * neither the item nor its parent is frozen or has a tab gap (the
+          ordinary move above): a frozen subtree keeps `master`'s bytes;
+        * the previous line is paragraph text of that parent: its own marker
+          line with text after the marker (an empty item, ` * ` or
+          ` 1. [[BR]]`, is none: the blank line would end it), or a
+          continuation line it owns that is not a block line
+          (`_is_block_line`: a code placeholder, a fence, a table row);
+        * the previous line does not end in a hard break (two trailing
+          spaces, what `[[BR]]` becomes). CommonMark drops a hard break at
+          the end of a paragraph, so the blank line would lose the `[[BR]]`
+          on the round trip. Declined: that shape keeps `master`'s bytes and
+          the nested list stays paragraph text in Markdown.
+
+        The blank line is a plain empty line (it carries no
+        `_BR_LINE_MARK`) and leaves the stack alone. The later list walks
+        (`_separate_list_from_trailing_paragraph`, `_separate_adjacent_lists`)
+        read it as the blank line a Trac author may write there (` * a` /
+        blank / `   4. x`), which they already pass through; the marker
+        after it clears their blank-line flags.
 
         Shift 0 is byte-identical to `master`: a nesting already at or past
         the parent's text column (a bullet under a bullet at column 3,
@@ -2246,7 +2284,9 @@ class TracWikiParser:
         # The extent of the processor block being walked.
         block_end = -1
         block_shift = 0
-        prev_text = False  # the previous line was a line with text
+        # Stack depth of the item whose paragraph text the previous output
+        # line is (#180), None when it is not text of an open item.
+        text_owner: int | None = None
 
         def end_list() -> None:
             nonlocal prev_list, list_shifted, root_target
@@ -2270,7 +2310,7 @@ class TracWikiParser:
                     if line.strip()
                     else line
                 )
-                prev_text = bool(line.strip())
+                text_owner = None
                 continue
             if not line.strip():
                 if not (
@@ -2278,23 +2318,20 @@ class TracWikiParser:
                     and line.endswith(_BR_LINE_MARK)
                 ):
                     end_list()
-                prev_text = False
+                text_owner = None
                 out.append(line)
                 continue
-            was_text, prev_text = prev_text, True
             indent = _indent_of(line)
             column = _indent_width(indent)
             marker = _LIST_MARKER_RE.match(line)
             if marker:
-                before = len(stack)
-                popped: _ShiftItem | None = None
+                depth = len(stack)
                 while stack and stack[-1].column >= column:
-                    popped = stack.pop()
+                    stack.pop()
                 parent = stack[-1] if stack else None
                 after = line[marker.end() :]
                 gap = after[: len(after) - len(after.lstrip(" \t"))]
                 tab_gap = bool(after.strip()) and "\t" in gap
-                no_one = False
                 start = prev_list if parent is None else None
                 prev_list = None
                 if "\t" in indent:
@@ -2310,21 +2347,22 @@ class TracWikiParser:
                         shift, frozen = 0, column >= 4
                 elif parent.frozen or parent.tab_gap:
                     shift, frozen = 0, True
-                elif (
-                    before == len(stack)
-                    and was_text
-                    and _NON_ONE_ORDERED_RE.match(
-                        marker.group(0).strip()
-                    )
-                ) or (popped is not None and popped.no_one):
-                    # The item and the siblings after it: one list that
-                    # CommonMark will not start inside the parent's text.
-                    shift, frozen, no_one = 0, True, True
                 else:
                     target = column + parent.shift
                     target = max(target, parent.text_column)
                     target = min(target, parent.text_column + 3)
                     shift, frozen = target - column, False
+                    if (
+                        len(stack) == depth
+                        and text_owner == depth - 1
+                        and _NON_ONE_ORDERED_RE.match(
+                            marker.group(0).strip()
+                        )
+                        and not out[-1].endswith("  ")
+                    ):
+                        # #180: a nested ordered list not starting at 1
+                        # straight after the parent's paragraph text.
+                        out.append("")
                 if shift:
                     list_shifted = True
                 stack.append(
@@ -2334,12 +2372,13 @@ class TracWikiParser:
                         shift + _item_text_column(marker.end(), after),
                         frozen,
                         tab_gap,
-                        no_one,
                     )
                 )
                 out.append(self._move_line(line, shift))
+                text_owner = len(stack) - 1 if after.strip() else None
                 continue
             shift = 0
+            owned: int | None = None
             if stack:
                 owner = _continued_item(
                     [item.column for item in stack],
@@ -2352,11 +2391,14 @@ class TracWikiParser:
                 else:
                     del stack[owner + 1 :]
                     shift = 0 if "\t" in indent else stack[-1].shift
+                    if idx not in pairs and not _is_block_line(line):
+                        owned = len(stack) - 1
             else:
                 prev_list = None
             if idx in pairs:
                 block_end, block_shift = pairs[idx], shift
             out.append(self._move_line(line, shift))
+            text_owner = owned
         return "\n".join(out)
 
     def _move_line(self, line: str, shift: int) -> str:
@@ -2596,6 +2638,13 @@ class TracWikiParser:
         auto_pm #228 comment 9). Bullets and ``1.`` interrupt a paragraph
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
+
+        Ticket #180: the nested counterpart is not here. The blank line a
+        nested ordered list not starting at 1 needs after its parent's text
+        is written by ``_shift_nested_markers``, which runs first and knows
+        which items are frozen. This pass passes it through as the blank line
+        it reads in a Trac-authored ` * a` / blank / `   4. x`; the marker
+        after it clears the blank-line flags.
 
         Ticket #145: a continuation line (non-empty stack) that follows a
         citation line, i.e. a line starting with ``>``, also gets a blank
