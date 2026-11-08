@@ -363,6 +363,30 @@ def _stack_continued_item(
     )
 
 
+# The character a list marker switches to (ticket #177): a bullet's
+# `-`/`*`, an ordered marker's `.`/`)` delimiter.
+_SWITCHED_MARKER_CHAR = {"-": "*", "*": "-", ".": ")", ")": "."}
+
+
+def _set_marker_char(
+    line: str, column: int, token: str, char: str
+) -> str:
+    """`line` with the list marker `token` at `column` written with `char` as
+    its character: the last character of the token, which is the bullet
+    itself or an ordered marker's delimiter."""
+    at = column + len(token) - 1
+    return line[:at] + char + line[at + 1 :]
+
+
+def _item_text_column(marker_end: int, after: str) -> int:
+    """The Markdown text column of a list item whose marker ends at
+    `marker_end` and is followed by `after`: where the item's content
+    starts. One to four spaces of gap before text are kept, anything else
+    (no text, or five or more) counts as one."""
+    gap = len(after) - len(after.lstrip(" \t"))
+    return marker_end + (gap if 1 <= gap <= 4 and after.strip() else 1)
+
+
 def _marker_column_rule_applies(marker_line: str, line: str) -> bool:
     """True when #149's marker-column rule (`_continued_item`) may decide
     what `line` does to the list whose innermost item opens at `marker_line`;
@@ -1976,7 +2000,163 @@ class TracWikiParser:
             text,
             flags=re.MULTILINE,
         )
-        return text
+        return self._separate_adjacent_lists(text)
+
+    def _separate_adjacent_lists(self, text: str) -> str:
+        """Keep two Trac lists that only a blank line separates two lists
+        in Markdown (ticket #177).
+
+        Trac ends a list at every blank line (#143) and the next marker
+        opens a NEW top-level list at any indent. Measured on /trac_test on
+        2026-11-07 (ticket #177 comment 1):
+
+        * P1 ` 1. a` / ` 1. b` / blank / ` 1. c` / ` 1. d` / blank / ` 1. e`:
+          three ``<ol>``, each starting at 1;
+        * P2 ` * a` / blank / ` * c`: two ``<ul>``;
+        * P3 ` * a` / blank / `  * c` (column 2): two ``<ul>``;
+        * P4 ` * a` / blank / `   * c` (column 3) / ` * d`: three ``<ul>``,
+          ``c`` not nested in ``a``;
+        * P5 ` 3. a` / blank / ` 7. c`: ``<ol start="3">``, then
+          ``<ol start="7">``;
+        * P6 ` * a` / `   * b` / blank / ` * c`: ``a`` with its nested list,
+          then a second ``<ul>``.
+
+        Passed through unchanged, CommonMark reads each of these as ONE
+        loose list (the write leg then merged them and renumbered the
+        ordered ones). CommonMark starts a new list when the bullet
+        character or the ordered delimiter changes, so the read leg changes
+        the character instead of adding a separator. The write leg already
+        writes two adjacent Markdown lists with a blank line between them,
+        each keeping its start number (#150), so it is not touched.
+
+        Trade-off, accepted: the Markdown now carries ``)`` ordered
+        delimiters and alternating ``-``/``*`` bullets. That is CommonMark,
+        and our own write leg (mistune) reads it, but Python-Markdown does
+        not read ``7) c`` as a list item and markdownlint flags it (MD004,
+        MD029).
+
+        Only an EMPTY line counts as the blank line that separates two Trac
+        lists. A whitespace-only line is what the read leg leaves for a
+        ``[[BR]]`` alone on a continuation line and for a dropped macro: item
+        content, which neither sets nor clears the blank-line flag. A
+        marker line whose column is 4 or more, or whose indentation holds a
+        tab, is indented code to CommonMark: it is no list item here (not
+        switched, not counted).
+
+        Runs after the ``*`` to ``-`` rewrite, over the final lines. A
+        top-level marker line (its column is left of the open list's text
+        column, so CommonMark would make it a sibling item) opens a new
+        Markdown list when all of these hold:
+
+        * a blank line separates it from the previous non-blank line;
+        * the previous non-blank content belongs to an open list of the
+          same kind (bullet, or digits-only ordered) whose top-level marker
+          uses the same character as this line's.
+
+        Its marker then switches (``-`` and ``*``, ``.`` and ``)``), and
+        so does every later top-level item of the same Trac list (no blank
+        line between them). After another blank line the next list's marker
+        differs from the open one's, so it keeps its own character, which
+        is the switch back (P1: ``.``, ``)``, ``.``). Nested markers are
+        never switched; the one-line nested form ` * * item` (``- - item``)
+        switches its first marker only.
+
+        A non-marker, non-blank line indented left of the open list's text
+        column ends the list when a blank line precedes it (a code
+        placeholder or paragraph at column 0 included) or when it
+        interrupts a paragraph (``_LAZY_CONTINUATION_INTERRUPT_RE``: a
+        heading, ``>``, a fence, a rule), so a later list keeps
+        ``master``'s bytes. Any other such line (` * a` / `  text`) is a lazy
+        continuation of the item's paragraph in CommonMark, and Trac keeps it
+        in the item too: the list stays open and the next list after a blank
+        line switches as usual. A line at or past the text column continues
+        the item. A bullet list followed by an ordered one
+        (or the reverse) keeps ``master``'s bytes, since CommonMark already
+        reads two lists there, and so does a list after a paragraph. P4 (a
+        marker after the blank line at or past the previous item's text
+        column) keeps ``master``'s bytes too: CommonMark nests it in the
+        item, and that case belongs to #183. Lettered and roman lists are
+        fenced by an earlier fallback pass and never reach this code.
+        """
+        out: list[str] = []
+        # The open top-level Markdown list: its kind ("bullet" or
+        # "ordered"), the marker character it is written with, the text
+        # column of its latest top-level item, and whether this pass
+        # switched its character.
+        kind: str | None = None
+        char = ""
+        text_col = 0
+        switched = False
+        blank_since = False
+        for line in text.split("\n"):
+            if line == "":
+                # Only an EMPTY line is a blank line to Trac. The read leg
+                # leaves a whitespace-only line for a `[[BR]]` alone on a
+                # continuation line and for a dropped macro: item content,
+                # which neither sets nor clears the flag.
+                blank_since = True
+                out.append(line)
+                continue
+            if not line.strip():
+                out.append(line)
+                continue
+            marker = _LIST_MARKER_RE.match(line)
+            if marker is not None:
+                indent = _indent_of(line)
+                token = line[len(indent) : marker.end()]
+                if (
+                    len(indent) >= 4
+                    or "\t" in indent
+                    or not (
+                        token in ("-", "*") or _is_digits_ordered(line)
+                    )
+                ):
+                    # Indented code to CommonMark (column 4 or more, a tab)
+                    # or a marker it cannot read: no list item here.
+                    marker = None
+            if marker is None:
+                if (
+                    kind is not None
+                    and len(_indent_of(line)) < text_col
+                    and (
+                        blank_since
+                        or _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                            line.lstrip(" \t")
+                        )
+                    )
+                ):
+                    kind = None
+                blank_since = False
+                out.append(line)
+                continue
+            column = len(indent)
+            this_kind = "bullet" if token in ("-", "*") else "ordered"
+            this_char = token[-1]
+            this_text_col = _item_text_column(
+                marker.end(), line[marker.end() :]
+            )
+            if kind is not None and column >= text_col:
+                pass  # nested in the open item: never switched
+            elif kind != this_kind:
+                kind, char, switched = this_kind, this_char, False
+                text_col = this_text_col
+            elif blank_since and this_char == char:
+                # CommonMark would make this a sibling of the open list.
+                char = _SWITCHED_MARKER_CHAR[this_char]
+                switched = True
+                text_col = this_text_col
+                line = _set_marker_char(line, column, token, char)
+            elif switched and not blank_since:
+                text_col = this_text_col
+                line = _set_marker_char(line, column, token, char)
+            else:
+                # Already a different list in CommonMark (a changed
+                # character), or master's own sibling item.
+                char, switched = this_char, False
+                text_col = this_text_col
+            blank_since = False
+            out.append(line)
+        return "\n".join(out)
 
     def _separate_list_from_trailing_paragraph(self, text: str) -> str:
         """Insert a blank line where a list ends with nothing marking it
@@ -2148,10 +2328,8 @@ class TracWikiParser:
                     stack.pop()
                 stack.append(column)
                 marker_lines[column] = line
-                after = line[marker.end() :]
-                gap = len(after) - len(after.lstrip(" \t"))
-                text_column[column] = marker.end() + (
-                    gap if 1 <= gap <= 4 and after.strip() else 1
+                text_column[column] = _item_text_column(
+                    marker.end(), line[marker.end() :]
                 )
                 out.append(line)
                 continue
