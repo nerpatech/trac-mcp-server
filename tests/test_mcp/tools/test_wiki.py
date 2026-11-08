@@ -869,6 +869,54 @@ class TestHandleCreate(unittest.TestCase):
             self.assertIn("Created wiki page 'NewPage'", text)
             self.assertIn("version 1", text)
 
+    def _create_identical_race(self, current_version):
+        """Run wiki_create where the page is absent at the existence
+        check and putPage then reports a byte-identical no-op."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(404, "Page not found"),
+                WikiPageNotModified(
+                    "Page not modified (content identical)",
+                    "NewPage",
+                    None,
+                    current_version,
+                ),
+            ]
+            return asyncio.run(
+                _handle_create(
+                    self.mock_client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+    def test_handle_create_identical_content_race(self):
+        """The page was absent at the existence check and created by
+        another writer with byte-identical content before putPage:
+        already_exists, naming the version (ticket #174 review)."""
+        result = self._create_identical_race(2)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn(
+            "created by another writer with identical content "
+            "after this call's existence check (version 2)",
+            text,
+        )
+        self.assertIn("Trac stored nothing", text)
+        self.assertIn("Nothing needs doing", text)
+
+    def test_handle_create_identical_content_race_version_unknown(self):
+        result = self._create_identical_race(None)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn("(version unknown)", text)
+        self.assertIn("Trac stored nothing", text)
+
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""
         with patch(
@@ -1012,6 +1060,69 @@ class TestHandleUpdate(unittest.TestCase):
                 text.splitlines()[0],
                 "Wiki page 'TestPage' unchanged: content identical to "
                 "version 5. Trac stored nothing.",
+            )
+
+    def test_handle_update_not_modified_prefers_the_reread_version(
+        self,
+    ):
+        """Identical content stored as v6 by someone else while the
+        caller passed v5: the result says 6 (ticket #174 review)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)",
+                "TestPage",
+                5,
+                6,
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            self.assertEqual(
+                result.content[0].text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "version 6. Trac stored nothing.",
+            )
+
+    def test_handle_update_not_modified_both_versions_unknown(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)",
+                "TestPage",
+                None,
+                None,
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            self.assertEqual(
+                result.content[0].text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "the stored page (version unknown). Trac stored "
+                "nothing.",
             )
 
     def test_handle_update_not_modified_keeps_the_gate_lines(self):

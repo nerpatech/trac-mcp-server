@@ -190,9 +190,14 @@ class WikiPageNotModified(ValueError):
     Trac stored nothing (ticket #174).
 
     Raised by ``TracClient.put_wiki_page`` from both write paths when the
-    server answers "Page not modified". That is a no-op, not a failure:
-    callers report it as "unchanged". ``version`` is the version the
-    caller passed (``None`` for an unversioned write).
+    server answers "Page not modified" (Trac's own TracError text, matched
+    exactly: a false match is reported to callers as success). That is a
+    no-op, not a failure: callers report it as "unchanged". ``version`` is
+    the version the caller passed (``None`` for an unversioned write).
+    ``current_version`` is the page's version re-read after the no-op,
+    best effort (``None`` when the read failed or answered nothing
+    usable): it is what the page is at now, which differs from
+    ``version`` when someone else stored the same content meanwhile.
 
     Subclasses ``ValueError``, with the message the client has always
     used, so callers that catch the plain ``ValueError`` (the CLI
@@ -204,10 +209,12 @@ class WikiPageNotModified(ValueError):
         message: str,
         page_name: str,
         version: int | None,
+        current_version: int | None = None,
     ):
         super().__init__(message)
         self.page_name = page_name
         self.version = version
+        self.current_version = current_version
 
 
 def _describe_error(err: BaseException) -> str:
@@ -232,6 +239,11 @@ _WIKI_CONFLICT_FAULT_CODE = 409
 _WIKI_CONFLICT_MARKER = re.compile(
     r"^'?\[wiki-version-conflict current_version=(\d+|none)\]"
 )
+
+# Trac's own TracError text for a byte-identical write, compared lowercased
+# (ticket #174). Not the looser "not modified": a plugin's unrelated fault
+# containing that would be reported as an "unchanged" success.
+_WIKI_NOT_MODIFIED_MARKER = "page not modified"
 
 # TracXMLRPC's MethodNotFound fault code (JSON-RPC's "method not found").
 _METHOD_NOT_FOUND_FAULT_CODE = -32601
@@ -1836,13 +1848,32 @@ class TracClient:
                     version,
                     current,
                 ) from None
-            if "not modified" in err.faultString.lower():
-                raise WikiPageNotModified(
-                    "Page not modified (content identical)",
-                    page_name,
-                    version,
+            if _WIKI_NOT_MODIFIED_MARKER in err.faultString.lower():
+                raise self._wiki_not_modified(
+                    page_name, version
                 ) from None
             raise _unwrap_tracrpc_fault(err) from None
+
+    def _wiki_not_modified(
+        self, page_name: str, version: int | None
+    ) -> WikiPageNotModified:
+        """The no-op exception for ``page_name``, with the page's current
+        version re-read (ticket #174). Best effort: any failure of the
+        read, or a reply that is not a non-empty dict, leaves
+        ``current_version`` None, and never replaces the no-op."""
+        current: int | None = None
+        try:
+            info = self.get_wiki_page_info(page_name)
+            if isinstance(info, dict) and info:
+                current = _wiki_version(info.get("version"))
+        except Exception:
+            current = None
+        return WikiPageNotModified(
+            "Page not modified (content identical)",
+            page_name,
+            version,
+            current,
+        )
 
     def _put_wiki_page_checked_here(
         self,
@@ -1905,11 +1936,9 @@ class TracClient:
             # Handle specific fault conditions
             fault_str = err.faultString.lower()
 
-            if "not modified" in fault_str:
-                raise WikiPageNotModified(
-                    "Page not modified (content identical)",
-                    page_name,
-                    version,
+            if _WIKI_NOT_MODIFIED_MARKER in fault_str:
+                raise self._wiki_not_modified(
+                    page_name, version
                 ) from None
             elif "version" in fault_str:
                 raise ValueError(

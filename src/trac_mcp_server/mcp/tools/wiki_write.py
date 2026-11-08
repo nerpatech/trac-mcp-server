@@ -254,6 +254,22 @@ async def _handle_create(
         response_lines = _stored_readback_failed_lines(
             "Created", page_name, e, "wiki_create"
         )
+    except WikiPageNotModified as e:
+        # The page was absent at the existence check above and someone
+        # created it with byte-identical content before putPage (ticket
+        # #174): the same answer as a page that exists at the check.
+        shown = (
+            "unknown"
+            if e.current_version is None
+            else e.current_version
+        )
+        return build_error_response(
+            "already_exists",
+            f"Page '{page_name}' was created by another writer with "
+            "identical content after this call's existence check "
+            f"(version {shown}). Trac stored nothing.",
+            "Nothing needs doing: the page already holds this content.",
+        )
     else:
         # Extract version from result
         new_version = result.get("version", 1)
@@ -352,12 +368,23 @@ async def _handle_update(
             f"Page has been modified. Current version is {e.current_version}, you tried to update version {version}.",
             f"Fetch current content with wiki_get(page_name='{page_name}'), then retry update with version={e.current_version}.",
         )
-    except WikiPageNotModified:
+    except WikiPageNotModified as e:
         # Byte-identical to the stored page (ticket #174): Trac stored
-        # nothing, which is a no-op, not a failure.
+        # nothing, which is a no-op, not a failure. The version is the
+        # re-read current one, which differs from the caller's when
+        # someone else stored the same content meanwhile.
+        shown = (
+            e.current_version
+            if e.current_version is not None
+            else e.version
+        )
+        if shown is None:
+            identical_to = "the stored page (version unknown)"
+        else:
+            identical_to = f"version {shown}"
         response_lines = [
             f"Wiki page '{page_name}' unchanged: content identical to "
-            f"version {version}. Trac stored nothing."
+            f"{identical_to}. Trac stored nothing."
         ]
         response_lines.extend(gate_lines)
         return types.CallToolResult(

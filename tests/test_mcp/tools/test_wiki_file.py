@@ -791,6 +791,76 @@ class TestPushNotModified:
         assert sc["possible_overwrite"] is False
         assert sc["warnings"] == []
 
+    async def test_unchanged_reports_the_reread_current_version(self):
+        """Identical content stored as v4 by someone else after the
+        probe saw v3: version is the re-read 4 (ticket #174 review)."""
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", 3, 4
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version 4): content identical "
+            "to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 4
+
+    async def test_unchanged_create_path_reports_the_reread_version(
+        self,
+    ):
+        """The probe found no page (version None), yet the write was a
+        no-op: someone created it identically in between. The re-read
+        version is reported."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page not found"
+        )
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", None, 1
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version 1): content identical "
+            "to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 1
+
+    async def test_unchanged_with_no_known_version(self):
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page not found"
+        )
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", None, None
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version unknown): content "
+            "identical to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["version"] is None
+
     async def test_unchanged_keeps_warnings_and_gate_lines(self):
         client = _make_client()
         client.get_wiki_page_info.return_value = {"version": 3}

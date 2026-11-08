@@ -434,7 +434,6 @@ async def _handle_push(
 
     # The write: exactly one putPage, with no fallback.
     readback_error: str | None = None
-    unchanged = False
     try:
         result = await run_sync(
             client.put_wiki_page,
@@ -449,12 +448,18 @@ async def _handle_push(
         # one would write the page a second time.
         result = {}
         readback_error = str(e)
-    except WikiPageNotModified:
+    except WikiPageNotModified as e:
         # Byte-identical to the stored page (ticket #174): Trac stored
-        # nothing, which is a no-op, not a failure.
+        # nothing, which is a no-op, not a failure. The version is the
+        # re-read current one; the probe's is the fallback, and on the
+        # create path (probe found no page) there may be neither.
         result = {}
-        unchanged = True
         action = "unchanged"
+        version = (
+            e.current_version
+            if e.current_version is not None
+            else version
+        )
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket
         # #120); put_wiki_page refused before posting anything.
@@ -470,13 +475,11 @@ async def _handle_push(
             f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
         )
 
-    verb = "Created" if action == "created" else "Updated"
     # Trac /trac_mcp_server #130: only an update read back successfully
     # can be flagged; put_wiki_page never sets it on a create.
     possible_overwrite = bool(result.get("possible_overwrite"))
-    if unchanged:
-        # `version` is the one read before the write, which is still the
-        # current one: nothing was stored.
+    if action == "unchanged":
+        # Nothing was stored; `version` is what the page is at.
         new_version = version
         shown = "unknown" if version is None else version
         text_parts = [
@@ -484,6 +487,7 @@ async def _handle_push(
             "content identical to the stored page. Trac stored nothing."
         ]
     elif readback_error is None:
+        verb = "Created" if action == "created" else "Updated"
         new_version = result.get("version", 1)
         text_parts = [
             f"{verb} wiki page '{page_name}' (version {new_version})"
@@ -495,6 +499,7 @@ async def _handle_push(
             if overwrite is not None:
                 text_parts.append(overwrite)
     else:
+        verb = "Created" if action == "created" else "Updated"
         new_version = None
         text_parts = [
             f"{verb} wiki page '{page_name}' (version unknown): the "
