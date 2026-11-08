@@ -19,14 +19,17 @@ The change, in two legs:
 
 * Write leg: for an ordered marker, a TEXT continuation (a soft-break or
   loose-paragraph line, a plain text run, the `rest` lines of a #176
-  "between" paragraph) goes at `min(len(prefix) + 1, len(indent) + 3)`. A
+  "between" paragraph) goes at `min(len(prefix) + 1, bound)`, `bound` being
+  `trac_continuation_bound`, and only while no EMPTY line has ended the list
+  (a run after one keeps the text column). A
   quote child, a code child and a table child keep the text column, and
   bullets are unchanged (`len(prefix) + 1` is already `m + 2`, their bound).
 * Read leg: a line that continues the INNERMOST item, deeper than its marker
   and no deeper than Trac's bound for it, is re-indented to the item's
   Markdown text column when that column is past the bound (ordered items 10
-  or more, or a wider gap after the marker), unless an EMPTY line has passed
-  since the marker. Without it ` 10. j` / `    a [[BR]][[BR]]` / `    b` read
+  or more, or a wider gap after the marker), unless a blank line has passed
+  since the marker (a raw whitespace-only line is one; only the line
+  `[[BR]]` made is not). Without it ` 10. j` / `    a [[BR]][[BR]]` / `    b` read
   back with `b` at column 4: after the blank line `[[BR]][[BR]]` becomes,
   CommonMark leaves the item and `b` is an indented code block.
 
@@ -235,6 +238,130 @@ class TestWriteLegCapsTextAtMarkerPlus3:
         )
 
 
+@pytest.mark.parametrize(("number", "depth"), ORDERED, ids=IDS)
+class TestWriteLegNoCapAfterABlankSeparator:
+    """Review fix 1 (#178): the marker + 3 cap holds only while no EMPTY line
+    separates the run from the item. After one Trac has already ended the
+    list, so the run keeps `master`'s text-column indent (`continuation_
+    indent`); capping it moved it into column 4, where the read leg then
+    reads a line of the NEXT list's body and fenced the heading."""
+
+    def _write(self, number, depth, body):
+        out = markdown_to_tracwiki(
+            _md_list("ordered", number, depth, body)
+        )
+        ind, _, text, marker = _cols(number, depth)
+        return _tail(out, marker), ind, " " * text, marker
+
+    def test_heading_child_after_a_blank(self, number, depth):
+        out, ind, text, marker = self._write(
+            number, depth, ["", "# h", "", "after"]
+        )
+        assert out == (
+            f"{ind}{marker} j\n\n{text}= h =\n{text}after\n"
+            f"{ind}{number + 1}. k"
+        )
+
+    def test_heading_child_alone(self, number, depth):
+        out, ind, text, marker = self._write(number, depth, ["", "# h"])
+        assert out == (
+            f"{ind}{marker} j\n\n{text}= h =\n{ind}{number + 1}. k"
+        )
+
+    def test_hr_child_after_a_blank(self, number, depth):
+        out, ind, text, marker = self._write(
+            number, depth, ["", "---", "", "after"]
+        )
+        assert out == (
+            f"{ind}{marker} j\n\n{text}----\n\n{text}after\n"
+            f"{ind}{number + 1}. k"
+        )
+
+    def test_hr_child_alone(self, number, depth):
+        out, ind, text, marker = self._write(number, depth, ["", "---"])
+        assert out == (
+            f"{ind}{marker} j\n\n{text}----\n{ind}{number + 1}. k"
+        )
+
+    def test_two_paragraphs_after_a_nested_list_each_after_a_blank(
+        self, number, depth
+    ):
+        # `||x||` is a passthrough line, so #176's "between" is refused and
+        # both paragraphs sit after a blank line (the second inside the run).
+        out, ind, text, marker = self._write(
+            number, depth, ["- n", "", "||x||", "", "p2"]
+        )
+        nested = " " * (2 * depth + 3)
+        assert out == (
+            f"{ind}{marker} j\n{nested}* n\n\n{text}||x||\n\n"
+            f"{text}p2\n{ind}{number + 1}. k"
+        )
+
+    def test_a_blank_inside_the_item_text_uncaps_the_lines_after_it(
+        self, number, depth
+    ):
+        # `p1` is before the blank (the list is still open: capped); the
+        # lines after the blank line keep master's text column.
+        out, ind, text, marker = self._write(
+            number, depth, ["p1", "", "||x||", "", "p3"]
+        )
+        bound = " " * _cols(number, depth)[1]
+        assert out == (
+            f"{ind}{marker} j\n{bound}p1\n\n{text}||x||\n\n{text}p3\n"
+            f"{ind}{number + 1}. k"
+        )
+
+    def test_a_blank_inside_a_run_uncaps_the_lines_after_it(
+        self, number, depth
+    ):
+        # The run is adjacent to the code child (capped up to its own blank
+        # line); the line after that blank keeps the text column.
+        out, ind, text, marker = self._write(
+            number,
+            depth,
+            ["", "```", "c", "```", "p1", "||x||", "", "p3"],
+        )
+        bound = " " * _cols(number, depth)[1]
+        assert out == (
+            f"{ind}{marker} j\n{text}{{{{{{\n{text}c\n{text}}}}}}}\n"
+            f"{bound}p1\n{bound}||x||\n\n{text}p3\n{ind}{number + 1}. k"
+        )
+
+    def test_a_run_after_a_code_child_and_a_blank_keeps_the_text_column(
+        self, number, depth
+    ):
+        out, ind, text, marker = self._write(
+            number, depth, ["", "```", "c", "```", "||x||", "", "p3"]
+        )
+        assert out == (
+            f"{ind}{marker} j\n{text}{{{{{{\n{text}c\n{text}}}}}}}\n\n"
+            f"{text}||x||\n\n{text}p3\n{ind}{number + 1}. k"
+        )
+
+    def test_a_paragraph_adjacent_to_a_code_child_is_still_capped(
+        self, number, depth
+    ):
+        # No empty line before it (#143 "adjacent"): the cap applies.
+        out, ind, text, marker = self._write(
+            number, depth, ["", "```", "c", "```", "after"]
+        )
+        bound = " " * _cols(number, depth)[1]
+        assert out == (
+            f"{ind}{marker} j\n{text}{{{{{{\n{text}c\n{text}}}}}}}\n"
+            f"{bound}after\n{ind}{number + 1}. k"
+        )
+
+
+def test_the_blank_separator_repro_round_trips_stably():
+    """MD -> TW -> MD -> TW for the review's repro: a heading after a blank
+    line under item 10. On the first round-one branch the second trip turned
+    the heading into a `{{{` block."""
+    md = "10. j\n\n    # h\n\n    after\n11. k\n"
+    first = markdown_to_tracwiki(md)
+    assert first == " 10. j\n\n     = h =\n     after\n 11. k"
+    assert markdown_to_tracwiki(_read(first)) == first
+
+
 def test_the_documented_example_literally():
     """The ticket's example, spelled out: the paragraph lands at column 4."""
     md = "10. j\n\n    second para\n\n11. k\n"
@@ -436,6 +563,131 @@ class TestReadLegMovesTheLineToTheTextColumn:
         assert f"\n{' ' * bound}+ x\n" in md
 
 
+def _tw_lines(number: int, depth: int, body: list[str]) -> str:
+    """TracWiki for item `j` and its `k`, `body` lines VERBATIM (their own
+    indentation, "" for an empty line), at depth 0 or 1 as `_tw_list`."""
+    lines: list[str] = []
+    ind = " " * (2 * depth + 1)
+    if depth:
+        lines.append(" * a")
+        lines += [f"   {i}. x" for i in range(1, number)]
+    lines.append(f"{ind}{number}. j")
+    lines += body
+    lines.append(f"{ind}{number + 1}. k")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.mark.parametrize(("number", "depth"), ORDERED, ids=IDS)
+class TestOnlyAMacroMadeLineKeepsTheItemOpen:
+    """Review fix 2 (#178). Measured on /trac_test (2026-11-08): Trac ends the
+    list at a raw whitespace-only line exactly as at an empty one. Only the
+    line `[[BR]][[BR]]` becomes (a hard break, item content to Trac) leaves
+    the item open for the #178 rule."""
+
+    def _setup(self, number, depth):
+        ind, bound, text, marker = _cols(number, depth)
+        return ind, " " * bound, " " * text, marker
+
+    def test_raw_whitespace_only_line_ends_the_list(
+        self, number, depth
+    ):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(number, depth, [f"{bound}a", "   ", f"{bound}b"])
+        md = _tail(_read(tw), marker)
+        # `a` continues the item and is moved; `b` is after a blank: master's
+        # bytes, still at the bound.
+        assert md == (
+            f"{ind}{marker} j\n{text}a\n   \n{bound}b\n"
+            f"{ind}{number + 1}. k\n"
+        )
+
+    def test_raw_tab_only_line_ends_the_list(self, number, depth):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(number, depth, [f"{bound}a", "\t", f"{bound}b"])
+        md = _tail(_read(tw), marker)
+        assert md == (
+            f"{ind}{marker} j\n{text}a\n\t\n{bound}b\n"
+            f"{ind}{number + 1}. k\n"
+        )
+
+    @pytest.mark.parametrize(
+        "blank", ["", "   "], ids=["empty", "spaces"]
+    )
+    def test_crlf_document_blank_line_ends_the_list(
+        self, number, depth, blank
+    ):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(
+            number, depth, [f"{bound}a", blank, f"{bound}b"]
+        ).replace("\n", "\r\n")
+        md = _tail(_read(tw), marker)
+        assert md == (
+            f"{ind}{marker} j\r\n{text}a\r\n{blank}\r\n{bound}b\r\n"
+            f"{ind}{number + 1}. k\r\n"
+        )
+
+    def test_br_br_line_still_keeps_the_item_open(self, number, depth):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(
+            number, depth, [f"{bound}a [[BR]][[BR]]", f"{bound}b"]
+        )
+        md = _tail(_read(tw), marker)
+        assert md == (
+            f"{ind}{marker} j\n{text}a   \n  \n{text}b\n"
+            f"{ind}{number + 1}. k\n"
+        )
+
+    def test_a_lone_br_line_still_keeps_the_item_open(
+        self, number, depth
+    ):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(
+            number, depth, [f"{bound}a", f"{bound}[[BR]]", f"{bound}b"]
+        )
+        md = _tail(_read(tw), marker)
+        assert md == (
+            f"{ind}{marker} j\n{text}a\n{bound}  \n{text}b\n"
+            f"{ind}{number + 1}. k\n"
+        )
+
+    def test_a_raw_whitespace_line_after_br_br_ends_the_list(
+        self, number, depth
+    ):
+        ind, bound, text, marker = self._setup(number, depth)
+        tw = _tw_lines(
+            number,
+            depth,
+            [f"{bound}a [[BR]][[BR]]", "   ", f"{bound}b"],
+        )
+        md = _tail(_read(tw), marker)
+        assert md == (
+            f"{ind}{marker} j\n{text}a   \n  \n   \n{bound}b\n"
+            f"{ind}{number + 1}. k\n"
+        )
+
+
+def test_a_raw_unit_separator_in_the_input_is_kept_and_never_a_marker():
+    """The marking uses a control character that counts as whitespace. A
+    document that already holds one disables the marking (the `[[BR]][[BR]]`
+    rule then keeps master's bytes) and its own characters are kept as
+    written."""
+    tw = " 10. j\n    a\n  \x1f\n    b\n 11. k\n"
+    assert _read(tw) == (" 10. j\n     a\n  \x1f\n    b\n 11. k\n")
+    tw = " 10. j\n    a [[BR]][[BR]]\n    b\x1f\n 11. k\n"
+    assert _read(tw) == (" 10. j\n     a   \n  \n    b\x1f\n 11. k\n")
+
+
+def test_trac_continuation_bound_helper():
+    from trac_mcp_server.converters.common import (
+        trac_continuation_bound,
+    )
+
+    assert trac_continuation_bound(1, ordered=True) == 4
+    assert trac_continuation_bound(1, ordered=False) == 3
+    assert trac_continuation_bound(3, ordered=True) == 6
+    assert trac_continuation_bound(3, ordered=False) == 5
+
+
 def test_read_leg_wide_gap_item_moves_to_the_text_column():
     """` 1.   j` has its text at column 6, past the bound (4)."""
     tw = " 1.   j\n    lazy [[BR]][[BR]]\n    second\n 2.   k\n"
@@ -502,6 +754,10 @@ SHAPES = {
     "soft": ["soft1", "soft2"],
     "loose": ["", "second para"],
     "loose3": ["", "second para", "", "third para"],
+    # Review fix 1: a run after an EMPTY line keeps master's text column.
+    "heading": ["", "# h", "", "after"],
+    "heading_only": ["", "# h"],
+    "hr_only": ["", "---"],
 }
 
 
