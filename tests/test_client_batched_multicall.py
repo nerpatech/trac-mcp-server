@@ -352,9 +352,8 @@ def test_a_raise_inside_fetch_singly_does_not_read_singly_twice(
     mock_config,
 ):
     client = TracClient(mock_config)
-    client._rpc_request = (
-        lambda s, m, calls: []
-    )  # malformed length  # type: ignore[method-assign]
+    # A reply of the wrong length (malformed).
+    client._rpc_request = lambda s, m, calls: []  # type: ignore[method-assign]
     attempts: list[list[int]] = []
 
     def fetch_singly(items):

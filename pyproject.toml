@@ -45,7 +45,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-ruff>=0.5.0",
     "pyinstaller>=6.0.0",
-    "ruff>=0.15.0",
+    # Exact: CI installs the newest release that matches, and two ruff
+    # versions can format the same line differently (Trac #184).
+    "ruff==0.17.4",
 ]
 
 [project.scripts]
