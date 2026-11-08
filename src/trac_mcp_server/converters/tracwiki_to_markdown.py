@@ -2514,11 +2514,26 @@ class TracWikiParser:
           a table row and the lines of a processor block move with their
           item; the body of a block fenced at the item's text column (#144)
           is in the code stash, and moves with it (`_item_fence_stashes`).
-          A `>` line moves by its item's shift too, but CommonMark does not
-          let a quote continue a paragraph, so after a nested item the quote
-          lands in the PARENT's item, not that item's (Trac keeps it in the
-          nested one). That gap is already on `master` and is not fixed
-          here (#187);
+          A `>` line is not one of these (see the next bullet);
+        * a citation line (stripped text starts with `>`; not in a processor
+          block walked as a unit; no tab in its indent) with an item open
+          goes to the item Trac 1.6's `Formatter.handle_quote_block` puts it
+          in, not to the item `_continued_item` picks (#187): the deepest
+          open item whose source marker column is at or left of the `>`
+          column. There is no upper bound (a `>` past the item's text column
+          stays in it, #175) and a `>` AT the outermost marker column stays
+          in that item, where plain text ends the list. The stack is cut
+          back to that item and the line is written at ITS output text
+          column (`_ShiftItem.text_column`) with its indent stripped, where
+          a `>` opens a quote in that item; right after a deeper item
+          CommonMark closes that item at the dedent. Trac closes lists on
+          the FIRST line of a run of `>` lines only, so the later lines of
+          the run keep that item and column. The quote counts as the item's
+          text for #180's blank line, as it did (CommonMark reads a `4. x`
+          right after it as a lazy continuation of the quote). Declined, keeping `master`'s bytes (the line then takes
+          the per-line path of the previous bullet): no owner (a `>` at
+          column 0, or left of the root marker), the owner or an item the cut
+          would close is frozen or has a tab gap, a tab in the indent;
         * a `{{{#!processor ...}}}` block that is still in the text (a
           container passed through, not stashed like code) is walked as one
           unit, from its opener to its MATCHING closer, nested blocks
@@ -2610,6 +2625,11 @@ class TracWikiParser:
         # Stack depth of the item whose paragraph text the previous output
         # line is (#180), None when it is not text of an open item.
         text_owner: int | None = None
+        # The previous line was a citation line met with an item open
+        # (#187), and the output column that run writes at: None when the
+        # run was declined.
+        quote_run = False
+        quote_column: int | None = None
 
         def end_list() -> None:
             nonlocal prev_list, list_shifted, root_target
@@ -2627,6 +2647,7 @@ class TracWikiParser:
             root_target = None
 
         for idx, line in enumerate(lines):
+            in_quote_run, quote_run = quote_run, False
             if idx <= block_end:
                 out.append(
                     self._move_line(line, block_shift)
@@ -2700,6 +2721,23 @@ class TracWikiParser:
                 out.append(self._move_line(line, shift))
                 text_owner = len(stack) - 1 if after.strip() else None
                 continue
+            if (
+                stack
+                and idx not in pairs
+                and line.lstrip().startswith(">")
+                and "\t" not in indent
+            ):
+                # #187: Trac's `handle_quote_block` rule, not
+                # `_continued_item`'s.
+                quote_run = True
+                if not in_quote_run:
+                    quote_column = self._quote_text_column(
+                        stack, column
+                    )
+                if quote_column is not None:
+                    out.append(" " * quote_column + line.lstrip(" "))
+                    text_owner = len(stack) - 1
+                    continue
             shift = 0
             owned: int | None = None
             if stack:
@@ -2723,6 +2761,36 @@ class TracWikiParser:
             out.append(self._move_line(line, shift))
             text_owner = owned
         return "\n".join(out)
+
+    @staticmethod
+    def _quote_text_column(
+        stack: list[_ShiftItem], column: int
+    ) -> int | None:
+        """The output column a citation line whose `>` is at source `column`
+        is written at, or None when it is declined (ticket #187).
+
+        Trac 1.6's `Formatter.handle_quote_block` closes every open list whose
+        marker column is greater than the `>` column and puts the quote in
+        the deepest one left: the last item of `stack` whose source column is
+        at or left of `column`, with no upper bound. That item is the owner;
+        `stack` is cut back to it and its output text column is returned.
+        Nothing is changed when the line is declined: no owner (the `>` is
+        left of the root marker or at column 0), or the owner or an item the
+        cut would close is frozen or has a tab gap."""
+        owner = max(
+            (
+                i
+                for i, item in enumerate(stack)
+                if item.column <= column
+            ),
+            default=None,
+        )
+        if owner is None or any(
+            item.frozen or item.tab_gap for item in stack[owner:]
+        ):
+            return None
+        del stack[owner + 1 :]
+        return stack[owner].text_column
 
     def _move_line(self, line: str, shift: int) -> str:
         """`line` moved `shift` columns (`_shift_nested_markers`). A line

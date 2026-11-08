@@ -236,10 +236,13 @@ GATE_ROWS = {
     ),
     # F5: a blockquote line at the marker column, then a continuation: the
     # first branch moved the continuation below a blank line.
+    # Since #187 the quote stays in item `a`, at its text column (master:
+    # ` - a` / blank / ` > q` / ` b`, outside the list), and #145's separator
+    # puts the blank line and the re-indent after it.
     "F5 interrupter then continuation": (
         " * a\n > q\n b\n * c\n",
-        " - a\n\n > q\n b\n - c\n",
-        " * a\n\n  q\n  b\n\n * c",
+        " - a\n   > q\n\n   b\n - c\n",
+        " * a\n   > q\n   b\n * c",
     ),
     # F6: the separator keeps its stack across a blank line (#52/#53), so a
     # line two below a blank one was judged against closed items.
