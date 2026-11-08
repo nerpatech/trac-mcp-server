@@ -262,11 +262,21 @@ UNCHANGED = {
         " - a\n\x1f\n   c\n - d\n",
         " * a\n   c\n * d",
     ),
-    # A lettered item is itself carried through the fallback (#74).
+    # A lettered item is itself carried through the fallback (#74), so no
+    # Markdown list is open above the marker and the rule is not applied.
+    # The second row pins master's bytes, which are wrong (a marker past
+    # column 4 is indented code to CommonMark, so the round trip makes a
+    # `{{{` block): the same shape after a lettered item, left for a
+    # ticket of its own.
     "a lettered outer item": (
         " a. a\n\n   * c\n",
         f"{_FENCE} a. a\n```\n\n   - c\n",
         " a. a\n\n * c",
+    ),
+    "a lettered outer item, marker at its text column": (
+        " a. a\n\n     * c\n",
+        f"{_FENCE} a. a\n```\n\n     - c\n",
+        " a. a\n\n{{{\n - c\n}}}",
     ),
     # `[[BR]]` is text at this pass, not a blank line: a line that holds
     # only `[[BR]]` continues the item, and so does what follows it.
