@@ -16,6 +16,7 @@ from trac_mcp_server.core.client import (
     TicketUpdateConflict,
     TracClient,
     WikiPageConflict,
+    WikiPageNotModified,
     WikiPageStoredReadbackFailed,
     _keepalive_socket_options,
 )
@@ -2186,6 +2187,13 @@ def test_put_wiki_page_not_modified(mock_post, mock_config):
         client.put_wiki_page("Page", "content", "comment")
 
     assert "not modified" in str(exc_info.value)
+    # Ticket #174: a typed no-op, still a ValueError for old callers.
+    assert isinstance(exc_info.value, WikiPageNotModified)
+    assert (
+        str(exc_info.value) == "Page not modified (content identical)"
+    )
+    assert exc_info.value.page_name == "Page"
+    assert exc_info.value.version is None
 
 
 # ---------------------------------------------------------------------------
@@ -2696,7 +2704,7 @@ def test_put_wiki_page_create_never_calls_the_plugin(
     assert [c[1] for c in calls] == ["putPage", "getPageInfo"]
 
 
-def test_put_wiki_page_plugin_not_modified_is_the_usual_value_error(
+def test_put_wiki_page_plugin_not_modified_is_the_typed_no_op(
     mock_config,
 ):
     def _rpc(namespace, method, *args):
@@ -2712,6 +2720,177 @@ def test_put_wiki_page_plugin_not_modified_is_the_usual_value_error(
 
     assert not isinstance(exc_info.value, WikiPageConflict)
     assert "not modified" in str(exc_info.value)
+    # Ticket #174.
+    assert isinstance(exc_info.value, WikiPageNotModified)
+    assert (
+        str(exc_info.value) == "Page not modified (content identical)"
+    )
+    assert exc_info.value.page_name == "X"
+    assert exc_info.value.version == 3
+
+
+def test_put_wiki_page_precheck_not_modified_carries_the_version(
+    mock_config,
+):
+    """The client-side path (no plugin) raises the same typed no-op,
+    with the version the caller passed (ticket #174)."""
+
+    def _rpc(namespace, method, *args):
+        if method == "putPageIfVersion":
+            raise xmlrpc.client.Fault(
+                -32601, 'RPC method "wiki.putPageIfVersion" not found'
+            )
+        if method == "getPageInfo":
+            return {"name": "X", "version": 3}
+        if method == "putPage":
+            raise xmlrpc.client.Fault(1, "Page not modified")
+        raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(WikiPageNotModified) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert isinstance(exc_info.value, ValueError)
+    assert (
+        str(exc_info.value) == "Page not modified (content identical)"
+    )
+    assert exc_info.value.page_name == "X"
+    assert exc_info.value.version == 3
+
+
+def test_put_wiki_page_plugin_loose_not_modified_text_is_no_no_op(
+    mock_config,
+):
+    """Only Trac's own "page not modified" is the no-op (ticket #174
+    review): a plugin fault that merely contains "not modified" goes
+    through `_unwrap_tracrpc_fault`, since a false match is reported as
+    success."""
+
+    def _rpc(namespace, method, *args):
+        raise xmlrpc.client.Fault(
+            1,
+            "'Plugin refused: not modified by policy' while executing "
+            "'wiki.putPageIfVersion()'",
+        )
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert not isinstance(exc_info.value, WikiPageNotModified)
+    assert (
+        exc_info.value.faultString
+        == "Plugin refused: not modified by policy"
+    )
+
+
+def test_put_wiki_page_precheck_loose_not_modified_text_reraises_fault(
+    mock_config,
+):
+    def _rpc(namespace, method, *args):
+        if method == "putPageIfVersion":
+            raise xmlrpc.client.Fault(
+                -32601, 'RPC method "wiki.putPageIfVersion" not found'
+            )
+        if method == "getPageInfo":
+            return {"name": "X", "version": 3}
+        if method == "putPage":
+            raise xmlrpc.client.Fault(
+                1, "Plugin refused: not modified by policy"
+            )
+        raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+    client = TracClient(mock_config)
+    with patch.object(client, "_rpc_request", side_effect=_rpc):
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=3)
+
+    assert not isinstance(exc_info.value, ValueError)
+    assert (
+        exc_info.value.faultString
+        == "Plugin refused: not modified by policy"
+    )
+
+
+def _not_modified_rpc(reread, plugin: bool):
+    """An `_rpc_request` stand-in for a no-op write: the write answers
+    "Page not modified"; `getPageInfo` answers per ``reread`` (the
+    precheck's own call sees version 5, the re-read after the no-op sees
+    ``reread``, a value or an exception to raise)."""
+    seen_put = []
+
+    def _rpc(namespace, method, *args):
+        if method == "putPageIfVersion":
+            if not plugin:
+                raise xmlrpc.client.Fault(
+                    -32601,
+                    'RPC method "wiki.putPageIfVersion" not found',
+                )
+            seen_put.append(method)
+            raise xmlrpc.client.Fault(
+                1,
+                "'Page not modified' while executing "
+                "'wiki.putPageIfVersion()'",
+            )
+        if method == "putPage":
+            seen_put.append(method)
+            raise xmlrpc.client.Fault(1, "Page not modified")
+        if method == "getPageInfo":
+            if not seen_put:
+                return {"name": "X", "version": 5}
+            if isinstance(reread, BaseException):
+                raise reread
+            return reread
+        raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+    return _rpc
+
+
+@pytest.mark.parametrize("plugin", [True, False])
+def test_put_wiki_page_not_modified_rereads_the_current_version(
+    mock_config, plugin
+):
+    """Identical content stored as v6 by someone else while the caller
+    passed v5: the no-op carries 6 as `current_version` (ticket #174
+    review), on both write paths."""
+    client = TracClient(mock_config)
+    rpc = _not_modified_rpc({"name": "X", "version": 6}, plugin)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        with pytest.raises(WikiPageNotModified) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=5)
+
+    assert exc_info.value.version == 5
+    assert exc_info.value.current_version == 6
+
+
+@pytest.mark.parametrize("plugin", [True, False])
+@pytest.mark.parametrize(
+    "reread",
+    [
+        xmlrpc.client.Fault(1, "Page not found"),
+        OSError("connection reset"),
+        0,
+        {},
+        "garbage",
+    ],
+    ids=["fault", "transport", "zero", "empty-dict", "non-dict"],
+)
+def test_put_wiki_page_not_modified_failed_reread_leaves_none(
+    mock_config, plugin, reread
+):
+    """The best-effort re-read never replaces the no-op: any failure,
+    or a non-dict or falsy reply, gives `current_version` None and the
+    exception still raises."""
+    client = TracClient(mock_config)
+    rpc = _not_modified_rpc(reread, plugin)
+    with patch.object(client, "_rpc_request", side_effect=rpc):
+        with pytest.raises(WikiPageNotModified) as exc_info:
+            client.put_wiki_page("X", "content", "c", version=5)
+
+    assert exc_info.value.version == 5
+    assert exc_info.value.current_version is None
 
 
 @pytest.mark.parametrize(

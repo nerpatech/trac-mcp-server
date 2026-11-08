@@ -1067,6 +1067,7 @@ Every page with a positive score is returned, best first (ties by page name), so
     "text": "Error (already_exists): Page 'WikiStart' already exists\n\nAction: Use wiki_update to modify existing page, or choose a different name."
   }
   ```
+  The same error answers a race: the page was absent at the existence check, and another writer created it with byte-identical content before this call's write. The message says so, names the version the page is at (or "unknown"), and says Trac stored nothing; the action says nothing needs doing, since the page already holds this content (Trac /trac_mcp_server #174).
 
 - **permission_denied:** Insufficient permissions
   ```json
@@ -1120,6 +1121,15 @@ Every page with a positive score is returned, best first (ties by page name), so
   "text": "Updated wiki page 'DevelopmentGuide' to version 7\nWarning: possible overwrite on 'DevelopmentGuide'. This update was based on version 5, so it should have stored version 6, but the page reads back as version 7. Version 6 was most likely written by someone else between the version check and this write, which replaced it without merging. The page was stored; inspect what version 6 changed with wiki_diff(page_name='DevelopmentGuide', from_version=5, to_version=6) and re-apply anything this write dropped."
 }
 ```
+
+**Unchanged:** content byte-identical to the stored page is not an error. Trac answers "Page not modified" and stores nothing, and the result says so, with no `isError`:
+```json
+{
+  "type": "text",
+  "text": "Wiki page 'DevelopmentGuide' unchanged: content identical to version 5. Trac stored nothing."
+}
+```
+The version named is the page's current version, re-read after the no-op, so when someone else stored the same content meanwhile (the caller passed 5, the page is now 6) it says 6. If that re-read fails the version the caller passed is named, and when neither is known the text says "version unknown". Only Trac's own "page not modified" fault counts as this outcome (Trac /trac_mcp_server #174).
 
 **Error Responses:**
 
@@ -1304,11 +1314,15 @@ Every page with a positive score is returned, best first (ties by page name), so
 }
 ```
 
+**`action`** (string, always present): `"created"` (the page did not exist), `"updated"` (it did and the push stored a new version), or `"unchanged"` (the content was byte-identical to the stored page, so nothing was stored; see below).
+
 **`gate_notes`** (list of strings, always present): the lines the write gate appended to the text -- the write-gate OFF line when the gate is off on this daemon, or the gate-on advisory ("Also reported") lines -- empty when there are none. Carried in `structuredContent` because Claude Code shows it in preference to the text block; see [Write Gate Status](#write-gate-status).
 
 **`readback_failed`** (boolean, always present): `true` when the page was stored but its new version could not be read back; see below.
 
 **`possible_overwrite`** (boolean, always present): `true` when an update stored a version other than the one after the version it was based on -- the push read version 3, so an uncontended write stores 4, but the page reads back as 5. Another write most likely landed between the version check and `putPage` and was replaced by this push without merging (or landed just after it). `intervening_versions` (present only when `true`) lists the versions between the base version and the stored one (`[4]` here), and the text carries a warning that names them and suggests `wiki_diff(page_name=..., from_version=3, to_version=4)` to inspect what they changed. The result is still a success: the page was stored. A create never sets it. Detection only, at no extra RPC (Trac /trac_mcp_server #130). Where the instance has the `tracrpc_comment` plugin's `wiki.putPageIfVersion`, an update goes through it and the window is closed: a write landing between the check and the save is refused as `version_conflict` instead (#129), so the flag can then only mean a write that landed just after this one. See [wiki_update](#wiki_update) for how the version is checked.
+
+**Unchanged:** content byte-identical to the stored page is not an error. Trac answers "Page not modified" and stores nothing, and the result says so, with no `isError`: the text is `Wiki page 'Docs/MyPage' unchanged (version 4): content identical to the stored page. Trac stored nothing.`, `action` is `"unchanged"`, and every other key is as on a stored push (conversion warnings and `gate_notes` kept; `readback_failed` and `possible_overwrite` are `false`). `version` is the page's current version, re-read after the no-op, so a page someone else stored identically in the meantime reports the newer version, including when the push saw no page and would have created it; if that re-read fails it falls back to the version read before the write, and is `null` (text: "version unknown") when neither is known. Only Trac's own "page not modified" fault counts as this outcome (Trac /trac_mcp_server #174).
 
 **Stored, read-back failed:** if `wiki.putPage` succeeded but reading back the page's new version then failed, the result is **not** an error -- the page was stored, and an error result means nothing was. `readback_failed` is `true`, `version` is `null`, `readback_error` carries the read-back's error, and the text says the page WAS stored and not to push again. The push posts `putPage` exactly once: a "not found" fault from the read-back (the page was deleted just after the write) no longer triggers a second write as a create (Trac /trac_mcp_server #140).
 

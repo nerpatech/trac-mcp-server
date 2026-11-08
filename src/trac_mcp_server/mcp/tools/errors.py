@@ -179,7 +179,7 @@ def translate_xmlrpc_error(
                 msgs["already_exists"],
             )
 
-        case s if "version" in s or "not modified" in s:
+        case s if "version" in s:
             action = msgs.get("version", msgs["server"])
             if entity_name:
                 action = action.format(entity_name=entity_name)

@@ -15,6 +15,7 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
 from .errors import build_error_response
@@ -122,7 +123,7 @@ WIKI_WRITE_TOOLS = [
     ),
     types.Tool(
         name="wiki_update",
-        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. If the result says the page WAS stored but its new version could not be read back, do not update it again. A 'possible overwrite' warning means the stored version is not version + 1: another write most likely landed just before this one and was replaced; inspect it with wiki_diff.",
+        description="Update an existing wiki page. Requires the version you read: it is checked against the page's current version immediately before the write, and a stale one is refused with version_conflict. Content is TracWiki and is stored byte-for-byte -- nothing is converted, so hand-authored markup survives exactly as written. If the result says the page WAS stored but its new version could not be read back, do not update it again. A 'possible overwrite' warning means the stored version is not version + 1: another write most likely landed just before this one and was replaced; inspect it with wiki_diff. Content identical to the stored page stores nothing and returns an \"unchanged\" result, not an error.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -253,6 +254,22 @@ async def _handle_create(
         response_lines = _stored_readback_failed_lines(
             "Created", page_name, e, "wiki_create"
         )
+    except WikiPageNotModified as e:
+        # The page was absent at the existence check above and someone
+        # created it with byte-identical content before putPage (ticket
+        # #174): the same answer as a page that exists at the check.
+        shown = (
+            "unknown"
+            if e.current_version is None
+            else e.current_version
+        )
+        return build_error_response(
+            "already_exists",
+            f"Page '{page_name}' was created by another writer with "
+            "identical content after this call's existence check "
+            f"(version {shown}). Trac stored nothing.",
+            "Nothing needs doing: the page already holds this content.",
+        )
     else:
         # Extract version from result
         new_version = result.get("version", 1)
@@ -351,12 +368,35 @@ async def _handle_update(
             f"Page has been modified. Current version is {e.current_version}, you tried to update version {version}.",
             f"Fetch current content with wiki_get(page_name='{page_name}'), then retry update with version={e.current_version}.",
         )
+    except WikiPageNotModified as e:
+        # Byte-identical to the stored page (ticket #174): Trac stored
+        # nothing, which is a no-op, not a failure. The version is the
+        # re-read current one, which differs from the caller's when
+        # someone else stored the same content meanwhile.
+        shown = (
+            e.current_version
+            if e.current_version is not None
+            else e.version
+        )
+        if shown is None:
+            identical_to = "the stored page (version unknown)"
+        else:
+            identical_to = f"version {shown}"
+        response_lines = [
+            f"Wiki page '{page_name}' unchanged: content identical to "
+            f"{identical_to}. Trac stored nothing."
+        ]
+        response_lines.extend(gate_lines)
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text", text="\n".join(response_lines)
+                )
+            ]
+        )
     except xmlrpc.client.Fault as e:
         # Check for version conflict
-        if (
-            "version" in e.faultString.lower()
-            or "not modified" in e.faultString.lower()
-        ):
+        if "version" in e.faultString.lower():
             # Fetch current version for error message
             try:
                 current_info = await run_sync(
