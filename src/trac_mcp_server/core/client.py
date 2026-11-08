@@ -7,10 +7,11 @@ import time
 import weakref
 import xmlrpc.client
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar, cast
 from xml.etree import ElementTree
 
 import requests
@@ -19,6 +20,11 @@ from urllib3.connection import HTTPConnection
 
 from ..config import Config
 from ..validators import validate_content, validate_page_name
+from .faults import (
+    classify_fault,
+    is_missing_method_fault,
+    unwrap_tracrpc_fault,
+)
 from .scope import ScopedSession, scope_for
 from .wiki_search import BM25, Section, search_pages, split_sections
 
@@ -161,14 +167,14 @@ class WikiPageConflict(ValueError):
     """A wiki_update's ``version`` was stale: the page's current version is
     not the one the caller read (ticket #120).
 
-    Raised by ``TracClient.put_wiki_page`` BEFORE ``wiki.putPage`` is
-    posted, because Trac ignores the ``version`` attribute of putPage --
-    no fault ever comes back for a stale one, so the comparison has to be
-    made here (see ``put_wiki_page``).
+    Raised by ``TracClient.put_wiki_page`` by the precheck before
+    ``wiki.putPage`` is posted (Trac ignores putPage's ``version``
+    attribute, #120), by the plugin's conditional put (#129), or after a
+    putPage fault when a re-read shows the page's version moved (a
+    server-side save collision, #185). In every case nothing was stored.
 
     ``current_version`` is ``None`` when the page does not exist at all.
-    Subclasses ``ValueError`` so callers that already catch the client's
-    plain version-conflict ``ValueError`` keep working.
+    Subclasses ``ValueError`` for callers that catch ``ValueError``.
     """
 
     def __init__(
@@ -181,6 +187,38 @@ class WikiPageConflict(ValueError):
         super().__init__(message)
         self.page_name = page_name
         self.expected_version = expected_version
+        self.current_version = current_version
+
+
+class WikiPageNotModified(ValueError):
+    """A wiki write's content was byte-identical to the stored page, so
+    Trac stored nothing (ticket #174).
+
+    Raised by ``TracClient.put_wiki_page`` from both write paths when the
+    server answers "Page not modified" (Trac's own TracError text, matched
+    exactly: a false match is reported to callers as success). That is a
+    no-op, not a failure: callers report it as "unchanged". ``version`` is
+    the version the caller passed (``None`` for an unversioned write).
+    ``current_version`` is the page's version re-read after the no-op,
+    best effort (``None`` when the read failed or answered nothing
+    usable): it is what the page is at now, which differs from
+    ``version`` when someone else stored the same content meanwhile.
+
+    Subclasses ``ValueError``, with the message the client has always
+    used, so callers that catch the plain ``ValueError`` (the CLI
+    ``convert`` code) keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        page_name: str,
+        version: int | None,
+        current_version: int | None = None,
+    ):
+        super().__init__(message)
+        self.page_name = page_name
+        self.version = version
         self.current_version = current_version
 
 
@@ -207,8 +245,10 @@ _WIKI_CONFLICT_MARKER = re.compile(
     r"^'?\[wiki-version-conflict current_version=(\d+|none)\]"
 )
 
-# TracXMLRPC's MethodNotFound fault code (JSON-RPC's "method not found").
-_METHOD_NOT_FOUND_FAULT_CODE = -32601
+# Trac's own TracError text for a byte-identical write, compared lowercased
+# (ticket #174). Not the looser "not modified": a plugin's unrelated fault
+# containing that would be reported as an "unchanged" success.
+_WIKI_NOT_MODIFIED_MARKER = "page not modified"
 
 # How long a client remembers that the plugin method is missing before it
 # tries again. Long enough that a burst of writes to a plugin-less instance
@@ -241,34 +281,6 @@ WIKI_SCOPE_INDEX_MAX = 16
 # "Since the beginning" for ``wiki.getRecentChanges``.
 _WIKI_EPOCH = "19700101T00:00:00"
 
-# TracXMLRPC wraps every fault from a plain TracError as
-# "'<message>' while executing '<method>()'".
-_TRACRPC_FAULT_WRAPPER = re.compile(
-    r"^'(?P<message>.*)' while executing '[\w.]+\(\)'$", re.DOTALL
-)
-
-
-def _is_missing_method_fault(
-    err: xmlrpc.client.Fault, method: str
-) -> bool:
-    """True when ``err`` says the server has no RPC method ``method``.
-
-    TracXMLRPC raises ``MethodNotFound('RPC method "<name>" not found')``
-    with fault code -32601. The text fallback matches the same heuristic as
-    the ticket_comment tools' ``_translate_missing_method``, narrowed to the
-    method name so that a "page not found" fault can never pass for it.
-    "No such method" (some servers' wording) counts on the same terms: the
-    text must name ``method``.
-    """
-    if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
-        return True
-    text = err.faultString.lower()
-    if method.lower() not in text:
-        return False
-    return ("not found" in text and "method" in text) or (
-        "no such method" in text
-    )
-
 
 @dataclass
 class _OptionalMethod:
@@ -292,26 +304,10 @@ class _OptionalMethod:
     def note_fault(self, err: xmlrpc.client.Fault) -> bool:
         """True, and remember the absence, when ``err`` says the server
         has no such method; False for any other fault."""
-        if not _is_missing_method_fault(err, self.name):
+        if not is_missing_method_fault(err, self.name):
             return False
         self.absent_until = time.monotonic() + self.ttl
         return True
-
-
-def _unwrap_tracrpc_fault(
-    err: xmlrpc.client.Fault,
-) -> xmlrpc.client.Fault:
-    """``err`` with TracXMLRPC's "while executing" wrapper removed.
-
-    The wrapper names the method, and "wiki.putPageIfVersion()" contains
-    "version" -- which ``wiki_update``'s fault handler reads as a version
-    conflict. Unwrapped, a fault from the plugin path reads the same as the
-    same fault from ``wiki.putPage`` would.
-    """
-    match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
-    if match is None:
-        return err
-    return xmlrpc.client.Fault(err.faultCode, match.group("message"))
 
 
 @dataclass
@@ -341,6 +337,14 @@ def _wiki_time_key(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+K = TypeVar("K")
+V = TypeVar("V")
+
+# What a ``_batched_multicall`` decoder returns to drop its item: None
+# is a value there, as it is on the single-read path.
+_SKIP = object()
+
+
 def _multicall_value(entry: Any) -> tuple[bool, Any]:
     """``(True, value)`` for one ``system.multicall`` result entry that
     is a value (a one-element list), ``(False, None)`` for a fault (a
@@ -366,6 +370,14 @@ def _wiki_page_record(
         _wiki_time_key(info.get("lastModified")),
         text,
     )
+
+
+def _decode_wiki_page(name: str, values: list[Any]) -> Any:
+    """``_batched_multicall`` decoder for a page's ``getPageInfo`` and
+    ``getPage`` values: its record, or ``_SKIP`` if they are not a
+    page."""
+    record = _wiki_page_record(*values)
+    return _SKIP if record is None else record
 
 
 class WikiPageStoredReadbackFailed(Exception):
@@ -628,35 +640,17 @@ class TracClient:
         returns -- for each id that loaded; an id that failed is absent.
 
         - Ids are de-duplicated, order kept. An empty list makes no RPC.
-        - While the server has ``system.multicall``, ids go in batches of
-          ``TICKET_FETCH_BATCH``, one ``ticket.get`` each. A fault on one
-          entry leaves that id absent, with no single retry. A reply that
-          is not a list of the right length sends that batch to single
-          gets.
-        - A ``Fault`` that says ``system.multicall`` is missing is
-          remembered (shared with the wiki search) and the rest is read
-          by single gets; any other ``Fault``, or any other exception,
-          sends just that batch to single gets.
-        - Single gets are ``get_ticket`` per id, a failure skipping that
-          id.
+        - Ids go in batches of ``TICKET_FETCH_BATCH``, one ``ticket.get``
+          each; the batching and fallback rules are those of
+          ``_batched_multicall``.
         """
-        ids = list(dict.fromkeys(ticket_ids))
-        out: dict[int, Any] = {}
-        done = 0
-        if ids and self._multicall.available():
-            while done < len(ids):
-                batch = ids[done : done + TICKET_FETCH_BATCH]
-                try:
-                    out.update(self._fetch_ticket_batch(batch))
-                except xmlrpc.client.Fault as err:
-                    if self._multicall.note_fault(err):
-                        break  # no multicall: the rest goes one by one
-                    out.update(self._fetch_tickets_singly(batch))
-                except Exception:
-                    out.update(self._fetch_tickets_singly(batch))
-                done += len(batch)
-        out.update(self._fetch_tickets_singly(ids[done:]))
-        return out
+        return self._batched_multicall(
+            list(dict.fromkeys(ticket_ids)),
+            TICKET_FETCH_BATCH,
+            lambda tid: [{"methodName": "ticket.get", "params": [tid]}],
+            lambda tid, values: values[0],
+            self._fetch_tickets_singly,
+        )
 
     def _fetch_tickets_singly(self, ids: list[int]) -> dict[int, Any]:
         """``get_ticket`` per id, skipping any that fail."""
@@ -668,21 +662,98 @@ class TracClient:
                 continue
         return out
 
-    def _fetch_ticket_batch(self, ids: list[int]) -> dict[int, Any]:
-        """One ``system.multicall`` of ``ticket.get`` for ``ids``. A
-        per-entry fault leaves that id out; a reply that is not a list of
-        ``len(ids)`` entries is read singly."""
-        calls = [
-            {"methodName": "ticket.get", "params": [tid]} for tid in ids
-        ]
+    def _batched_multicall(
+        self,
+        items: list[K],
+        batch_size: int,
+        calls_for: Callable[[K], list[dict[str, Any]]],
+        decode: Callable[[K, list[Any]], V | object],
+        fetch_singly: Callable[[list[K]], dict[K, V]],
+    ) -> dict[K, V]:
+        """Read ``items`` in ``system.multicall`` batches, falling back
+        to ``fetch_singly``; ``{item: value}`` for each that loaded.
+
+        The one batch-then-fallback loop behind ``get_tickets`` and the
+        wiki search's page fetch (Trac /trac_mcp_server #172).
+
+        - ``calls_for(item)`` is the multicall entries
+          (``{"methodName", "params"}``) that read one item; the count
+          may differ per item.
+        - ``decode(item, values)`` turns the item's result values (one
+          per entry, in order) into its value, or returns ``_SKIP`` to
+          drop it; any other return, ``None`` included, is the value.
+          It runs only when every entry of the item is a value.
+        - ``fetch_singly(items)`` is the one-call-per-item read.
+
+        No items makes no RPC. While the server has ``system.multicall``
+        the items go in batches of ``batch_size``:
+
+        - a reply that is not a list of exactly the batch's entry count
+          sends that batch to ``fetch_singly``, and is not remembered;
+        - an entry that is a fault leaves its item absent, with no
+          single retry;
+        - a ``Fault`` that says ``system.multicall`` is missing is
+          remembered (``self._multicall``, shared by every caller) and
+          the rest, that batch included, goes to ``fetch_singly``;
+        - any other ``Fault``, or any other exception (a timeout, a
+          dropped connection, an unparseable reply), sends just that
+          batch to ``fetch_singly`` -- one batch failing must not fail
+          the whole read -- and batching goes on.
+
+        ``fetch_singly`` runs outside the ``try``: an error it raises
+        propagates, and never triggers a second single read.
+        """
+        out: dict[K, V] = {}
+        done = 0
+        if items and self._multicall.available():
+            while done < len(items):
+                batch = items[done : done + batch_size]
+                fallback = False
+                try:
+                    got = self._multicall_batch(
+                        batch, calls_for, decode
+                    )
+                    if got is None:
+                        fallback = True
+                    else:
+                        out.update(got)
+                except xmlrpc.client.Fault as err:
+                    if self._multicall.note_fault(err):
+                        break  # no multicall: the rest goes singly
+                    fallback = True
+                except Exception:
+                    fallback = True
+                if fallback:
+                    out.update(fetch_singly(batch))
+                done += len(batch)
+        out.update(fetch_singly(items[done:]))
+        return out
+
+    def _multicall_batch(
+        self,
+        batch: list[K],
+        calls_for: Callable[[K], list[dict[str, Any]]],
+        decode: Callable[[K, list[Any]], V | object],
+    ) -> dict[K, V] | None:
+        """One ``system.multicall`` for ``batch``; see
+        ``_batched_multicall``. ``None`` if the reply is not a list of
+        one result per call. Raises whatever the RPC raises."""
+        per_item = [calls_for(item) for item in batch]
+        calls = [call for item_calls in per_item for call in item_calls]
         results = self._rpc_request("system", "multicall", calls)
         if not isinstance(results, list) or len(results) != len(calls):
-            return self._fetch_tickets_singly(ids)
-        out = {}
-        for tid, entry in zip(ids, results, strict=True):
-            ok, value = _multicall_value(entry)
-            if ok:
-                out[tid] = value
+            return None
+        out: dict[K, V] = {}
+        offset = 0
+        for item, item_calls in zip(batch, per_item, strict=True):
+            entries = results[offset : offset + len(item_calls)]
+            offset += len(item_calls)
+            decoded = [_multicall_value(entry) for entry in entries]
+            if not all(ok for ok, _ in decoded):
+                continue
+            value = decode(item, [v for _, v in decoded])
+            if value is not _SKIP:
+                out[item] = cast(V, value)
         return out
 
     def get_ticket_changelog(self, ticket_id: int) -> Any:
@@ -1331,56 +1402,6 @@ class TracClient:
             )
         return result
 
-    def get_wiki_page_with_metadata(
-        self, page_name: str
-    ) -> dict[str, Any]:
-        """
-        Get wiki page content with full metadata.
-        This method provides helpful error messages with suggestions for missing pages.
-
-        Args:
-            page_name: Name of wiki page
-
-        Returns:
-            Dict with keys: name, content, version, author, lastModified
-
-        Raises:
-            ValueError: If page not found, includes suggestions for similar pages
-            xmlrpc.client.Fault: For other server errors
-        """
-        try:
-            content = self.get_wiki_page(page_name)
-            info = self.get_wiki_page_info(page_name)
-
-            return {
-                "name": page_name,
-                "content": content,
-                "version": info.get("version"),
-                "author": info.get("author"),
-                "lastModified": info.get("lastModified"),
-            }
-        except xmlrpc.client.Fault as err:
-            if err.faultCode == 1:  # Page not found
-                # Find similar pages by substring matching
-                all_pages = self.list_wiki_pages()
-                query_lower = page_name.lower()
-                suggestions = [
-                    p for p in all_pages if query_lower in p.lower()
-                ][:5]
-
-                suggestion_text = ""
-                if suggestions:
-                    suggestion_text = (
-                        f" Similar pages: {', '.join(suggestions)}"
-                    )
-
-                raise ValueError(
-                    f"Page '{page_name}' not found.{suggestion_text}"
-                ) from None
-            else:
-                # Re-raise other faults
-                raise
-
     def search_wiki_pages_by_title(
         self, query: str, max_results: int = 10
     ) -> list[dict[str, Any]]:
@@ -1534,28 +1555,23 @@ class TracClient:
     ) -> dict[str, tuple[int | None, str | None, str]]:
         """Read the version, modification time and text of ``names``.
 
-        ``system.multicall`` batches of ``WIKI_FETCH_BATCH_PAGES`` pages;
-        one call per page when the server has no multicall. A page that
-        cannot be read is left out of the result.
+        Pages go in batches of ``WIKI_FETCH_BATCH_PAGES``; the batching
+        and fallback rules are those of ``_batched_multicall``. A page
+        that cannot be read is left out of the result.
         """
-        out: dict[str, tuple[int | None, str | None, str]] = {}
-        done = 0
-        if names and self._multicall.available():
-            while done < len(names):
-                batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
-                try:
-                    out.update(self._fetch_wiki_batch(batch))
-                except xmlrpc.client.Fault as err:
-                    if self._multicall.note_fault(err):
-                        break  # no multicall: the rest goes page by page
-                    out.update(self._fetch_wiki_singly(batch))
-                except Exception:
-                    # A timeout, a dropped connection, an unparseable
-                    # reply: one batch failing must not fail the search.
-                    out.update(self._fetch_wiki_singly(batch))
-                done += len(batch)
-        out.update(self._fetch_wiki_singly(names[done:]))
-        return out
+        # Each page is a getPageInfo then a getPage (in that order, so a
+        # page edited in between is cached under the older version and
+        # re-read next time).
+        return self._batched_multicall(
+            names,
+            WIKI_FETCH_BATCH_PAGES,
+            lambda name: [
+                {"methodName": "wiki.getPageInfo", "params": [name]},
+                {"methodName": "wiki.getPage", "params": [name]},
+            ],
+            _decode_wiki_page,
+            self._fetch_wiki_singly,
+        )
 
     def _fetch_wiki_singly(
         self, names: list[str]
@@ -1572,38 +1588,6 @@ class TracClient:
             except Exception:
                 # Skip pages that can't be read (permission denied, etc.)
                 continue
-            if record is not None:
-                out[name] = record
-        return out
-
-    def _fetch_wiki_batch(
-        self, names: list[str]
-    ) -> dict[str, tuple[int | None, str | None, str]]:
-        """One ``system.multicall`` reading ``names``.
-
-        Each page is a ``getPageInfo`` then a ``getPage`` (in that order,
-        so a page edited in between is cached under the older version and
-        re-read next time). A per-entry fault comes back as a
-        ``{'faultCode', 'faultString'}`` dict: that page is skipped.
-        """
-        calls = []
-        for name in names:
-            calls.append(
-                {"methodName": "wiki.getPageInfo", "params": [name]}
-            )
-            calls.append(
-                {"methodName": "wiki.getPage", "params": [name]}
-            )
-        results = self._rpc_request("system", "multicall", calls)
-        if not isinstance(results, list) or len(results) != len(calls):
-            return {}
-        out = {}
-        for i, name in enumerate(names):
-            info_ok, info = _multicall_value(results[2 * i])
-            text_ok, text = _multicall_value(results[2 * i + 1])
-            if not (info_ok and text_ok):
-                continue
-            record = _wiki_page_record(info, text)
             if record is not None:
                 out[name] = record
         return out
@@ -1660,11 +1644,16 @@ class TracClient:
             WikiPageConflict: If ``version`` is not the page's current
                 version (or the page does not exist): the client's
                 precheck found it, and putPage was not called, or the
-                plugin method refused, and stored nothing. A
-                ``ValueError`` subclass.
-            ValueError: If page_name or content validation fails, or the
-                server reports a version conflict
-            xmlrpc.client.Fault: If server returns error or permissions denied
+                plugin method refused, or a putPage fault was followed by
+                a re-read showing a different version (a save collision).
+                Nothing was stored in any case. A ``ValueError`` subclass.
+            WikiPageNotModified: If the content is identical to the stored
+                page (Trac stored nothing; ticket #174). A ``ValueError``
+                subclass.
+            ValueError: If page_name or content validation fails
+            xmlrpc.client.Fault: If server returns error or permissions
+                denied (a putPage fault is a ``WikiPageConflict`` instead
+                when the page's version moved past ``version``)
             WikiPageStoredReadbackFailed: If putPage returned ``True`` (the
                 page IS stored) but reading back its new version failed.
                 Every other exception above means nothing was stored.
@@ -1722,10 +1711,12 @@ class TracClient:
             WikiPageConflict: The plugin's conflict fault: ``version`` is
                 not the page's current version, checked in the same
                 transaction as the save. Nothing was stored.
-            ValueError: "Page not modified", as from ``wiki.putPage``.
+            WikiPageNotModified: "Page not modified": the content is
+                identical to the stored page, and nothing was stored.
+                A ``ValueError`` subclass.
             xmlrpc.client.Fault: Any other fault, with TracXMLRPC's
                 "while executing" wrapper removed (see
-                ``_unwrap_tracrpc_fault``). Nothing was stored.
+                ``unwrap_tracrpc_fault``). Nothing was stored.
         """
         # A JSON-schema "integer" admits 3.0; the plugin takes an int.
         expected = int(version)
@@ -1767,11 +1758,32 @@ class TracClient:
                     version,
                     current,
                 ) from None
-            if "not modified" in err.faultString.lower():
-                raise ValueError(
-                    "Page not modified (content identical)"
+            if _WIKI_NOT_MODIFIED_MARKER in err.faultString.lower():
+                raise self._wiki_not_modified(
+                    page_name, version
                 ) from None
-            raise _unwrap_tracrpc_fault(err) from None
+            raise unwrap_tracrpc_fault(err) from None
+
+    def _wiki_not_modified(
+        self, page_name: str, version: int | None
+    ) -> WikiPageNotModified:
+        """The no-op exception for ``page_name``, with the page's current
+        version re-read (ticket #174). Best effort: any failure of the
+        read, or a reply that is not a non-empty dict, leaves
+        ``current_version`` None, and never replaces the no-op."""
+        current: int | None = None
+        try:
+            info = self.get_wiki_page_info(page_name)
+            if isinstance(info, dict) and info:
+                current = _wiki_version(info.get("version"))
+        except Exception:
+            current = None
+        return WikiPageNotModified(
+            "Page not modified (content identical)",
+            page_name,
+            version,
+            current,
+        )
 
     def _put_wiki_page_checked_here(
         self,
@@ -1786,6 +1798,18 @@ class TracClient:
         Used for creates and unversioned writes, and for versioned ones
         where the server lacks ``wiki.putPageIfVersion``. Returns
         putPage's result.
+
+        A ``putPage`` fault stored nothing. With ``version`` given, the
+        page's version is re-read (best effort) and, if it differs from
+        ``version``, the fault is raised as ``WikiPageConflict`` with the
+        current version: the page moved between the precheck and the save
+        (a server-side save collision). Otherwise -- the version is
+        unchanged, or the re-read failed -- the original fault is
+        re-raised, with TracXMLRPC's "while executing" wrapper removed
+        (``unwrap_tracrpc_fault``). The fault text is never consulted
+        for that decision (Trac /trac_mcp_server #185). A fault from
+        the ``version`` pre-check's ``getPageInfo`` that is not a
+        missing page is re-raised the same way, unwrapped.
         """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
@@ -1795,14 +1819,13 @@ class TracClient:
             try:
                 info = self.get_wiki_page_info(page_name)
             except xmlrpc.client.Fault as err:
-                # A not-found Fault means the page is missing, same as
-                # the 0 return below; any other Fault propagates.
-                fault_str = err.faultString.lower()
-                if (
-                    "not found" not in fault_str
-                    and "does not exist" not in fault_str
-                ):
-                    raise
+                # A fault classify_fault reads as not_found (its code
+                # 404, or its text with quoted names removed) means the
+                # page is missing, same as the 0 return below; any other
+                # Fault propagates, unwrapped like the putPage faults
+                # below (Trac /trac_mcp_server #191).
+                if classify_fault(err) != "not_found":
+                    raise unwrap_tracrpc_fault(err) from None
                 info = None
             # Some Trac instances return 0 (int) instead of raising a
             # Fault for a non-existent page.
@@ -1834,17 +1857,37 @@ class TracClient:
             # Handle specific fault conditions
             fault_str = err.faultString.lower()
 
-            if "not modified" in fault_str:
-                raise ValueError(
-                    "Page not modified (content identical)"
+            if _WIKI_NOT_MODIFIED_MARKER in fault_str:
+                raise self._wiki_not_modified(
+                    page_name, version
                 ) from None
-            elif "version" in fault_str:
-                raise ValueError(
-                    "Version conflict - page was modified by another user"
+            if version is None:
+                # A create / unversioned write: nothing to compare.
+                raise unwrap_tracrpc_fault(err) from None
+            # A fault is a conflict only if the page moved, which the
+            # fault text cannot tell: a save collision's wording is
+            # backend-specific (sqlite's "UNIQUE constraint failed:
+            # wiki.name, wiki.version" is one of several), and the old
+            # `"version" in fault_str` test also caught faults that
+            # merely name a page like VersionNotes (Trac
+            # /trac_mcp_server #185). So decide by state.
+            now: int | None = None
+            try:
+                info = self.get_wiki_page_info(page_name)
+                if isinstance(info, dict) and info:
+                    now = _wiki_version(info.get("version"))
+            except Exception:
+                now = None
+            if now is not None and now != version:
+                raise WikiPageConflict(
+                    f"Version conflict on '{page_name}': you tried to "
+                    f"update version {version} but its current "
+                    f"version is {now}",
+                    page_name,
+                    version,
+                    now,
                 ) from None
-            else:
-                # Re-raise other faults
-                raise
+            raise unwrap_tracrpc_fault(err) from None
         return result
 
     def _read_back_stored_page(
@@ -2106,11 +2149,11 @@ class TracClient:
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:
-            # Fall back to getAllPages + getPageInfo if getRecentChanges not available
-            if (
-                "not found" in str(e).lower()
-                or "no such method" in str(e).lower()
-            ):
+            # Fall back to getAllPages + getPageInfo if getRecentChanges
+            # not available. Only a missing-method fault counts: a
+            # resource fault whose text says "not found" is re-raised
+            # (Trac /trac_mcp_server #191).
+            if is_missing_method_fault(e, "getRecentChanges"):
                 pages = self.list_wiki_pages()
                 changes = []
                 for page in pages:

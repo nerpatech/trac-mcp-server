@@ -3,11 +3,12 @@
 import bisect
 import re
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from .common import (
     ConversionResult,
     is_link_target,
+    trac_continuation_bound,
     tracwiki_to_markdown_lang,
 )
 
@@ -184,6 +185,22 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|\|.*\|\|\s*$")
 _DIV_TABLE_MARK = "\x00DIVTABLE\x00"
 _DIV_TABLE_MARK_RE = re.compile(r"^[ \t]*\x00DIVTABLE\x00$")
 
+# Ticket #178 review: the one whitespace-only line the list-continuation pass
+# must tell from a raw one. `[[BR]]` becomes a hard break and, when it sits
+# alone on its line (`a [[BR]][[BR]]`, a lone `[[BR]]`), a whitespace-only
+# line that is item CONTENT to Trac, while a raw whitespace-only line (or a
+# `\r` line of a CRLF document) is a blank line and ends the list (measured
+# on /trac_test, 2026-11-08). The two read the same once converted, so
+# `_convert_macros` marks the lines it made: `_BR_LINE_MARK` is appended to
+# each, and `_separate_list_from_trailing_paragraph` removes it as it walks
+# the lines. The mark is the ASCII unit separator, a character `str.strip`
+# and `\s` count as whitespace, so every pass between the two (headings,
+# formatting, links) treats a marked line exactly as the unmarked one and no
+# output byte changes except where the #178 rule fires. A document that
+# already holds the character is not marked at all (`_br_marks_active`):
+# its own characters must survive, and the rule then keeps `master`'s bytes.
+_BR_LINE_MARK = "\x1f"
+
 # Trac's block-opener grammar: `{{{` alone, or `{{{#!processor args`, with
 # optional whitespace between the braces and the `#!` (measured on Trac's
 # renderer: `{{{ #!div class=x` is a div). Text after the braces that is not
@@ -252,6 +269,15 @@ def _enclosing_list_marker(
 _NON_ONE_ORDERED_RE = re.compile(r"^(?!0*1\.$)\d+\.$")
 
 
+# A line CommonMark reads as the start of a list item: a bullet (`+` too,
+# which TracWiki has no marker for) or digits with `.` or `)`, then a space or
+# the end of the line (ticket #176: a moved line that starts like this would
+# become a nested Markdown item).
+_MARKDOWN_ITEM_START_RE = re.compile(
+    r"^(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)"
+)
+
+
 def _lines_since_blank(pieces: list[str]) -> list[str]:
     """The complete lines of `"".join(pieces)` after its last blank line
     (all of them if there is none), the partial last line excluded.
@@ -275,7 +301,26 @@ def _lines_since_blank(pieces: list[str]) -> list[str]:
         size *= 4
 
 
-def _continued_item(columns: Sequence[int], width: int) -> int | None:
+def _deepest_item_at_or_left(
+    columns: Sequence[int], width: int
+) -> int | None:
+    """The index into `columns` (ascending, outermost first) of the deepest
+    item whose marker column is at or left of `width`, or None when there is
+    none. The owner search `_continued_item` (a plain text line) and
+    `_shift_nested_markers`' citation rule (#187) share."""
+    for i in range(len(columns) - 1, -1, -1):
+        if columns[i] <= width:
+            return i
+    return None
+
+
+def _continued_item(
+    columns: Sequence[int],
+    width: int,
+    *,
+    innermost_ordered: bool = False,
+    upper_bound: bool,
+) -> int | None:
     """The index into `columns` of the list item an indented, non-blank,
     non-marker line `width` columns wide continues, or None when the line
     ends the list (ticket #149).
@@ -284,28 +329,107 @@ def _continued_item(columns: Sequence[int], width: int) -> int | None:
     first (`m_0 < ... < m_k`). Measured on /trac_test on 2026-11-07 and read
     off Trac 1.6's `Formatter._indent_formatter`:
 
-    * `width >= m_k`: the line continues the innermost item (a line AT the
-      marker column included: ` 1. a` / ` b` / ` 1. c` is one list with b in
-      item a).
+    * `width > m_k + 2` (`m_k + 3` when the innermost item is a digits-only
+      ordered one, `innermost_ordered`): the list ends. The line is a
+      blockquote in Trac (ticket #175).
+    * `width >= m_k`, up to that bound: the line continues the innermost item
+      (a line AT the marker column included: ` 1. a` / ` b` / ` 1. c` is one
+      list with b in item a).
     * `0 < width < m_k` and `width > m_0`: the items whose marker is past
       `width` close, and the line continues the deepest remaining item
       (`m <= width`).
     * otherwise (`width <= m_0` while a deeper item is open, or width 0):
       the list ends.
 
-    This is the lower side of Trac's rule only. Trac also puts an upper
-    bound on `width` (marker column + 2 for a bullet, + 3 for an ordered
-    item); a line deeper than that leaves the list. This function does not
-    apply it -- that is a separate ticket, and lines deeper than `m_k` keep
-    continuing the innermost item here as they did before #149.
+    The upper bound is Trac 1.6's `_indent_formatter` rule, measured on
+    /trac_test on 2026-11-07 (ticket #175): ` * a` / text at column 3
+    continues `a`, at column 4 the list ends; ` 1. a` / text at column 4
+    continues, at column 5 the list ends. It is read off the innermost item
+    only, which is the item a deeper line would continue; the caller passes
+    `innermost_ordered` from that item's marker line (`_is_digits_ordered`).
+
+    The upper bound is a rule about RAW TracWiki lines. A caller that walks
+    text the converter has already rewritten (list items' content sits at
+    their Markdown text column, which is past the bound of an item numbered
+    10 or more) passes `upper_bound=False` and gets the lower-side rule only.
     """
     if not columns or width <= 0:
+        return None
+    if upper_bound and width > trac_continuation_bound(
+        columns[-1], ordered=innermost_ordered
+    ):
         return None
     if width >= columns[-1]:
         return len(columns) - 1
     if width <= columns[0]:
         return None
-    return max(i for i, column in enumerate(columns) if column <= width)
+    return _deepest_item_at_or_left(columns, width)
+
+
+_DIGITS_ORDERED_RE = re.compile(rf"^[ \t]+{_NUMERIC_MARKER}(?=[ \t])")
+
+
+def _is_digits_ordered(marker_line: str) -> bool:
+    """True when `marker_line` opens a digits-only ordered item (`1.`), the
+    kind whose continuation bound is marker column + 3 (ticket #175); a
+    bullet's is + 2. Lettered and roman markers are not asked: the gate
+    (`_marker_column_rule_applies`) excludes them."""
+    return bool(_DIGITS_ORDERED_RE.match(marker_line))
+
+
+def _text_column_past_trac_bound(
+    marker_column: int, marker_line: str, text_column: int, width: int
+) -> bool:
+    """True when a line `width` columns wide, deeper than the item's marker
+    column `marker_column`, is still inside Trac's continuation bound for
+    the item whose marker line is `marker_line` (marker column + 3 for a
+    digits-only ordered item, + 2 for a bullet; `_continued_item`), while
+    the item's Markdown text column `text_column` is past that bound
+    (ticket #178)."""
+    bound = trac_continuation_bound(
+        marker_column, ordered=_is_digits_ordered(marker_line)
+    )
+    return width <= bound < text_column
+
+
+def _stack_continued_item(
+    stack: list[tuple[int, re.Match[str]]],
+    width: int,
+    *,
+    upper_bound: bool,
+) -> int | None:
+    """`_continued_item` over a list-item `stack` (non-empty), the bound read
+    off the innermost item's marker line."""
+    return _continued_item(
+        [c for c, _ in stack],
+        width,
+        innermost_ordered=_is_digits_ordered(stack[-1][1].string),
+        upper_bound=upper_bound,
+    )
+
+
+# The character a list marker switches to (ticket #177): a bullet's
+# `-`/`*`, an ordered marker's `.`/`)` delimiter.
+_SWITCHED_MARKER_CHAR = {"-": "*", "*": "-", ".": ")", ")": "."}
+
+
+def _set_marker_char(
+    line: str, column: int, token: str, char: str
+) -> str:
+    """`line` with the list marker `token` at `column` written with `char` as
+    its character: the last character of the token, which is the bullet
+    itself or an ordered marker's delimiter."""
+    at = column + len(token) - 1
+    return line[:at] + char + line[at + 1 :]
+
+
+def _item_text_column(marker_end: int, after: str) -> int:
+    """The Markdown text column of a list item whose marker ends at
+    `marker_end` and is followed by `after`: where the item's content
+    starts. One to four spaces of gap before text are kept, anything else
+    (no text, or five or more) counts as one."""
+    gap = len(after) - len(after.lstrip(" \t"))
+    return marker_end + (gap if 1 <= gap <= 4 and after.strip() else 1)
 
 
 def _marker_column_rule_applies(marker_line: str, line: str) -> bool:
@@ -335,7 +459,11 @@ def _marker_column_rule_applies(marker_line: str, line: str) -> bool:
 
 
 def _list_stack_step(
-    stack: list[tuple[int, re.Match[str]]], line: str
+    stack: list[tuple[int, re.Match[str]]],
+    line: str,
+    *,
+    upper_bound: bool,
+    quote_rule: bool | None = None,
 ) -> None:
     """Advance a list-item stack over one line, in place (the per-line step
     of `_open_list_item`, which documents the walk).
@@ -346,10 +474,46 @@ def _list_stack_step(
     at or past its column, with one exception (ticket #149): when
     `_marker_column_rule_applies` holds for the innermost item and
     `_continued_item` says the line continues that innermost item, the stack
-    is kept (a line at its marker column included). Every other shape,
-    including a line that continues an outer item and closes deeper ones
-    (ticket #176), keeps that pop, as on `master`.
+    is kept (a line at its marker column included). When the gate holds and
+    `_continued_item` answers an OUTER item (ticket #176: the line closes the
+    deeper ones and continues that item) whose marker line passes the gate
+    too, the stack is truncated to that item. For a line strictly between two markers that is the stack the pop
+    leaves; it differs only for a line AT a middle item's marker column in a
+    list of three or more levels, which keeps that middle item open (the pop
+    closed it). Every other shape keeps that pop, as on `master`.
+
+    Ticket #175: Trac's upper bound (a line past the innermost item's marker
+    column + 2, or + 3 for a digits-only ordered item, ends the list) is a
+    rule about RAW TracWiki lines. Only with `upper_bound` does such a line
+    empty the stack, which the pop would not do. A walk over lines the
+    converter already rewrote passes `upper_bound=False`: those sit at an
+    item's Markdown text column, past the bound for an item numbered 10 or
+    more, and `master`'s pop is what they need. Every caller states it.
+
+    Ticket #187: with `quote_rule`, a citation line (`>` after its indent,
+    no tab in the indent) is Trac's `handle_quote_block`, which is
+    `close_list(depth)`: it closes only the items whose marker column is
+    STRICTLY greater than the `>` column, so a `>` AT an item's marker
+    column stays in that item, and it has no upper bound (#175). The stack
+    is truncated to the items at or left of the `>` and never emptied by
+    the bound, which is what a plain line past the bound does. This is the
+    rule `_shift_nested_markers` applies to the same line; the earlier
+    passes (fences, indented blocks, the split past the bound) walk raw
+    lines and must agree with it. `quote_rule` defaults to `upper_bound`:
+    every raw-line walk that applies the bound gets the rule. Two raw-line
+    walks pass `upper_bound=False` (the bound is decided elsewhere or not
+    at all: `_open_list_item` for the in-item fence, `_split_past_bound`'s
+    per-line step, whose bound check is its own) and still need the quote
+    rule, so they pass `quote_rule=True`; they must not take the plain-text
+    bound, which would move other lines. A walk over rewritten lines gets
+    neither: a `>` already sits at a Markdown text column there and `   > q`
+    at a nested marker's column must close that item, as CommonMark does.
+    A tab in the indent keeps the old pop too. Known limit: the step is
+    per line, so a later line of a run of `>` lines at a smaller column
+    pops again, where Trac closes on the run's first line only.
     """
+    if quote_rule is None:
+        quote_rule = upper_bound
     if not line.strip():
         stack.clear()
         return
@@ -361,14 +525,136 @@ def _list_stack_step(
         stack.append((column, found))
         return
     if (
-        stack
-        and _marker_column_rule_applies(stack[-1][1].string, line)
-        and _continued_item([c for c, _ in stack], column)
-        == len(stack) - 1
+        quote_rule
+        and line.lstrip(" \t").startswith(">")
+        and "\t" not in _indent_of(line)
     ):
+        while stack and stack[-1][0] > column:
+            stack.pop()
         return
+    if stack and _marker_column_rule_applies(stack[-1][1].string, line):
+        answer = _stack_continued_item(
+            stack, column, upper_bound=upper_bound
+        )
+        if answer is not None and _marker_column_rule_applies(
+            stack[answer][1].string, line
+        ):
+            # The innermost item (nothing to close) or an outer one (#176;
+            # its marker line passes the gate too, as in the separator).
+            del stack[answer + 1 :]
+            return
+        if answer is None and upper_bound:
+            # The list ends: a line at or left of the outermost marker, or
+            # past the innermost item's upper bound. The pop below would
+            # empty the stack for the first and leave it whole for the
+            # second.
+            stack.clear()
+            return
     while stack and stack[-1][0] >= column:
         stack.pop()
+
+
+def _is_block_line(line: str) -> bool:
+    """True for an output line that is not paragraph text: a code-block
+    placeholder (`\\x00CODE<n>\\x00`), a fence line or a table row. A list
+    after one needs no blank line to be a list in CommonMark (ticket #180).
+    The list passes run before `_convert_tables`, so a TracWiki table row is
+    still `||...||`; a line that starts with ONE pipe is paragraph text."""
+    stripped = line.strip()
+    return stripped.startswith(("\x00CODE", "```", "~~~", "||"))
+
+
+class _ShiftItem(NamedTuple):
+    """An open list item as `_shift_nested_markers` tracks it (ticket #179).
+
+    `column` is the marker's source column (what Trac's rules read), `shift`
+    how many columns the item's lines move on output, `text_column` the
+    Markdown text column of the item AFTER the move, and `frozen` marks an
+    item whose subtree is never moved (a tab-indented marker, a root marker
+    at column 4 or more, or anything under a `tab_gap` item: master's
+    reading, kept byte for byte). `tab_gap` is set when a tab sits between the
+    marker and the text: `_item_text_column` counts it as one column, so the
+    text column is unknown and the item's children are frozen (review fix 2).
+    A nested ordered item not numbered 1 is an ordinary item here (ticket
+    #180): it moves to the parent's text column, and `_shift_nested_markers`
+    adds the blank line CommonMark needs before it, where it knows the item
+    and its parent are not frozen."""
+
+    column: int
+    shift: int
+    text_column: int
+    frozen: bool
+    tab_gap: bool = False
+
+
+def _matched_blocks(lines: list[str]) -> dict[int, int]:
+    """Opener index -> closer index of every `{{{` ... `}}}` block that is
+    still in the lines (a processor block passed through, not stashed like
+    code), by `_passthrough_containers`' discipline: a closer pops the most
+    recent unmatched opener, a closer with no opener is an ordinary line, and
+    an opener nobody closes is left out (`_shift_nested_markers` leaves its
+    lines to the per-line rules)."""
+    openers: list[int] = []
+    pairs: dict[int, int] = {}
+    for idx, line in enumerate(lines):
+        if _BLOCK_OPEN_RE.match(line):
+            openers.append(idx)
+        elif _BLOCK_CLOSE_RE.match(line) and openers:
+            pairs[openers.pop()] = idx
+    return pairs
+
+
+def _shift_line(line: str, shift: int) -> str:
+    """`line` moved `shift` columns right (left when negative: leading
+    spaces are removed, never more than the line has)."""
+    if shift >= 0:
+        return " " * shift + line
+    drop = min(-shift, len(line) - len(line.lstrip(" ")))
+    return line[drop:]
+
+
+def _lines_above_since_blank(
+    lines: list[str],
+    inside: set[int],
+    start: int,
+) -> list[str]:
+    """The lines above line `start` since the last blank one, block content
+    and block opener lines left out (what `_items_open_above` walks)."""
+    above: list[str] = []
+    for idx in range(start - 1, -1, -1):
+        if idx in inside:
+            continue
+        if not lines[idx].strip():
+            break
+        if idx + 1 in inside and lines[idx].lstrip(" \t").startswith(
+            "{{{"
+        ):
+            continue
+        above.append(lines[idx])
+    above.reverse()
+    return above
+
+
+def _items_open_above(
+    lines: list[str],
+    inside: set[int],
+    start: int,
+) -> list[tuple[int, re.Match[str]]]:
+    """The list-item stack open just above line `start`, as
+    `_list_stack_step` walks it over the lines since the last blank one.
+    `inside` holds the indices of block content lines
+    (`_lines_inside_blocks`), which are skipped.
+
+    The line that opens a block (one starting with `{{{`, whose next line is
+    block content) is skipped too. Trac keeps a block, whatever its indent,
+    inside the open item; walked as a line, a flush-left `{{{` would end the
+    list (ticket #175, the seed of `_split_past_bound`).
+
+    `lines` are raw TracWiki, so the walk applies the upper bound (#175)."""
+    stack: list[tuple[int, re.Match[str]]] = []
+    for line in _lines_above_since_blank(lines, inside, start):
+        _list_stack_step(stack, line, upper_bound=True)
+    return stack
 
 
 def _open_list_item(lines: list[str]) -> re.Match[str] | None:
@@ -387,7 +673,12 @@ def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """
     stack: list[tuple[int, re.Match[str]]] = []
     for line in lines:
-        _list_stack_step(stack, line)
+        # Raw lines, no plain-text bound (see `_list_stack_step`, #187): a
+        # `>` at an item's marker column keeps that item, so a fence after
+        # the quote is still in it.
+        _list_stack_step(
+            stack, line, upper_bound=False, quote_rule=True
+        )
     return stack[-1][1] if stack else None
 
 
@@ -420,6 +711,33 @@ _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
 # the indented form this pattern is anchored directly on the marker with no
 # leading-whitespace requirement.
 _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
+
+# Any list marker at column zero (ticket #182), from the same fragments:
+# Trac's list indent is ``\s*``, so ``- a``, ``* a`` and ``1. a`` at column
+# zero are list items (measured on the WikiFormatting page: one ``<ul>``
+# with a nested ``<ul>``), and an indented line after one continues it.
+# No lettered alternative: a column-zero lettered line is the stash
+# lookback's (``_col0_list_stashes``), as ``_fallback_column_zero_lists``
+# stashes it before ``_convert_indented_blocks`` runs.
+_LIST_MARKER_COL0_RE = re.compile(
+    rf"^(?:{_BULLET_MARKER}|{_NUMERIC_MARKER})(?=[ \t])"
+)
+# A column-zero digits-ordered marker line (ticket #190): the kind whose
+# continuation bound is column 3, where a bullet's is column 2.
+_DIGITS_ORDERED_COL0_RE = re.compile(rf"^{_NUMERIC_MARKER}(?=[ \t])")
+# Two shapes CommonMark reads as a block of their own where Trac reads text
+# (ticket #190): a thematic break of any width (`___`, `***`, wider than
+# `_LAZY_CONTINUATION_INTERRUPT_RE`'s `---`), and an HTML block start.
+_THEMATIC_BREAK_RE = re.compile(r"^(?:[-*_][ \t]*){3,}$")
+_HTML_BLOCK_START_RE = re.compile(r"^<[A-Za-z/!?]")
+# The three lines of a ``_stash_fallback`` stash, as ``_convert_indented_blocks``
+# sees them (ticket #182): the opening fence (indented when the block was),
+# the placeholder at column zero, and the closing fence.
+_STASH_PLACEHOLDER_RE = re.compile(r"^\x00CODE(\d+)\x00$")
+_STASH_FENCE_OPEN_RE = re.compile(
+    rf"^[ \t]*`{{3,}}{re.escape(FALLBACK_FENCE_INFO)}$"
+)
+_STASH_FENCE_CLOSE_RE = re.compile(r"^`{3,}(?!`)")
 
 # A line shape that CommonMark already treats as "interrupting" -- it starts
 # a new sibling block on its own, without needing a blank line, rather than
@@ -531,6 +849,9 @@ class TracWikiParser:
         self._unknown_macros = unknown_macros
         self._link_placeholders: list[str] = []
         self._code_placeholders: list[str] = []
+        self._br_marks_active = False
+        self._item_fence_stashes: set[int] = set()
+        self._col0_list_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -548,6 +869,9 @@ class TracWikiParser:
         self.warnings = []
         self._link_placeholders = []
         self._code_placeholders = []
+        self._br_marks_active = False
+        self._item_fence_stashes = set()
+        self._col0_list_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -558,6 +882,12 @@ class TracWikiParser:
         text = self._convert_formatting(text)
         text = self._convert_links(text)
         text = self._convert_lists(text)
+        if self._br_marks_active and _BR_LINE_MARK in text:
+            raise ValueError(
+                "tracwiki_to_markdown: unrestored [[BR]] line mark "
+                "(unit separator) survived the list pass -- failing "
+                "loudly instead of emitting corrupted content (#178)"
+            )
         text = self._convert_other_elements(text)
         text = self._convert_tables(text)
         text = self._restore_link_placeholders(text)
@@ -848,6 +1178,19 @@ class TracWikiParser:
         touches a line around it -- prose above, below, or between two runs
         is left exactly as written.
 
+        A column-zero continuation line ENDS the list, which stays true. An
+        INDENTED line continues the item instead (measured on /trac_test,
+        ticket #190): Trac reads the marker at column 0, and the lines after
+        it are walked as Trac walks a list (``_lettered_item_extent``): an
+        indented marker line opens a nested item, and any other indented
+        line must continue one of the open items
+        (``_continued_item``, bound included).  Such lines straight after a
+        marker line join the stash, and a marker line at column zero after
+        them continues it.  A blank line, a column-zero non-marker line, a
+        line past the bound, a tab in the indent, a table row or heading, a
+        line holding a code-block delimiter and a line of an earlier stash
+        (a processor block's fence) stop it.
+
         Runs as its own top-level pass rather than a branch inside
         ``_convert_indented_blocks``, per the ticket: a column-zero marker
         line's first character is never whitespace, so the two passes can
@@ -859,6 +1202,7 @@ class TracWikiParser:
         """
         lines = text.split("\n")
         masked = self._verbatim_mask(text).split("\n")
+        stashed = self._stash_lines(lines, masked)
         out: list[str] = []
         index = 0
         n = len(lines)
@@ -872,13 +1216,76 @@ class TracWikiParser:
                 masked[index]
             ):
                 index += 1
+                # Ticket #190: indented lines straight after the marker
+                # line continue the item, and a marker line after them
+                # continues the list.
+                index = self._lettered_item_extent(
+                    masked, stashed, index
+                )
             out.append(
                 self._stash_fallback(
                     "\n".join(lines[start:index]),
                     "Lettered or roman ordered list",
                 )
             )
+            self._col0_list_stashes.add(
+                len(self._code_placeholders) - 1
+            )
         return "\n".join(out)
+
+    def _lettered_item_extent(
+        self, masked: list[str], stashed: set[int], index: int
+    ) -> int:
+        """The index of the first line at or after `index` that does NOT
+        continue the column-zero lettered or roman item above it (ticket
+        #190), walking the lines as Trac walks a list.
+
+        The open items are a stack of marker columns, starting at
+        ``[0]`` (the item itself, ordered). An indented marker line pops
+        the items at or past its column and opens one (a bullet or an
+        ordered item, by its marker); any other indented line must
+        continue one of the open items (``_continued_item`` with the
+        upper bound, read off the innermost item), and closes the items
+        deeper than the one it continues. Stops at a blank line, a line at
+        column zero, a tab in the indent, a code-block delimiter (which
+        would strand the other half of its block), a line of an earlier
+        stash (`stashed`: a processor block's fence) and a table row or
+        heading, which Trac does not keep in a list."""
+        columns = [0]
+        ordered = [True]
+        while index < len(masked):
+            line = masked[index]
+            indent = _indent_of(line)
+            if (
+                not line.strip()
+                or not indent
+                or "\t" in indent
+                or index in stashed
+                or self._line_holds_a_brace(line)
+                or _INDENTED_TABLE_RE.match(line)
+                or _INDENTED_HEADING_RE.match(line)
+            ):
+                break
+            width = len(indent)
+            if _LIST_MARKER_RE.match(line):
+                while columns and columns[-1] >= width:
+                    columns.pop()
+                    ordered.pop()
+                columns.append(width)
+                ordered.append(line.lstrip(" ")[0] not in "*-")
+            else:
+                owner = _continued_item(
+                    columns,
+                    width,
+                    innermost_ordered=ordered[-1],
+                    upper_bound=True,
+                )
+                if owner is None:
+                    break
+                del columns[owner + 1 :]
+                del ordered[owner + 1 :]
+            index += 1
+        return index
 
     @staticmethod
     def _line_holds_a_brace(masked_line: str) -> bool:
@@ -953,6 +1360,16 @@ class TracWikiParser:
            which is also what keeps a multi-line list item working: its
            continuation line is indented too, and claiming it would take the
            item apart.
+           Indented lines directly before the run's first marker, with no
+           list open above (ticket #182), are cut off first: they are a
+           quote to Trac, and the list after them is the next run.  They go
+           through step 5 on their own, followed by one blank line.  The
+           cut is declined when that marker is indented 4 or more columns
+           or by a tab (the blank line would make it indented code), and
+           after a stashed processor block in an open item.  A head that
+           is itself a heading or table row stays as written, and the
+           blank line follows it only before an ordered marker that does
+           not start at 1, which cannot interrupt a paragraph (#183).
         5. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
            byte-for-byte.  Converted.  Anything else -- one space, three,
@@ -960,6 +1377,27 @@ class TracWikiParser:
            fallback, which restores it unchanged and *warns*.  Before ticket
            #73, one and three spaces lost the indent silently and four spaces
            or a tab became a literal ``{{{`` code block.
+
+        Between steps 3 and 4 (ticket #190): a run that starts on the line
+        straight after a column-zero bullet or digits item and holds no list
+        marker is that item's continuation, not a quote.  Trac reads the
+        marker at column 0, so an indented line continues the item up to
+        ``trac_continuation_bound(0, ordered=...)`` -- column 2 under a
+        bullet, 3 under a digits item -- and the first line past it ends the
+        list (measured on /trac_test).  The lines up to the bound go out as
+        written, which CommonMark keeps in the item, and the rest of the run
+        goes through steps 4 and 5 as its own run.  When the head takes the
+        whole run and the next line is a column-zero line that ends the list
+        for Trac, one blank line follows the head, so CommonMark does not
+        read that line as a lazy continuation of the item; a column-zero
+        marker line, a code-block delimiter and a stash line get none (Trac
+        keeps a column-zero ``{{{`` block in the item).  Declined, with
+        master's bytes (``_column_zero_continuation`` lists them): a tab in
+        the indent of ANY line of the run, a line of an earlier stash, a
+        head line that is Markdown-only syntax (a ``>`` citation, ``#``
+        heading, fence, rule, ``+ x`` / ``1) x`` item, HTML block) or a
+        Trac table row or heading, and a run holding a list marker anywhere
+        (`` - a`` / ``  q`` / ``   r`` / ``      - x`` keeps master's path).
 
         Steps 2 and 3 run **before** step 4, which is the operator decision on
         ticket #63 applied twice: a run holding both a bullet and a definition
@@ -980,6 +1418,11 @@ class TracWikiParser:
         out: list[str] = []
         stack: list[int] = []
         inside: set[int] | None = None
+        # Ticket #182: True once an earlier indented run held a list marker,
+        # a brace, a definition list or a lettered list, until a column-zero
+        # line; a list may then still be open above the next run.
+        list_may_be_open = False
+        stashed = self._stash_lines(lines, masked)
         index = 0
         while index < len(lines):
             probe = masked[index]
@@ -987,6 +1430,22 @@ class TracWikiParser:
                 # Blank lines leave the stack alone; column zero clears it.
                 if probe.strip():
                     stack = []
+                    # A block's lines are not prose (the mask fills its
+                    # interior and its closing line; a stashed processor
+                    # block's fence, placeholder and closing line stand for
+                    # one), and a block joins an open item, so they leave
+                    # the flag alone (ticket #182).
+                    if self._is_column_zero_list_line(
+                        lines, probe, index
+                    ):
+                        # A column-zero item keeps its list open (#182).
+                        list_may_be_open = True
+                    elif not (
+                        probe.startswith("\x01")
+                        or self._line_holds_a_brace(probe)
+                        or index in stashed
+                    ):
+                        list_may_be_open = False
                 out.append(lines[index])
                 index += 1
                 continue
@@ -1003,11 +1462,13 @@ class TracWikiParser:
 
             if any(self._line_holds_a_brace(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.extend(run)
                 continue
 
             if any(_DEFINITION_LIST_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Definition list"
@@ -1017,6 +1478,7 @@ class TracWikiParser:
 
             if any(_ALPHA_LIST_MARKER_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Lettered or roman ordered list"
@@ -1024,9 +1486,135 @@ class TracWikiParser:
                 )
                 continue
 
+            # Ticket #190: a run straight after a column-0 item, with no
+            # marker in it, continues that item up to Trac's bound.
+            head = self._column_zero_continuation(
+                masked, run, probes, stashed, start
+            )
+            if head:
+                stack = []
+                list_may_be_open = True
+                out.extend(run[:head])
+                index = start + head
+                # Trac ends the list at a column-zero line after the whole
+                # run; CommonMark would read it as a lazy continuation of
+                # the item, so a blank line goes between (F1).
+                if head == len(run) and self._item_run_ends_the_list(
+                    lines, masked, stashed, index
+                ):
+                    out.append("")
+                continue
+
+            # Ticket #182: indented quote lines directly before the run's
+            # first marker are a blockquote to Trac and the list after
+            # them a top-level list. The run is cut at the marker (the
+            # rest is the next run) when no list can be open above it, so
+            # the head is classified on its own below.
+            cut_head = False
+            marker_at = next(
+                (
+                    i
+                    for i, m in enumerate(probes)
+                    if _LIST_MARKER_RE.match(m)
+                ),
+                None,
+            )
+            if marker_at is not None and inside is None:
+                inside = self._lines_inside_blocks(lines)
+            # Ticket #183: Trac ends a list at every blank line, so a run
+            # that starts straight after one has no list open above it
+            # for Trac, whatever `list_may_be_open` says. A raw line of
+            # spaces, tabs or `\r` is a blank line to Trac too (measured,
+            # #178); any other whitespace character is not measured and
+            # keeps master's bytes, and a `[[BR]]` line is text at this
+            # pass, so it never counts.
+            blank_before = (
+                marker_at is not None
+                and start > 0
+                and not masked[start - 1].strip(" \t\r")
+            )
+            if (
+                marker_at is not None
+                and marker_at > 0
+                and (not list_may_be_open or blank_before)
+                and not self._first_marker_is_code_indented(
+                    probes[marker_at]
+                )
+                and not self._starts_inside_open_item(
+                    lines, masked, inside, stashed, start
+                )
+            ):
+                cut_head = True
+                index = start + marker_at
+                run = run[:marker_at]
+                probes = probes[:marker_at]
+
+            # Ticket #183: a marker line straight after a blank line that
+            # ended a list is a new top-level list to Trac, but CommonMark
+            # nests it in the open item when it sits at or past the item's
+            # text column. The run is carried verbatim up to the first
+            # marker left of that column.
+            if marker_at == 0 and blank_before:
+                fenced = self._marker_run_after_blank_in_list(
+                    lines, masked, probes, inside, start
+                )
+                if fenced:
+                    stack = []
+                    list_may_be_open = True
+                    out.append(
+                        self._stash_fallback(
+                            "\n".join(run[:fenced]),
+                            "List marker after a blank line inside a "
+                            "list's text column",
+                        )
+                    )
+                    index = start + fenced
+                    continue
+
+            # Ticket #175: Trac ends a list at an indented line past the
+            # innermost item's upper bound and renders it as a blockquote.
+            # The run is split there; the quote part goes out verbatim.
+            if marker_at is not None and not cut_head:
+                list_may_be_open = True
+                segments = self._split_past_bound(
+                    lines, masked, inside, start, index
+                )
+                if segments is not None:
+                    stack = []
+                    for seg, (is_quote, part) in enumerate(segments):
+                        if is_quote:
+                            # A blank line each side keeps the fence out
+                            # of the list for CommonMark; the write leg
+                            # writes the same blank lines back.
+                            if out and out[-1].strip():
+                                out.append("")
+                            out.append(
+                                self._stash_fallback(
+                                    "\n".join(part),
+                                    "Indented line past a list item's bound",
+                                )
+                            )
+                            if seg < len(segments) - 1:
+                                out.append("")
+                        else:
+                            out.extend(part)
+                    continue
+
             if any(self._line_is_not_a_quote(m) for m in probes):
                 stack = []
                 out.extend(run)
+                if cut_head and _NON_ONE_ORDERED_RE.match(
+                    _LIST_MARKER_RE.match(masked[index])
+                    .group(0)
+                    .strip()
+                ):
+                    # The head stays as written. A list that does not
+                    # start at 1 cannot interrupt the head's paragraph
+                    # and would read as its text (`2.` after `  = h =`),
+                    # so the blank line the cut owes it is added then
+                    # (#183 review). A bullet or `1.` interrupts, and
+                    # #182's bytes for it stay.
+                    out.append("")
                 continue
 
             # Ticket #143 review (F3): a run that starts straight after the
@@ -1058,7 +1646,369 @@ class TracWikiParser:
                         "\n".join(run), self._indent_kind(run)
                     )
                 )
+            if cut_head:
+                # One blank line ends the quote (or the fence) before the
+                # list that was cut from its run (ticket #182).
+                out.append("")
         return "\n".join(out)
+
+    def _column_zero_continuation(
+        self,
+        masked: list[str],
+        run: list[str],
+        probes: list[str],
+        stashed: set[int],
+        start: int,
+    ) -> int:
+        """How many leading lines of the run at `start` continue the
+        column-0 item straight above it, or 0 (ticket #190).
+
+        Trac reads a column-0 marker as a list marker at column 0, so an
+        indented line continues the item up to
+        ``trac_continuation_bound(0, ordered=...)`` (column 2 under a
+        bullet, 3 under a digits item) and the first line past it ends the
+        list (measured on /trac_test, 2026-11-08). The caller emits those
+        lines as written, where CommonMark keeps them in the item (at or
+        past its text column they continue it, left of it they are a lazy
+        continuation of its paragraph), and the rest of the run goes on
+        through the later steps as its own run.
+
+        0 (master's path) when:
+
+        * the previous line, on the masked text, is not a column-0 bullet
+          or digits marker line;
+        * the run holds a list marker anywhere (the item's own nested
+          list, which the later passes place: `` - a`` / ``  q`` /
+          ``   r`` / ``      - x`` keeps master's bytes);
+        * a line of the run has a tab in its indent. Trac counts a tab as
+          ONE column, so a tab line may be inside the bound where the split
+          would fence it outside; the whole run declines, checked before
+          the walk;
+        * a line of the run is a line of a stash (`stashed`): the indented
+          opening fence of a processor block that
+          ``_fallback_processor_blocks`` already stashed is not text;
+        * no line is within the bound;
+        * a head line, stripped of its indent, is syntax that CommonMark
+          reads as something other than item text but Trac reads as text
+          (T5): a citation, heading, fence or rule
+          (``_LAZY_CONTINUATION_INTERRUPT_RE``), any thematic break, a
+          Markdown-only item start (``+ x``, ``1) x``), an HTML block, or
+          a Trac table row or heading (``_line_is_not_a_quote``: Trac ends
+          the list at a table row, so that run keeps step 4).
+        """
+        if start == 0 or not _LIST_MARKER_COL0_RE.match(
+            masked[start - 1]
+        ):
+            return 0
+        if any(_LIST_MARKER_RE.match(m) for m in probes):
+            return 0
+        if any("\t" in _indent_of(line) for line in run):
+            return 0
+        if any(start + i in stashed for i in range(len(run))):
+            return 0
+        bound = trac_continuation_bound(
+            0,
+            ordered=bool(
+                _DIGITS_ORDERED_COL0_RE.match(masked[start - 1])
+            ),
+        )
+        head = 0
+        for line in run:
+            if len(_indent_of(line)) > bound:
+                break
+            head += 1
+        for line, probe in zip(run[:head], probes[:head], strict=True):
+            text = line.lstrip(" ")
+            if (
+                _LAZY_CONTINUATION_INTERRUPT_RE.match(text)
+                or _THEMATIC_BREAK_RE.match(text)
+                or _MARKDOWN_ITEM_START_RE.match(text)
+                or _HTML_BLOCK_START_RE.match(text)
+                or self._line_is_not_a_quote(probe)
+            ):
+                return 0
+        return head
+
+    def _item_run_ends_the_list(
+        self,
+        lines: list[str],
+        masked: list[str],
+        stashed: set[int],
+        index: int,
+    ) -> bool:
+        """True when the line at `index`, straight after a head that took
+        the whole of a column-0 item's continuation run, ends the list for
+        Trac and so wants a blank line before it for CommonMark (ticket
+        #190): a non-blank line (at column zero, the run being maximal)
+        that is not a column-zero marker line (or the stash lookback
+        ``_is_column_zero_list_line``), a code-block delimiter, or a line
+        of a stash. Trac keeps a column-zero ``{{{`` block in the item
+        (measured, T3), so none of those gets the blank line."""
+        if index >= len(lines) or not masked[index].strip():
+            return False
+        return not (
+            self._is_column_zero_list_line(lines, masked[index], index)
+            or self._line_holds_a_brace(masked[index])
+            or index in stashed
+        )
+
+    def _marker_run_after_blank_in_list(
+        self,
+        lines: list[str],
+        masked: list[str],
+        probes: list[str],
+        inside: set[int],
+        start: int,
+    ) -> int:
+        """How many lines of the run at `start` to fence verbatim, or 0
+        (ticket #183). The run's first line is a list marker and the line
+        before it is a blank line.
+
+        The items open above the blank lines are found with ONE upward
+        walk, started above every consecutive blank line before the run (a
+        line of spaces, tabs or `\\r` is one; Trac ends the list at the
+        first of them, so the number does not matter). The outermost item
+        decides:
+
+        * A marker indented 4 or more columns, or by a tab, is fenced
+          whatever the item: CommonMark reads it as indented code or as
+          nested in the item even LEFT of the item's text column, and
+          after a lettered item (a fallback of its own, #74) as indented
+          code. The extent is as below, with an unknown text column
+          (lettered item, or a tab in the item's indent) taken as
+          unreachable by any plain marker.
+        * Any other marker is fenced when it reaches the item's text
+          column (`_item_text_column`). Declined (0) when the item is
+          lettered or a tab is in its indent (`_marker_column_rule_applies`
+          is False for both): the column is unknown, and neither item is
+          an open Markdown list to nest a plain marker in (a lettered list
+          is a fallback of its own, a tab-indented line is code), so a
+          plain marker after it is already a new list.
+
+        The fence runs to the first later PLAIN marker line (not
+        code-indented) left of the text column, or to the end of the run.
+        Last, declined when the list above had a nested marker moved:
+        `_shift_nested_markers` (#179) then moves this marker to the
+        list's own column, which is a new list in Markdown too and keeps
+        master's bytes. That probe is the costly step, so it runs after
+        every other decline; it is asked about the list and this one line,
+        and only this line counts."""
+        first = probes[0]
+        code_indented = self._first_marker_is_code_indented(first)
+        top = start - 1
+        while top > 0 and not masked[top - 1].strip(" \t\r"):
+            top -= 1
+        above = _lines_above_since_blank(lines, inside, top)
+        stack: list[tuple[int, re.Match[str]]] = []
+        for line in above:
+            _list_stack_step(stack, line, upper_bound=True)
+        if not stack:
+            return 0
+        outer = stack[0][1]
+        # The helper's lettered and tab tests are the "is the item's text
+        # column known" question; its interrupter test cannot match the
+        # item's own marker line.
+        text_column = (
+            _item_text_column(outer.end(), outer.string[outer.end() :])
+            if _marker_column_rule_applies(outer.string, outer.string)
+            else None
+        )
+        if not code_indented and (
+            text_column is None
+            or _indent_width(_indent_of(first)) < text_column
+        ):
+            return 0
+        moved = self._shift_nested_markers(
+            "\n".join([*above, "", lines[start]])
+        )
+        if moved.rsplit("\n", 1)[-1] != lines[start]:
+            return 0
+        fenced = len(probes)
+        for offset in range(1, len(probes)):
+            probe = probes[offset]
+            if (
+                _LIST_MARKER_RE.match(probe)
+                and not self._first_marker_is_code_indented(probe)
+                and (
+                    text_column is None
+                    or _indent_width(_indent_of(probe)) < text_column
+                )
+            ):
+                fenced = offset
+                break
+        return fenced
+
+    def _is_column_zero_list_line(
+        self, lines: list[str], probe: str, index: int
+    ) -> bool:
+        """True for a column-zero line that Trac reads as a list item, or
+        that closes the fence a column-zero lettered list was stashed in
+        (ticket #182).  `probe` is the masked `lines[index]`, which is not
+        indented."""
+        if _LIST_MARKER_COL0_RE.match(probe):
+            return True
+        for look in (index, index - 1):
+            m = (
+                _STASH_PLACEHOLDER_RE.match(lines[look])
+                if look >= 0
+                else None
+            )
+            if m and int(m.group(1)) in self._col0_list_stashes:
+                return True
+        return False
+
+    @staticmethod
+    def _stash_lines(lines: list[str], masked: list[str]) -> set[int]:
+        """Indices of the lines of every `_stash_fallback` stash: the
+        placeholder (column zero, not inside a block), the opening fence
+        before it and the closing fence after it (ticket #182).
+
+        `_fallback_processor_blocks` stashes `#!comment`, `#!table`, `#!td`
+        and `#!th` blocks before `_convert_indented_blocks` runs, so a
+        block there is these three lines with no braces. They are the
+        block's lines, as the masked interior and closing line of a
+        `{{{` block are."""
+        stashed: set[int] = set()
+        for idx, probe in enumerate(masked):
+            if not _STASH_PLACEHOLDER_RE.match(probe):
+                continue
+            stashed.add(idx)
+            if idx > 0 and _STASH_FENCE_OPEN_RE.match(lines[idx - 1]):
+                stashed.add(idx - 1)
+            if idx + 1 < len(lines) and _STASH_FENCE_CLOSE_RE.match(
+                lines[idx + 1]
+            ):
+                stashed.add(idx + 1)
+        return stashed
+
+    @staticmethod
+    def _first_marker_is_code_indented(marker_probe: str) -> bool:
+        """True when a list marker is indented 4 or more columns, or by a
+        tab (ticket #182). A blank line before such a marker makes
+        CommonMark read it as indented code, so the cut, which adds that
+        blank line, is declined and master's bytes stay."""
+        indent = _indent_of(marker_probe)
+        return "\t" in indent or len(indent) >= 4
+
+    def _item_stack_after_block(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        start: int,
+    ) -> list[tuple[int, re.Match[str]]]:
+        """The list items open above the run at `start` when it begins
+        straight after a block's closing line, else empty: the seed
+        `_split_past_bound` walks from, and `_starts_inside_open_item`
+        reads (ticket #182).
+
+        `_closes_block_line` sees only an indented closing line (its indent
+        is masked); `inside` also holds a flush-left one."""
+        if not (
+            self._closes_block_line(masked, start)
+            or start - 1 in inside
+        ):
+            return []
+        return _items_open_above(lines, inside, start)
+
+    def _starts_inside_open_item(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        stashed: set[int],
+        start: int,
+    ) -> bool:
+        """True when the run at `start` begins straight after a block's
+        closing line with a list item open above the block (ticket #182).
+        A block is a `{{{` block (the seed `_split_past_bound` uses) or a
+        stashed processor block, whose lines `_items_open_above` then
+        skips as it skips a block's content."""
+        if self._item_stack_after_block(lines, masked, inside, start):
+            return True
+        if start - 1 not in stashed:
+            return False
+        return bool(_items_open_above(lines, inside | stashed, start))
+
+    def _split_past_bound(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        start: int,
+        end: int,
+    ) -> list[tuple[bool, list[str]]] | None:
+        """Split the run `lines[start:end]` (which holds a list marker line)
+        where Trac ends a list at an indented line past the innermost item's
+        upper bound (ticket #175), or None when no line is past it.
+
+        The run is walked with a list stack as `_list_stack_step` does,
+        over the masked probes. A run that starts straight after a block's
+        closing line is seeded with the item open before the block, as
+        `_continues_item_after_block` finds it. At the first non-marker line
+        where the stack is non-empty, `_marker_column_rule_applies` holds
+        and the line would be quote text (not a table row, heading and the
+        like: `_line_is_not_a_quote`, which keep their usual path) and its
+        width is past the innermost item's bound (marker column + 2 for a
+        bullet, + 3 for a digits-only ordered item), the walk splits:
+        the lines before it stay as they are, and the quote part runs from
+        that line up to the next marker line (or the end of the run). The
+        walk then restarts at that marker line with an empty stack. The
+        result is `(is_quote, original lines)` segments in order.
+        """
+        segments: list[tuple[bool, list[str]]] = []
+        found = False
+        pos = start
+        while pos < end:
+            stack: list[tuple[int, re.Match[str]]] = []
+            if pos == start:
+                stack = self._item_stack_after_block(
+                    lines, masked, inside, start
+                )
+            split = None
+            for idx in range(pos, end):
+                probe = masked[idx]
+                if _LIST_MARKER_RE.match(probe):
+                    _list_stack_step(stack, probe, upper_bound=False)
+                    continue
+                if (
+                    stack
+                    and _marker_column_rule_applies(
+                        stack[-1][1].string, probe
+                    )
+                    and not self._line_is_not_a_quote(probe)
+                ):
+                    width = _indent_width(_indent_of(probe))
+                    if (
+                        width > stack[-1][0]
+                        and _stack_continued_item(
+                            stack, width, upper_bound=True
+                        )
+                        is None
+                    ):
+                        split = idx
+                        break
+                # The bound was decided above; the step reads only the
+                # lower side (its default). A citation line closes items by
+                # Trac's quote rule, so the text after it is judged against
+                # the right item (#187).
+                _list_stack_step(
+                    stack, probe, upper_bound=False, quote_rule=True
+                )
+            if split is None:
+                segments.append((False, lines[pos:end]))
+                break
+            found = True
+            quote_end = split
+            while quote_end < end and not _LIST_MARKER_RE.match(
+                masked[quote_end]
+            ):
+                quote_end += 1
+            if split > pos:
+                segments.append((False, lines[pos:split]))
+            segments.append((True, lines[split:quote_end]))
+            pos = quote_end
+        return segments if found else None
 
     @staticmethod
     def _closes_block_line(masked: list[str], start: int) -> bool:
@@ -1086,31 +2036,23 @@ class TracWikiParser:
         A line AT the marker's column of a bullet or digits-only ordered
         item also counts (#149, `_marker_column_rule_applies` gates it, as
         in `_list_stack_step`); a line that would close deeper items is not
-        claimed (#176). `inside` holds the indices of block content lines
+        claimed (#176), nor is one past the item's upper bound (#175: Trac
+        ends the list there; a block opener past it is a block, not a
+        line, and is skipped, #144). `inside` holds the indices of block content lines
         (`_lines_inside_blocks`), which are skipped: a blank or column-zero
         line in a code body does not end the list. The stack empties at a
         blank line, so only the lines after the last blank one matter.
         """
-        above: list[str] = []
-        for idx in range(start - 1, -1, -1):
-            if idx in inside:
-                continue
-            if not lines[idx].strip():
-                break
-            above.append(lines[idx])
-        above.reverse()
-        stack: list[tuple[int, re.Match[str]]] = []
-        for line in above:
-            _list_stack_step(stack, line)
+        stack = _items_open_above(lines, inside, start)
         if not stack:
             return False
         marker_line = stack[-1][1].string
         width = _indent_width(_indent_of(lines[start]))
         if _marker_column_rule_applies(marker_line, lines[start]):
             # A line that would close deeper items stays as it was (#176).
-            return _continued_item([c for c, _ in stack], width) == (
-                len(stack) - 1
-            )
+            return _stack_continued_item(
+                stack, width, upper_bound=True
+            ) == (len(stack) - 1)
         return width > stack[-1][0]
 
     def _lines_inside_blocks(self, lines: list[str]) -> set[int]:
@@ -1391,6 +2333,11 @@ class TracWikiParser:
         read the block as the item's continuation (F3). The first shown
         line is carried by the placeholder itself, so the stash holds it
         without O.
+
+        Ticket #179: the later lines of the stash carry O, so the stash is
+        recorded in `_item_fence_stashes`: when `_shift_nested_markers` moves
+        the item (a list nested left of its parent's text column), it moves
+        the placeholder line and those lines by the same shift.
         """
         line_start = text.rfind("\n", 0, start) + 1
         indent = text[line_start:start]
@@ -1416,6 +2363,9 @@ class TracWikiParser:
         # A blank first line leaves the placeholder line whitespace-only.
         first = shown[0][len(out_indent) :] if shown[0] else ""
         self._code_placeholders.append("\n".join([first] + shown[1:]))
+        # The stash holds lines at O: `_shift_nested_markers` (#179) moves
+        # them with the item.
+        self._item_fence_stashes.add(len(self._code_placeholders) - 1)
         placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
         return (
             f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
@@ -1577,6 +2527,13 @@ class TracWikiParser:
         # (ticket #30). Consuming any newline (and trailing whitespace)
         # that immediately follows the macro in the source avoids
         # emitting a second one.
+        # Ticket #178 review: each hard break is tagged with `_BR_LINE_MARK`
+        # so that, below, the lines made of nothing else can be told from a
+        # raw whitespace-only line. A document that already holds the mark
+        # character is left untagged (see `_BR_LINE_MARK`).
+        self._br_marks_active = _BR_LINE_MARK not in text
+        br_tag = _BR_LINE_MARK if self._br_marks_active else ""
+
         def convert_br(m: re.Match[str]) -> str:
             # "[[BR]]" itself is always 6 chars; anything after that in
             # the match is the consumed trailing whitespace/newline, which
@@ -1584,7 +2541,7 @@ class TracWikiParser:
             core_end = m.start() + len("[[BR]]")
             if self._is_backtick_wrapped(text, m.start(), core_end):
                 return m.group(0)
-            return "  \n"
+            return br_tag + "  \n"
 
         text = re.sub(
             r"\[\[BR\]\][ \t]*\r?\n?",
@@ -1592,6 +2549,23 @@ class TracWikiParser:
             text,
             flags=re.IGNORECASE,
         )
+
+        def settle_marks(body: str) -> str:
+            # A tag on a line that holds anything else is just dropped; a
+            # line left with whitespace only keeps ONE, at its end. A line
+            # left EMPTY (no indentation) is an empty line, which ends a
+            # list in Trac and in Markdown alike, and stays unmarked.
+            kept: list[str] = []
+            for line in body.split("\n"):
+                if br_tag in line:
+                    line = line.replace(br_tag, "")
+                    if line and not line.strip():
+                        line += br_tag
+                kept.append(line)
+            return "\n".join(kept)
+
+        if br_tag and br_tag in text:
+            text = settle_marks(text)
 
         # TracLinks: Keep as-is since Markdown has no equivalent
         # Examples: #123, ticket:1, wiki:Page, changeset:abc123
@@ -1618,8 +2592,15 @@ class TracWikiParser:
             if args or name.lower() in _KNOWN_MACROS:
                 match self._unknown_macros:
                     case "drop":
-                        # Silently omit the macro from the output.
-                        return ""
+                        # Silently omit the macro from the output. Ticket
+                        # #179 review: a line the macro was alone on is
+                        # left whitespace-only, which is item CONTENT to
+                        # Trac (the macro was on it). `br_tag` marks the
+                        # spot, and `settle_marks` below keeps ONE mark on a
+                        # line that ends up whitespace-only, as for
+                        # `[[BR]]` alone, so the list walks do not take it
+                        # for a blank line.
+                        return br_tag
                     case _:
                         # "preserve" (default): leave [[MacroName(args)]]
                         # literal. markdown_to_tracwiki's _BRACKET_SYNTAX_RE
@@ -1645,6 +2626,8 @@ class TracWikiParser:
             text,
             flags=re.IGNORECASE,
         )
+        if br_tag and self._unknown_macros == "drop" and br_tag in text:
+            text = settle_marks(text)
         return text
 
     def _convert_headings(self, text: str) -> str:
@@ -1742,7 +2725,16 @@ class TracWikiParser:
         (the only thing the separator reads) is untouched by swapping
         ``*`` for ``-``, but running it first keeps this method's own
         order matching the order the two defects were found in.
+
+        Ticket #179: first of all, `_shift_nested_markers` moves a list
+        nested left of its parent's Markdown text column to that column. It
+        runs after `_split_past_bound` (`_apply_fallbacks`, which reads raw
+        columns) and after `_convert_code_blocks` (which fences a block at
+        its item's raw text column, so the fence moves with the item), and
+        before `_separate_list_from_trailing_paragraph`, whose text columns
+        are then read off the moved markers.
         """
+        text = self._shift_nested_markers(text)
         text = self._separate_list_from_trailing_paragraph(text)
 
         def convert_list_marker(match):
@@ -1759,7 +2751,503 @@ class TracWikiParser:
             text,
             flags=re.MULTILINE,
         )
-        return text
+        return self._separate_adjacent_lists(text)
+
+    def _shift_nested_markers(self, text: str) -> str:
+        """Move a list nested left of its parent's Markdown text column to
+        that column (ticket #179).
+
+        Trac nests a list marker indented past its parent's marker at ANY
+        deeper column (measured on /trac_test, 2026-11-07 and 11-08, down to
+        m + 1 and up to m + 5). CommonMark nests a marker only at or past the
+        parent's text column (`_item_text_column`: 4 under ` 1. `, 5 under
+        ` 10. `, 3 under ` * `) and reads one four or more columns past it as
+        indented code. The read leg copied the source column, so ` 1. outer`
+        / `   * inner` / ` 2. outer2` left the item (the bullets became a
+        second list, the outer list restarted; a nested ordered list joined
+        the outer one).
+
+        A stack of the open items (`_ShiftItem`: source marker column, shift,
+        output text column) is walked over the lines, with the same rules
+        as the later list walks (`_continued_item`, `_LIST_MARKER_RE`):
+
+        * a blank line ends the list (the stack empties), except a
+          whitespace-only line `_convert_macros` marked with
+          `_BR_LINE_MARK`: what `[[BR]]` alone on a line makes (#178) and
+          what a dropped macro (`unknown_macros="drop"`) leaves of its line
+          (review fix 4). Both are item content to Trac;
+        * a MARKER line pops the items at or past its column. A root marker
+          stays where it is. Under a parent it goes to `column + parent
+          shift`, raised to the parent's output text column when that is
+          left of it, and clamped to that column + 3 when it is past it (a
+          marker at column + 4 is indented code to CommonMark). Its own
+          shift, output column minus source column, is its children's
+          starting point;
+        * any other line goes to the item Trac continues it with
+          (`_continued_item`, lower side; a line outside every item ends the
+          list) and moves by that item's shift, so the columns inside an item
+          keep their distances and the bound and text-column rules of #149,
+          #176 and #178 read the same distances on the moved text. A fence,
+          a table row and the lines of a processor block move with their
+          item; the body of a block fenced at the item's text column (#144)
+          is in the code stash, and moves with it (`_item_fence_stashes`).
+          A `>` line is not one of these (see the next bullet);
+        * a citation line (stripped text starts with `>`; not in a processor
+          block walked as a unit; no tab in its indent) with an item open
+          goes to the item Trac 1.6's `Formatter.handle_quote_block` puts it
+          in, not to the item `_continued_item` picks (#187): the deepest
+          open item whose source marker column is at or left of the `>`
+          column. There is no upper bound (a `>` past the item's text column
+          stays in it, #175) and a `>` AT the outermost marker column stays
+          in that item, where plain text ends the list. The stack is cut
+          back to that item and the line is written at ITS output text
+          column (`_ShiftItem.text_column`) with its indent stripped, where
+          a `>` opens a quote in that item; right after a deeper item
+          CommonMark closes that item at the dedent. Trac closes lists on
+          the FIRST line of a run of `>` lines only, so the later lines of
+          the run keep that item and column. The quote counts as the item's
+          text for #180's blank line, as it did (CommonMark reads a `4. x`
+          right after it as a lazy continuation of the quote). Declined,
+          keeping `master`'s bytes (the line then takes the per-line path
+          of the previous bullet): no owner (a `>` at column 0, or left of
+          the root marker), the owner or an item the cut would close is
+          frozen or has a tab gap, a tab in the indent of the run's FIRST
+          line (the later lines of an accepted run are written at its
+          column, tabs included). A citation line is found with
+          `lstrip(" \t")` everywhere: other leading whitespace (a no-break
+          space) is not one here;
+        * a `{{{#!processor ...}}}` block that is still in the text (a
+          container passed through, not stashed like code) is walked as one
+          unit, from its opener to its MATCHING closer, nested blocks
+          included (`_matched_blocks`): every line in it, blank lines
+          included, belongs to the item that owns the opener, so the stack
+          does not change and each line moves by that item's shift, and a
+          marker-shaped line inside is the block's content, not an item
+          (review fix 5). An opener nobody closes is not a unit here: its
+          lines take the per-line rules.
+
+        Declined shapes keep `master`'s bytes (shift 0, frozen: the subtree
+        is never moved either):
+
+        * a tab-indented marker line, a root marker at column 4 or more
+          (indented code already) and everything nested under either; a
+          tab-indented continuation line is not moved;
+        * the children of an item whose marker-to-text gap holds a tab
+          (review fix 2: `_item_text_column` counts a tab as one column).
+
+        A nested ORDERED marker whose number is not 1 is moved like any
+        other (ticket #180): the clamp to `parent.text_column` is what keeps
+        ` 1. a` / `   4. x` from being read as a sibling item. CommonMark does
+        not let such a list interrupt its parent's paragraph, so right after
+        the parent's text it would be paragraph text at the text column, and
+        this pass also writes the blank line that makes it a list, in the
+        one place that knows whether the item and its parent are frozen
+        (freezing propagates down the stack here, and only here). The blank
+        line goes right before the moved marker line when ALL of these hold:
+
+        * the marker is an ordered number other than 1 (`_NON_ONE_ORDERED_RE`)
+          and opens a new level directly under its parent: the stack is not
+          empty and no item was popped on arrival;
+        * neither the item nor its parent is frozen or has a tab gap (the
+          ordinary move above): a frozen subtree keeps `master`'s bytes;
+        * the previous line is paragraph text of that parent: its own marker
+          line with text after the marker (an empty item, ` * ` or
+          ` 1. [[BR]]`, is none: the blank line would end it), or a
+          continuation line it owns that is not a block line
+          (`_is_block_line`: a code placeholder, a fence, a table row);
+        * the previous line does not end in a hard break (two trailing
+          spaces, what `[[BR]]` becomes). CommonMark drops a hard break at
+          the end of a paragraph, so the blank line would lose the `[[BR]]`
+          on the round trip. Declined: that shape keeps `master`'s bytes and
+          the nested list stays paragraph text in Markdown.
+
+        The blank line is a plain empty line (it carries no
+        `_BR_LINE_MARK`) and leaves the stack alone. The later list walks
+        (`_separate_list_from_trailing_paragraph`, `_separate_adjacent_lists`)
+        read it as the blank line a Trac author may write there (` * a` /
+        blank / `   4. x`), which they already pass through; the marker
+        after it clears their blank-line flags.
+
+        Shift 0 is byte-identical to `master`: a nesting already at or past
+        the parent's text column (a bullet under a bullet at column 3,
+        column 4 to 7 under ` 1. `) moves nothing, and neither does a list
+        with no nesting.
+
+        A root marker after a blank line opens a NEW list in Trac at any
+        column. Once the previous list's nested markers were moved, a root
+        marker at or past that list's output text column would be read by
+        CommonMark as nested in its last item (` * a` / `  * b` / blank /
+        `   * c`: `c` next to `b`, in `a`), and the round trip would lose the
+        blank line and re-nest it (review fix 1). It is moved to the
+        previous list's marker column instead, where
+        `_separate_adjacent_lists` (#177: a marker left of the open list's
+        text column after a blank line) starts a new Markdown list as it
+        does for any two Trac lists. Only a previous list this pass changed
+        (a moved item in it) counts: the same shape after an unmoved list
+        (` * a` / blank / `   * c`) is #183's and keeps `master`'s bytes. The
+        later root markers of that list (no blank line between) go to the
+        same column.
+        """
+        lines = text.split("\n")
+        pairs = _matched_blocks(lines)
+        out: list[str] = []
+        stack: list[_ShiftItem] = []
+        # The last list that ended in a blank line, when this pass moved
+        # something in it: (output column, output text column) of its last
+        # root item. Valid until the next non-blank line.
+        prev_list: tuple[int, int] | None = None
+        # The open list holds an item this pass moved.
+        list_shifted = False
+        # Output column of the roots of an open list whose first root this
+        # pass moved (review fix 1).
+        root_target: int | None = None
+        # The extent of the processor block being walked.
+        block_end = -1
+        block_shift = 0
+        # Stack depth of the item whose paragraph text the previous output
+        # line is (#180), None when it is not text of an open item.
+        text_owner: int | None = None
+        # The previous line was a citation line met with an item open
+        # (#187), and the output column that run writes at: None when the
+        # run was declined.
+        quote_run = False
+        quote_column: int | None = None
+
+        def end_list() -> None:
+            nonlocal prev_list, list_shifted, root_target
+            if stack:
+                root = stack[0]
+                prev_list = (
+                    (root.column + root.shift, root.text_column)
+                    if list_shifted
+                    and not root.frozen
+                    and not root.tab_gap
+                    else None
+                )
+            stack.clear()
+            list_shifted = False
+            root_target = None
+
+        for idx, line in enumerate(lines):
+            in_quote_run, quote_run = quote_run, False
+            if idx <= block_end:
+                out.append(
+                    self._move_line(line, block_shift)
+                    if line.strip()
+                    else line
+                )
+                text_owner = None
+                continue
+            if not line.strip():
+                if not (
+                    self._br_marks_active
+                    and line.endswith(_BR_LINE_MARK)
+                ):
+                    end_list()
+                text_owner = None
+                out.append(line)
+                continue
+            indent = _indent_of(line)
+            column = _indent_width(indent)
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                depth = len(stack)
+                while stack and stack[-1].column >= column:
+                    stack.pop()
+                parent = stack[-1] if stack else None
+                after = line[marker.end() :]
+                gap = after[: len(after) - len(after.lstrip(" \t"))]
+                tab_gap = bool(after.strip()) and "\t" in gap
+                start = prev_list if parent is None else None
+                prev_list = None
+                if "\t" in indent:
+                    shift, frozen = 0, True
+                elif parent is None:
+                    if start is not None and column >= start[1]:
+                        # CommonMark would nest this new list in the
+                        # previous one's last item.
+                        root_target = start[0]
+                    if root_target is not None:
+                        shift, frozen = root_target - column, False
+                    else:
+                        shift, frozen = 0, column >= 4
+                elif parent.frozen or parent.tab_gap:
+                    shift, frozen = 0, True
+                else:
+                    target = column + parent.shift
+                    target = max(target, parent.text_column)
+                    target = min(target, parent.text_column + 3)
+                    shift, frozen = target - column, False
+                    if (
+                        len(stack) == depth
+                        and text_owner == depth - 1
+                        and _NON_ONE_ORDERED_RE.match(
+                            marker.group(0).strip()
+                        )
+                        and not out[-1].endswith("  ")
+                    ):
+                        # #180: a nested ordered list not starting at 1
+                        # straight after the parent's paragraph text.
+                        out.append("")
+                if shift:
+                    list_shifted = True
+                stack.append(
+                    _ShiftItem(
+                        column,
+                        shift,
+                        shift + _item_text_column(marker.end(), after),
+                        frozen,
+                        tab_gap,
+                    )
+                )
+                out.append(self._move_line(line, shift))
+                text_owner = len(stack) - 1 if after.strip() else None
+                continue
+            # No `idx not in pairs` test: `_BLOCK_OPEN_RE` cannot match a
+            # `>` line, so a citation line is never a block opener.
+            if (
+                stack
+                and line.lstrip(" \t").startswith(">")
+                and (in_quote_run or "\t" not in indent)
+            ):
+                # #187: Trac's `handle_quote_block` rule, not
+                # `_continued_item`'s. Only the FIRST line of a run is
+                # declined by a tab in its indent: the later lines are
+                # written at the run's column whatever their indent.
+                quote_run = True
+                if not in_quote_run:
+                    quote_column = self._quote_text_column(
+                        stack, column
+                    )
+                if quote_column is not None:
+                    out.append(" " * quote_column + line.lstrip(" \t"))
+                    text_owner = len(stack) - 1
+                    continue
+            shift = 0
+            owned: int | None = None
+            if stack:
+                owner = _continued_item(
+                    [item.column for item in stack],
+                    column,
+                    upper_bound=False,
+                )
+                if owner is None:
+                    end_list()
+                    prev_list = None
+                else:
+                    del stack[owner + 1 :]
+                    shift = 0 if "\t" in indent else stack[-1].shift
+                    if idx not in pairs and not _is_block_line(line):
+                        owned = len(stack) - 1
+            else:
+                prev_list = None
+            if idx in pairs:
+                block_end, block_shift = pairs[idx], shift
+            out.append(self._move_line(line, shift))
+            text_owner = owned
+        return "\n".join(out)
+
+    @staticmethod
+    def _quote_text_column(
+        stack: list[_ShiftItem], column: int
+    ) -> int | None:
+        """The output column a citation line whose `>` is at source `column`
+        is written at, or None when it is declined (ticket #187).
+
+        Trac 1.6's `Formatter.handle_quote_block` closes every open list whose
+        marker column is greater than the `>` column and puts the quote in
+        the deepest one left: the last item of `stack` whose source column is
+        at or left of `column`, with no upper bound. That item is the owner;
+        `stack` is cut back to it and its output text column is returned.
+        Nothing is changed when the line is declined: no owner (the `>` is
+        left of the root marker or at column 0), or the owner or an item the
+        cut would close is frozen or has a tab gap."""
+        owner = _deepest_item_at_or_left(
+            [item.column for item in stack], column
+        )
+        if owner is None or any(
+            item.frozen or item.tab_gap for item in stack[owner:]
+        ):
+            return None
+        del stack[owner + 1 :]
+        return stack[owner].text_column
+
+    def _move_line(self, line: str, shift: int) -> str:
+        """`line` moved `shift` columns (`_shift_nested_markers`). A line
+        that is the placeholder of a block fenced inside a list item (#144)
+        takes the lines of its stash along: they carry the item's text
+        column too."""
+        if shift == 0:
+            return line
+        if "\x00CODE" in line:
+            found = re.fullmatch(r"[ ]*\x00CODE(\d+)\x00", line)
+            if (
+                found
+                and int(found.group(1)) in self._item_fence_stashes
+            ):
+                index = int(found.group(1))
+                head, *rest = self._code_placeholders[index].split("\n")
+                self._code_placeholders[index] = "\n".join(
+                    [head]
+                    + [_shift_line(r, shift) if r else r for r in rest]
+                )
+        return _shift_line(line, shift)
+
+    def _separate_adjacent_lists(self, text: str) -> str:
+        """Keep two Trac lists that only a blank line separates two lists
+        in Markdown (ticket #177).
+
+        Trac ends a list at every blank line (#143) and the next marker
+        opens a NEW top-level list at any indent. Measured on /trac_test on
+        2026-11-07 (ticket #177 comment 1):
+
+        * P1 ` 1. a` / ` 1. b` / blank / ` 1. c` / ` 1. d` / blank / ` 1. e`:
+          three ``<ol>``, each starting at 1;
+        * P2 ` * a` / blank / ` * c`: two ``<ul>``;
+        * P3 ` * a` / blank / `  * c` (column 2): two ``<ul>``;
+        * P4 ` * a` / blank / `   * c` (column 3) / ` * d`: three ``<ul>``,
+          ``c`` not nested in ``a``;
+        * P5 ` 3. a` / blank / ` 7. c`: ``<ol start="3">``, then
+          ``<ol start="7">``;
+        * P6 ` * a` / `   * b` / blank / ` * c`: ``a`` with its nested list,
+          then a second ``<ul>``.
+
+        Passed through unchanged, CommonMark reads each of these as ONE
+        loose list (the write leg then merged them and renumbered the
+        ordered ones). CommonMark starts a new list when the bullet
+        character or the ordered delimiter changes, so the read leg changes
+        the character instead of adding a separator. The write leg already
+        writes two adjacent Markdown lists with a blank line between them,
+        each keeping its start number (#150), so it is not touched.
+
+        Trade-off, accepted: the Markdown now carries ``)`` ordered
+        delimiters and alternating ``-``/``*`` bullets. That is CommonMark,
+        and our own write leg (mistune) reads it, but Python-Markdown does
+        not read ``7) c`` as a list item and markdownlint flags it (MD004,
+        MD029).
+
+        Only an EMPTY line counts as the blank line that separates two Trac
+        lists. A whitespace-only line is what the read leg leaves for a
+        ``[[BR]]`` alone on a continuation line and for a dropped macro: item
+        content, which neither sets nor clears the blank-line flag. A
+        marker line whose column is 4 or more, or whose indentation holds a
+        tab, is indented code to CommonMark: it is no list item here (not
+        switched, not counted).
+
+        Runs after the ``*`` to ``-`` rewrite, over the final lines. A
+        top-level marker line (its column is left of the open list's text
+        column, so CommonMark would make it a sibling item) opens a new
+        Markdown list when all of these hold:
+
+        * a blank line separates it from the previous non-blank line;
+        * the previous non-blank content belongs to an open list of the
+          same kind (bullet, or digits-only ordered) whose top-level marker
+          uses the same character as this line's.
+
+        Its marker then switches (``-`` and ``*``, ``.`` and ``)``), and
+        so does every later top-level item of the same Trac list (no blank
+        line between them). After another blank line the next list's marker
+        differs from the open one's, so it keeps its own character, which
+        is the switch back (P1: ``.``, ``)``, ``.``). Nested markers are
+        never switched; the one-line nested form ` * * item` (``- - item``)
+        switches its first marker only.
+
+        A non-marker, non-blank line indented left of the open list's text
+        column ends the list when a blank line precedes it (a code
+        placeholder or paragraph at column 0 included) or when it
+        interrupts a paragraph (``_LAZY_CONTINUATION_INTERRUPT_RE``: a
+        heading, ``>``, a fence, a rule), so a later list keeps
+        ``master``'s bytes. Any other such line (` * a` / `  text`) is a lazy
+        continuation of the item's paragraph in CommonMark, and Trac keeps it
+        in the item too: the list stays open and the next list after a blank
+        line switches as usual. A line at or past the text column continues
+        the item. A bullet list followed by an ordered one
+        (or the reverse) keeps ``master``'s bytes, since CommonMark already
+        reads two lists there, and so does a list after a paragraph. P4 (a
+        marker after the blank line at or past the previous item's text
+        column) keeps ``master``'s bytes too: CommonMark nests it in the
+        item, and that case belongs to #183. Lettered and roman lists are
+        fenced by an earlier fallback pass and never reach this code.
+        """
+        out: list[str] = []
+        # The open top-level Markdown list: its kind ("bullet" or
+        # "ordered"), the marker character it is written with, the text
+        # column of its latest top-level item, and whether this pass
+        # switched its character.
+        kind: str | None = None
+        char = ""
+        text_col = 0
+        switched = False
+        blank_since = False
+        for line in text.split("\n"):
+            if line == "":
+                # Only an EMPTY line is a blank line to Trac. The read leg
+                # leaves a whitespace-only line for a `[[BR]]` alone on a
+                # continuation line and for a dropped macro: item content,
+                # which neither sets nor clears the flag.
+                blank_since = True
+                out.append(line)
+                continue
+            if not line.strip():
+                out.append(line)
+                continue
+            marker = _LIST_MARKER_RE.match(line)
+            if marker is not None:
+                indent = _indent_of(line)
+                token = line[len(indent) : marker.end()]
+                if (
+                    len(indent) >= 4
+                    or "\t" in indent
+                    or not (
+                        token in ("-", "*") or _is_digits_ordered(line)
+                    )
+                ):
+                    # Indented code to CommonMark (column 4 or more, a tab)
+                    # or a marker it cannot read: no list item here.
+                    marker = None
+            if marker is None:
+                if (
+                    kind is not None
+                    and len(_indent_of(line)) < text_col
+                    and (
+                        blank_since
+                        or _LAZY_CONTINUATION_INTERRUPT_RE.match(
+                            line.lstrip(" \t")
+                        )
+                    )
+                ):
+                    kind = None
+                blank_since = False
+                out.append(line)
+                continue
+            column = len(indent)
+            this_kind = "bullet" if token in ("-", "*") else "ordered"
+            this_char = token[-1]
+            this_text_col = _item_text_column(
+                marker.end(), line[marker.end() :]
+            )
+            if kind is not None and column >= text_col:
+                pass  # nested in the open item: never switched
+            elif kind != this_kind:
+                kind, char, switched = this_kind, this_char, False
+                text_col = this_text_col
+            elif blank_since and this_char == char:
+                # CommonMark would make this a sibling of the open list.
+                char = _SWITCHED_MARKER_CHAR[this_char]
+                switched = True
+                text_col = this_text_col
+                line = _set_marker_char(line, column, token, char)
+            elif switched and not blank_since:
+                text_col = this_text_col
+                line = _set_marker_char(line, column, token, char)
+            else:
+                # Already a different list in CommonMark (a changed
+                # character), or master's own sibling item.
+                char, switched = this_char, False
+                text_col = this_text_col
+            blank_since = False
+            out.append(line)
+        return "\n".join(out)
 
     def _separate_list_from_trailing_paragraph(self, text: str) -> str:
         """Insert a blank line where a list ends with nothing marking it
@@ -1822,6 +3310,13 @@ class TracWikiParser:
         already, so they get no blank line (an unmeasured stored-byte
         change); a marker that continues an open list needs none.
 
+        Ticket #180: the nested counterpart is not here. The blank line a
+        nested ordered list not starting at 1 needs after its parent's text
+        is written by ``_shift_nested_markers``, which runs first and knows
+        which items are frozen. This pass passes it through as the blank line
+        it reads in a Trac-authored ` * a` / blank / `   4. x`; the marker
+        after it clears the blank-line flags.
+
         Ticket #145: a continuation line (non-empty stack) that follows a
         citation line, i.e. a line starting with ``>``, also gets a blank
         line first, unless it is itself a ``>`` line or one of
@@ -1870,13 +3365,79 @@ class TracWikiParser:
           but Trac ended every list at the blank, so a line below one was
           being judged against items Trac had already closed.
 
-        A line that continues a NON-innermost item and closes deeper ones
-        (case C: ``_continued_item`` answers an outer item) is not changed
-        here: the Markdown for it can only be written below a blank line,
-        which ends the Trac list on the way back; that is ticket #176. A
-        line deeper than the innermost marker is unchanged, and Trac's upper
-        bound (marker column + 2 for a bullet, + 3 for an ordered item) is
-        not applied: a separate ticket.
+        Ticket #176 (case C, and a line at a middle item's marker column in
+        a three-level list): a line for which ``_continued_item`` (lower
+        side, ``upper_bound=False``) answers an item OUTSIDE the innermost
+        one continues that outer item and closes the deeper ones; Trac
+        renders it inside that item, after the nested list. The stack is
+        truncated to that item, the line gets a blank line first and is
+        moved to that item's text column, which keeps it in the item in
+        Markdown. The write leg reads the blank line back as the item's
+        paragraph after a nested list and writes it in Trac's form again
+        (``_item_block_separator``'s ``"between"``). The gates are #149's,
+        all required: no blank line since the innermost marker, and
+        ``_marker_column_rule_applies`` for the innermost item's marker line
+        and again for the target item's (which also refuses the list
+        interrupters); plus two of #176's own: the nested list is not left
+        of the target item's text column (an ordered item's nested list can
+        be, #179: the moved line would be an indented code block), and the
+        line does not start like a Markdown list item
+        (``_MARKDOWN_ITEM_START_RE``: ``+ x``, ``1) x``). When one fails the
+        line keeps ``master``'s pop and bytes.
+        A following line of the same paragraph (case C5's second line, at
+        the outer item's column + 1) is not moved: CommonMark reads it as a
+        lazy continuation of the paragraph above, which is where it is. A
+        line deeper than the innermost marker is unchanged. Trac's upper
+        bound (ticket #175: marker column + 2 for a bullet, + 3 for an
+        ordered item) is not applied here: this pass reads lines the
+        converter has already rewritten. A raw line past the bound is fenced
+        by ``_split_past_bound`` before it runs only when it is indented
+        quote text. Two kinds of raw past-bound line are not: a run holding
+        a ``{{{``/``}}}`` line is skipped by the ``_line_holds_a_brace``
+        check before the split, and a line ``_line_is_not_a_quote`` names
+        (a table row, a heading) is not split either. Those keep master's
+        reading here.
+
+        Ticket #178: a line that continues the INNERMOST open item, left of
+        a Markdown text column that Trac's bound keeps it from reaching, is
+        moved to that text column (``text_column``, ``_item_text_column``). Trac
+        continues an ordered item only up to marker column + 3 (a bullet's
+        is + 2), and an ordered item numbered 10 or more has its Markdown
+        text column at + 4 (+ 5 from 100), so no column Trac accepts is
+        also a column CommonMark keeps in the item: ` 10. j` / `    b` is
+        one item in Trac, but after a blank line the read leg makes from
+        ``[[BR]][[BR]]`` the `b` at column 4 was an indented code block
+        outside the list. The rule is narrow (the operator's decision on
+        the ticket) and all of these must hold, else the line keeps
+        ``master``'s bytes:
+
+        * the line sits deeper than the innermost item's marker column and
+          no deeper than Trac's bound for it (marker + 3 for a digits-only
+          ordered item, + 2 for a bullet; ``_continued_item``);
+        * the item's text column is PAST that bound (ordered items 10 or
+          more, or a wider gap after the marker; every one-space bullet and
+          one-space item 1-9 is within it and untouched);
+        * ``_marker_column_rule_applies`` and not
+          ``_MARKDOWN_ITEM_START_RE``, as for #176 (a list interrupter or a
+          line that would become a nested item keeps its bytes);
+        * no blank line has passed since the innermost marker line, where
+          the only whitespace-only line that is NOT a blank line is the one
+          ``_convert_macros`` made from a ``[[BR]]`` (``_BR_LINE_MARK``): a
+          hard break inside the item, which Trac keeps open. This is not
+          ``blank_since_marker``: that flag counts every whitespace-only
+          line, the ``[[BR]]`` one included, so gating on it would exclude
+          the very case this rule is for. A raw whitespace-only line (spaces,
+          a tab, the ``\\r`` of a CRLF document) ends the list in Trac exactly
+          as an empty one does (measured on /trac_test, 2026-11-08), so a
+          line after one keeps ``master``'s bytes, as in #149.
+
+        Nested list MARKER lines are not moved here: since ticket #179
+        `_shift_nested_markers` runs first and puts a marker nested left of
+        its parent's text column at that column, so this pass reads the moved
+        columns (and #176's gate on the nested list passes for the shapes
+        that moved). The wider
+        shape (a bullet continued at marker + 1, or an item 1-9 at marker +
+        1 or + 2, after ``[[BR]][[BR]]``) is not fixed here either.
         """
         lines = text.split("\n")
         out: list[str] = []
@@ -1884,14 +3445,25 @@ class TracWikiParser:
         text_column: dict[int, int] = {}  # marker column -> text column
         marker_lines: dict[int, str] = {}  # marker column -> its line
         blank_since_marker = False
+        # #178: a blank line to TRAC has passed since the innermost marker:
+        # any whitespace-only line except one `_convert_macros` made from a
+        # `[[BR]]` (`_BR_LINE_MARK`).
+        trac_blank_since_marker = False
         for line in lines:
             if not line.strip():
                 blank_since_marker = True
+                if self._br_marks_active and line.endswith(
+                    _BR_LINE_MARK
+                ):
+                    line = line[: -len(_BR_LINE_MARK)]
+                else:
+                    trac_blank_since_marker = True
                 out.append(line)
                 continue
             marker = _LIST_MARKER_RE.match(line)
             if marker:
                 blank_since_marker = False
+                trac_blank_since_marker = False
                 if (
                     not stack
                     and out
@@ -1906,30 +3478,77 @@ class TracWikiParser:
                     stack.pop()
                 stack.append(column)
                 marker_lines[column] = line
-                after = line[marker.end() :]
-                gap = len(after) - len(after.lstrip(" \t"))
-                text_column[column] = marker.end() + (
-                    gap if 1 <= gap <= 4 and after.strip() else 1
+                text_column[column] = _item_text_column(
+                    marker.end(), line[marker.end() :]
                 )
                 out.append(line)
                 continue
             if stack:
                 column = len(_indent_of(line))
-                if (
-                    not blank_since_marker
-                    and _marker_column_rule_applies(
-                        marker_lines[stack[-1]], line
+                moved = False
+                outer = None
+                rule_applies = _marker_column_rule_applies(
+                    marker_lines[stack[-1]], line
+                )
+                starts_item = bool(
+                    _MARKDOWN_ITEM_START_RE.match(line.lstrip(" \t"))
+                )
+                answer = (
+                    _continued_item(stack, column, upper_bound=False)
+                    if not blank_since_marker and rule_applies
+                    else None
+                )
+                # #178: the line continues the innermost item in Trac (it
+                # is deeper than its marker, so nothing below pops) but sits
+                # left of that item's Markdown text column, which no column
+                # Trac accepts reaches. Judged on the stack as it is NOW: a
+                # line that closes deeper items and continues an outer one
+                # is #176's (and #179's) business, not this rule's. It moves
+                # to the text column below.
+                widened = (
+                    not trac_blank_since_marker
+                    and stack[-1] < column
+                    and _text_column_past_trac_bound(
+                        stack[-1],
+                        marker_lines[stack[-1]],
+                        text_column[stack[-1]],
+                        column,
                     )
-                    and _continued_item(stack, column) == len(stack) - 1
-                ):
+                    and rule_applies
+                    and not starts_item
+                )
+                if answer == len(stack) - 1:
                     # #149: the line continues the innermost item. At its
                     # marker's column Markdown would not keep it there as
                     # written, so it moves to the text column below.
                     moved = column <= stack[-1]
+                elif (
+                    answer is not None
+                    and _marker_column_rule_applies(
+                        marker_lines[stack[answer]], line
+                    )
+                    # The nested list must not sit left of the item's
+                    # Markdown text column (an ordered item, #179): the
+                    # moved line would be an indented code block there.
+                    and text_column[stack[answer]] <= stack[answer + 1]
+                    and not starts_item
+                ):
+                    # #176: the line closes the deeper items and continues
+                    # an outer one (Trac: it renders inside that item,
+                    # after the nested list). It is handled below.
+                    outer = answer
                 else:
-                    moved = False
                     while stack and stack[-1] >= column:
                         stack.pop()
+                moved = moved or widened
+                if outer is not None:
+                    del stack[outer + 1 :]
+                    out.append("")
+                    out.append(
+                        " " * text_column[stack[-1]]
+                        + line.lstrip(" \t")
+                    )
+                    continue
                 after_quote = bool(out) and out[-1].lstrip(
                     " \t"
                 ).startswith(">")
@@ -2118,7 +3737,9 @@ class TracWikiParser:
                 div_group = True
             elif _TABLE_ROW_RE.match(line):
                 if div_group:
-                    _list_stack_step(stacks[-1], line)
+                    _list_stack_step(
+                        stacks[-1], line, upper_bound=False
+                    )
                 elif not table_rows:
                     # First row of a bare group.
                     bare_blank = bool(
@@ -2140,7 +3761,9 @@ class TracWikiParser:
                 if idx in close_at:
                     stacks.pop()
                 else:
-                    _list_stack_step(stacks[-1], line)
+                    _list_stack_step(
+                        stacks[-1], line, upper_bound=False
+                    )
                     if idx in open_at:
                         stacks.append([])
                 # Ticket #143 (and #146's second review, R5, for a bare

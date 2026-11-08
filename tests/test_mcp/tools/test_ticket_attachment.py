@@ -5,7 +5,6 @@ round-trip test marked ``@pytest.mark.live`` is also included; gate it
 behind ``--run-live`` (see conftest.py).
 """
 
-import os
 import xmlrpc.client
 from unittest.mock import MagicMock
 
@@ -493,6 +492,55 @@ class TestDelete:
         assert "permission_denied" in result.content[0].text
         assert "TICKET_ADMIN" in result.content[0].text
 
+    async def test_delete_real_403_shape_is_permission_denied(self):
+        """TracXMLRPC's real PermissionError, Fault(403, ...), gets the
+        handler's own corrective action (Trac #191)."""
+        client = _make_client()
+        client.delete_ticket_attachment.side_effect = (
+            xmlrpc.client.Fault(
+                403,
+                "TICKET_ADMIN privileges are required to perform this "
+                "operation on Ticket #5",
+            )
+        )
+
+        result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": 5, "filename": "x"},
+            client,
+        )
+        assert result.isError is True
+        assert "permission_denied" in result.content[0].text
+        assert "Deleting ticket attachments requires" in (
+            result.content[0].text
+        )
+
+    async def test_delete_code_1_quoted_name_is_not_permission(self):
+        """A code-1 fault is any TracError, and a name it quotes that
+        contains 'Permission' is no evidence of a permission fault: the
+        handler re-raises it, so the dispatcher reports a server error
+        and not the handler's permission_denied (Trac #191)."""
+        client = _make_client()
+        client.delete_ticket_attachment.side_effect = (
+            xmlrpc.client.Fault(
+                1,
+                "'Invalid attachment 'PermissionNotes'' while "
+                "executing 'ticket.deleteAttachment()'",
+            )
+        )
+
+        result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": 5, "filename": "PermissionNotes"},
+            client,
+        )
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "permission_denied" not in result.content[0].text
+        assert "Deleting ticket attachments requires" not in (
+            result.content[0].text
+        )
+
 
 # =============================================================================
 # Unknown tool
@@ -517,75 +565,88 @@ async def test_unknown_tool_name():
 async def test_live_round_trip(tmp_path):
     """End-to-end: push a fixture file, list, get, verify bytes, delete.
 
-    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars pointing
-    at a live Trac instance with at least one ticket the test user can
-    attach to.
+    Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars. Runs
+    on `/trac_test` (the host of TRAC_URL, whatever project TRAC_URL
+    itself names) against a scratch ticket it creates first and
+    deletes at the end (Trac #173). It used to need a
+    TRAC_TEST_TICKET_ID and attach to that ticket on the default
+    TRAC_URL store, and skipped without one.
     """
-    from trac_mcp_server.config import Config
-    from trac_mcp_server.core.client import TracClient
+    import uuid
 
-    ticket_id_env = os.environ.get("TRAC_TEST_TICKET_ID")
-    if not ticket_id_env:
-        pytest.skip(
-            "TRAC_TEST_TICKET_ID env var required for live attachment test"
-        )
-    ticket_id = int(ticket_id_env)
+    from tests.live_helpers import trac_test_client
 
-    # Use the same env-driven config the server uses
-    config = Config(
-        trac_url=os.environ["TRAC_URL"],
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = TracClient(config)
+    filename = f"live-fixture-{uuid.uuid4().hex[:8]}.bin"
 
-    fixture = tmp_path / "live-fixture.bin"
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names.
+    client = trac_test_client()
+
+    fixture = tmp_path / filename
     payload = b"trac-mcp-server live attachment test \x00\x01\x02"
     fixture.write_bytes(payload)
 
-    # Push
-    push_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_put",
-        {
-            "ticket_id": ticket_id,
-            "file_path": str(fixture),
-            "description": "live round-trip fixture",
-            "replace": True,
-        },
-        client,
+    ticket_id = client.create_ticket(
+        "Ticket173AttachmentLive",
+        "Throwaway; deleted by the test.",
     )
-    assert push_result.isError is None or push_result.isError is False
+    cleanup_error = None
+    try:
+        # Push
+        push_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_put",
+            {
+                "ticket_id": ticket_id,
+                "file_path": str(fixture),
+                "description": "live round-trip fixture",
+                "replace": True,
+            },
+            client,
+        )
+        assert (
+            push_result.isError is None or push_result.isError is False
+        )
 
-    # List — confirm it appears
-    list_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_list", {"ticket_id": ticket_id}, client
-    )
-    filenames = [
-        a["filename"]
-        for a in list_result.structuredContent["attachments"]
-    ]
-    assert "live-fixture.bin" in filenames
+        # List -- confirm it appears
+        list_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_list", {"ticket_id": ticket_id}, client
+        )
+        filenames = [
+            a["filename"]
+            for a in list_result.structuredContent["attachments"]
+        ]
+        assert filename in filenames
 
-    # Get — confirm byte-identical retrieval
-    out_file = tmp_path / "downloaded.bin"
-    get_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_get",
-        {
-            "ticket_id": ticket_id,
-            "filename": "live-fixture.bin",
-            "output_path": str(out_file),
-        },
-        client,
-    )
-    assert get_result.isError is None or get_result.isError is False
-    assert out_file.read_bytes() == payload
+        # Get -- confirm byte-identical retrieval
+        out_file = tmp_path / "downloaded.bin"
+        get_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_get",
+            {
+                "ticket_id": ticket_id,
+                "filename": filename,
+                "output_path": str(out_file),
+            },
+            client,
+        )
+        assert get_result.isError is None or get_result.isError is False
+        assert out_file.read_bytes() == payload
 
-    # Delete — clean up
-    del_result = await handle_ticket_attachment_tool(
-        "ticket_attachment_delete",
-        {"ticket_id": ticket_id, "filename": "live-fixture.bin"},
-        client,
-    )
-    assert del_result.isError is None or del_result.isError is False
+        # Delete -- clean up
+        del_result = await handle_ticket_attachment_tool(
+            "ticket_attachment_delete",
+            {"ticket_id": ticket_id, "filename": filename},
+            client,
+        )
+        assert del_result.isError is None or del_result.isError is False
+    finally:
+        try:
+            client.delete_ticket(ticket_id)
+        except Exception as exc:
+            cleanup_error = exc
+    # Reached only when the body passed: a body failure propagates
+    # unchanged out of the finally above.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"ticket {ticket_id} left behind on /trac_test: "
+            f"{cleanup_error!r}"
+        )

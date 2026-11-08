@@ -12,6 +12,8 @@ from typing import Any
 
 import mcp.types as types
 
+from ...core.faults import classify_fault
+
 
 def build_error_response(
     error_type: str, message: str, corrective_action: str
@@ -128,7 +130,14 @@ def translate_xmlrpc_error(
     """Translate XML-RPC fault to structured error response.
 
     Provides domain-specific corrective action messages for ticket,
-    wiki, and milestone operations.
+    wiki, and milestone operations. The fault is classified by
+    :func:`classify_fault`: codes first (409 version conflict from
+    wiki.putPageIfVersion, 404 not found, 403 permission), so a fault's
+    text, which may carry a page or milestone name, never overrides its
+    code; then its text with quoted names removed, because a quoted name
+    is not evidence (Trac #188). Text is matched for not found,
+    permission and milestone already-exists, never for version
+    conflicts.
 
     Args:
         error: XML-RPC fault exception
@@ -140,53 +149,51 @@ def translate_xmlrpc_error(
         CallToolResult with isError=True and corrective action
     """
     msgs = _DOMAIN_MESSAGES.get(domain, _DOMAIN_MESSAGES["ticket"])
-    fault_str = error.faultString.lower()
 
-    match fault_str:
-        case s if "not found" in s or "does not exist" in s:
-            if entity_name and "not_found_named" in msgs:
-                action = msgs["not_found_named"].format(
-                    entity_name=entity_name
-                )
-            elif entity_name and domain == "wiki":
-                action = msgs.get(
-                    "not_found_named", msgs["not_found"]
-                ).format(entity_name=entity_name)
-            else:
-                action = msgs["not_found"]
-            return build_error_response(
-                "not_found", error.faultString, action
+    def version_conflict() -> types.CallToolResult:
+        action = msgs.get("version", msgs["server"])
+        if entity_name:
+            action = action.format(entity_name=entity_name)
+        return build_error_response(
+            "version_conflict", error.faultString, action
+        )
+
+    def not_found() -> types.CallToolResult:
+        if entity_name and "not_found_named" in msgs:
+            action = msgs["not_found_named"].format(
+                entity_name=entity_name
             )
+        elif entity_name and domain == "wiki":
+            action = msgs.get(
+                "not_found_named", msgs["not_found"]
+            ).format(entity_name=entity_name)
+        else:
+            action = msgs["not_found"]
+        return build_error_response(
+            "not_found", error.faultString, action
+        )
 
-        case s if (
-            "permission" in s
-            or "denied" in s
-            or (domain == "milestone" and error.faultCode == 403)
-        ):
-            perm_msg = error.faultString
-            if domain == "milestone":
-                perm_msg = f"{error.faultString} (requires TICKET_ADMIN for create/update/delete)"
-            return build_error_response(
-                "permission_denied", perm_msg, msgs["permission"]
-            )
+    def permission_denied() -> types.CallToolResult:
+        perm_msg = error.faultString
+        if domain == "milestone":
+            perm_msg = f"{error.faultString} (requires TICKET_ADMIN for create/update/delete)"
+        return build_error_response(
+            "permission_denied", perm_msg, msgs["permission"]
+        )
 
-        case s if domain == "milestone" and (
-            "exists" in s or "already" in s
-        ):
+    match classify_fault(error, domain):
+        case "version_conflict":
+            return version_conflict()
+        case "not_found":
+            return not_found()
+        case "permission_denied":
+            return permission_denied()
+        case "already_exists":
             return build_error_response(
                 "already_exists",
                 error.faultString,
                 msgs["already_exists"],
             )
-
-        case s if "version" in s or "not modified" in s:
-            action = msgs.get("version", msgs["server"])
-            if entity_name:
-                action = action.format(entity_name=entity_name)
-            return build_error_response(
-                "version_conflict", error.faultString, action
-            )
-
         case _:
             return build_error_response(
                 "server_error", error.faultString, msgs["server"]

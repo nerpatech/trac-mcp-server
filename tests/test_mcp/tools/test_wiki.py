@@ -16,7 +16,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.core.client import WikiPageConflict
+from trac_mcp_server.core.client import (
+    WikiPageConflict,
+    WikiPageNotModified,
+)
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
 from trac_mcp_server.mcp.tools.errors import format_timestamp
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -866,6 +869,54 @@ class TestHandleCreate(unittest.TestCase):
             self.assertIn("Created wiki page 'NewPage'", text)
             self.assertIn("version 1", text)
 
+    def _create_identical_race(self, current_version):
+        """Run wiki_create where the page is absent at the existence
+        check and putPage then reports a byte-identical no-op."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(404, "Page not found"),
+                WikiPageNotModified(
+                    "Page not modified (content identical)",
+                    "NewPage",
+                    None,
+                    current_version,
+                ),
+            ]
+            return asyncio.run(
+                _handle_create(
+                    self.mock_client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+    def test_handle_create_identical_content_race(self):
+        """The page was absent at the existence check and created by
+        another writer with byte-identical content before putPage:
+        already_exists, naming the version (ticket #174 review)."""
+        result = self._create_identical_race(2)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn(
+            "created by another writer with identical content "
+            "after this call's existence check (version 2)",
+            text,
+        )
+        self.assertIn("Trac stored nothing", text)
+        self.assertIn("Nothing needs doing", text)
+
+    def test_handle_create_identical_content_race_version_unknown(self):
+        result = self._create_identical_race(None)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn("(version unknown)", text)
+        self.assertIn("Trac stored nothing", text)
+
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""
         with patch(
@@ -893,6 +944,95 @@ class TestHandleCreate(unittest.TestCase):
             self.assertIn("Error (already_exists)", text)
             self.assertIn("already exists", text)
             self.assertIn("wiki_update", text)
+
+    def test_handle_create_real_not_found_shape_still_means_absent(
+        self,
+    ):
+        """TracXMLRPC's missing-page fault, Fault(404, 'Wiki page "X"
+        does not exist'), is classified by its code: create goes on to
+        put the page (Trac #189)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(
+                    404, 'Wiki page "NewPage" does not exist'
+                ),
+                {"name": "NewPage", "version": 1, "author": "alice"},
+            ]
+
+            result = asyncio.run(
+                _handle_create(
+                    self.mock_client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+            self.assertFalse(result.isError)
+            self.assertIn(
+                "Created wiki page 'NewPage'", result.content[0].text
+            )
+
+    def test_handle_create_code_1_invalid_name_is_not_absent(self):
+        """A code-1 fault is any TracError, and its quoted name
+        'Not Found Notes' is no evidence of a missing page: the
+        existence check re-raises it instead of creating (Trac #189)."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPage()'",
+        )
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [fault, {"version": 1}]
+
+            with self.assertRaises(xmlrpc.client.Fault) as ctx:
+                asyncio.run(
+                    _handle_create(
+                        self.mock_client,
+                        {
+                            "page_name": "Not Found Notes",
+                            "content": "# New Page",
+                        },
+                    )
+                )
+
+            self.assertIs(ctx.exception, fault)
+            # Only the existence check ran; nothing was created.
+            self.assertEqual(mock_run_sync.call_count, 1)
+
+    def test_wiki_create_code_1_invalid_name_is_a_server_error(self):
+        """End to end through the dispatcher: the code-1 fault is
+        neither a created page nor an absent one (Trac #189)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(
+                    1,
+                    "'Invalid Wiki page name 'Not Found Notes'' "
+                    "while executing 'wiki.getPage()'",
+                ),
+                {"version": 1},
+            ]
+
+            result = asyncio.run(
+                ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                    "wiki_create",
+                    {
+                        "page_name": "Not Found Notes",
+                        "content": "# New Page",
+                    },
+                    self.mock_client,
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (server_error)", text)
+            self.assertNotIn("Created wiki page", text)
+            self.assertEqual(mock_run_sync.call_count, 1)
 
 
 class TestHandleUpdate(unittest.TestCase):
@@ -941,27 +1081,15 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("version 6", text)
 
     def test_handle_update_version_conflict(self):
-        """Test _handle_update handles version conflict."""
+        """A WikiPageConflict from put_wiki_page (client precheck, plugin
+        or post-fault re-read) reports the current version."""
         with patch(
             "trac_mcp_server.mcp.tools.wiki_write.run_sync"
         ) as mock_run_sync:
-            # Set up side effect - first call raises conflict, second returns current version
-            call_count = [0]
+            mock_run_sync.side_effect = WikiPageConflict(
+                "Version conflict on 'TestPage'", "TestPage", 5, 7
+            )
 
-            def side_effect_func(*args, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    # First call is put_wiki_page
-                    raise xmlrpc.client.Fault(
-                        409, "Version conflict - page not modified"
-                    )
-                else:
-                    # Second call is get_wiki_page_info
-                    return {"name": "TestPage", "version": 7}
-
-            mock_run_sync.side_effect = side_effect_func
-
-            # Call handler
             result = asyncio.run(
                 _handle_update(
                     self.mock_client,
@@ -973,7 +1101,6 @@ class TestHandleUpdate(unittest.TestCase):
                 )
             )
 
-            # Verify response
             self.assertTrue(result.isError)
             self.assertEqual(len(result.content), 1)
             text = result.content[0].text
@@ -982,6 +1109,209 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("Current version is 7", text)
             self.assertIn("you tried to update version 5", text)
             self.assertIn("version=7", text)
+
+    def test_handle_update_fault_naming_a_version_page_propagates(self):
+        """A Fault is no longer classified by its text here (Trac
+        /trac_mcp_server #185): it propagates to the dispatcher."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "WIKI_MODIFY privileges are required to perform this "
+            "operation on VersionNotes. You don't have the required "
+            "permissions.",
+        )
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = fault
+
+            with self.assertRaises(xmlrpc.client.Fault) as ctx:
+                asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "page_name": "VersionNotes",
+                            "content": "# Updated",
+                            "version": 1,
+                        },
+                    )
+                )
+
+            self.assertIs(ctx.exception, fault)
+
+    def test_wiki_update_fault_naming_a_version_page_is_permission_denied(
+        self,
+    ):
+        """End to end through the dispatcher: the same Fault is a
+        permission_denied, not a version_conflict (#185)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                1,
+                "WIKI_MODIFY privileges are required to perform this "
+                "operation on VersionNotes. You don't have the "
+                "required permissions.",
+            )
+
+            result = asyncio.run(
+                ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                    "wiki_update",
+                    {
+                        "page_name": "VersionNotes",
+                        "content": "# Updated",
+                        "version": 1,
+                    },
+                    self.mock_client,
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (permission_denied)", text)
+            self.assertNotIn("version_conflict", text)
+
+    def test_handle_update_not_modified_is_an_unchanged_success(self):
+        """Ticket #174: identical content stores nothing -- not an error."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)", "TestPage", 5
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            text = result.content[0].text
+            self.assertEqual(
+                text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "version 5. Trac stored nothing.",
+            )
+
+    def test_handle_update_not_modified_prefers_the_reread_version(
+        self,
+    ):
+        """Identical content stored as v6 by someone else while the
+        caller passed v5: the result says 6 (ticket #174 review)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)",
+                "TestPage",
+                5,
+                6,
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            self.assertEqual(
+                result.content[0].text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "version 6. Trac stored nothing.",
+            )
+
+    def test_handle_update_not_modified_both_versions_unknown(self):
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)",
+                "TestPage",
+                None,
+                None,
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            self.assertEqual(
+                result.content[0].text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "the stored page (version unknown). Trac stored "
+                "nothing.",
+            )
+
+    def test_handle_update_not_modified_keeps_the_gate_lines(self):
+        gate_note = "Link gate: OFF (test note)"
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, [gate_note]),
+            ),
+        ):
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)", "TestPage", 5
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            lines = result.content[0].text.splitlines()
+            self.assertIn(gate_note, lines[1:])
+
+    def test_handle_update_plain_not_modified_fault_reraises(self):
+        """Ticket #174: a bare "Page not modified" Fault is no version
+        conflict any more, so the handler no longer claims one."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                1, "Page not modified"
+            )
+
+            with self.assertRaises(xmlrpc.client.Fault):
+                asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "page_name": "TestPage",
+                            "content": "# Updated",
+                            "version": 5,
+                        },
+                    )
+                )
 
     def test_handle_update_wiki_page_conflict(self):
         """A stale version refused by the client precheck (ticket #120)."""
@@ -1432,6 +1762,82 @@ class TestHandleDelete(unittest.TestCase):
 
             self.assertIn("Error (permission_denied)", text)
             self.assertIn("permission", text.lower())
+
+    def test_handle_delete_real_not_found_shape_is_not_found(self):
+        """Fault(404, 'Wiki page "X" does not exist') from the
+        existence check is the not_found response (Trac #189)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                404, 'Wiki page "NoSuchPage" does not exist'
+            )
+
+            result = asyncio.run(
+                _handle_delete(
+                    self.mock_client, {"page_name": "NoSuchPage"}
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (not_found)", text)
+            self.assertIn("Wiki page 'NoSuchPage' does not exist", text)
+            self.assertEqual(mock_run_sync.call_count, 1)
+
+    def test_handle_delete_code_1_invalid_name_is_not_not_found(self):
+        """A code-1 fault whose quoted name contains 'Not Found' is no
+        missing page: the existence check re-raises it and nothing is
+        deleted (Trac #189)."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPage()'",
+        )
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [fault, True]
+
+            with self.assertRaises(xmlrpc.client.Fault) as ctx:
+                asyncio.run(
+                    _handle_delete(
+                        self.mock_client,
+                        {"page_name": "Not Found Notes"},
+                    )
+                )
+
+            self.assertIs(ctx.exception, fault)
+            self.assertEqual(mock_run_sync.call_count, 1)
+
+    def test_wiki_delete_code_1_invalid_name_is_a_server_error(self):
+        """End to end through the dispatcher: neither deleted nor
+        not_found (Trac #189)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(
+                    1,
+                    "'Invalid Wiki page name 'Not Found Notes'' "
+                    "while executing 'wiki.getPage()'",
+                ),
+                True,
+            ]
+
+            result = asyncio.run(
+                ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                    "wiki_delete",
+                    {"page_name": "Not Found Notes"},
+                    self.mock_client,
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (server_error)", text)
+            self.assertNotIn("Deleted wiki page", text)
+            self.assertEqual(mock_run_sync.call_count, 1)
 
 
 class TestHandleWikiTool(unittest.TestCase):

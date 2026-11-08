@@ -3,7 +3,8 @@
 `list_instances` and the per-write OFF line are tested beside their own
 handlers (`tools/test_instances.py`, `tools/test_write_gate.py`). This
 file holds the two that live in ``server.py``: ``ping`` and the startup
-log line.
+log line, plus the check that ``list_instances`` and ``ping`` print the
+same shared write-gate line.
 """
 
 import asyncio
@@ -22,6 +23,11 @@ from trac_mcp_server.mcp.server import (
     _handle_ping,
     log_startup_settings,
 )
+from trac_mcp_server.mcp.tools.instances import (
+    INSTANCE_SPECS,
+    set_instance_registry,
+)
+from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.write_gate import (
     gate_enabled,
     write_gate_line,
@@ -44,6 +50,26 @@ def _ping(write_gate: bool):
     client.config = _config(write_gate=write_gate)
     client.validate_connection.return_value = "1.2.0"
     return asyncio.run(_handle_ping(client, {}))
+
+
+def _list_instances(write_gate: bool):
+    config = _config(write_gate=write_gate)
+    client = MagicMock()
+    client.config = config
+    # No host config files: the registry would otherwise read the machine's.
+    with patch(
+        "trac_mcp_server.instances.discover_config_files",
+        return_value=[],
+    ):
+        set_instance_registry(InstanceRegistry(config, {}))
+        try:
+            return asyncio.run(
+                ToolRegistry(INSTANCE_SPECS).call_tool(
+                    "list_instances", {"discover": False}, client
+                )
+            )
+        finally:
+            set_instance_registry(None)
 
 
 @pytest.mark.parametrize("state", [True, False])
@@ -250,5 +276,8 @@ async def test_oidc_clients_carry_the_logged_write_gate(caplog):
 
 @pytest.mark.parametrize("state", [True, False])
 def test_ping_and_list_instances_share_the_line(state):
-    """One wording for one status: ping prints write_gate_line()."""
-    assert write_gate_line(state) in _ping(state).content[0].text
+    """One wording for one status: ping and list_instances both print
+    write_gate_line()."""
+    line = write_gate_line(state)
+    assert line in _ping(state).content[0].text
+    assert line in _list_instances(state).content[0].text

@@ -263,10 +263,10 @@ def test_linear_in_the_length_of_a_blank_free_run(monkeypatch):
     real = t2m._list_stack_step
     calls = 0
 
-    def counting(stack, line):
+    def counting(stack, line, **kw):
         nonlocal calls
         calls += 1
-        return real(stack, line)
+        return real(stack, line, **kw)
 
     monkeypatch.setattr(t2m, "_list_stack_step", counting)
 

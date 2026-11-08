@@ -231,6 +231,21 @@ def is_link_target(candidate: str) -> bool:
     return scheme in TRACLINK_SCHEMES or scheme in URL_SCHEMES
 
 
+def trac_continuation_bound(
+    marker_column: int, *, ordered: bool
+) -> int:
+    """The deepest column at which a text line still continues a list item
+    whose marker sits at `marker_column`, in Trac 1.6's
+    `Formatter._indent_formatter`: marker column + 3 for a digits-only
+    ordered item, + 2 for a bullet (ticket #175, measured on /trac_test).
+    A line past it ends the list.
+
+    The one place the bound lives: the read leg's `_continued_item` and its
+    #178 text-column rule, and the write leg's cap on an ordered item's text
+    continuation lines (#178), all use it."""
+    return marker_column + (3 if ordered else 2)
+
+
 @dataclass
 class ConversionResult:
     """Result of format conversion with metadata and warnings.

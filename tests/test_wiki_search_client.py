@@ -652,11 +652,9 @@ def test_a_failed_batch_is_read_page_by_page_and_the_search_goes_on(
     ],
 )
 def test_a_missing_method_fault_must_name_the_method(fault, missing):
-    from trac_mcp_server.core.client import _is_missing_method_fault
+    from trac_mcp_server.core.faults import is_missing_method_fault
 
-    assert (
-        _is_missing_method_fault(fault, "system.multicall") is missing
-    )
+    assert is_missing_method_fault(fault, "system.multicall") is missing
 
 
 # --------------------------------------------------------------------

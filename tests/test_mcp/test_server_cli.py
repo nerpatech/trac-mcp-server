@@ -10,6 +10,7 @@ import pytest
 
 from trac_mcp_server import __version__
 from trac_mcp_server.mcp.server import build_parser, server
+from trac_mcp_server.version import format_server_version, release_sha
 
 # ---------------------------------------------------------------------------
 # build_parser() basics
@@ -162,7 +163,10 @@ def test_server_version_matches_project_version():
     """Server("trac-mcp-server", version=__version__) -- without this,
     StreamableHTTPSessionManager's create_initialization_options() falls
     back to reporting the mcp SDK version instead of the project version."""
-    assert server.version == __version__
+    assert server.version == format_server_version(
+        __version__, release_sha()
+    )
+    assert server.version.startswith(__version__)
 
 
 # ---------------------------------------------------------------------------

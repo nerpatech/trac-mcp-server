@@ -6,7 +6,10 @@ from unittest.mock import MagicMock, patch
 import mcp.types as types
 import pytest
 
-from trac_mcp_server.core.client import WikiPageConflict
+from trac_mcp_server.core.client import (
+    WikiPageConflict,
+    WikiPageNotModified,
+)
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.wiki_file import (
     WIKI_FILE_SPECS,
@@ -742,6 +745,43 @@ class TestPushReadbackAfterWrite:
         client.put_wiki_page.assert_called_once()
         assert client.put_wiki_page.call_args[0][3] is None
 
+    async def test_probe_real_404_means_absent_and_creates(self):
+        """TracXMLRPC's missing-page fault, Fault(404, 'Wiki page "X"
+        does not exist'), is classified by its code (Trac #191)."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "X" does not exist'
+        )
+        client.put_wiki_page.return_value = {"version": 1}
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+        assert result.structuredContent["action"] == "created"
+        client.put_wiki_page.assert_called_once()
+
+    async def test_probe_code_1_quoted_name_is_not_absence(self):
+        """A code-1 fault is any TracError, and the name it quotes,
+        'Not Found Notes', is no evidence that the page is missing:
+        the probe's fault propagates (the dispatcher's server error)
+        and nothing is written (Trac #191)."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPageInfo()'",
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "Not Found Notes"},
+            client,
+        )
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "not_found" not in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
     async def test_write_fault_is_not_retried_as_a_create(self):
         """A not-found fault raised by the write itself (not the probe)
         is an error, never a second write."""
@@ -757,6 +797,187 @@ class TestPushReadbackAfterWrite:
         )
         assert result.isError
         client.put_wiki_page.assert_called_once()
+
+
+class TestPushNotModified:
+    """An identical push stores nothing and says so (Trac
+    /trac_mcp_server #174): a success-shaped "unchanged" result."""
+
+    async def test_identical_push_is_an_unchanged_success(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", 3
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version 3): content identical "
+            "to the stored page. Trac stored nothing."
+        )
+        sc = result.structuredContent
+        assert sc["action"] == "unchanged"
+        assert sc["version"] == 3
+        assert sc["page_name"] == "X"
+        assert sc["readback_failed"] is False
+        assert sc["possible_overwrite"] is False
+        assert sc["warnings"] == []
+
+    async def test_unchanged_reports_the_reread_current_version(self):
+        """Identical content stored as v4 by someone else after the
+        probe saw v3: version is the re-read 4 (ticket #174 review)."""
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", 3, 4
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version 4): content identical "
+            "to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 4
+
+    async def test_unchanged_create_path_reports_the_reread_version(
+        self,
+    ):
+        """The probe found no page (version None), yet the write was a
+        no-op: someone created it identically in between. The re-read
+        version is reported."""
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page not found"
+        )
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", None, 1
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version 1): content identical "
+            "to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 1
+
+    async def test_unchanged_with_no_known_version(self):
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page not found"
+        )
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", None, None
+        )
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        assert result.content[0].text.splitlines()[0] == (
+            "Wiki page 'X' unchanged (version unknown): content "
+            "identical to the stored page. Trac stored nothing."
+        )
+        assert result.structuredContent["version"] is None
+
+    async def test_unchanged_keeps_warnings_and_gate_lines(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageNotModified(
+            "Page not modified (content identical)", "X", 3
+        )
+        gate_note = "Link gate: OFF (test note)"
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, [gate_note]),
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.auto_convert"
+            ) as mock_convert,
+        ):
+            conversion = MagicMock()
+            conversion.text = "= X =\n"
+            conversion.converted = True
+            conversion.warnings = ["a conversion warning"]
+            mock_convert.return_value = conversion
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {
+                    "content": "# X\n",
+                    "filename": "x.md",
+                    "page_name": "X",
+                },
+                client,
+            )
+
+        assert not result.isError
+        text = result.content[0].text
+        assert text.splitlines()[0].startswith(
+            "Wiki page 'X' unchanged (version 3)"
+        )
+        assert "Conversion warnings:" in text
+        assert "- a conversion warning" in text
+        assert gate_note in text.splitlines()
+        sc = result.structuredContent
+        assert sc["action"] == "unchanged"
+        assert sc["warnings"] == ["a conversion warning"]
+        assert sc["gate_notes"] == [gate_note]
+
+    async def test_real_client_plugin_not_modified_fault(
+        self, mock_config
+    ):
+        """End to end through a real TracClient: the plugin's "Page not
+        modified" fault comes back as the unchanged result."""
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+
+        def _rpc(namespace, method, *args):
+            if method == "getPageInfo":
+                return {"name": "X", "version": 3}
+            if method == "putPageIfVersion":
+                raise xmlrpc.client.Fault(
+                    1,
+                    "'Page not modified' while executing "
+                    "'wiki.putPageIfVersion()'",
+                )
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\n", "page_name": "X"},
+                client,
+            )
+
+        assert not result.isError
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 3
 
 
 class TestPushPossibleOverwrite:
@@ -1037,6 +1258,56 @@ class TestPull:
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
         assert "validation_error" in result.content[0].text
+
+    async def test_pull_real_404_is_not_found(self, tmp_path):
+        """TracXMLRPC's missing-page fault, Fault(404, 'Wiki page "X"
+        does not exist'), is classified by its code (Trac #191)."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "NoSuchPage" does not exist'
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "NoSuchPage", "file_path": str(out_file)},
+            client,
+        )
+
+        assert result.isError is True
+        assert "Error (not_found)" in result.content[0].text
+        assert not out_file.exists()
+
+    async def test_pull_code_1_quoted_name_is_not_not_found(
+        self, tmp_path
+    ):
+        """A code-1 fault is any TracError, and the name it quotes,
+        'Not Found Notes', is no evidence that the page is missing: the
+        fault propagates to the dispatcher, which reports a server
+        error, not a not_found (Trac #191)."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'Not Found Notes'' while "
+            "executing 'wiki.getPage()'",
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "Not Found Notes",
+                "file_path": str(out_file),
+            },
+            client,
+        )
+
+        assert result.isError is True
+        assert "server_error" in result.content[0].text
+        assert "not_found" not in result.content[0].text
+        assert not out_file.exists()
 
     async def test_pull_other_fault_reraises(self, tmp_path):
         """Non-not-found Fault is caught by the registry error handler."""

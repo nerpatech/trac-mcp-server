@@ -15,6 +15,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 
+import anyio
 import uvicorn
 from mcp.server import Server
 from mcp.server.streamable_http_manager import (
@@ -29,11 +30,62 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .. import version as _version
 from ..config_schema import ServerConfig
 from ..instances import Identity
 from .oidc import extract_bearer_token
 
 logger = logging.getLogger(__name__)
+
+_SDK_TRANSPORT_LOGGER = "mcp.server.streamable_http"
+
+
+class _SseWriterCloseFilter(logging.Filter):
+    """Demote the MCP SDK 1.30.0 session-close "standalone SSE writer" record.
+
+    With ``mcp==1.30.0`` on the server side, every streamable-http session
+    close logs ``Error in standalone SSE writer`` at ERROR from the logger
+    ``mcp.server.streamable_http`` (``logger.exception``, with an
+    ``anyio.ClosedResourceError`` in ``exc_info``). The client's DELETE runs
+    ``StreamableHTTPServerTransport.terminate()``, which closes the receive
+    stream the standalone GET writer is iterating; 1.30.0 moved the GET
+    handler's cleanup into a ``finally``, so the writer now reports that
+    close as an error. The session ends normally and 1.29.1 does not log
+    it, so the record is noise (Trac /trac_mcp_server #169).
+
+    A record matches only when the logger name, the message AND a
+    ``ClosedResourceError`` all match; anything else passes unchanged. A
+    match is demoted to DEBUG in place and kept only if the logger is
+    enabled for DEBUG: handlers compare ``record.levelno`` with their own
+    level only, so a NOTSET handler would otherwise still emit it.
+
+    Remove once the SDK stops logging this on a normal session close.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.name == _SDK_TRANSPORT_LOGGER
+            and record.getMessage() == "Error in standalone SSE writer"
+            and record.exc_info
+            and isinstance(
+                record.exc_info[1], anyio.ClosedResourceError
+            )
+        ):
+            record.levelno = logging.DEBUG
+            record.levelname = logging.getLevelName(logging.DEBUG)
+            return logging.getLogger(record.name).isEnabledFor(
+                logging.DEBUG
+            )
+        return True
+
+
+def _install_sse_writer_close_filter() -> None:
+    """Install ``_SseWriterCloseFilter`` on the SDK transport logger once."""
+    lg = logging.getLogger(_SDK_TRANSPORT_LOGGER)
+    if not any(
+        isinstance(f, _SseWriterCloseFilter) for f in lg.filters
+    ):
+        lg.addFilter(_SseWriterCloseFilter())
 
 
 class BearerAuthMiddleware:
@@ -221,7 +273,12 @@ class OidcTokenRequiredMiddleware:
 
 
 async def _healthz(_request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok"})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "release": _version.release_sha() or "unknown",
+        }
+    )
 
 
 class _SessionManagerASGIApp:
@@ -257,6 +314,7 @@ def build_http_app(
     the MCP endpoint; ``allowed_hosts``/``allowed_origins`` default to the
     configured bind address plus loopback, extended by config.
     """
+    _install_sse_writer_close_filter()
     security_settings = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[

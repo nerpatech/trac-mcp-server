@@ -6,6 +6,13 @@ item. Since #112 the converter keeps an item's children in source order, so
 the shape converts faithfully and then renders split. The detector lives in
 `converters.markdown_to_tracwiki` so the preview checks and the
 `wiki_file_push` write path reach the same function.
+
+Since #176 a plain paragraph directly after a nested list is NOT a split: the
+writer puts it one column past the item's marker with no blank line, which
+Trac keeps in the outer item. The rows here that seed the defect with a
+paragraph use one the writer still has to keep behind a blank line: its first
+line, ``1\\.`` or ``\\-``, would open a list item in Trac at that column.
+(tests/test_converter_between_column_continuation.py pins the silent form.)
 """
 
 import xmlrpc.client
@@ -34,7 +41,7 @@ TICKET_INPUT = (
     "  - first suspect;\n"
     "  - second suspect.\n"
     "\n"
-    "  A paragraph that belongs after the list.\n"
+    "  1\\. A paragraph that belongs after the list.\n"
     "- Guard: next item.\n"
 )
 
@@ -96,7 +103,7 @@ def test_table_after_sublist():
 
 
 def test_ordered_parent():
-    text = "1. Ordered:\n   1. sub\n\n   para\n2. next\n"
+    text = "1. Ordered:\n   1. sub\n\n   1\\. para\n2. next\n"
     found = find_list_item_splits(text)
     assert len(found) == 1
     assert found[0]["item"] == "Ordered:"
@@ -109,7 +116,7 @@ def test_nested_item_reports_depth_one():
         "  - mid\n"
         "    - leaf\n"
         "\n"
-        "    after the leaf\n"
+        "    \\- after the leaf\n"
         "  - mid two\n"
     )
     assert find_list_item_splits(text) == [
@@ -118,7 +125,7 @@ def test_nested_item_reports_depth_one():
 
 
 def test_item_text_is_restored_with_no_nul_byte():
-    text = "- Use `foo()` and [[PageOutline]] here\n  - sub\n\n  tail\n"
+    text = "- Use `foo()` and [[PageOutline]] here\n  - sub\n\n  \\- tail\n"
     found = find_list_item_splits(text)
     assert len(found) == 1
     assert found[0]["item"] == "Use foo() and [[PageOutline]] here"
@@ -130,7 +137,7 @@ def test_item_text_is_restored_with_no_nul_byte():
 
 def test_item_is_truncated_after_restoring():
     long_code = "x" * 80
-    text = f"- `{long_code}`\n  - sub\n\n  tail\n"
+    text = f"- `{long_code}`\n  - sub\n\n  \\- tail\n"
     found = find_list_item_splits(text)
     assert found[0]["item"] == "x" * 60
 
@@ -208,7 +215,7 @@ async def test_push_honours_the_preview_checks_pragma(tmp_path):
 
 
 def test_message_for_an_item_that_starts_with_a_nested_list():
-    text = "- - b\n\n  tail\n"
+    text = "- - b\n\n  \\- tail\n"
     found = find_list_item_splits(text)
     assert len(found) == 1
     assert found[0]["item"] == ""

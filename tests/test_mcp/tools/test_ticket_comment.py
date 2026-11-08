@@ -331,7 +331,7 @@ class TicketCommentHappyPathTestCase(unittest.TestCase):
 class TicketCommentFaultTranslationTestCase(unittest.TestCase):
     """The two faults that must not reach the caller raw."""
 
-    def _client_raising(self, attr, fault_string):
+    def _client_raising(self, attr, fault_string, code=1):
         # get_ticket defaults to a matching base_ts of "100" so the edit
         # cases below reach the RPC under test rather than being turned
         # away by ticket #104's precondition first.
@@ -339,7 +339,9 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
         setattr(
             client,
             attr,
-            MagicMock(side_effect=xmlrpc.client.Fault(1, fault_string)),
+            MagicMock(
+                side_effect=xmlrpc.client.Fault(code, fault_string)
+            ),
         )
         return client
 
@@ -362,41 +364,71 @@ class TicketCommentFaultTranslationTestCase(unittest.TestCase):
         self.assertTrue(result.isError)
         self.assertIn("tracrpc_comment", text_of(result))
 
+    # (client method, the RPC method it calls, handler, arguments):
+    # each tool's helper is asked about the method it actually called.
+    _TOOL_CASES = [
+        (
+            "edit_ticket_comment",
+            "editComment",
+            _handle_edit,
+            {
+                "ticket_id": 1,
+                "cnum": 1,
+                "comment": "x",
+                "base_ts": "100",
+            },
+        ),
+        (
+            "delete_ticket_comment",
+            "deleteComment",
+            _handle_delete,
+            {"ticket_id": 1, "cnum": 1},
+        ),
+        (
+            "reply_to_ticket_comment",
+            "replyToComment",
+            _handle_reply,
+            {"ticket_id": 1, "cnum": 1, "comment": "x"},
+        ),
+        (
+            "get_ticket_comment_history",
+            "getCommentHistory",
+            _handle_history,
+            {"ticket_id": 1, "cnum": 1},
+        ),
+    ]
+
     def test_missing_plugin_explained_for_every_tool(self):
-        fault = 'RPC method "ticket.whatever" not found'
-        cases = [
-            (
-                "edit_ticket_comment",
-                _handle_edit,
-                {
-                    "ticket_id": 1,
-                    "cnum": 1,
-                    "comment": "x",
-                    "base_ts": "100",
-                },
-            ),
-            (
-                "delete_ticket_comment",
-                _handle_delete,
-                {"ticket_id": 1, "cnum": 1},
-            ),
-            (
-                "reply_to_ticket_comment",
-                _handle_reply,
-                {"ticket_id": 1, "cnum": 1, "comment": "x"},
-            ),
-            (
-                "get_ticket_comment_history",
-                _handle_history,
-                {"ticket_id": 1, "cnum": 1},
-            ),
-        ]
-        for attr, handler, args in cases:
+        for attr, rpc, handler, args in self._TOOL_CASES:
             with self.subTest(handler=attr):
+                fault = f'RPC method "ticket.{rpc}" not found'
                 result = run(
                     handler(self._client_raising(attr, fault), args)
                 )
                 self.assertIn("tracrpc_comment", text_of(result))
+
+    def test_method_not_found_code_is_enough_for_every_tool(self):
+        """-32601 is TracXMLRPC's MethodNotFound whatever the text
+        says: wording without "not found" still counts (Trac #191)."""
+        for attr, rpc, handler, args in self._TOOL_CASES:
+            with self.subTest(handler=attr):
+                client = self._client_raising(
+                    attr, f"No such method '{rpc}'", code=-32601
+                )
+                result = run(handler(client, args))
+                self.assertTrue(result.isError)
+                self.assertIn("tracrpc_comment", text_of(result))
+
+    def test_a_resource_fault_naming_a_method_is_not_swallowed(self):
+        """A "not found" resource fault that merely quotes a name
+        containing "method" is no missing method: it propagates
+        (Trac #191)."""
+        fault = "Comment 3 not found on ticket #5 'MethodNotes'"
+        for attr, _rpc, handler, args in self._TOOL_CASES:
+            with self.subTest(handler=attr):
+                client = self._client_raising(attr, fault)
+                with self.assertRaises(xmlrpc.client.Fault):
+                    run(handler(client, args))
 
     def test_bundled_change_refusal_keeps_the_servers_wording(self):
         """The refusal names the fields; dropping it would lose the reason."""

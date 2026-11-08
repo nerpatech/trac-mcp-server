@@ -268,21 +268,22 @@ def test_text_after_a_table_after_a_nested_list_keeps_the_blank_line():
 # -- Unchanged output -------------------------------------------------------
 
 
-def test_paragraph_after_a_nested_list_is_unchanged():
-    """A Trac limit (#112): the blank line stays, the advisory (#125) fires."""
+def test_paragraph_after_a_nested_list_goes_between_the_markers():
+    """#176: no blank line, one column past the item's marker (Trac keeps
+    it in the outer item), and the advisory (#125) stays quiet. The refused
+    runs keep the #112 blank line (tests/test_converter_between_column_
+    continuation.py)."""
     md = "- a\n  - b\n\n  para\n- c\n"
-    assert markdown_to_tracwiki(md) == (" * a\n   * b\n\n   para\n * c")
-    assert find_list_item_splits(md) == [
-        {"item": "a", "block": "paragraph", "depth": 0}
-    ]
+    assert markdown_to_tracwiki(md) == (" * a\n   * b\n  para\n * c")
+    assert find_list_item_splits(md) == []
 
 
 def test_two_paragraphs_after_a_nested_list_separate_by_br():
-    """The first stays behind a blank line (the Trac limit); the break
-    between the two paragraphs is the new form."""
+    """The first goes between the markers (the rest at the continuation
+    indent), joined by the break the #143 form uses between paragraphs."""
     md = "- a\n  - b\n\n  p1\n\n  p2\n- c\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   * b\n\n   p1 [[BR]][[BR]]\n   p2\n * c"
+        " * a\n   * b\n  p1 [[BR]][[BR]]\n   p2\n * c"
     )
 
 
@@ -368,7 +369,6 @@ def test_released_table_followed_by_a_fence_gets_no_blank_line():
     [
         " * a\n   {{{\n   c\n   }}}\n   tail",
         " * a\n   {{{\n   c\n   }}}\n   tail\n\nafter",
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b",
         " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n   tail",
         " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
         "   tail\n\nafter",
@@ -382,6 +382,17 @@ def test_item_text_after_a_block_is_item_text_without_a_following_item(
     result = tracwiki_to_markdown(wiki)
     assert "tracwiki-unconverted" not in result.text, result.text
     assert result.warnings == []
+
+
+def test_text_after_a_blank_line_following_a_block_is_a_quote():
+    """Not item text: Trac ends the list at the blank line, so `more` is a
+    blockquote and ` * b` a new list (#183). This row was in the list above
+    (no fence) until then; it is carried through the fallback fence now."""
+    wiki = " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b"
+    assert tracwiki_to_markdown(wiki).text == (
+        " - a\n   ```\n   c\n   ```\n   tail\n\n"
+        "```tracwiki-unconverted\n   more\n```\n\n - b"
+    )
 
 
 # -- TracWiki -> Markdown -> TracWiki byte stability -------------------------

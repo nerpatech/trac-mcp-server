@@ -31,11 +31,12 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
 from ...file_handler import detect_file_format
 from ...preview.checks import _allowed_codes
-from .errors import build_error_response
+from .errors import build_error_response, classify_fault
 from .file_io import (
     check_output_path,
     deliver_output,
@@ -71,7 +72,10 @@ WIKI_FILE_TOOLS = [
             "stored a version other than the one after the version it "
             "was based on: another write most likely landed just before "
             "it and was replaced (intervening_versions lists them; "
-            "inspect with wiki_diff). The page was stored."
+            "inspect with wiki_diff). The page was stored. Content "
+            "identical to the stored page stores nothing and returns "
+            'an "unchanged" result (structuredContent.action is '
+            '"unchanged"), not an error.'
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -410,11 +414,7 @@ async def _handle_push(
     try:
         info = await run_sync(client.get_wiki_page_info, page_name)
     except xmlrpc.client.Fault as e:
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" not in fault_lower
-            and "does not exist" not in fault_lower
-        ):
+        if classify_fault(e) != "not_found":
             raise
         info = None
     # Some Trac instances return 0 (int) instead of raising Fault
@@ -444,6 +444,18 @@ async def _handle_push(
         # one would write the page a second time.
         result = {}
         readback_error = str(e)
+    except WikiPageNotModified as e:
+        # Byte-identical to the stored page (ticket #174): Trac stored
+        # nothing, which is a no-op, not a failure. The version is the
+        # re-read current one; the probe's is the fallback, and on the
+        # create path (probe found no page) there may be neither.
+        result = {}
+        action = "unchanged"
+        version = (
+            e.current_version
+            if e.current_version is not None
+            else version
+        )
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket
         # #120); put_wiki_page refused before posting anything.
@@ -459,11 +471,19 @@ async def _handle_push(
             f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
         )
 
-    verb = "Created" if action == "created" else "Updated"
     # Trac /trac_mcp_server #130: only an update read back successfully
     # can be flagged; put_wiki_page never sets it on a create.
     possible_overwrite = bool(result.get("possible_overwrite"))
-    if readback_error is None:
+    if action == "unchanged":
+        # Nothing was stored; `version` is what the page is at.
+        new_version = version
+        shown = "unknown" if version is None else version
+        text_parts = [
+            f"Wiki page '{page_name}' unchanged (version {shown}): "
+            "content identical to the stored page. Trac stored nothing."
+        ]
+    elif readback_error is None:
+        verb = "Created" if action == "created" else "Updated"
         new_version = result.get("version", 1)
         text_parts = [
             f"{verb} wiki page '{page_name}' (version {new_version})"
@@ -475,6 +495,7 @@ async def _handle_push(
             if overwrite is not None:
                 text_parts.append(overwrite)
     else:
+        verb = "Created" if action == "created" else "Updated"
         new_version = None
         text_parts = [
             f"{verb} wiki page '{page_name}' (version unknown): the "
@@ -559,11 +580,7 @@ async def _handle_pull(
             client.get_wiki_page, page_name, version
         )
     except xmlrpc.client.Fault as e:
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" in fault_lower
-            or "does not exist" in fault_lower
-        ):
+        if classify_fault(e) == "not_found":
             return build_error_response(
                 "not_found",
                 f"Wiki page '{page_name}' does not exist",

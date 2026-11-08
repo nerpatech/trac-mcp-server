@@ -21,7 +21,7 @@ from ...core.client import (
     TracClient,
 )
 from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
-from .errors import build_error_response
+from .errors import build_error_response, classify_fault
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
@@ -1012,10 +1012,7 @@ async def _handle_delete(
         await run_sync(client.delete_ticket, ticket_id)
     except xmlrpc.client.Fault as e:
         # Provide specific guidance for permission errors
-        if (
-            "permission" in e.faultString.lower()
-            or "denied" in e.faultString.lower()
-        ):
+        if classify_fault(e) == "permission_denied":
             return build_error_response(
                 "permission_denied",
                 e.faultString,

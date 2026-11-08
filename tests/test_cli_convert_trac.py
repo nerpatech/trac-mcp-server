@@ -240,8 +240,35 @@ def test_check_trac_auth_missing_prints_friendly_error_and_exits_4(
 
 
 def test_check_trac_ping_auth_fault_classified(monkeypatch, capsys):
-    """XML-RPC generic fault is classified as 'Trac fault' (Phase 23: refactored
-    from 'authentication failed' to the shared helper's generic Fault branch)."""
+    """A fault with no recognised code or text is the generic 'Trac fault'.
+
+    Here that is Fault(500, "Forbidden"). A 403 is permission denied:
+    see test_check_trac_ping_403_fault_is_permission_denied.
+    """
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        validate_side_effect=xmlrpc.client.Fault(500, "Forbidden")
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--check-trac"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "Trac fault" in err
+    assert "Forbidden" in err
+
+
+def test_check_trac_ping_403_fault_is_permission_denied(
+    monkeypatch, capsys
+):
+    """A bare Fault(403, "Forbidden") -- TracXMLRPC's PermissionError
+    code, with no permission word in its text -- is classified by its
+    code as 'Trac permission denied', not the generic 'Trac fault' it
+    gave before classify_fault (Trac #189)."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
         validate_side_effect=xmlrpc.client.Fault(403, "Forbidden")
@@ -255,7 +282,7 @@ def test_check_trac_ping_auth_fault_classified(monkeypatch, capsys):
 
     assert result == EXIT_TRAC
     err = capsys.readouterr().err
-    assert "Trac fault" in err
+    assert "Trac permission denied" in err
     assert "Forbidden" in err
 
 
@@ -538,11 +565,13 @@ def test_from_wiki_auth_missing_prints_friendly_error_and_exits_4(
 def test_from_wiki_page_not_found_prints_friendly_error_and_exits_4(
     monkeypatch, capsys
 ):
-    """Fault(1) -> 'wiki page not found: <page name>'."""
+    """Fault(404, 'Wiki page "<name>" does not exist') -> 'wiki page
+    not found: <page name>': the real TracXMLRPC shape for a missing
+    page, classified by its code."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
         get_wiki_page_side_effect=xmlrpc.client.Fault(
-            1, "page not found"
+            404, 'Wiki page "NoSuchPage" does not exist'
         )
     )
     monkeypatch.setattr(
@@ -555,6 +584,61 @@ def test_from_wiki_page_not_found_prints_friendly_error_and_exits_4(
     assert result == EXIT_TRAC
     err = capsys.readouterr().err
     assert "wiki page not found: NoSuchPage" in err
+
+
+def test_from_wiki_code_1_fault_naming_a_notfound_page_is_not_missing(
+    monkeypatch, capsys
+):
+    """TracXMLRPC sends code 1 for ANY TracError, so code 1 is no
+    evidence of a missing page, and a quoted page name containing
+    'NotFound' is no evidence either (Trac #188, #189): the generic
+    fault message, not 'wiki page not found'."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'NotFoundHandling'' while "
+            "executing 'wiki.getPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "NotFoundHandling", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
+
+
+def test_from_wiki_code_1_fault_naming_a_permission_page_is_not_denied(
+    monkeypatch, capsys
+):
+    """A quoted page name containing 'Permission' is no permission
+    fault (Trac #188, #189)."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'PermissionNotes'' while "
+            "executing 'wiki.getPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "PermissionNotes", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "permission denied" not in err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
 
 
 def test_from_wiki_other_fault_reports_fault_string_and_exits_4(
@@ -1248,6 +1332,34 @@ def test_to_wiki_fault_not_found_reports_page_not_found(
     assert "TargetPage" in err
 
 
+def test_to_wiki_code_1_fault_naming_a_notfound_page_is_not_missing(
+    monkeypatch, capsys
+):
+    """The write-path counterpart: a code-1 fault whose quoted page
+    name contains 'NotFound' is the generic fault message, not 'wiki
+    page not found' (Trac #189)."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        put_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'NotFoundHandling'' while "
+            "executing 'wiki.putPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello"))
+
+    result = main(["--to-wiki", "NotFoundHandling"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
+
+
 def test_to_wiki_permission_denied_fault_classified(
     monkeypatch, capsys
 ):
@@ -1499,13 +1611,12 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 # Requires:
 #   - `pytest --run-live` on the command line
 #   - TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD env vars pointing at a
-#     real Trac instance
-#   - Optional: TRAC_TEST_WIKI_PAGE env var (default:
-#     "TracConvertLiveTest") — the test OVERWRITES this page with the
-#     seed body plus a per-run nonce line on every run, creating it
-#     if absent, so point
-#     it only at a scratch page the test user has WIKI_MODIFY on.
-#     Never point it at a page whose content matters.
+#     real Trac host. Every CLI call in the test passes --trac-url
+#     for that host's /trac_test instance, so it never writes to the
+#     project TRAC_URL itself names (Trac #173).
+#   - The scratch page is per-run (Scratch/TracConvertLive<hex8>),
+#     created by the test and deleted when it ends; there is no page
+#     to configure.
 #   - Optional: TRAC_INSECURE=1 to disable SSL verification for
 #     self-signed test servers
 #
@@ -1553,13 +1664,18 @@ def _main_with_stdin(argv, text):
 
 
 @pytest.mark.live
-def test_live_round_trip_check_from_edit_to(capsys):
+def test_live_round_trip_check_from_edit_to(capsys, monkeypatch):
     """Live round-trip: --check-trac → --from-wiki → edit → --to-wiki.
 
     Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars
-    pointing at a real Trac instance. Uses TRAC_TEST_WIKI_PAGE
-    (default 'TracConvertLiveTest') as the scratch target so
-    WikiStart and production pages are never modified.
+    pointing at a real Trac host. Runs on /trac_test ONLY:
+    `trac-convert` has no --instance, but it has --trac-url, the
+    highest-precedence override of the Trac URL, and every CLI call
+    in this row passes it the /trac_test URL of that host (TRAC_URL
+    is also re-pointed, as a second layer). The scratch target is a
+    per-run page,
+    Scratch/TracConvertLive<hex8>, deleted at the end, so no existing
+    page, WikiStart included, and no other instance is written.
 
     Sequence:
       1. --check-trac → exit 0, stdout mentions "OK (Trac API version".
@@ -1576,18 +1692,17 @@ def test_live_round_trip_check_from_edit_to(capsys):
          the marker written in step 5 (proves the round-trip actually
          persisted).
 
-    Seeds the page rather than deleting it. Trac keeps every version,
-    so the page's history still grows one version per run, but the
-    rendered page stays at the seed body, a nonce line and a single
-    marker. This departs from test_wiki_attachment.py's "pages
-    persist, ops can prune manually" convention, which nothing ever
-    pruned — see #84.
+    The page is created by step 2 and deleted in a finally, so the
+    instance is left as found (Trac #173; before it, one fixed page
+    was reseeded run after run and shared by overlapping runs).
 
     IMPORTANT: The test does NOT unset the real env vars. It reads
-    them via os.environ.get and relies on the actual live Trac.
+    them via os.environ.get, passes --trac-url on each CLI call, and
+    also overrides TRAC_URL (restored by monkeypatch).
     """
     import os
-    import time
+
+    from tests.live_helpers import trac_test_client, trac_test_url
 
     if not (
         os.environ.get("TRAC_URL")
@@ -1599,12 +1714,39 @@ def test_live_round_trip_check_from_edit_to(capsys):
             " for --run-live tests"
         )
 
-    page_name = os.environ.get(
-        "TRAC_TEST_WIKI_PAGE", "TracConvertLiveTest"
-    )
+    page_name = f"Scratch/TracConvertLive{uuid.uuid4().hex[:8]}"
+
+    # The destructive-test instance on the same host, whatever project
+    # or sub-path TRAC_URL itself names. --trac-url on every CLI call
+    # is the lever (it beats the env var, .env and the YAML); the
+    # setenv is a second layer.
+    test_url = trac_test_url()
+    monkeypatch.setenv("TRAC_URL", test_url)
+    cleaner = trac_test_client()
+    cleanup_error = None
+    try:
+        _live_round_trip_steps(capsys, page_name, test_url)
+    finally:
+        try:
+            cleaner.delete_wiki_page(page_name)
+        except Exception as exc:
+            cleanup_error = exc
+    # Reached only when the body passed: a body failure propagates
+    # unchanged out of the finally above.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"page {page_name} left behind on /trac_test: "
+            f"{cleanup_error!r}"
+        )
+
+
+def _live_round_trip_steps(capsys, page_name, test_url):
+    """Steps 1-6 of the live round-trip, against `page_name`, every
+    CLI call carrying `--trac-url <test_url>`."""
+    import time
 
     # Step 1: --check-trac
-    rc = main(["--check-trac"])
+    rc = main(["--check-trac", "--trac-url", test_url])
     assert rc == EXIT_OK, "live --check-trac should succeed"
     captured = capsys.readouterr()
     assert "OK (Trac API version" in captured.out
@@ -1617,7 +1759,14 @@ def test_live_round_trip_check_from_edit_to(capsys):
     #   write. A per-run nonce line makes each seed distinct; later
     #   steps re-read the page and never compare it to the constant.
     rc = _main_with_stdin(
-        ["--to-wiki", page_name, "--from", "md"],
+        [
+            "--to-wiki",
+            page_name,
+            "--from",
+            "md",
+            "--trac-url",
+            test_url,
+        ],
         _LIVE_SEED_BODY + "\n" + _run_nonce_line(),
     )
     assert rc == EXIT_OK, (
@@ -1627,7 +1776,9 @@ def test_live_round_trip_check_from_edit_to(capsys):
     capsys.readouterr()
 
     # Step 3: --from-wiki → md on stdout
-    rc = main(["--from-wiki", page_name, "--to", "md"])
+    rc = main(
+        ["--from-wiki", page_name, "--to", "md", "--trac-url", test_url]
+    )
     assert rc == EXIT_OK, f"live --from-wiki {page_name} should succeed"
     md_original = capsys.readouterr().out
     assert md_original, (
@@ -1641,7 +1792,16 @@ def test_live_round_trip_check_from_edit_to(capsys):
     # Step 5: --to-wiki with edited MD on stdin, verbose to check
     #   "info: wrote" line surfaces on stderr.
     rc = _main_with_stdin(
-        ["--to-wiki", page_name, "--from", "md", "-v"], md_edited
+        [
+            "--to-wiki",
+            page_name,
+            "--from",
+            "md",
+            "-v",
+            "--trac-url",
+            test_url,
+        ],
+        md_edited,
     )
     assert rc == EXIT_OK, (
         f"live --to-wiki {page_name} should succeed"
@@ -1652,9 +1812,53 @@ def test_live_round_trip_check_from_edit_to(capsys):
     assert page_name in captured.err
 
     # Step 6: re-fetch and verify the marker landed.
-    rc = main(["--from-wiki", page_name, "--to", "md"])
+    rc = main(
+        ["--from-wiki", page_name, "--to", "md", "--trac-url", test_url]
+    )
     assert rc == EXIT_OK
     md_reread = capsys.readouterr().out
     assert marker.strip() in md_reread, (
         "marker written in step 5 must appear in the re-read page"
     )
+
+
+def test_classifying_a_fault_does_not_import_the_mcp_tools():
+    """trac-convert's error path imports classify_fault from
+    core.faults, a stdlib-only module, not from mcp.tools.errors: that
+    import ran the whole mcp.tools package (every tool handler) just to
+    read one fault. Checked in a fresh interpreter, since this process
+    has long since imported the package (Trac #191)."""
+    import os
+    import subprocess
+    from pathlib import Path
+
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    code = (
+        "import sys, xmlrpc.client\n"
+        "from trac_mcp_server.cli.convert import _classify_trac_error\n"
+        "msg = _classify_trac_error(\n"
+        "    xmlrpc.client.Fault(1, 'x'),\n"
+        "    'https://trac.example.com',\n"
+        ")\n"
+        "assert msg == 'Trac fault (wiki operation): x', msg\n"
+        "leaked = sorted(\n"
+        "    m for m in sys.modules\n"
+        "    if m == 'trac_mcp_server.mcp.tools'\n"
+        "    or m.startswith('trac_mcp_server.mcp.tools.')\n"
+        ")\n"
+        "assert not leaked, leaked\n"
+    )
+    existing = os.environ.get("PYTHONPATH")
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        env={
+            **os.environ,
+            "PYTHONPATH": (
+                src + os.pathsep + existing if existing else src
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

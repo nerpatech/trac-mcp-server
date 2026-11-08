@@ -35,7 +35,11 @@ from ..instances import (
 )
 from ..instances import caller_identity as _caller_identity
 from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging, startup_note
-from ..version import check_version_consistency
+from ..version import (
+    check_version_consistency,
+    format_server_version,
+    release_sha,
+)
 from .http_app import run_http
 from .lifespan import server_lifespan
 from .oidc import OidcClientCache, extract_bearer_token
@@ -63,7 +67,10 @@ from .tools.write_gate import gate_enabled, write_gate_line
 logger = logging.getLogger(__name__)
 
 # Initialize server instance
-server = Server("trac-mcp-server", version=__version__)
+server = Server(
+    "trac-mcp-server",
+    version=format_server_version(__version__, release_sha()),
+)
 
 # Global instance registry (initialized in lifespan)
 _instances: InstanceRegistry | None = None
@@ -373,9 +380,10 @@ async def handle_call_tool(
     except InstanceNotAllowedError as e:
         # Ticket #110: a caller scoped away from the DEFAULT instance must
         # still be able to ask what it may reach -- the refusal below tells
-        # it to do exactly that. list_instances reads the registry, not
-        # the client, so it runs with none; every other tool, and an
-        # explicit out-of-scope `instance`, is still refused.
+        # it to do exactly that. list_instances takes the client when it
+        # has one and the registry otherwise, so it runs with none; every
+        # other tool, and an explicit out-of-scope `instance`, is still
+        # refused.
         if name != "list_instances" or instance is not None:
             return build_error_response(
                 _instance_error_type(e),
@@ -632,7 +640,8 @@ async def main(config_overrides: dict | None = None):
     ) as ctx:
         set_instances(ctx["instances"])
         set_instance_registry(ctx["instances"])
-        # The registry's value, the same one list_instances reports.
+        # The registry's (startup config) value. list_instances reports the
+        # calling client's, which is built from the same config.
         log_startup_settings(server_config, ctx["instances"].write_gate)
         oidc_rpc_url = (
             server_config.oidc_rpc_url
@@ -676,7 +685,7 @@ async def _run_stdio() -> None:
     ):
         init_options = InitializationOptions(
             server_name="trac-mcp-server",
-            server_version=__version__,
+            server_version=server.version,
             capabilities=server.get_capabilities(
                 notification_options=NotificationOptions(),
                 experimental_capabilities={},

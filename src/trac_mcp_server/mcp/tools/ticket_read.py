@@ -17,6 +17,7 @@ from ...core.async_utils import (
     run_sync_limited,
 )
 from ...core.client import TracClient
+from ...core.faults import is_missing_method_fault
 from .errors import build_error_response, format_timestamp
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
@@ -788,11 +789,10 @@ async def _handle_actions(
     try:
         actions = await run_sync(client.get_ticket_actions, ticket_id)
     except xmlrpc.client.Fault as e:
-        # If getActions is not available, provide helpful error
-        if (
-            "not found" in str(e).lower()
-            or "no such method" in str(e).lower()
-        ):
+        # If getActions is not available, provide helpful error. Only a
+        # missing-method fault counts: a resource fault whose text says
+        # "not found" (a missing ticket) must propagate (Trac #191).
+        if is_missing_method_fault(e, "getActions"):
             return build_error_response(
                 "method_not_available",
                 "ticket.getActions() not available on this Trac instance",
