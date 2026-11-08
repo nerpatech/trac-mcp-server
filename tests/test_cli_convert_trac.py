@@ -259,6 +259,30 @@ def test_check_trac_ping_auth_fault_classified(monkeypatch, capsys):
     assert "Forbidden" in err
 
 
+def test_check_trac_ping_403_fault_is_permission_denied(
+    monkeypatch, capsys
+):
+    """A bare Fault(403, "Forbidden") -- TracXMLRPC's PermissionError
+    code, with no permission word in its text -- is classified by its
+    code as 'Trac permission denied', not the generic 'Trac fault' it
+    gave before classify_fault (Trac #189)."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        validate_side_effect=xmlrpc.client.Fault(403, "Forbidden")
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--check-trac"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "Trac permission denied" in err
+    assert "Forbidden" in err
+
+
 def test_check_trac_ping_ssl_error_classified(monkeypatch, capsys):
     """SSL error is classified and mentions 'SSL'."""
     _mock_valid_env(monkeypatch)
