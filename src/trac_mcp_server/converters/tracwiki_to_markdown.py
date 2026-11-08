@@ -366,7 +366,7 @@ def _continued_item(
     return _deepest_item_at_or_left(columns, width)
 
 
-_DIGITS_ORDERED_RE = re.compile(rf"^[ \t]+{_NUMERIC_MARKER}(?=[ \t])")
+_DIGITS_ORDERED_RE = re.compile(rf"^[ \t]*{_NUMERIC_MARKER}(?=[ \t])")
 
 
 def _is_digits_ordered(marker_line: str) -> bool:
@@ -464,9 +464,14 @@ def _list_stack_step(
     *,
     upper_bound: bool,
     quote_rule: bool | None = None,
+    col0: bool = False,
 ) -> None:
     """Advance a list-item stack over one line, in place (the per-line step
     of `_open_list_item`, which documents the walk).
+
+    With `col0` a column-0 bullet or digits marker line (`_LIST_MARKER_COL0_RE`,
+    #182) is a marker line too, as Trac reads it (#190); without it such a
+    line is a plain column-0 line, which empties the stack.
 
     A blank line empties the stack. A line matching `_LIST_MARKER_RE` pops
     every entry at or past its own column (Trac's tab-expanded
@@ -518,7 +523,9 @@ def _list_stack_step(
         stack.clear()
         return
     column = _indent_width(_indent_of(line))
-    found = _LIST_MARKER_RE.match(line)
+    found = _LIST_MARKER_RE.match(line) or (
+        _LIST_MARKER_COL0_RE.match(line) if col0 else None
+    )
     if found:
         while stack and stack[-1][0] >= column:
             stack.pop()
@@ -639,6 +646,8 @@ def _items_open_above(
     lines: list[str],
     inside: set[int],
     start: int,
+    *,
+    col0: bool = False,
 ) -> list[tuple[int, re.Match[str]]]:
     """The list-item stack open just above line `start`, as
     `_list_stack_step` walks it over the lines since the last blank one.
@@ -650,16 +659,21 @@ def _items_open_above(
     inside the open item; walked as a line, a flush-left `{{{` would end the
     list (ticket #175, the seed of `_split_past_bound`).
 
-    `lines` are raw TracWiki, so the walk applies the upper bound (#175)."""
+    `lines` are raw TracWiki, so the walk applies the upper bound (#175).
+    With `col0` a column-0 marker line is an item too (`_list_stack_step`;
+    the run after a processor block fenced in a list item, #192)."""
     stack: list[tuple[int, re.Match[str]]] = []
     for line in _lines_above_since_blank(lines, inside, start):
-        _list_stack_step(stack, line, upper_bound=True)
+        _list_stack_step(stack, line, upper_bound=True, col0=col0)
     return stack
 
 
-def _open_list_item(lines: list[str]) -> re.Match[str] | None:
+def _open_list_item(
+    lines: list[str], *, col0: bool = False
+) -> re.Match[str] | None:
     """The list-marker match of the innermost list item still OPEN after
-    `lines`, or None (ticket #144).
+    `lines`, or None (ticket #144). `col0` also reads a column-0 marker line
+    as an item (`_list_stack_step`; the processor block in an item, #192).
 
     The stack walk `_separate_list_from_trailing_paragraph` uses, over
     columns in Trac's tab-expanded width: a marker line pops every entry at
@@ -677,7 +691,7 @@ def _open_list_item(lines: list[str]) -> re.Match[str] | None:
         # `>` at an item's marker column keeps that item, so a fence after
         # the quote is still in it.
         _list_stack_step(
-            stack, line, upper_bound=False, quote_rule=True
+            stack, line, upper_bound=False, quote_rule=True, col0=col0
         )
     return stack[-1][1] if stack else None
 
@@ -738,6 +752,9 @@ _STASH_FENCE_OPEN_RE = re.compile(
     rf"^[ \t]*`{{3,}}{re.escape(FALLBACK_FENCE_INFO)}$"
 )
 _STASH_FENCE_CLOSE_RE = re.compile(r"^`{3,}(?!`)")
+# The placeholder line of a processor block fenced in a list item (ticket
+# #192): the same line, at the item's text column.
+_ITEM_STASH_PLACEHOLDER_RE = re.compile(r"^[ ]*\x00CODE(\d+)\x00$")
 
 # A line shape that CommonMark already treats as "interrupting" -- it starts
 # a new sibling block on its own, without needing a blank line, rather than
@@ -851,6 +868,13 @@ class TracWikiParser:
         self._code_placeholders: list[str] = []
         self._br_marks_active = False
         self._item_fence_stashes: set[int] = set()
+        # The subset of `_item_fence_stashes` that stands for a processor
+        # block fenced in a list item (ticket #192).
+        self._item_processor_stashes: set[int] = set()
+        # Line indices of the closing fence of each of those stashes in the
+        # text `_convert_indented_blocks` is walking: the run after one
+        # reads a column-0 item above it (#192).
+        self._item_stash_closers: set[int] = set()
         self._col0_list_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
@@ -871,6 +895,8 @@ class TracWikiParser:
         self._code_placeholders = []
         self._br_marks_active = False
         self._item_fence_stashes = set()
+        self._item_processor_stashes = set()
+        self._item_stash_closers = set()
         self._col0_list_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
@@ -995,15 +1021,20 @@ class TracWikiParser:
         code-block pass uses, so no later pass rewrites the markup we are
         deliberately preserving as source text.
         """
+        self._note_fallback(kind)
+        self._code_placeholders.append(source)
+        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
+        fence = self._fence_for(source)
+        return f"{fence}{FALLBACK_FENCE_INFO}\n{placeholder}\n{fence}"
+
+    def _note_fallback(self, kind: str) -> None:
+        """The warning every verbatim fallback raises (`_stash_fallback`, and
+        the in-item form of a processor block, ticket #192)."""
         self.warnings.append(
             f"{kind} cannot be represented in Markdown - emitted verbatim "
             f"in a {FALLBACK_FENCE_INFO} block; markdown_to_tracwiki "
             f"restores it unchanged"
         )
-        self._code_placeholders.append(source)
-        placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
-        fence = self._fence_for(source)
-        return f"{fence}{FALLBACK_FENCE_INFO}\n{placeholder}\n{fence}"
 
     def _verbatim_mask(self, text: str) -> str:
         """Return ``text`` with verbatim regions blanked to ``\\x01`` fillers.
@@ -1057,8 +1088,34 @@ class TracWikiParser:
         Only a block at top level qualifies.  One nested inside another
         ``{{{ }}}`` block is that block's content, not a construct of its own
         (ticket #51), and one inside a code span is a quoted token (#46).
+
+        Ticket #192: where the opener is the first non-whitespace on its
+        line, the fence follows Trac's reading of the block. A run of
+        `comment`/`table` blocks stays inside an open list item at any
+        indent, column 0 included, and the lines after it continue the item
+        (M1, M2), so with an item open (`_open_list_item` over the lookback
+        view below, column-0 markers included) it is fenced at the item's
+        text column by `_fence_processor_in_item`, as #144 fences a plain
+        block. A run holding a `td`/`th` closes the list (M3), and so does a
+        block with no open item or with a declined marker (a lettered item,
+        a TAB-indented one): the opener's indentation, already emitted, is
+        taken back into the stash, so the fence, placeholder and closer all
+        sit at column 0 and the Markdown ends the list there. A block not
+        first on its line keeps the old path.
         """
         out: list[str] = []
+        # Ticket #192: what the open-item lookback reads. The same text as
+        # `out`, except that a block is not prose to it. One whose opener is
+        # first on its line is left out, with its indentation and the rest
+        # of its closing line: a block is transparent to the item stack
+        # (#144's F4-F6), and an earlier plain block is still raw here, so
+        # a column-0 body line would otherwise pop the item. A td/th run
+        # stands for one column-0 line, because Trac closes the list there
+        # (M3). A block opened mid-line keeps only its first line.
+        view: list[str] = []
+        view_from = (
+            0  # text before this index is not copied into `view`
+        )
         i = 0
         n = len(text)
         while i < n:
@@ -1067,7 +1124,11 @@ class TracWikiParser:
                 if end == -1:
                     out.append(text[i:])
                     break
+                line_start = text.rfind("\n", 0, i) + 1
+                indent = text[line_start:i]
+                first_on_line = not indent.strip(" \t")
                 m = _FALLBACK_PROCESSOR_RE.match(text, i)
+                ends_list = False
                 if m:
                     # Coalesce a run of adjacent fallback blocks into ONE
                     # region.  Emitting a fence each would put the closing
@@ -1095,21 +1156,74 @@ class TracWikiParser:
                             f"#!{x}" for x in dict.fromkeys(names)
                         )
                     )
-                    out.append(self._stash_fallback(text[i:end], kind))
+                    if first_on_line:
+                        # Ticket #192: the opener's indentation, which the
+                        # pass has already emitted, is taken back. A run of
+                        # comment/table blocks in an open item is fenced at
+                        # the item's text column; everything else (a td/th,
+                        # no open item, a declined marker) carries the
+                        # indentation into a column-0 stash, so the
+                        # Markdown ends the list before it, as Trac does
+                        # for a td/th (M3).
+                        if indent:
+                            del out[len(out) - len(indent) :]
+                            del view[len(view) - len(indent) :]
+                        ends_list = "td" in names or "th" in names
+                        fenced = (
+                            None
+                            if ends_list
+                            else self._fence_processor_in_item(
+                                view, indent, text[i:end], kind
+                            )
+                        )
+                        out.append(
+                            fenced
+                            if fenced is not None
+                            else self._stash_fallback(
+                                indent + text[i:end], kind
+                            )
+                        )
+                    else:
+                        out.append(
+                            self._stash_fallback(text[i:end], kind)
+                        )
                 else:
+                    if first_on_line and indent:
+                        del view[len(view) - len(indent) :]
                     out.append(text[i:end])
+                # What the lookback sees of the block.
+                eol = text.find("\n", end)
+                eol = n if eol == -1 else eol + 1
+                if first_on_line:
+                    if ends_list:
+                        view.append("x\n")
+                    if not text[end:eol].strip():
+                        view_from = eol
+                else:
+                    nl = text.find("\n", i, end)
+                    if nl == -1:
+                        view.append(text[i:end])
+                    else:
+                        view.append(text[i : nl + 1])
+                        view_from = eol
                 i = end
             elif text[i] == "`":
                 j = text.find("`", i + 1)
                 nl = text.find("\n", i + 1)
                 if j != -1 and (nl == -1 or j < nl):
                     out.append(text[i : j + 1])
+                    if i >= view_from:
+                        view.append(text[i : j + 1])
                     i = j + 1
                 else:
                     out.append(text[i])
+                    if i >= view_from:
+                        view.append(text[i])
                     i += 1
             else:
                 out.append(text[i])
+                if i >= view_from:
+                    view.append(text[i])
                 i += 1
         return "".join(out)
 
@@ -1415,6 +1529,17 @@ class TracWikiParser:
         """
         lines = text.split("\n")
         masked = self._verbatim_mask(text).split("\n")
+        stashed = self._stash_lines(lines, masked)
+        # Ticket #192: a processor block fenced in a list item is read as a
+        # `{{{ }}}` block is (the mask fills its interior and its closing
+        # line), so every rule below that is about a block in an item
+        # applies to it as #144 has it.
+        self._item_stash_closers = set()
+        for opening, holder, closing in self._item_stash_triples(lines):
+            masked[opening] = _indent_of(lines[opening]) + "{{{"
+            masked[holder] = "\x01"
+            masked[closing] = "\x01}}}"
+            self._item_stash_closers.add(closing)
         out: list[str] = []
         stack: list[int] = []
         inside: set[int] | None = None
@@ -1422,7 +1547,6 @@ class TracWikiParser:
         # a brace, a definition list or a lettered list, until a column-zero
         # line; a list may then still be open above the next run.
         list_may_be_open = False
-        stashed = self._stash_lines(lines, masked)
         index = 0
         while index < len(lines):
             probe = masked[index]
@@ -1430,6 +1554,16 @@ class TracWikiParser:
                 # Blank lines leave the stack alone; column zero clears it.
                 if probe.strip():
                     stack = []
+                    # Ticket #192: a column-0 line straight after a processor
+                    # block fenced in a column-0 item ends the list for Trac,
+                    # and CommonMark (mistune) would read it as the item's.
+                    if index - 1 in self._item_stash_closers:
+                        if inside is None:
+                            inside = self._lines_inside_blocks(lines)
+                        if self._stash_ends_col0_list(
+                            lines, masked, inside, stashed, index, index
+                        ):
+                            out.append("")
                     # A block's lines are not prose (the mask fills its
                     # interior and its closing line; a stashed processor
                     # block's fence, placeholder and closing line stand for
@@ -1632,6 +1766,11 @@ class TracWikiParser:
                 ):
                     stack = []
                     out.extend(run)
+                    # Ticket #192: as above, after the run.
+                    if self._stash_ends_col0_list(
+                        lines, masked, inside, stashed, start, index
+                    ):
+                        out.append("")
                     continue
 
             depths, stack = _quote_depths(run, stack)
@@ -1752,6 +1891,34 @@ class TracWikiParser:
             or index in stashed
         )
 
+    def _stash_ends_col0_list(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        stashed: set[int],
+        start: int,
+        end: int,
+    ) -> bool:
+        """True when the line at `end` ends a list that a column-0 item
+        opened, straight after the lines `start` to `end` (none when
+        `end == start`) that follow a processor block fenced in that item
+        (ticket #192), and so wants a blank line before it for CommonMark:
+        `_item_run_ends_the_list`, for the list the later separator pass
+        cannot see (it reads indented markers only). False when the item
+        above the block is not a column-0 one: that pass puts the blank
+        line in."""
+        if start - 1 not in self._item_stash_closers:
+            return False
+        stack = _items_open_above(lines, inside, start, col0=True)
+        return (
+            bool(stack)
+            and stack[0][0] == 0
+            and self._item_run_ends_the_list(
+                lines, masked, stashed, end
+            )
+        )
+
     def _marker_run_after_blank_in_list(
         self,
         lines: list[str],
@@ -1857,8 +2024,30 @@ class TracWikiParser:
                 return True
         return False
 
-    @staticmethod
-    def _stash_lines(lines: list[str], masked: list[str]) -> set[int]:
+    def _item_stash_triples(
+        self, lines: list[str]
+    ) -> list[tuple[int, int, int]]:
+        """The (opening fence, placeholder, closing fence) line indices of
+        every processor block `_fallback_processor_blocks` fenced in a list
+        item (ticket #192). The three lines sit at the item's text column,
+        so the placeholder is `[ ]*\\x00CODE<n>\\x00` with `n` recorded in
+        `_item_processor_stashes`."""
+        if not self._item_processor_stashes:
+            return []
+        triples: list[tuple[int, int, int]] = []
+        for idx, line in enumerate(lines):
+            found = _ITEM_STASH_PLACEHOLDER_RE.match(line)
+            if (
+                found
+                and int(found.group(1)) in self._item_processor_stashes
+                and 0 < idx < len(lines) - 1
+            ):
+                triples.append((idx - 1, idx, idx + 1))
+        return triples
+
+    def _stash_lines(
+        self, lines: list[str], masked: list[str]
+    ) -> set[int]:
         """Indices of the lines of every `_stash_fallback` stash: the
         placeholder (column zero, not inside a block), the opening fence
         before it and the closing fence after it (ticket #182).
@@ -1867,8 +2056,11 @@ class TracWikiParser:
         and `#!th` blocks before `_convert_indented_blocks` runs, so a
         block there is these three lines with no braces. They are the
         block's lines, as the masked interior and closing line of a
-        `{{{` block are."""
+        `{{{` block are. A block fenced in a list item has all three lines
+        at the item's text column (#192)."""
         stashed: set[int] = set()
+        for triple in self._item_stash_triples(lines):
+            stashed.update(triple)
         for idx, probe in enumerate(masked):
             if not _STASH_PLACEHOLDER_RE.match(probe):
                 continue
@@ -1909,7 +2101,12 @@ class TracWikiParser:
             or start - 1 in inside
         ):
             return []
-        return _items_open_above(lines, inside, start)
+        return _items_open_above(
+            lines,
+            inside,
+            start,
+            col0=start - 1 in self._item_stash_closers,
+        )
 
     def _starts_inside_open_item(
         self,
@@ -1928,7 +2125,14 @@ class TracWikiParser:
             return True
         if start - 1 not in stashed:
             return False
-        return bool(_items_open_above(lines, inside | stashed, start))
+        return bool(
+            _items_open_above(
+                lines,
+                inside | stashed,
+                start,
+                col0=start - 1 in self._item_stash_closers,
+            )
+        )
 
     def _split_past_bound(
         self,
@@ -2024,9 +2228,8 @@ class TracWikiParser:
         prev = masked[start - 1]
         return prev.startswith("\x01") and prev.rstrip().endswith("}}}")
 
-    @staticmethod
     def _continues_item_after_block(
-        lines: list[str], inside: set[int], start: int
+        self, lines: list[str], inside: set[int], start: int
     ) -> bool:
         """True when the line at `start`, which follows a block's closing
         line, continues a list item (ticket #143 review, F3).
@@ -2043,7 +2246,12 @@ class TracWikiParser:
         line in a code body does not end the list. The stack empties at a
         blank line, so only the lines after the last blank one matter.
         """
-        stack = _items_open_above(lines, inside, start)
+        stack = _items_open_above(
+            lines,
+            inside,
+            start,
+            col0=start - 1 in self._item_stash_closers,
+        )
         if not stack:
             return False
         marker_line = stack[-1][1].string
@@ -2081,6 +2289,10 @@ class TracWikiParser:
                 i = j + 1 if j != -1 and (nl == -1 or j < nl) else i + 1
             else:
                 i += 1
+        # A processor block fenced in a list item (#192) is a block here too,
+        # opening fence included: `_lines_above_since_blank` skips it whole.
+        for triple in self._item_stash_triples(lines):
+            inside.update(triple)
         return inside
 
     @staticmethod
@@ -2346,19 +2558,52 @@ class TracWikiParser:
         marker = _open_list_item(_lines_since_blank(emitted))
         if marker is None:
             return None
+        replacement = self._fence_at_item_column(
+            marker, indent, code.split("\n"), fence, info
+        )
+        if replacement is None:
+            return None
+        return replacement, len(indent)
+
+    def _fence_at_item_column(
+        self,
+        marker: re.Match[str],
+        indent: str,
+        lines: list[str],
+        fence: str,
+        info: str,
+        *,
+        keep: int = 0,
+    ) -> str | None:
+        """The fence of `lines` at the text column of the open list item
+        `marker` (the core `_fence_in_list_item` and a processor block in an
+        item share, ticket #192), or None when the item's marker is declined.
+        `indent` is the opener's own indentation, which the caller has
+        already taken back from its output.
+
+        Declined, so the old path stands: a marker Markdown cannot express
+        (lettered/roman, #74 -- the item is fenced away as unconverted
+        text, and a fence under it came back as an inline span), and a
+        TAB-indented marker line (CommonMark reads it as an indented code
+        block, which predates #144).
+
+        The first `keep` lines are not part of the body Trac shows (a
+        processor block's `{{{#!comment` line is the block itself): they are
+        left out of the strip test and keep their text, and take O like any
+        other line. Every other line loses `indent` when ALL its non-blank
+        ones start with it (F2).
+        """
         lead = _indent_of(marker.string)
-        # Declined, so the old path stands: a marker Markdown cannot express
-        # (lettered/roman, #74 -- the item is fenced away as unconverted
-        # text, and a fence under it came back as an inline span), and a
-        # TAB-indented marker line (CommonMark reads it as an indented code
-        # block, which predates #144).
         if _ALPHA_LIST_MARKER_RE.match(marker.string) or "\t" in lead:
             return None
         token = marker.group(0)[len(lead) :]
         out_indent = " " * (_indent_width(lead) + len(token) + 1)
-        lines = code.split("\n")
-        if all(ln.startswith(indent) for ln in lines if ln.strip()):
-            lines = [ln[len(indent) :] for ln in lines]
+        if all(
+            ln.startswith(indent) for ln in lines[keep:] if ln.strip()
+        ):
+            lines = lines[:keep] + [
+                ln[len(indent) :] for ln in lines[keep:]
+            ]
         shown = [out_indent + ln if ln.strip() else "" for ln in lines]
         # A blank first line leaves the placeholder line whitespace-only.
         first = shown[0][len(out_indent) :] if shown[0] else ""
@@ -2369,9 +2614,42 @@ class TracWikiParser:
         placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
         return (
             f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
-            f"{out_indent}{fence}",
-            len(indent),
+            f"{out_indent}{fence}"
         )
+
+    def _fence_processor_in_item(
+        self,
+        view: list[str],
+        indent: str,
+        source: str,
+        kind: str,
+    ) -> str | None:
+        """The fence of a `{{{#!comment}}}` / `{{{#!table}}}` run (`source`,
+        from its first `{{{` to its last `}}}`) at the text column of the list
+        item open in `view`, or None (ticket #192).
+
+        Trac keeps such a block inside the open item (M1, M2), so the fence
+        is the item's own, exactly as #144 fences a plain block
+        (`_fence_at_item_column`). None when no item is open there or the
+        item's marker is declined; the caller then stashes the block at
+        column 0."""
+        marker = _open_list_item(_lines_since_blank(view), col0=True)
+        if marker is None:
+            return None
+        fenced = self._fence_at_item_column(
+            marker,
+            indent,
+            source.split("\n"),
+            self._fence_for(source),
+            FALLBACK_FENCE_INFO,
+            keep=1,
+        )
+        if fenced is not None:
+            self._note_fallback(kind)
+            self._item_processor_stashes.add(
+                len(self._code_placeholders) - 1
+            )
+        return fenced
 
     @staticmethod
     def _div_end(text: str, start: int) -> int:
