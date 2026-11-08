@@ -450,6 +450,21 @@ class TestHandler:
         out = _run(client, _registry(other))
         assert out["style_page"]["reason"] == "permission_denied"
 
+    def test_style_page_404_without_not_found_wording(self):
+        # ResourceNotFound is code 404 whatever its text, as in
+        # translate_xmlrpc_error (Trac #186).
+        other = FakeClient(
+            {STYLE_PAGE: ("x", 1)},
+            faults={
+                STYLE_PAGE: xmlrpc.client.Fault(
+                    404, "No version 3 for " + STYLE_PAGE
+                )
+            },
+        )
+        client = FakeClient({"WikiStart": (AGENT + "\n", 1)})
+        out = _run(client, _registry(other))
+        assert out["style_page"]["reason"] == "not_found"
+
     def test_style_page_other_failure_is_error(self):
         other = FakeClient(
             {STYLE_PAGE: ("x", 1)},

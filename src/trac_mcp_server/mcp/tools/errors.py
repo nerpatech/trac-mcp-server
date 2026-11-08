@@ -128,11 +128,13 @@ def translate_xmlrpc_error(
     """Translate XML-RPC fault to structured error response.
 
     Provides domain-specific corrective action messages for ticket,
-    wiki, and milestone operations. Fault codes classify first where
-    TracXMLRPC sets them (404 not found, 403 permission, 409 version
-    conflict from wiki.putPageIfVersion); the fault text is matched only
-    for not found, permission and milestone already-exists, never for
-    version conflicts.
+    wiki, and milestone operations. Fault codes classify first, before
+    any text is read, where TracXMLRPC and the wiki plugin set them (409
+    version conflict from wiki.putPageIfVersion, 404 not found, 403
+    permission), so a fault's text, which may carry a page or milestone
+    name, never overrides its code. A fault with none of those codes is
+    matched on its text for not found, permission and milestone
+    already-exists, never for version conflicts.
 
     Args:
         error: XML-RPC fault exception
@@ -146,35 +148,54 @@ def translate_xmlrpc_error(
     msgs = _DOMAIN_MESSAGES.get(domain, _DOMAIN_MESSAGES["ticket"])
     fault_str = error.faultString.lower()
 
-    match fault_str:
-        case s if (
-            "not found" in s
-            or "does not exist" in s
-            or error.faultCode == 404
-        ):
-            if entity_name and "not_found_named" in msgs:
-                action = msgs["not_found_named"].format(
-                    entity_name=entity_name
-                )
-            elif entity_name and domain == "wiki":
-                action = msgs.get(
-                    "not_found_named", msgs["not_found"]
-                ).format(entity_name=entity_name)
-            else:
-                action = msgs["not_found"]
-            return build_error_response(
-                "not_found", error.faultString, action
-            )
+    def version_conflict() -> types.CallToolResult:
+        action = msgs.get("version", msgs["server"])
+        if entity_name:
+            action = action.format(entity_name=entity_name)
+        return build_error_response(
+            "version_conflict", error.faultString, action
+        )
 
-        case s if (
-            "permission" in s or "denied" in s or error.faultCode == 403
-        ):
-            perm_msg = error.faultString
-            if domain == "milestone":
-                perm_msg = f"{error.faultString} (requires TICKET_ADMIN for create/update/delete)"
-            return build_error_response(
-                "permission_denied", perm_msg, msgs["permission"]
+    def not_found() -> types.CallToolResult:
+        if entity_name and "not_found_named" in msgs:
+            action = msgs["not_found_named"].format(
+                entity_name=entity_name
             )
+        elif entity_name and domain == "wiki":
+            action = msgs.get(
+                "not_found_named", msgs["not_found"]
+            ).format(entity_name=entity_name)
+        else:
+            action = msgs["not_found"]
+        return build_error_response(
+            "not_found", error.faultString, action
+        )
+
+    def permission_denied() -> types.CallToolResult:
+        perm_msg = error.faultString
+        if domain == "milestone":
+            perm_msg = f"{error.faultString} (requires TICKET_ADMIN for create/update/delete)"
+        return build_error_response(
+            "permission_denied", perm_msg, msgs["permission"]
+        )
+
+    # Codes first (Trac #186): 409 is wiki.putPageIfVersion's conflict
+    # code, matched by code and never by text, since a name containing
+    # "version" is no conflict.
+    match error.faultCode:
+        case 409:
+            return version_conflict()
+        case 404:
+            return not_found()
+        case 403:
+            return permission_denied()
+
+    match fault_str:
+        case s if "not found" in s or "does not exist" in s:
+            return not_found()
+
+        case s if "permission" in s or "denied" in s:
+            return permission_denied()
 
         case s if domain == "milestone" and (
             "exists" in s or "already" in s
@@ -183,16 +204,6 @@ def translate_xmlrpc_error(
                 "already_exists",
                 error.faultString,
                 msgs["already_exists"],
-            )
-
-        # Matched by code, not text: a name containing "version" is not
-        # a conflict (Trac #186). 409 is wiki.putPageIfVersion's code.
-        case _ if error.faultCode == 409:
-            action = msgs.get("version", msgs["server"])
-            if entity_name:
-                action = action.format(entity_name=entity_name)
-            return build_error_response(
-                "version_conflict", error.faultString, action
             )
 
         case _:

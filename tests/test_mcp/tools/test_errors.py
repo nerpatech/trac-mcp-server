@@ -240,6 +240,72 @@ class TestTranslateXmlrpcError:
         text = _get_error_text(result)
         assert "version_conflict" in text
 
+    def test_409_missing_page_conflict_is_version_conflict(self):
+        """Trac #186: the plugin's missing-page conflict says "does not
+        exist" but is code 409, so it is a conflict, not not_found."""
+        fault = xmlrpc.client.Fault(
+            409,
+            "[wiki-version-conflict current_version=none] Version"
+            ' conflict on wiki page "X": you tried to update version 3'
+            " but the page does not exist.",
+        )
+        result = translate_xmlrpc_error(fault, "wiki", "X")
+
+        text = _get_error_text(result)
+        assert "version_conflict" in text
+        assert "not_found" not in text
+
+    def test_409_conflict_on_page_named_permission_is_version_conflict(
+        self,
+    ):
+        """Trac #186: a 409 on a page named PermissionPolicy is a
+        conflict, not permission_denied."""
+        fault = xmlrpc.client.Fault(
+            409,
+            "[wiki-version-conflict current_version=4] Version conflict"
+            ' on wiki page "PermissionPolicy": you tried to update'
+            " version 3 but its current version is 4.",
+        )
+        result = translate_xmlrpc_error(
+            fault, "wiki", "PermissionPolicy"
+        )
+
+        text = _get_error_text(result)
+        assert "version_conflict" in text
+        assert "permission_denied" not in text
+
+    def test_403_on_milestone_named_not_found_is_permission_denied(
+        self,
+    ):
+        """Trac #186: a 403 whose text names "Not found bugs" is a
+        permission fault, not not_found."""
+        fault = xmlrpc.client.Fault(
+            403,
+            "WIKI_VIEW privileges are required to perform this operation"
+            " on Milestone Not found bugs. You don't have the required"
+            " permissions.",
+        )
+        result = translate_xmlrpc_error(fault, "milestone")
+
+        text = _get_error_text(result)
+        assert "permission_denied" in text
+        assert "TICKET_ADMIN" in text
+        assert "not_found" not in text
+
+    def test_404_on_page_named_permission_is_not_found(self):
+        """Trac #186: a 404 on a page named PermissionNotes is not_found,
+        not permission_denied."""
+        fault = xmlrpc.client.Fault(
+            404, 'Wiki page "PermissionNotes" does not exist'
+        )
+        result = translate_xmlrpc_error(
+            fault, "wiki", "PermissionNotes"
+        )
+
+        text = _get_error_text(result)
+        assert "not_found" in text
+        assert "permission_denied" not in text
+
     def test_not_modified_is_not_a_version_conflict(self):
         """Ticket #174: "Page not modified" is no version conflict."""
         fault = xmlrpc.client.Fault(1, "Page not modified")
