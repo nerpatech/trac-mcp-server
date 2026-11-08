@@ -397,7 +397,7 @@ UNCHANGED = [
         " - a\n   - b\n\n> > q\n",
         id="quote-after-a-blank-line",
     ),
-    # KNOWN GAP (#187 review R6, to be filed as its own ticket): Trac puts the
+    # KNOWN GAP (#187 review R6, filed as #200): Trac puts the
     # `q` of ` * a/  * b/    {{{/    code/    }}}/  > q` in `b`, after the
     # code block; the read leg ends the list at the fence and leaves the
     # quote at column 0 (`_convert_indented_blocks`), the same bytes as on
