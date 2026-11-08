@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar, cast
 from xml.etree import ElementTree
 
 import requests
@@ -342,6 +342,14 @@ def _wiki_time_key(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+K = TypeVar("K")
+V = TypeVar("V")
+
+# What a ``_batched_multicall`` decoder returns to drop its item: None
+# is a value there, as it is on the single-read path.
+_SKIP = object()
+
+
 def _multicall_value(entry: Any) -> tuple[bool, Any]:
     """``(True, value)`` for one ``system.multicall`` result entry that
     is a value (a one-element list), ``(False, None)`` for a fault (a
@@ -367,6 +375,14 @@ def _wiki_page_record(
         _wiki_time_key(info.get("lastModified")),
         text,
     )
+
+
+def _decode_wiki_page(name: str, values: list[Any]) -> Any:
+    """``_batched_multicall`` decoder for a page's ``getPageInfo`` and
+    ``getPage`` values: its record, or ``_SKIP`` if they are not a
+    page."""
+    record = _wiki_page_record(*values)
+    return _SKIP if record is None else record
 
 
 class WikiPageStoredReadbackFailed(Exception):
@@ -629,17 +645,9 @@ class TracClient:
         returns -- for each id that loaded; an id that failed is absent.
 
         - Ids are de-duplicated, order kept. An empty list makes no RPC.
-        - While the server has ``system.multicall``, ids go in batches of
-          ``TICKET_FETCH_BATCH``, one ``ticket.get`` each. A fault on one
-          entry leaves that id absent, with no single retry. A reply that
-          is not a list of the right length sends that batch to single
-          gets.
-        - A ``Fault`` that says ``system.multicall`` is missing is
-          remembered (shared with the wiki search) and the rest is read
-          by single gets; any other ``Fault``, or any other exception,
-          sends just that batch to single gets.
-        - Single gets are ``get_ticket`` per id, a failure skipping that
-          id.
+        - Ids go in batches of ``TICKET_FETCH_BATCH``, one ``ticket.get``
+          each; the batching and fallback rules are those of
+          ``_batched_multicall``.
         """
         return self._batched_multicall(
             list(dict.fromkeys(ticket_ids)),
@@ -661,12 +669,12 @@ class TracClient:
 
     def _batched_multicall(
         self,
-        items: list[Any],
+        items: list[K],
         batch_size: int,
-        calls_for: Callable[[Any], list[dict[str, Any]]],
-        decode: Callable[[Any, list[Any]], Any],
-        fetch_singly: Callable[[list[Any]], dict[Any, Any]],
-    ) -> dict[Any, Any]:
+        calls_for: Callable[[K], list[dict[str, Any]]],
+        decode: Callable[[K, list[Any]], V | object],
+        fetch_singly: Callable[[list[K]], dict[K, V]],
+    ) -> dict[K, V]:
         """Read ``items`` in ``system.multicall`` batches, falling back
         to ``fetch_singly``; ``{item: value}`` for each that loaded.
 
@@ -677,7 +685,8 @@ class TracClient:
           (``{"methodName", "params"}``) that read one item; the count
           may differ per item.
         - ``decode(item, values)`` turns the item's result values (one
-          per entry, in order) into its value, or ``None`` to skip it.
+          per entry, in order) into its value, or returns ``_SKIP`` to
+          drop it; any other return, ``None`` included, is the value.
           It runs only when every entry of the item is a value.
         - ``fetch_singly(items)`` is the one-call-per-item read.
 
@@ -685,7 +694,7 @@ class TracClient:
         the items go in batches of ``batch_size``:
 
         - a reply that is not a list of exactly the batch's entry count
-          sends that batch to ``fetch_singly``;
+          sends that batch to ``fetch_singly``, and is not remembered;
         - an entry that is a fault leaves its item absent, with no
           single retry;
         - a ``Fault`` that says ``system.multicall`` is missing is
@@ -695,23 +704,31 @@ class TracClient:
           dropped connection, an unparseable reply), sends just that
           batch to ``fetch_singly`` -- one batch failing must not fail
           the whole read -- and batching goes on.
+
+        ``fetch_singly`` runs outside the ``try``: an error it raises
+        propagates, and never triggers a second single read.
         """
-        out: dict[Any, Any] = {}
+        out: dict[K, V] = {}
         done = 0
         if items and self._multicall.available():
             while done < len(items):
                 batch = items[done : done + batch_size]
+                fallback = False
                 try:
-                    out.update(
-                        self._multicall_batch(
-                            batch, calls_for, decode, fetch_singly
-                        )
+                    got = self._multicall_batch(
+                        batch, calls_for, decode
                     )
+                    if got is None:
+                        fallback = True
+                    else:
+                        out.update(got)
                 except xmlrpc.client.Fault as err:
                     if self._multicall.note_fault(err):
                         break  # no multicall: the rest goes singly
-                    out.update(fetch_singly(batch))
+                    fallback = True
                 except Exception:
+                    fallback = True
+                if fallback:
                     out.update(fetch_singly(batch))
                 done += len(batch)
         out.update(fetch_singly(items[done:]))
@@ -719,19 +736,19 @@ class TracClient:
 
     def _multicall_batch(
         self,
-        batch: list[Any],
-        calls_for: Callable[[Any], list[dict[str, Any]]],
-        decode: Callable[[Any, list[Any]], Any],
-        fetch_singly: Callable[[list[Any]], dict[Any, Any]],
-    ) -> dict[Any, Any]:
+        batch: list[K],
+        calls_for: Callable[[K], list[dict[str, Any]]],
+        decode: Callable[[K, list[Any]], V | object],
+    ) -> dict[K, V] | None:
         """One ``system.multicall`` for ``batch``; see
-        ``_batched_multicall``. Raises whatever the RPC raises."""
+        ``_batched_multicall``. ``None`` if the reply is not a list of
+        one result per call. Raises whatever the RPC raises."""
         per_item = [calls_for(item) for item in batch]
         calls = [call for item_calls in per_item for call in item_calls]
         results = self._rpc_request("system", "multicall", calls)
         if not isinstance(results, list) or len(results) != len(calls):
-            return fetch_singly(batch)
-        out: dict[Any, Any] = {}
+            return None
+        out: dict[K, V] = {}
         offset = 0
         for item, item_calls in zip(batch, per_item, strict=True):
             entries = results[offset : offset + len(item_calls)]
@@ -740,8 +757,8 @@ class TracClient:
             if not all(ok for ok, _ in decoded):
                 continue
             value = decode(item, [v for _, v in decoded])
-            if value is not None:
-                out[item] = value
+            if value is not _SKIP:
+                out[item] = cast(V, value)
         return out
 
     def get_ticket_changelog(self, ticket_id: int) -> Any:
@@ -1593,9 +1610,9 @@ class TracClient:
     ) -> dict[str, tuple[int | None, str | None, str]]:
         """Read the version, modification time and text of ``names``.
 
-        ``system.multicall`` batches of ``WIKI_FETCH_BATCH_PAGES`` pages;
-        one call per page when the server has no multicall. A page that
-        cannot be read is left out of the result.
+        Pages go in batches of ``WIKI_FETCH_BATCH_PAGES``; the batching
+        and fallback rules are those of ``_batched_multicall``. A page
+        that cannot be read is left out of the result.
         """
         # Each page is a getPageInfo then a getPage (in that order, so a
         # page edited in between is cached under the older version and
@@ -1607,7 +1624,7 @@ class TracClient:
                 {"methodName": "wiki.getPageInfo", "params": [name]},
                 {"methodName": "wiki.getPage", "params": [name]},
             ],
-            lambda name, values: _wiki_page_record(*values),
+            _decode_wiki_page,
             self._fetch_wiki_singly,
         )
 

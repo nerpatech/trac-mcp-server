@@ -17,6 +17,7 @@ import pytest
 from tests.test_client_get_tickets import MISSING_METHOD, FakeTrac
 from tests.test_wiki_search_client import FakeWiki
 from trac_mcp_server.core.client import (
+    _SKIP,
     TICKET_FETCH_BATCH,
     WIKI_FETCH_BATCH_PAGES,
     TracClient,
@@ -297,7 +298,7 @@ def test_the_helper_tracks_offsets_for_a_variable_call_count(
     assert out == {"a": 1, "b": 3, "c": 0, "d": 2, "e": 1}
 
 
-def test_the_helper_skips_an_item_decode_returns_none_for(mock_config):
+def test_the_helper_skips_an_item_decode_returns_skip_for(mock_config):
     client = TracClient(mock_config)
     client._rpc_request = lambda s, m, calls: [  # type: ignore[method-assign]
         [c["params"][0]] for c in calls
@@ -307,10 +308,66 @@ def test_the_helper_skips_an_item_decode_returns_none_for(mock_config):
         [1, 2, 3],
         10,
         lambda i: [{"methodName": "x.y", "params": [i]}],
-        lambda item, values: None if item == 2 else values[0],
+        lambda item, values: _SKIP if item == 2 else values[0],
         lambda items: (
             pytest.fail(f"single read of {items}") if items else {}
         ),
     )
 
     assert out == {1: 1, 3: 3}
+
+
+def test_a_none_value_is_kept_when_decode_returns_it(mock_config):
+    # only the _SKIP sentinel drops an item; None is a value
+    client = TracClient(mock_config)
+    client._rpc_request = lambda s, m, calls: [  # type: ignore[method-assign]
+        [None] for c in calls
+    ]
+
+    out = client._batched_multicall(
+        [1, 2],
+        10,
+        lambda i: [{"methodName": "x.y", "params": [i]}],
+        lambda item, values: values[0],
+        lambda items: (
+            pytest.fail(f"single read of {items}") if items else {}
+        ),
+    )
+
+    assert out == {1: None, 2: None}
+
+
+def test_a_ticket_whose_multicall_value_is_none_is_kept(mock_config):
+    # as the single path (``_fetch_tickets_singly``) does
+    trac = FakeTrac([1])
+    trac.multicall_result = [[None]]
+    client = TracClient(mock_config)
+    client._rpc_request = trac.rpc  # type: ignore[method-assign]
+
+    assert client.get_tickets([1]) == {1: None}
+    assert trac.singles == []
+
+
+def test_a_raise_inside_fetch_singly_does_not_read_singly_twice(
+    mock_config,
+):
+    client = TracClient(mock_config)
+    client._rpc_request = (
+        lambda s, m, calls: []
+    )  # malformed length  # type: ignore[method-assign]
+    attempts: list[list[int]] = []
+
+    def fetch_singly(items):
+        attempts.append(list(items))
+        raise RuntimeError("single read blew up")
+
+    with pytest.raises(RuntimeError, match="blew up"):
+        client._batched_multicall(
+            [1, 2],
+            10,
+            lambda i: [{"methodName": "x.y", "params": [i]}],
+            lambda item, values: values[0],
+            fetch_singly,
+        )
+
+    assert attempts == [[1, 2]]
