@@ -205,6 +205,10 @@ UNCHANGED = {
         " - x\n\n- a\n  q\n  - b\n",
         " * x\n * a\n   q\n   * b",
     ),
+    # This row pins master's bytes, which are wrong: Trac renders `q` as a
+    # continuation of item `a`, and the read leg writes it as a quote (a
+    # pre-existing defect, not caused by #182). Trac /trac_mcp_server #190
+    # owns the fix; the expected values change with it.
     "a column-0 bullet item, no marker after the quote": (
         " * x\n- a\n  q\n",
         " - x\n\n- a\n> q\n",
@@ -229,6 +233,47 @@ UNCHANGED = {
         "P\n- a\n  q\n  - b\n",
         "P\n- a\n  q\n  - b\n",
         "P\n\n * a\n   q\n   * b",
+    ),
+    # A marker indented 4+ columns, or by a tab, is indented code to
+    # CommonMark once a blank line precedes it, so the cut would lose the
+    # list (HEAD: `    - c` after a blank line, back as a `{{{` block).
+    # Master's bytes, which kept the list, come back.
+    "a marker indented 4 columns": (
+        "P\n  q\n    * c\n",
+        "P\n  q\n    - c\n",
+        "P\nq\n- c",
+    ),
+    "a marker indented by a tab": (
+        "P\n  q\n\t* c\n",
+        "P\n  q\n\t* c\n",
+        "P\nq\n* c",
+    ),
+    "a marker indented 5 columns": (
+        "P\n\n  q\n     * c\n",
+        "P\n\n  q\n     - c\n",
+        "P\n\nq\n- c",
+    ),
+    # A processor block is stashed (`_fallback_processor_blocks`) before this
+    # pass: its fence, placeholder and closing lines are column-zero lines
+    # with no braces, but they are the block's lines, and Trac keeps the
+    # block inside the open item, so the text after it continues the item.
+    "after a stashed processor block in a column-0 item": (
+        "- item\n{{{#!comment\nnote\n}}}\n  continuation text\n  - sub\n",
+        "- item\n```tracwiki-unconverted\n{{{#!comment\nnote\n}}}\n```\n"
+        "  continuation text\n  - sub\n",
+        " * item\n\n{{{#!comment\nnote\n}}}\n\ncontinuation text\n\n * sub",
+    ),
+    "after a stashed processor block in an indented item": (
+        " * item\n{{{#!comment\nnote\n}}}\n  continuation text\n  - sub\n",
+        " - item\n```tracwiki-unconverted\n{{{#!comment\nnote\n}}}\n```\n"
+        "  continuation text\n  - sub\n",
+        " * item\n\n{{{#!comment\nnote\n}}}\n\ncontinuation text\n\n * sub",
+    ),
+    "after a stashed td block in an indented item": (
+        " * a\n   {{{#!td\n   x\n   }}}\n   more\n * b\n",
+        " - a\n   ```tracwiki-unconverted\n\n{{{#!td\n   x\n   }}}\n```\n"
+        "   more\n - b\n",
+        " * a\n\n{{{#!td\nx\n}}}\n\n{{{\n   more\n - b\n}}}",
     ),
     "a head that is a heading": (
         "P\n\n  = H =\n * c\n",
