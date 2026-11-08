@@ -16,7 +16,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.core.client import WikiPageConflict
+from trac_mcp_server.core.client import (
+    WikiPageConflict,
+    WikiPageNotModified,
+)
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
 from trac_mcp_server.mcp.tools.errors import format_timestamp
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -982,6 +985,86 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("Current version is 7", text)
             self.assertIn("you tried to update version 5", text)
             self.assertIn("version=7", text)
+
+    def test_handle_update_not_modified_is_an_unchanged_success(self):
+        """Ticket #174: identical content stores nothing -- not an error."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)", "TestPage", 5
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            text = result.content[0].text
+            self.assertEqual(
+                text.splitlines()[0],
+                "Wiki page 'TestPage' unchanged: content identical to "
+                "version 5. Trac stored nothing.",
+            )
+
+    def test_handle_update_not_modified_keeps_the_gate_lines(self):
+        gate_note = "Link gate: OFF (test note)"
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, [gate_note]),
+            ),
+        ):
+            mock_run_sync.side_effect = WikiPageNotModified(
+                "Page not modified (content identical)", "TestPage", 5
+            )
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "page_name": "TestPage",
+                        "content": "# Same",
+                        "version": 5,
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
+            lines = result.content[0].text.splitlines()
+            self.assertIn(gate_note, lines[1:])
+
+    def test_handle_update_plain_not_modified_fault_reraises(self):
+        """Ticket #174: a bare "Page not modified" Fault is no version
+        conflict any more, so the handler no longer claims one."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                1, "Page not modified"
+            )
+
+            with self.assertRaises(xmlrpc.client.Fault):
+                asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "page_name": "TestPage",
+                            "content": "# Updated",
+                            "version": 5,
+                        },
+                    )
+                )
 
     def test_handle_update_wiki_page_conflict(self):
         """A stale version refused by the client precheck (ticket #120)."""

@@ -185,6 +185,31 @@ class WikiPageConflict(ValueError):
         self.current_version = current_version
 
 
+class WikiPageNotModified(ValueError):
+    """A wiki write's content was byte-identical to the stored page, so
+    Trac stored nothing (ticket #174).
+
+    Raised by ``TracClient.put_wiki_page`` from both write paths when the
+    server answers "Page not modified". That is a no-op, not a failure:
+    callers report it as "unchanged". ``version`` is the version the
+    caller passed (``None`` for an unversioned write).
+
+    Subclasses ``ValueError``, with the message the client has always
+    used, so callers that catch the plain ``ValueError`` (the CLI
+    ``convert`` code) keep working.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        page_name: str,
+        version: int | None,
+    ):
+        super().__init__(message)
+        self.page_name = page_name
+        self.version = version
+
+
 def _describe_error(err: BaseException) -> str:
     """A one-line description of ``err``: a Fault's faultString, else its
     message, else its type name."""
@@ -1701,6 +1726,9 @@ class TracClient:
                 precheck found it, and putPage was not called, or the
                 plugin method refused, and stored nothing. A
                 ``ValueError`` subclass.
+            WikiPageNotModified: If the content is identical to the stored
+                page (Trac stored nothing; ticket #174). A ``ValueError``
+                subclass.
             ValueError: If page_name or content validation fails, or the
                 server reports a version conflict
             xmlrpc.client.Fault: If server returns error or permissions denied
@@ -1761,7 +1789,9 @@ class TracClient:
             WikiPageConflict: The plugin's conflict fault: ``version`` is
                 not the page's current version, checked in the same
                 transaction as the save. Nothing was stored.
-            ValueError: "Page not modified", as from ``wiki.putPage``.
+            WikiPageNotModified: "Page not modified": the content is
+                identical to the stored page, and nothing was stored.
+                A ``ValueError`` subclass.
             xmlrpc.client.Fault: Any other fault, with TracXMLRPC's
                 "while executing" wrapper removed (see
                 ``_unwrap_tracrpc_fault``). Nothing was stored.
@@ -1807,8 +1837,10 @@ class TracClient:
                     current,
                 ) from None
             if "not modified" in err.faultString.lower():
-                raise ValueError(
-                    "Page not modified (content identical)"
+                raise WikiPageNotModified(
+                    "Page not modified (content identical)",
+                    page_name,
+                    version,
                 ) from None
             raise _unwrap_tracrpc_fault(err) from None
 
@@ -1874,8 +1906,10 @@ class TracClient:
             fault_str = err.faultString.lower()
 
             if "not modified" in fault_str:
-                raise ValueError(
-                    "Page not modified (content identical)"
+                raise WikiPageNotModified(
+                    "Page not modified (content identical)",
+                    page_name,
+                    version,
                 ) from None
             elif "version" in fault_str:
                 raise ValueError(

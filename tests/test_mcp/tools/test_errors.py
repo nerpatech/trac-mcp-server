@@ -176,6 +176,15 @@ class TestTranslateXmlrpcError:
         text = _get_error_text(result)
         assert "version_conflict" in text
 
+    def test_not_modified_is_not_a_version_conflict(self):
+        """Ticket #174: "Page not modified" is no version conflict."""
+        fault = xmlrpc.client.Fault(1, "Page not modified")
+        result = translate_xmlrpc_error(fault, "wiki", "X")
+
+        text = _get_error_text(result)
+        assert "server_error" in text
+        assert "version_conflict" not in text
+
     def test_version_conflict_with_entity(self):
         """Version conflict with entity name — substitutes name in action."""
         fault = xmlrpc.client.Fault(1, "Page version conflict")

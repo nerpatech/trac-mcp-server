@@ -31,6 +31,7 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
 from ...file_handler import detect_file_format
@@ -71,7 +72,10 @@ WIKI_FILE_TOOLS = [
             "stored a version other than the one after the version it "
             "was based on: another write most likely landed just before "
             "it and was replaced (intervening_versions lists them; "
-            "inspect with wiki_diff). The page was stored."
+            "inspect with wiki_diff). The page was stored. Content "
+            "identical to the stored page stores nothing and returns "
+            'an "unchanged" result (structuredContent.action is '
+            '"unchanged"), not an error.'
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -430,6 +434,7 @@ async def _handle_push(
 
     # The write: exactly one putPage, with no fallback.
     readback_error: str | None = None
+    unchanged = False
     try:
         result = await run_sync(
             client.put_wiki_page,
@@ -444,6 +449,12 @@ async def _handle_push(
         # one would write the page a second time.
         result = {}
         readback_error = str(e)
+    except WikiPageNotModified:
+        # Byte-identical to the stored page (ticket #174): Trac stored
+        # nothing, which is a no-op, not a failure.
+        result = {}
+        unchanged = True
+        action = "unchanged"
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket
         # #120); put_wiki_page refused before posting anything.
@@ -463,7 +474,16 @@ async def _handle_push(
     # Trac /trac_mcp_server #130: only an update read back successfully
     # can be flagged; put_wiki_page never sets it on a create.
     possible_overwrite = bool(result.get("possible_overwrite"))
-    if readback_error is None:
+    if unchanged:
+        # `version` is the one read before the write, which is still the
+        # current one: nothing was stored.
+        new_version = version
+        shown = "unknown" if version is None else version
+        text_parts = [
+            f"Wiki page '{page_name}' unchanged (version {shown}): "
+            "content identical to the stored page. Trac stored nothing."
+        ]
+    elif readback_error is None:
         new_version = result.get("version", 1)
         text_parts = [
             f"{verb} wiki page '{page_name}' (version {new_version})"
