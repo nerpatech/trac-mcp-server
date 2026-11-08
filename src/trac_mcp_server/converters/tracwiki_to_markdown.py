@@ -3,7 +3,7 @@
 import bisect
 import re
 from collections.abc import Sequence
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from .common import (
     ConversionResult,
@@ -508,6 +508,30 @@ def _list_stack_step(
         stack.pop()
 
 
+class _ShiftItem(NamedTuple):
+    """An open list item as `_shift_nested_markers` tracks it (ticket #179).
+
+    `column` is the marker's source column (what Trac's rules read), `shift`
+    how many columns the item's lines move on output, `text_column` the
+    Markdown text column of the item AFTER the move, and `frozen` marks an
+    item whose subtree is never moved (a tab-indented marker, or a root
+    marker at column 4 or more: master's reading, kept byte for byte)."""
+
+    column: int
+    shift: int
+    text_column: int
+    frozen: bool
+
+
+def _shift_line(line: str, shift: int) -> str:
+    """`line` moved `shift` columns right (left when negative: leading
+    spaces are removed, never more than the line has)."""
+    if shift >= 0:
+        return " " * shift + line
+    drop = min(-shift, len(line) - len(line.lstrip(" ")))
+    return line[drop:]
+
+
 def _items_open_above(
     lines: list[str],
     inside: set[int],
@@ -703,6 +727,7 @@ class TracWikiParser:
         self._link_placeholders: list[str] = []
         self._code_placeholders: list[str] = []
         self._br_marks_active = False
+        self._item_fence_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -721,6 +746,7 @@ class TracWikiParser:
         self._link_placeholders = []
         self._code_placeholders = []
         self._br_marks_active = False
+        self._item_fence_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -1672,6 +1698,11 @@ class TracWikiParser:
         read the block as the item's continuation (F3). The first shown
         line is carried by the placeholder itself, so the stash holds it
         without O.
+
+        Ticket #179: the later lines of the stash carry O, so the stash is
+        recorded in `_item_fence_stashes`: when `_shift_nested_markers` moves
+        the item (a list nested left of its parent's text column), it moves
+        the placeholder line and those lines by the same shift.
         """
         line_start = text.rfind("\n", 0, start) + 1
         indent = text[line_start:start]
@@ -1697,6 +1728,9 @@ class TracWikiParser:
         # A blank first line leaves the placeholder line whitespace-only.
         first = shown[0][len(out_indent) :] if shown[0] else ""
         self._code_placeholders.append("\n".join([first] + shown[1:]))
+        # The stash holds lines at O: `_shift_nested_markers` (#179) moves
+        # them with the item.
+        self._item_fence_stashes.add(len(self._code_placeholders) - 1)
         placeholder = f"\x00CODE{len(self._code_placeholders) - 1}\x00"
         return (
             f"{out_indent}{fence}{info}\n{out_indent}{placeholder}\n"
@@ -2041,7 +2075,16 @@ class TracWikiParser:
         (the only thing the separator reads) is untouched by swapping
         ``*`` for ``-``, but running it first keeps this method's own
         order matching the order the two defects were found in.
+
+        Ticket #179: first of all, `_shift_nested_markers` moves a list
+        nested left of its parent's Markdown text column to that column. It
+        runs after `_split_past_bound` (`_apply_fallbacks`, which reads raw
+        columns) and after `_convert_code_blocks` (which fences a block at
+        its item's raw text column, so the fence moves with the item), and
+        before `_separate_list_from_trailing_paragraph`, whose text columns
+        are then read off the moved markers.
         """
+        text = self._shift_nested_markers(text)
         text = self._separate_list_from_trailing_paragraph(text)
 
         def convert_list_marker(match):
@@ -2059,6 +2102,129 @@ class TracWikiParser:
             flags=re.MULTILINE,
         )
         return self._separate_adjacent_lists(text)
+
+    def _shift_nested_markers(self, text: str) -> str:
+        """Move a list nested left of its parent's Markdown text column to
+        that column (ticket #179).
+
+        Trac nests a list marker indented past its parent's marker at ANY
+        deeper column (measured on /trac_test, 2026-11-07 and 11-08, down to
+        m + 1 and up to m + 5). CommonMark nests a marker only at or past the
+        parent's text column (`_item_text_column`: 4 under ` 1. `, 5 under
+        ` 10. `, 3 under ` * `) and reads one four or more columns past it as
+        indented code. The read leg copied the source column, so ` 1. outer`
+        / `   * inner` / ` 2. outer2` left the item (the bullets became a
+        second list, the outer list restarted; a nested ordered list joined
+        the outer one).
+
+        A stack of the open items (`_ShiftItem`: source marker column, shift,
+        output text column) is walked over the lines, with the same rules
+        as the later list walks (`_continued_item`, `_LIST_MARKER_RE`):
+
+        * a blank line ends the list (the stack empties), except the
+          whitespace-only line `[[BR]]` alone makes (`_BR_LINE_MARK`), which
+          is item content (#178);
+        * a MARKER line pops the items at or past its column. A root marker
+          stays where it is. Under a parent it goes to `column + parent
+          shift`, raised to the parent's output text column when that is
+          left of it, and clamped to that column + 3 when it is past it (a
+          marker at column + 4 is indented code to CommonMark). Its own
+          shift, output column minus source column, is its children's
+          starting point;
+        * any other line goes to the item Trac continues with it
+          (`_continued_item`, lower side; a line outside every item ends the
+          list) and moves by that item's shift, so the columns inside an item
+          keep their distances and the bound and text-column rules of #149,
+          #176 and #178 read the same distances on the moved text. A fence,
+          a `>` line and a table row move with their item; the body of a
+          block fenced at the item's text column (#144) is in the code
+          stash, and moves with it (`_item_fence_stashes`).
+
+        Shift 0 is byte-identical to `master`: a nesting already at or past
+        the parent's text column (a bullet under a bullet at column 3,
+        column 4 to 7 under ` 1. `) moves nothing, and neither does a list
+        with no nesting. Declined shapes keep `master`'s bytes: a
+        tab-indented marker line, a root marker at column 4 or more
+        (indented code already) and everything nested under either; a
+        tab-indented continuation line is not moved.
+        """
+        out: list[str] = []
+        stack: list[_ShiftItem] = []
+        for line in text.split("\n"):
+            if not line.strip():
+                if not (
+                    self._br_marks_active
+                    and line.endswith(_BR_LINE_MARK)
+                ):
+                    stack.clear()
+                out.append(line)
+                continue
+            indent = _indent_of(line)
+            column = _indent_width(indent)
+            marker = _LIST_MARKER_RE.match(line)
+            if marker:
+                while stack and stack[-1].column >= column:
+                    stack.pop()
+                parent = stack[-1] if stack else None
+                if "\t" in indent or (parent is None and column >= 4):
+                    shift, frozen = 0, True
+                elif parent is None:
+                    shift, frozen = 0, False
+                elif parent.frozen:
+                    shift, frozen = 0, True
+                else:
+                    target = column + parent.shift
+                    target = max(target, parent.text_column)
+                    target = min(target, parent.text_column + 3)
+                    shift, frozen = target - column, False
+                stack.append(
+                    _ShiftItem(
+                        column,
+                        shift,
+                        shift
+                        + _item_text_column(
+                            marker.end(), line[marker.end() :]
+                        ),
+                        frozen,
+                    )
+                )
+                out.append(self._move_line(line, shift))
+                continue
+            if not stack:
+                out.append(line)
+                continue
+            owner = _continued_item(
+                [item.column for item in stack],
+                column,
+                upper_bound=False,
+            )
+            if owner is None:
+                stack.clear()
+                out.append(line)
+                continue
+            del stack[owner + 1 :]
+            shift = stack[-1].shift
+            if "\t" in indent:
+                shift = 0
+            out.append(self._move_line(line, shift))
+        return "\n".join(out)
+
+    def _move_line(self, line: str, shift: int) -> str:
+        """`line` moved `shift` columns (`_shift_nested_markers`). A line
+        that is the placeholder of a block fenced inside a list item (#144)
+        takes the lines of its stash along: they carry the item's text
+        column too."""
+        if shift == 0:
+            return line
+        found = re.fullmatch(r"[ ]*\x00CODE(\d+)\x00", line)
+        if found and int(found.group(1)) in self._item_fence_stashes:
+            index = int(found.group(1))
+            head, *rest = self._code_placeholders[index].split("\n")
+            self._code_placeholders[index] = "\n".join(
+                [head]
+                + [_shift_line(r, shift) if r else r for r in rest]
+            )
+        return _shift_line(line, shift)
 
     def _separate_adjacent_lists(self, text: str) -> str:
         """Keep two Trac lists that only a blank line separates two lists
@@ -2391,7 +2557,11 @@ class TracWikiParser:
           as an empty one does (measured on /trac_test, 2026-11-08), so a
           line after one keeps ``master``'s bytes, as in #149.
 
-        Nested list MARKER lines are out of scope (ticket #179). The wider
+        Nested list MARKER lines are not moved here: since ticket #179
+        `_shift_nested_markers` runs first and puts a marker nested left of
+        its parent's text column at that column, so this pass reads the moved
+        columns (and #176's gate on the nested list passes for the shapes
+        that moved). The wider
         shape (a bullet continued at marker + 1, or an item 1-9 at marker +
         1 or + 2, after ``[[BR]][[BR]]``) is not fixed here either.
         """
