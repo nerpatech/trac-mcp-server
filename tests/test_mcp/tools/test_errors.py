@@ -13,6 +13,7 @@ import mcp.types as types
 
 from trac_mcp_server.mcp.tools.errors import (
     build_error_response,
+    classify_fault,
     format_timestamp,
     translate_xmlrpc_error,
 )
@@ -349,6 +350,158 @@ class TestTranslateXmlrpcError:
         assert (
             "ticket_search" in text.lower() or "ticket" in text.lower()
         )
+
+
+class TestQuotedNamesAreNotEvidence:
+    """A quoted name in a fault's text is not evidence (Trac #188)."""
+
+    @staticmethod
+    def _type(fault, domain):
+        text = _get_error_text(translate_xmlrpc_error(fault, domain))
+        return text.split("):", 1)[0].removeprefix("Error (")
+
+    def test_page_name_with_permission_is_server_error(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'PermissionNotes/../x'' while "
+            "executing 'wiki.putPage()'",
+        )
+        assert self._type(fault, "wiki") == "server_error"
+
+    def test_double_quoted_name_with_not_found_is_server_error(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Cannot frobnicate \"NotFoundHandling\"' while executing "
+            "'wiki.putPage()'",
+        )
+        assert self._type(fault, "wiki") == "server_error"
+
+    def test_milestone_name_with_already_is_server_error(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Milestone \"Already Shipped\" has open tickets' while "
+            "executing 'ticket.milestone.delete()'",
+        )
+        assert self._type(fault, "milestone") == "server_error"
+
+    def test_plugin_comment_not_found_still_not_found(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Comment 3 not found on ticket #5' while executing "
+            "'ticket.comment.get()'",
+        )
+        assert self._type(fault, "ticket") == "not_found"
+
+    def test_milestone_already_exists_still_already_exists(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Milestone \"v1\" already exists.' while executing "
+            "'ticket.milestone.create()'",
+        )
+        assert self._type(fault, "milestone") == "already_exists"
+
+    def test_wiki_page_already_exists_stays_server_error(self):
+        # The already_exists arm is milestone-only.
+        fault = xmlrpc.client.Fault(
+            1,
+            "'The page \\'X\\' already exists.' while executing "
+            "'wiki.putPage()'",
+        )
+        assert self._type(fault, "wiki") == "server_error"
+
+    def test_apostrophe_in_a_word_does_not_swallow_text(self):
+        fault = xmlrpc.client.Fault(
+            1, "You don't have permission to do that"
+        )
+        assert self._type(fault, "wiki") == "permission_denied"
+
+
+class TestClassifyFault:
+    """Direct rows for classify_fault() (Trac #188)."""
+
+    def test_409_is_version_conflict(self):
+        fault = xmlrpc.client.Fault(409, "not found permission")
+        assert classify_fault(fault) == "version_conflict"
+
+    def test_404_is_not_found(self):
+        assert (
+            classify_fault(xmlrpc.client.Fault(404, "x")) == "not_found"
+        )
+
+    def test_403_is_permission_denied(self):
+        fault = xmlrpc.client.Fault(
+            403, "WIKI_VIEW privileges are required"
+        )
+        assert classify_fault(fault) == "permission_denied"
+
+    def test_code_beats_text(self):
+        fault = xmlrpc.client.Fault(
+            403, "'Not found bugs' does not exist"
+        )
+        assert classify_fault(fault) == "permission_denied"
+
+    def test_code_1_text_not_found(self):
+        fault = xmlrpc.client.Fault(1, "Page not found")
+        assert classify_fault(fault) == "not_found"
+
+    def test_code_1_text_permission(self):
+        fault = xmlrpc.client.Fault(1, "Permission denied")
+        assert classify_fault(fault) == "permission_denied"
+
+    def test_already_exists_only_in_milestone_domain(self):
+        fault = xmlrpc.client.Fault(1, "Milestone already exists.")
+        assert classify_fault(fault, "milestone") == "already_exists"
+        assert classify_fault(fault, "wiki") is None
+        assert classify_fault(fault) is None
+
+    def test_quoted_name_is_not_evidence(self):
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'PermissionNotes/../x'' while "
+            "executing 'wiki.putPage()'",
+        )
+        assert classify_fault(fault, "wiki") is None
+
+    def test_unclassified_is_none(self):
+        assert classify_fault(xmlrpc.client.Fault(500, "boom")) is None
+
+    def test_single_quoted_name_with_an_apostrophe_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid Wiki page name 'Bob's/PermissionNotes'"
+        )
+        assert classify_fault(fault, "wiki") is None
+
+    def test_contraction_still_classifies(self):
+        fault = xmlrpc.client.Fault(
+            1, "You don't have permission to do that"
+        )
+        assert classify_fault(fault, "wiki") == "permission_denied"
+
+    def test_unquoted_comment_not_found_still_classifies(self):
+        fault = xmlrpc.client.Fault(
+            1, "Comment 3 not found on ticket #5"
+        )
+        assert classify_fault(fault, "ticket") == "not_found"
+
+    def test_whole_message_quoted_without_the_wrapper(self):
+        fault = xmlrpc.client.Fault(1, "'Wiki page \"Foo\" not found'")
+        assert classify_fault(fault, "wiki") == "not_found"
+
+    def test_whole_message_in_double_quotes(self):
+        fault = xmlrpc.client.Fault(1, '"Page not found"')
+        assert classify_fault(fault, "wiki") == "not_found"
+
+    def test_typographic_single_quoted_name_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid name \u2018PermissionNotes\u2019"
+        )
+        assert classify_fault(fault, "wiki") is None
+
+    def test_typographic_double_quoted_name_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid name \u201cNotFoundNotes not found\u201d"
+        )
+        assert classify_fault(fault, "wiki") is None
 
 
 # ---------------------------------------------------------------------------

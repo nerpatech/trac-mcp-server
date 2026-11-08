@@ -28,6 +28,7 @@ from ...instances import (
     UnknownInstanceError,
     caller_identity,
 )
+from .errors import classify_fault
 from .instances import get_instance_registry, own_intertrac_prefix
 from .registry import ToolSpec
 
@@ -105,21 +106,17 @@ def parse_style_declaration(text: str) -> StyleDeclaration:
 
 
 def _fault_reason(fault: xmlrpc.client.Fault) -> str:
-    """Classify a fault the way ``translate_xmlrpc_error`` does: by fault
-    code first (404 ``not_found``, 403 ``permission_denied``: Trac's
-    PermissionError text, "WIKI_VIEW privileges are required ...", need
-    not contain a keyword, and nor need a ResourceNotFound's), then by the
-    same text tests on the lower-cased fault string (``not found``/``does
-    not exist``, ``permission``/``denied``). Anything else is ``error``."""
-    text = str(fault.faultString).lower()
-    if fault.faultCode == 404:
-        return "not_found"
-    if fault.faultCode == 403:
-        return "permission_denied"
-    if "not found" in text or "does not exist" in text:
-        return "not_found"
-    if "permission" in text or "denied" in text:
-        return "permission_denied"
+    """Classify a fault with :func:`classify_fault`, the classifier
+    ``translate_xmlrpc_error`` uses: by fault code first (404
+    ``not_found``, 403 ``permission_denied``: Trac's PermissionError
+    text, "WIKI_VIEW privileges are required ...", need not contain a
+    keyword, and nor need a ResourceNotFound's), then by the text with
+    quoted names removed (Trac #188). ``not_found`` and
+    ``permission_denied`` are reported as such; anything else is
+    ``error``."""
+    reason = classify_fault(fault)
+    if reason in ("not_found", "permission_denied"):
+        return reason
     return "error"
 
 

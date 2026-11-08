@@ -2878,7 +2878,7 @@ def test_put_wiki_page_plugin_loose_not_modified_text_is_no_no_op(
 ):
     """Only Trac's own "page not modified" is the no-op (ticket #174
     review): a plugin fault that merely contains "not modified" goes
-    through `_unwrap_tracrpc_fault`, since a false match is reported as
+    through `unwrap_tracrpc_fault`, since a false match is reported as
     success."""
 
     def _rpc(namespace, method, *args):

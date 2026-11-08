@@ -453,5 +453,159 @@ class TestResponseFormatting(unittest.TestCase):
         mock_run_sync_limited.assert_not_called()
 
 
+class TestFaultClassification(unittest.TestCase):
+    """The Fault branch classifies by code, then by unquoted text (#188)."""
+
+    def setUp(self):
+        self.client = MagicMock()
+        self.client.config = Config(
+            trac_url="https://example.com/trac",
+            username="testuser",
+            password="testpass",
+        )
+        self.client.list_wiki_pages.return_value = ["WikiStart"]
+
+    @staticmethod
+    def _info_for(unversioned):
+        """``get_wiki_page_info`` side effect: a call pinned to a version
+        faults 404, one without a version returns ``unversioned``."""
+
+        def info(name, version=None):
+            if version is not None:
+                raise xmlrpc.client.Fault(
+                    404,
+                    f'Wiki page "{name}" does not exist at version 9',
+                )
+            return unversioned
+
+        return info
+
+    def _read(self, uri_text):
+        async def mock_run(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.resources.wiki.run_sync_limited",
+                side_effect=mock_run,
+            ),
+            patch(
+                "trac_mcp_server.mcp.resources.wiki.run_sync",
+                side_effect=mock_run,
+            ),
+        ):
+            return asyncio.run(
+                handle_read_wiki_resource(Url(uri_text), self.client)
+            )
+
+    def test_403_on_page_named_version_is_permission_denied(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            403,
+            "WIKI_VIEW privileges are required to perform this "
+            "operation on VersionNotes. You don't have the required "
+            "permissions.",
+        )
+        result = self._read("trac://wiki/VersionNotes?version=3")
+        self.assertTrue(
+            result.startswith("Error (permission_denied):"), result
+        )
+
+    def test_404_missing_page_without_version_is_not_found(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist'
+        )
+        result = self._read("trac://wiki/Foo")
+        self.assertTrue(result.startswith("Error (not_found):"), result)
+
+    def test_404_missing_version_of_existing_page_is_invalid_version(
+        self,
+    ):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+        # The read's own info call is pinned to version 9 and faults; the
+        # existence check passes no version and finds the page.
+        self.client.get_wiki_page_info.side_effect = self._info_for(
+            {"name": "Foo", "version": 4}
+        )
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertTrue(
+            result.startswith("Error (invalid_version):"), result
+        )
+        self.assertIn("Version 9", result)
+
+    def test_404_missing_version_and_page_is_not_found(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+        self.client.get_wiki_page_info.side_effect = (
+            xmlrpc.client.Fault(404, 'Wiki page "Foo" does not exist')
+        )
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertTrue(result.startswith("Error (not_found):"), result)
+
+    def test_404_missing_version_info_falsy_is_not_found(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+        self.client.get_wiki_page_info.side_effect = self._info_for(0)
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertTrue(result.startswith("Error (not_found):"), result)
+
+    def test_403_on_the_probe_is_reported_not_called_missing(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+
+        def info(name, version=None):
+            raise xmlrpc.client.Fault(
+                403, "WIKI_VIEW privileges are required on Foo"
+            )
+
+        self.client.get_wiki_page_info.side_effect = info
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertEqual(
+            result,
+            'Error (not_found): Wiki page "Foo" does not exist at '
+            "version 9",
+        )
+        self.assertNotIn("Similar pages", result)
+        self.assertNotIn("_index", result)
+
+    def test_transport_error_on_the_probe_is_reported_not_called_missing(
+        self,
+    ):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+
+        def info(name, version=None):
+            raise ConnectionError("connection reset")
+
+        self.client.get_wiki_page_info.side_effect = info
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertEqual(
+            result,
+            'Error (not_found): Wiki page "Foo" does not exist at '
+            "version 9",
+        )
+
+    def test_other_fault_is_server_error(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            500, "boom"
+        )
+        result = self._read("trac://wiki/Foo")
+        self.assertEqual(result, "Error (server_error): boom")
+
+    def test_code_1_fault_without_not_found_wording_is_server_error(
+        self,
+    ):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            1, "Something odd"
+        )
+        result = self._read("trac://wiki/Foo")
+        self.assertEqual(result, "Error (server_error): Something odd")
+
+
 if __name__ == "__main__":
     unittest.main()

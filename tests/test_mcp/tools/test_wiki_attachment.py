@@ -22,6 +22,7 @@ from trac_mcp_server.mcp.tools.errors import build_error_response
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 from trac_mcp_server.mcp.tools.wiki_attachment import (
     WIKI_ATTACHMENT_SPECS,
+    _handle_delete,
 )
 
 # These tests exercise the server-side path forms (ticket #111).
@@ -557,6 +558,53 @@ class TestDelete:
         assert result.isError is True
         assert "permission_denied" in result.content[0].text
         assert "WIKI_DELETE" in result.content[0].text
+
+    async def test_delete_403_wiki_delete_privileges_is_permission_denied(
+        self,
+    ):
+        client = _make_client()
+        client.delete_wiki_attachment.side_effect = xmlrpc.client.Fault(
+            403, "WIKI_DELETE privileges are required to perform this"
+        )
+
+        result = await handle_wiki_attachment_tool(
+            "wiki_attachment_delete",
+            {"page_name": "WikiStart", "filename": "x"},
+            client,
+        )
+        assert result.isError is True
+        assert "permission_denied" in result.content[0].text
+        assert "WIKI_DELETE" in result.content[0].text
+
+    async def test_delete_fault_naming_permission_page_is_not_permission(
+        self,
+    ):
+        """A missing attachment on a page named PermissionNotes is no
+        permission fault: the handler re-raises it (through the
+        registry it is not_found) (Trac #188)."""
+        client = _make_client()
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Attachment 'wiki:PermissionNotes: x.png' does not "
+            "exist.' while executing 'wiki.deleteAttachment()'",
+        )
+        client.delete_wiki_attachment.side_effect = fault
+
+        with pytest.raises(xmlrpc.client.Fault) as exc_info:
+            await _handle_delete(
+                client,
+                {"page_name": "PermissionNotes", "filename": "x.png"},
+            )
+        assert exc_info.value is fault
+
+        result = await handle_wiki_attachment_tool(
+            "wiki_attachment_delete",
+            {"page_name": "PermissionNotes", "filename": "x.png"},
+            client,
+        )
+        assert result.isError is True
+        assert "not_found" in result.content[0].text
+        assert "permission_denied" not in result.content[0].text
 
 
 # =============================================================================
