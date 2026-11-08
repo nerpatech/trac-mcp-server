@@ -363,6 +363,15 @@ def _stack_continued_item(
     )
 
 
+def _with_marker_char(
+    line: str, column: int, token: str, char: str
+) -> str:
+    """`line` with the list marker `token` at `column` written with `char`
+    as its character (the bullet itself, or an ordered marker's delimiter)."""
+    new = char if token in ("-", "*") else token[:-1] + char
+    return line[:column] + new + line[column + len(token) :]
+
+
 def _marker_column_rule_applies(marker_line: str, line: str) -> bool:
     """True when #149's marker-column rule (`_continued_item`) may decide
     what `line` does to the list whose innermost item opens at `marker_line`;
@@ -1976,7 +1985,133 @@ class TracWikiParser:
             text,
             flags=re.MULTILINE,
         )
-        return text
+        return self._separate_adjacent_lists(text)
+
+    def _separate_adjacent_lists(self, text: str) -> str:
+        """Keep two Trac lists that only a blank line separates two lists
+        in Markdown (ticket #177).
+
+        Trac ends a list at every blank line (#143) and the next marker
+        opens a NEW top-level list at any indent. Measured on /trac_test on
+        2026-11-07 (ticket #177 comment 1):
+
+        * P1 ` 1. a` / ` 1. b` / blank / ` 1. c` / ` 1. d` / blank / ` 1. e`:
+          three ``<ol>``, each starting at 1;
+        * P2 ` * a` / blank / ` * c`: two ``<ul>``;
+        * P3 ` * a` / blank / `  * c` (column 2): two ``<ul>``;
+        * P4 ` * a` / blank / `   * c` (column 3) / ` * d`: three ``<ul>``,
+          ``c`` not nested in ``a``;
+        * P5 ` 3. a` / blank / ` 7. c`: ``<ol start="3">``, then
+          ``<ol start="7">``;
+        * P6 ` * a` / `   * b` / blank / ` * c`: ``a`` with its nested list,
+          then a second ``<ul>``.
+
+        Passed through unchanged, CommonMark reads each of these as ONE
+        loose list (the write leg then merged them and renumbered the
+        ordered ones). CommonMark starts a new list when the bullet
+        character or the ordered delimiter changes, so the read leg changes
+        the character instead of adding a separator. The write leg already
+        writes two adjacent Markdown lists with a blank line between them,
+        each keeping its start number (#150), so it is not touched.
+
+        Runs after the ``*`` to ``-`` rewrite, over the final lines. A
+        top-level marker line (its column is left of the open list's text
+        column, so CommonMark would make it a sibling item) opens a new
+        Markdown list when all of these hold:
+
+        * a blank line separates it from the previous non-blank line;
+        * the previous non-blank content belongs to an open list of the
+          same kind (bullet, or digits-only ordered) whose top-level marker
+          uses the same character as this line's.
+
+        Its marker then switches (``-`` and ``*``, ``.`` and ``)``), and
+        so does every later top-level item of the same Trac list (no blank
+        line between them). After another blank line the next list's marker
+        differs from the open one's, so it keeps its own character, which
+        is the switch back (P1: ``.``, ``)``, ``.``). Nested markers are
+        never switched; the one-line nested form ` * * item` (``- - item``)
+        switches its first marker only.
+
+        A non-marker, non-blank line indented left of the open list's text
+        column ends the list (a code placeholder at column 0 included), so
+        a later list keeps ``master``'s bytes; a line at or past the text
+        column continues the item. A bullet list followed by an ordered one
+        (or the reverse) keeps ``master``'s bytes, since CommonMark already
+        reads two lists there, and so does a list after a paragraph. P4 (a
+        marker after the blank line at or past the previous item's text
+        column) keeps ``master``'s bytes too: CommonMark nests it in the
+        item, and that case belongs to #183. Lettered and roman lists are
+        fenced by an earlier fallback pass and never reach this code.
+        """
+        out: list[str] = []
+        # The open top-level Markdown list: its kind ("bullet", "ordered"
+        # or "other"), the marker character it is written with, the text
+        # column of its latest top-level item, and whether this pass
+        # switched its character.
+        kind: str | None = None
+        char = ""
+        text_col = 0
+        switched = False
+        blank_since = False
+        for line in text.split("\n"):
+            if not line.strip():
+                blank_since = True
+                out.append(line)
+                continue
+            marker = _LIST_MARKER_RE.match(line)
+            if marker is None:
+                if (
+                    kind is not None
+                    and len(_indent_of(line)) < text_col
+                ):
+                    kind = None
+                blank_since = False
+                out.append(line)
+                continue
+            column = len(_indent_of(line))
+            token = line[column : marker.end()]
+            if token in ("-", "*"):
+                this_kind = "bullet"
+            elif token[:-1].isdigit():
+                this_kind = "ordered"
+            else:
+                this_kind = "other"
+            after = line[marker.end() :]
+            gap = len(after) - len(after.lstrip(" \t"))
+            this_text_col = marker.end() + (
+                gap if 1 <= gap <= 4 and after.strip() else 1
+            )
+            this_char = token if this_kind == "bullet" else token[-1]
+            if kind is not None and column >= text_col:
+                pass  # nested in the open item: never switched
+            elif (
+                kind is None
+                or kind != this_kind
+                or this_kind == "other"
+            ):
+                kind, char, switched = this_kind, this_char, False
+                text_col = this_text_col
+            elif blank_since and this_char == char:
+                # CommonMark would make this a sibling of the open list.
+                char = (
+                    ("*" if this_char == "-" else "-")
+                    if (this_kind == "bullet")
+                    else (")" if this_char == "." else ".")
+                )
+                switched = True
+                text_col = this_text_col
+                line = _with_marker_char(line, column, token, char)
+            elif switched and not blank_since:
+                text_col = this_text_col
+                line = _with_marker_char(line, column, token, char)
+            else:
+                # Already a different list in CommonMark (a changed
+                # character), or master's own sibling item.
+                char, switched = this_char, False
+                text_col = this_text_col
+            blank_since = False
+            out.append(line)
+        return "\n".join(out)
 
     def _separate_list_from_trailing_paragraph(self, text: str) -> str:
         """Insert a blank line where a list ends with nothing marking it
