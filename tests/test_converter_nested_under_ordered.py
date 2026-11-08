@@ -676,7 +676,7 @@ def test_a_tab_gap_in_a_bullet_parent_freezes_its_children_too():
     assert _read(source) == " *\ta\n  - b\n - c\n"
 
 
-# -- review fix 3: a nested ordered list not starting at 1 (frozen) ---------
+# -- review fix 3 (ticket #180): a nested ordered list not starting at 1 -----
 
 
 @pytest.mark.parametrize(
@@ -684,26 +684,27 @@ def test_a_tab_gap_in_a_bullet_parent_freezes_its_children_too():
     [
         (
             " 1. a\n   10. b\n   11. c\n 2. d\n",
-            " 1. a\n   10. b\n   11. c\n 2. d\n",
+            " 1. a\n\n    10. b\n    11. c\n 2. d\n",
         ),
-        (" * a\n  3. b\n", " - a\n  3. b\n"),
+        (" * a\n  3. b\n", " - a\n\n   3. b\n"),
         (
             " 1. a\n   10. b\n      * c\n 2. d\n",
-            " 1. a\n   10. b\n      - c\n 2. d\n",
+            " 1. a\n\n    10. b\n        - c\n 2. d\n",
         ),
     ],
     ids=["ordered-10-11", "bullet-parent-3", "its-subtree"],
 )
-def test_a_nested_ordered_marker_not_1_keeps_masters_bytes(
+def test_a_nested_ordered_marker_not_1_moves_and_gets_a_blank_line(
     tracwiki, markdown
 ):
-    """Review fix 3, FROZEN. CommonMark does not let an ordered list that
-    starts at a number other than 1 interrupt the parent's paragraph, so
-    moving ` 1. a` / `   10. b` to the text column made `10. b` paragraph text
-    (`master` kept list items). A nested ordered marker whose number is not 1
-    and which follows the parent's text line directly gets shift 0, and so
-    does its subtree: `master`'s bytes. Ticket #180 owns making these real
-    nested lists; this pins the frozen behaviour until it does."""
+    """Review fix 3 froze these shapes at `master`'s bytes (shift 0), because
+    CommonMark does not let an ordered list that starts at a number other
+    than 1 interrupt the parent's paragraph: moved to the text column with no
+    blank line, `10. b` was paragraph text. Ticket #180 lifted the freeze:
+    the marker moves to the parent's text column like any nested marker, and
+    `_separate_list_from_trailing_paragraph` puts a blank line before it, so
+    it is a real nested list (see
+    `tests/test_converter_nested_non_one_ordered.py`)."""
     assert _read(tracwiki) == markdown
 
 
