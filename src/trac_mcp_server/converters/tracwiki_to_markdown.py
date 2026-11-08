@@ -1193,6 +1193,10 @@ class TracWikiParser:
            which is also what keeps a multi-line list item working: its
            continuation line is indented too, and claiming it would take the
            item apart.
+           Indented lines directly before the run's first marker, with no
+           list open above (ticket #182), are cut off first: they are a
+           quote to Trac, and the list after them is the next run.  They go
+           through step 5 on their own, followed by one blank line.
         5. **Canonical** -- every line's indent is exactly two spaces per
            level of its measured depth, so ``> `` markers reproduce it
            byte-for-byte.  Converted.  Anything else -- one space, three,
@@ -1220,6 +1224,10 @@ class TracWikiParser:
         out: list[str] = []
         stack: list[int] = []
         inside: set[int] | None = None
+        # Ticket #182: True once an earlier indented run held a list marker,
+        # a brace, a definition list or a lettered list, until a column-zero
+        # line; a list may then still be open above the next run.
+        list_may_be_open = False
         index = 0
         while index < len(lines):
             probe = masked[index]
@@ -1227,6 +1235,14 @@ class TracWikiParser:
                 # Blank lines leave the stack alone; column zero clears it.
                 if probe.strip():
                     stack = []
+                    # A block's lines are not prose (the mask fills its
+                    # interior and its closing line), and a block joins an
+                    # open item, so they leave the flag alone (ticket #182).
+                    if not (
+                        probe.startswith("\x01")
+                        or self._line_holds_a_brace(probe)
+                    ):
+                        list_may_be_open = False
                 out.append(lines[index])
                 index += 1
                 continue
@@ -1243,11 +1259,13 @@ class TracWikiParser:
 
             if any(self._line_holds_a_brace(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.extend(run)
                 continue
 
             if any(_DEFINITION_LIST_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Definition list"
@@ -1257,6 +1275,7 @@ class TracWikiParser:
 
             if any(_ALPHA_LIST_MARKER_RE.match(m) for m in probes):
                 stack = []
+                list_may_be_open = True
                 out.append(
                     self._stash_fallback(
                         "\n".join(run), "Lettered or roman ordered list"
@@ -1264,12 +1283,40 @@ class TracWikiParser:
                 )
                 continue
 
+            # Ticket #182: indented quote lines directly before the run's
+            # first marker are a blockquote to Trac and the list after
+            # them a top-level list. The run is cut at the marker (the
+            # rest is the next run) when no list can be open above it, so
+            # the head is classified on its own below.
+            cut_head = False
+            marker_at = next(
+                (
+                    i
+                    for i, m in enumerate(probes)
+                    if _LIST_MARKER_RE.match(m)
+                ),
+                None,
+            )
+            if marker_at is not None and inside is None:
+                inside = self._lines_inside_blocks(lines)
+            if (
+                marker_at is not None
+                and marker_at > 0
+                and not list_may_be_open
+                and not self._starts_inside_open_item(
+                    lines, masked, inside, start
+                )
+            ):
+                cut_head = True
+                index = start + marker_at
+                run = run[:marker_at]
+                probes = probes[:marker_at]
+
             # Ticket #175: Trac ends a list at an indented line past the
             # innermost item's upper bound and renders it as a blockquote.
             # The run is split there; the quote part goes out verbatim.
-            if any(_LIST_MARKER_RE.match(m) for m in probes):
-                if inside is None:
-                    inside = self._lines_inside_blocks(lines)
+            if marker_at is not None and not cut_head:
+                list_may_be_open = True
                 segments = self._split_past_bound(
                     lines, masked, inside, start, index
                 )
@@ -1328,7 +1375,28 @@ class TracWikiParser:
                         "\n".join(run), self._indent_kind(run)
                     )
                 )
+            if cut_head:
+                # One blank line ends the quote (or the fence) before the
+                # list that was cut from its run (ticket #182).
+                out.append("")
         return "\n".join(out)
+
+    def _starts_inside_open_item(
+        self,
+        lines: list[str],
+        masked: list[str],
+        inside: set[int],
+        start: int,
+    ) -> bool:
+        """True when the run at `start` begins straight after a block's
+        closing line with a list item open above the block: the seed
+        `_split_past_bound` uses (ticket #182)."""
+        if not (
+            self._closes_block_line(masked, start)
+            or start - 1 in inside
+        ):
+            return False
+        return bool(_items_open_above(lines, inside, start))
 
     def _split_past_bound(
         self,
