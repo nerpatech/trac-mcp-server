@@ -651,6 +651,17 @@ _INDENTED_HEADING_RE = re.compile(r"^[ \t]+=")
 # leading-whitespace requirement.
 _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 
+# Any list marker at column zero (ticket #182), from the same fragments:
+# Trac's list indent is ``\s*``, so ``- a``, ``* a`` and ``1. a`` at column
+# zero are list items (measured on the WikiFormatting page: one ``<ul>``
+# with a nested ``<ul>``), and an indented line after one continues it.  A
+# lettered marker is stashed by ``_fallback_column_zero_lists`` before
+# ``_convert_indented_blocks`` runs, so it is found there by its stash.
+_LIST_MARKER_COL0_RE = re.compile(
+    rf"^(?:{_BULLET_MARKER}|{_NUMERIC_MARKER}|{_ALPHA_MARKER})(?=[ \t])"
+)
+_STASH_PLACEHOLDER_RE = re.compile(r"^\x00CODE(\d+)\x00$")
+
 # A line shape that CommonMark already treats as "interrupting" -- it starts
 # a new sibling block on its own, without needing a blank line, rather than
 # being read as a lazy continuation of the preceding list item's paragraph
@@ -763,6 +774,7 @@ class TracWikiParser:
         self._code_placeholders: list[str] = []
         self._br_marks_active = False
         self._item_fence_stashes: set[int] = set()
+        self._col0_list_stashes: set[int] = set()
 
     def parse(self, tracwiki_text: str) -> ConversionResult:
         """
@@ -782,6 +794,7 @@ class TracWikiParser:
         self._code_placeholders = []
         self._br_marks_active = False
         self._item_fence_stashes = set()
+        self._col0_list_stashes = set()
         self._detect_lossy_elements(tracwiki_text)
 
         text = tracwiki_text
@@ -1118,6 +1131,9 @@ class TracWikiParser:
                     "Lettered or roman ordered list",
                 )
             )
+            self._col0_list_stashes.add(
+                len(self._code_placeholders) - 1
+            )
         return "\n".join(out)
 
     @staticmethod
@@ -1238,7 +1254,12 @@ class TracWikiParser:
                     # A block's lines are not prose (the mask fills its
                     # interior and its closing line), and a block joins an
                     # open item, so they leave the flag alone (ticket #182).
-                    if not (
+                    if self._is_column_zero_list_line(
+                        lines, probe, index
+                    ):
+                        # A column-zero item keeps its list open (#182).
+                        list_may_be_open = True
+                    elif not (
                         probe.startswith("\x01")
                         or self._line_holds_a_brace(probe)
                     ):
@@ -1380,6 +1401,25 @@ class TracWikiParser:
                 # list that was cut from its run (ticket #182).
                 out.append("")
         return "\n".join(out)
+
+    def _is_column_zero_list_line(
+        self, lines: list[str], probe: str, index: int
+    ) -> bool:
+        """True for a column-zero line that Trac reads as a list item, or
+        that closes the fence a column-zero lettered list was stashed in
+        (ticket #182).  `probe` is the masked `lines[index]`, which is not
+        indented."""
+        if _LIST_MARKER_COL0_RE.match(probe):
+            return True
+        for look in (index, index - 1):
+            m = (
+                _STASH_PLACEHOLDER_RE.match(lines[look])
+                if look >= 0
+                else None
+            )
+            if m and int(m.group(1)) in self._col0_list_stashes:
+                return True
+        return False
 
     def _starts_inside_open_item(
         self,

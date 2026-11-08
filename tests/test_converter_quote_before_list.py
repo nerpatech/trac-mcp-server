@@ -129,6 +129,14 @@ CASES = {
         "<blockquote>\n<p>q</p>\n</blockquote>\n<ul>\n<li>c</li>\n</ul>\n",
         "P\n\n  q0\n\n  q\n\n * c",
     ),
+    # A `- a` line inside a code block is content, not a list item.
+    "a list-looking line in a code block does not keep a list open": (
+        "{{{\n- a\n}}}\n\n  q\n * c\n",
+        "```\n- a\n```\n\n> q\n\n - c\n",
+        "<pre><code>- a\n</code></pre>\n<blockquote>\n<p>q</p>\n"
+        "</blockquote>\n<ul>\n<li>c</li>\n</ul>\n",
+        "{{{\n- a\n}}}\n\n  q\n\n * c",
+    ),
     # The second run follows a list, so it is out of scope (#181/#183) and
     # keeps master's bytes; only the first head is a quote.
     "a later quote run after the list is left alone": (
@@ -181,6 +189,46 @@ UNCHANGED = {
         " * a\n {{{\n c\n }}}\n tail\n\n  more\n * b\n",
         " - a\n   ```\n   c\n   ```\n   tail\n\n  more\n - b\n",
         " * a\n   {{{\n   c\n   }}}\n   tail\n\nmore\n\n * b",
+    ),
+    # A column-0 line that Trac reads as a list item (`- `, `* `, `1. `,
+    # `a. `) keeps its list open: an indented line after it is the item's
+    # continuation, and a marker after that is a nested item (measured on
+    # /trac_test for the WikiFormatting shape: one `<ul>` with a nested
+    # `<ul>`). The cut would turn the line into a citation.
+    "a column-0 bullet item": (
+        "P\n\n- a\n  q\n  - b\n",
+        "P\n\n- a\n  q\n  - b\n",
+        "P\n\n * a\n   q\n   * b",
+    ),
+    "a column-0 bullet item after a list": (
+        " * x\n- a\n  q\n  - b\n",
+        " - x\n\n- a\n  q\n  - b\n",
+        " * x\n * a\n   q\n   * b",
+    ),
+    "a column-0 bullet item, no marker after the quote": (
+        " * x\n- a\n  q\n",
+        " - x\n\n- a\n> q\n",
+        " * x\n * a\n\n  q",
+    ),
+    "a column-0 star item": (
+        "P\n\n* a\n  q\n  - b\n",
+        "P\n\n* a\n  q\n  - b\n",
+        "P\n\n * a\n   q\n   * b",
+    ),
+    "a column-0 ordered item": (
+        "P\n\n1. a\n  q\n  - b\n",
+        "P\n\n1. a\n  q\n  - b\n",
+        "P\n\n 1. a\n    q\n\n * b",
+    ),
+    "a column-0 lettered item": (
+        "P\n\na. a\n  q\n  - b\n",
+        "P\n\n```tracwiki-unconverted\na. a\n```\n  q\n  - b\n",
+        "P\n\na. a\n\nq\n\n * b",
+    ),
+    "a column-0 bullet item straight after a paragraph line": (
+        "P\n- a\n  q\n  - b\n",
+        "P\n- a\n  q\n  - b\n",
+        "P\n\n * a\n   q\n   * b",
     ),
     "a head that is a heading": (
         "P\n\n  = H =\n * c\n",
