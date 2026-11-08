@@ -355,8 +355,10 @@ async def _handle_update(
             ]
         )
     except WikiPageConflict as e:
-        # Stale version caught by the client's precheck (ticket #120);
-        # putPage was never posted.
+        # Stale version: caught by the client's precheck before putPage
+        # was posted (#120), refused by the plugin's conditional put
+        # (#129), or found by a re-read after a putPage fault (a save
+        # collision, #185). Nothing was stored in any case.
         if e.current_version is None:
             return build_error_response(
                 "version_conflict",

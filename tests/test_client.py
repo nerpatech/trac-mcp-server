@@ -2003,7 +2003,11 @@ def test_put_wiki_page_fault_with_failed_reread_is_the_original_fault(
     with pytest.raises(xmlrpc.client.Fault) as exc_info:
         client.put_wiki_page("Page", "content", "comment", version=1)
 
-    assert exc_info.value.faultString == _SQLITE_COLLISION
+    # The original putPage fault, unwrapped like any re-raised putPage
+    # fault (#185 review).
+    assert exc_info.value.faultString == (
+        "UNIQUE constraint failed: wiki.name, wiki.version"
+    )
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -2020,6 +2024,55 @@ def test_put_wiki_page_unversioned_fault_is_reraised_without_reread(
         client.put_wiki_page("VersionNotes", "content", "comment")
 
     assert exc_info.value.faultString == _VERSION_NOTES_PERMISSION
+    assert mock_post.call_count == 1
+
+
+_WRAPPED_VERSION_NOTES_PERMISSION = (
+    f"'{_VERSION_NOTES_PERMISSION}' while executing 'wiki.putPage()'"
+)
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_versioned_fault_is_reraised_unwrapped(
+    mock_post, mock_config
+):
+    """A putPage fault re-raised after an unchanged re-read loses
+    TracXMLRPC's "while executing" wrapper, as the plugin path's does,
+    and keeps its faultCode (#185 review)."""
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _page_info_response(1),
+        _fault_response(_WRAPPED_VERSION_NOTES_PERMISSION, code=403),
+        _page_info_response(1),
+    ]
+
+    client = TracClient(mock_config)
+
+    with pytest.raises(xmlrpc.client.Fault) as exc_info:
+        client.put_wiki_page(
+            "VersionNotes", "content", "comment", version=1
+        )
+
+    assert exc_info.value.faultString == _VERSION_NOTES_PERMISSION
+    assert exc_info.value.faultCode == 403
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_unversioned_fault_is_reraised_unwrapped(
+    mock_post, mock_config
+):
+    """The same unwrap for a create / unversioned write (#185 review)."""
+    mock_post.side_effect = [
+        _fault_response(_WRAPPED_VERSION_NOTES_PERMISSION, code=403)
+    ]
+
+    client = TracClient(mock_config)
+
+    with pytest.raises(xmlrpc.client.Fault) as exc_info:
+        client.put_wiki_page("VersionNotes", "content", "comment")
+
+    assert exc_info.value.faultString == _VERSION_NOTES_PERMISSION
+    assert exc_info.value.faultCode == 403
     assert mock_post.call_count == 1
 
 

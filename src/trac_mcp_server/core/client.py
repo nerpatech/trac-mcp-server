@@ -162,14 +162,14 @@ class WikiPageConflict(ValueError):
     """A wiki_update's ``version`` was stale: the page's current version is
     not the one the caller read (ticket #120).
 
-    Raised by ``TracClient.put_wiki_page`` BEFORE ``wiki.putPage`` is
-    posted, because Trac ignores the ``version`` attribute of putPage --
-    no fault ever comes back for a stale one, so the comparison has to be
-    made here (see ``put_wiki_page``).
+    Raised by ``TracClient.put_wiki_page`` by the precheck before
+    ``wiki.putPage`` is posted (Trac ignores putPage's ``version``
+    attribute, #120), by the plugin's conditional put (#129), or after a
+    putPage fault when a re-read shows the page's version moved (a
+    server-side save collision, #185). In every case nothing was stored.
 
     ``current_version`` is ``None`` when the page does not exist at all.
-    Subclasses ``ValueError`` so callers that already catch the client's
-    plain version-conflict ``ValueError`` keep working.
+    Subclasses ``ValueError`` for callers that catch ``ValueError``.
     """
 
     def __init__(
@@ -1736,8 +1736,9 @@ class TracClient:
             WikiPageConflict: If ``version`` is not the page's current
                 version (or the page does not exist): the client's
                 precheck found it, and putPage was not called, or the
-                plugin method refused, and stored nothing. A
-                ``ValueError`` subclass.
+                plugin method refused, or a putPage fault was followed by
+                a re-read showing a different version (a save collision).
+                Nothing was stored in any case. A ``ValueError`` subclass.
             WikiPageNotModified: If the content is identical to the stored
                 page (Trac stored nothing; ticket #174). A ``ValueError``
                 subclass.
@@ -1896,8 +1897,9 @@ class TracClient:
         current version: the page moved between the precheck and the save
         (a server-side save collision). Otherwise -- the version is
         unchanged, or the re-read failed -- the original fault is
-        re-raised unchanged. The fault text is never consulted for that
-        (Trac /trac_mcp_server #185).
+        re-raised, with TracXMLRPC's "while executing" wrapper removed
+        (``_unwrap_tracrpc_fault``). The fault text is never consulted
+        for that decision (Trac /trac_mcp_server #185).
         """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
@@ -1952,7 +1954,7 @@ class TracClient:
                 ) from None
             if version is None:
                 # A create / unversioned write: nothing to compare.
-                raise
+                raise _unwrap_tracrpc_fault(err) from None
             # A fault is a conflict only if the page moved, which the
             # fault text cannot tell: a save collision's wording is
             # backend-specific (sqlite's "UNIQUE constraint failed:
@@ -1976,7 +1978,7 @@ class TracClient:
                     version,
                     now,
                 ) from None
-            raise
+            raise _unwrap_tracrpc_fault(err) from None
         return result
 
     def _read_back_stored_page(
