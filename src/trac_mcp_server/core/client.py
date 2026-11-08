@@ -20,6 +20,11 @@ from urllib3.connection import HTTPConnection
 
 from ..config import Config
 from ..validators import validate_content, validate_page_name
+from .faults import (
+    classify_fault,
+    is_missing_method_fault,
+    unwrap_tracrpc_fault,
+)
 from .scope import ScopedSession, scope_for
 from .wiki_search import BM25, Section, search_pages, split_sections
 
@@ -245,9 +250,6 @@ _WIKI_CONFLICT_MARKER = re.compile(
 # containing that would be reported as an "unchanged" success.
 _WIKI_NOT_MODIFIED_MARKER = "page not modified"
 
-# TracXMLRPC's MethodNotFound fault code (JSON-RPC's "method not found").
-_METHOD_NOT_FOUND_FAULT_CODE = -32601
-
 # How long a client remembers that the plugin method is missing before it
 # tries again. Long enough that a burst of writes to a plugin-less instance
 # pays the extra round trip once, short enough that deploying the plugin is
@@ -279,34 +281,6 @@ WIKI_SCOPE_INDEX_MAX = 16
 # "Since the beginning" for ``wiki.getRecentChanges``.
 _WIKI_EPOCH = "19700101T00:00:00"
 
-# TracXMLRPC wraps every fault from a plain TracError as
-# "'<message>' while executing '<method>()'".
-_TRACRPC_FAULT_WRAPPER = re.compile(
-    r"^'(?P<message>.*)' while executing '[\w.]+\(\)'$", re.DOTALL
-)
-
-
-def _is_missing_method_fault(
-    err: xmlrpc.client.Fault, method: str
-) -> bool:
-    """True when ``err`` says the server has no RPC method ``method``.
-
-    TracXMLRPC raises ``MethodNotFound('RPC method "<name>" not found')``
-    with fault code -32601. The text fallback matches the same heuristic as
-    the ticket_comment tools' ``_translate_missing_method``, narrowed to the
-    method name so that a "page not found" fault can never pass for it.
-    "No such method" (some servers' wording) counts on the same terms: the
-    text must name ``method``.
-    """
-    if err.faultCode == _METHOD_NOT_FOUND_FAULT_CODE:
-        return True
-    text = err.faultString.lower()
-    if method.lower() not in text:
-        return False
-    return ("not found" in text and "method" in text) or (
-        "no such method" in text
-    )
-
 
 @dataclass
 class _OptionalMethod:
@@ -330,28 +304,10 @@ class _OptionalMethod:
     def note_fault(self, err: xmlrpc.client.Fault) -> bool:
         """True, and remember the absence, when ``err`` says the server
         has no such method; False for any other fault."""
-        if not _is_missing_method_fault(err, self.name):
+        if not is_missing_method_fault(err, self.name):
             return False
         self.absent_until = time.monotonic() + self.ttl
         return True
-
-
-def unwrap_tracrpc_fault(
-    err: xmlrpc.client.Fault,
-) -> xmlrpc.client.Fault:
-    """``err`` with TracXMLRPC's "while executing" wrapper removed.
-
-    Unwrapped, a fault from the plugin path reads the same as the same
-    fault from ``wiki.putPage`` would, and callers can show its message
-    without TracXMLRPC's method wrapper. A fault that is not wrapped is
-    returned as is (the same object). Public: the client uses it for
-    the faults it re-raises, and ``mcp.tools.errors`` for the text it
-    classifies.
-    """
-    match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
-    if match is None:
-        return err
-    return xmlrpc.client.Fault(err.faultCode, match.group("message"))
 
 
 @dataclass
@@ -1861,13 +1817,11 @@ class TracClient:
             try:
                 info = self.get_wiki_page_info(page_name)
             except xmlrpc.client.Fault as err:
-                # A not-found Fault means the page is missing, same as
-                # the 0 return below; any other Fault propagates.
-                fault_str = err.faultString.lower()
-                if (
-                    "not found" not in fault_str
-                    and "does not exist" not in fault_str
-                ):
+                # A fault classify_fault reads as not_found (its code
+                # 404, or its text with quoted names removed) means the
+                # page is missing, same as the 0 return below; any other
+                # Fault propagates (Trac /trac_mcp_server #191).
+                if classify_fault(err) != "not_found":
                     raise
                 info = None
             # Some Trac instances return 0 (int) instead of raising a
@@ -2192,11 +2146,11 @@ class TracClient:
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:
-            # Fall back to getAllPages + getPageInfo if getRecentChanges not available
-            if (
-                "not found" in str(e).lower()
-                or "no such method" in str(e).lower()
-            ):
+            # Fall back to getAllPages + getPageInfo if getRecentChanges
+            # not available. Only a missing-method fault counts: a
+            # resource fault whose text says "not found" is re-raised
+            # (Trac /trac_mcp_server #191).
+            if is_missing_method_fault(e, "wiki.getRecentChanges"):
                 pages = self.list_wiki_pages()
                 changes = []
                 for page in pages:

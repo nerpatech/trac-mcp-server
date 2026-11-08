@@ -28,7 +28,7 @@ import mcp.types as types
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from .attachment_common import coerce_attachment_payload
-from .errors import build_error_response
+from .errors import build_error_response, classify_fault
 from .file_io import (
     check_output_path,
     deliver_output,
@@ -423,10 +423,7 @@ async def _handle_delete(
             client.delete_ticket_attachment, ticket_id, filename
         )
     except xmlrpc.client.Fault as e:
-        if (
-            "permission" in e.faultString.lower()
-            or "denied" in e.faultString.lower()
-        ):
+        if classify_fault(e) == "permission_denied":
             return build_error_response(
                 "permission_denied",
                 e.faultString,

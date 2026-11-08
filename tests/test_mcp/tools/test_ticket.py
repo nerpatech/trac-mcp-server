@@ -185,6 +185,59 @@ class TestHandleDelete(unittest.TestCase):
                 "tracopt.ticket.deleter", result.content[0].text
             )
 
+    def test_handle_delete_real_403_shape_is_permission_denied(self):
+        """TracXMLRPC's real PermissionError, Fault(403, ...), is
+        classified by its code (Trac #191)."""
+        mock_client = MagicMock()
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                True,
+                xmlrpc.client.Fault(
+                    403,
+                    "TICKET_ADMIN privileges are required to perform "
+                    "this operation on Ticket #5",
+                ),
+            ]
+
+            result = asyncio.run(
+                _handle_delete(mock_client, {"ticket_id": 5})
+            )
+
+            self.assertTrue(result.isError)
+            self.assertIn(
+                "Error (permission_denied)", result.content[0].text
+            )
+            self.assertIn(
+                "tracopt.ticket.deleter", result.content[0].text
+            )
+
+    def test_handle_delete_code_1_quoted_name_is_not_permission(self):
+        """A code-1 fault is any TracError, and a name it quotes that
+        contains 'Permission' is no evidence of a permission fault: the
+        fault propagates instead of the permission_denied response
+        (Trac #191)."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid ticket field 'PermissionNotes'' while "
+            "executing 'ticket.delete()'",
+        )
+        mock_client = MagicMock()
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [True, fault]
+
+            with self.assertRaises(xmlrpc.client.Fault) as ctx:
+                asyncio.run(
+                    _handle_delete(mock_client, {"ticket_id": 5})
+                )
+
+            self.assertIs(ctx.exception, fault)
+
 
 # ---------------------------------------------------------------------------
 # Ticket Create handler tests
@@ -4605,6 +4658,43 @@ class TestHandleTicketActions:
             assert isinstance(result, types.CallToolResult)
             assert result.isError is True
             assert "method_not_available" in result.content[0].text
+
+    def test_actions_real_missing_method_fault(self):
+        """TracXMLRPC's real MethodNotFound, code -32601 naming
+        ticket.getActions, is method_not_available (Trac #191)."""
+        client = MagicMock(spec=TracClient)
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                -32601, 'RPC method "ticket.getActions" not found'
+            )
+
+            result = self._run(
+                _handle_actions(client, {"ticket_id": 5})
+            )
+
+            assert result.isError is True
+            assert "method_not_available" in result.content[0].text
+
+    def test_actions_resource_fault_is_not_a_missing_method(self):
+        """A resource fault whose text says "not found" (here a missing
+        ticket) is no missing method: it propagates instead of
+        reporting that workflow introspection is unavailable (Trac
+        #191)."""
+        client = MagicMock(spec=TracClient)
+        fault = xmlrpc.client.Fault(404, "Ticket 999 not found")
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = fault
+
+            with pytest.raises(xmlrpc.client.Fault) as exc_info:
+                self._run(_handle_actions(client, {"ticket_id": 999}))
+
+            assert exc_info.value is fault
 
     def test_actions_with_hints_and_input_fields(self):
         """Actions with list hints and input fields are formatted correctly."""
