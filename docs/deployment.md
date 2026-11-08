@@ -277,7 +277,7 @@ By default the server binds `127.0.0.1` only. Binding a non-loopback host (e.g. 
 
 ### Health Check
 
-`GET /healthz` is unauthenticated and returns `{"status": "ok"}` -- use it for container liveness/readiness probes and load-balancer health checks.
+`GET /healthz` is unauthenticated and returns `{"status": "ok", "release": "<40-hex sha>"}` (`"unknown"` for a build without a stamp: an editable install, an sdist, the Docker image) -- use it for container liveness/readiness probes and load-balancer health checks. `ci-live.sh --daemon <url> --expect-sha <sha>` compares the release.
 
 ```bash
 curl -s http://127.0.0.1:8080/healthz

@@ -35,7 +35,11 @@ from ..instances import (
 )
 from ..instances import caller_identity as _caller_identity
 from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging, startup_note
-from ..version import check_version_consistency
+from ..version import (
+    check_version_consistency,
+    format_server_version,
+    release_sha,
+)
 from .http_app import run_http
 from .lifespan import server_lifespan
 from .oidc import OidcClientCache, extract_bearer_token
@@ -63,7 +67,10 @@ from .tools.write_gate import gate_enabled, write_gate_line
 logger = logging.getLogger(__name__)
 
 # Initialize server instance
-server = Server("trac-mcp-server", version=__version__)
+server = Server(
+    "trac-mcp-server",
+    version=format_server_version(__version__, release_sha()),
+)
 
 # Global instance registry (initialized in lifespan)
 _instances: InstanceRegistry | None = None
@@ -678,7 +685,7 @@ async def _run_stdio() -> None:
     ):
         init_options = InitializationOptions(
             server_name="trac-mcp-server",
-            server_version=__version__,
+            server_version=server.version,
             capabilities=server.get_capabilities(
                 notification_options=NotificationOptions(),
                 experimental_capabilities={},

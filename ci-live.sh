@@ -17,7 +17,7 @@
 # layer out -- a skipped check reported as a clean one.
 #
 # ci-live.sh --daemon <url> [--token-env NAME] [--instance PATH
-#                            [--allow-instance-writes]]
+#                            [--allow-instance-writes]] [--expect-sha SHA]
 #
 # The in-process suite above builds its own app from this checkout, so it
 # cannot see what only a DEPLOYED daemon has: the FreeBSD wheels it really
@@ -37,7 +37,11 @@
 # named by --instance (default /trac_test), passed on every call and never
 # the daemon's own default, which on the shared daemon is a production
 # store. Any other --instance is refused (exit 2) unless
-# --allow-instance-writes is given too. Any other argument prints usage and
+# --allow-instance-writes is given too. --expect-sha SHA (7 to 40 lowercase
+# hex characters) makes check 1 fail unless the daemon's /healthz reports a
+# clean release built from that commit (or one it is the prefix of); without
+# it the reported release is only shown. A malformed SHA is refused (exit 2)
+# before any network call. Any other argument prints usage and
 # exits 2. The daemon must be started WITHOUT --permissions-file: a daemon
 # that filters its tool list by permission is unsupported (check 3 expects
 # every tool this checkout defines, so it fails by design).
@@ -52,6 +56,7 @@ usage() {
     echo "usage: ci-live.sh" >&2
     echo "       ci-live.sh --daemon URL [--token-env NAME]" >&2
     echo "                          [--instance PATH [--allow-instance-writes]]" >&2
+    echo "                          [--expect-sha SHA]" >&2
     echo "       (--daemon: the daemon must run without --permissions-file)" >&2
 }
 
@@ -70,7 +75,7 @@ if [ "$#" -gt 0 ]; then
                 daemon_url="$2"
                 shift 2
                 ;;
-            --token-env | --instance)
+            --token-env | --instance | --expect-sha)
                 if [ "$#" -lt 2 ]; then
                     usage
                     exit 2

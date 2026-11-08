@@ -3,6 +3,38 @@
 from pathlib import Path
 
 
+def release_sha() -> str | None:
+    """The commit this build was made from, or None.
+
+    ``setup.py`` writes ``trac_mcp_server/_release.py`` into the build
+    directory when it builds from a source checkout (Trac
+    /trac_mcp_server #170); a checkout run in place, an editable install
+    and a build from an sdist have no such module. A trailing ``-dirty``
+    means a tracked file differed from the commit at build time.
+    """
+    try:
+        from ._release import RELEASE_SHA
+    except ImportError:
+        return None
+    if isinstance(RELEASE_SHA, str) and RELEASE_SHA:
+        return RELEASE_SHA
+    return None
+
+
+def format_server_version(version: str, sha: str | None) -> str:
+    """``serverInfo.version``: the package version, plus a PEP
+    440-style local segment naming the commit when it is known.
+
+    ``2.2.0`` + ``<sha>`` gives ``2.2.0+g<first 12 of sha>``; a dirty
+    sha gives ``2.2.0+g<12>.dirty``.
+    """
+    if not sha:
+        return version
+    dirty = sha.endswith("-dirty")
+    short = sha.removesuffix("-dirty")[:12]
+    return f"{version}+g{short}" + (".dirty" if dirty else "")
+
+
 def check_version_consistency() -> tuple[bool, str]:
     """Check if runtime version matches source version in pyproject.toml.
 
