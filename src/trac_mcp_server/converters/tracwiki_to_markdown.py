@@ -722,6 +722,9 @@ _ALPHA_LIST_MARKER_COL0_RE = re.compile(rf"^{_ALPHA_MARKER}(?=[ \t])")
 _LIST_MARKER_COL0_RE = re.compile(
     rf"^(?:{_BULLET_MARKER}|{_NUMERIC_MARKER})(?=[ \t])"
 )
+# A column-zero digits-ordered marker line (ticket #190): the kind whose
+# continuation bound is column 3, where a bullet's is column 2.
+_DIGITS_ORDERED_COL0_RE = re.compile(rf"^{_NUMERIC_MARKER}(?=[ \t])")
 # The three lines of a ``_stash_fallback`` stash, as ``_convert_indented_blocks``
 # sees them (ticket #182): the opening fence (indented when the block was),
 # the placeholder at column zero, and the closing fence.
@@ -1170,6 +1173,15 @@ class TracWikiParser:
         touches a line around it -- prose above, below, or between two runs
         is left exactly as written.
 
+        A column-zero continuation line ENDS the list, which stays true. An
+        INDENTED line continues the item instead (measured on /trac_test,
+        ticket #190): Trac reads the marker at column 0, and an indented
+        line up to column 3 continues an ordered item.  Such lines straight
+        after a marker line join the stash, and a marker line after them
+        continues it.  A blank line, a column-zero non-marker line, a line
+        past column 3, a tab in the indent and a line holding a code-block
+        delimiter stop it.
+
         Runs as its own top-level pass rather than a branch inside
         ``_convert_indented_blocks``, per the ticket: a column-zero marker
         line's first character is never whitespace, so the two passes can
@@ -1194,6 +1206,13 @@ class TracWikiParser:
                 masked[index]
             ):
                 index += 1
+                # Ticket #190: indented lines straight after the marker
+                # line continue the item (up to column 3), and a marker
+                # line after them continues the list.
+                while index < n and self._continues_lettered_item(
+                    masked[index]
+                ):
+                    index += 1
             out.append(
                 self._stash_fallback(
                     "\n".join(lines[start:index]),
@@ -1204,6 +1223,22 @@ class TracWikiParser:
                 len(self._code_placeholders) - 1
             )
         return "\n".join(out)
+
+    def _continues_lettered_item(self, masked_line: str) -> bool:
+        """True for an indented line that continues a column-zero lettered
+        or roman item (ticket #190): non-blank, indented 1 to 3 columns
+        (Trac's bound for an ordered item, ``trac_continuation_bound(0,
+        ordered=True)``) with no tab, and not holding a code-block
+        delimiter, which would strand the other half of its block."""
+        if not masked_line.strip():
+            return False
+        indent = _indent_of(masked_line)
+        return (
+            bool(indent)
+            and "\t" not in indent
+            and len(indent) <= trac_continuation_bound(0, ordered=True)
+            and not self._line_holds_a_brace(masked_line)
+        )
 
     @staticmethod
     def _line_holds_a_brace(masked_line: str) -> bool:
@@ -1296,6 +1331,19 @@ class TracWikiParser:
            #73, one and three spaces lost the indent silently and four spaces
            or a tab became a literal ``{{{`` code block.
 
+        Between steps 3 and 4 (ticket #190): a run that starts on the line
+        straight after a column-zero bullet or digits item and holds no list
+        marker is that item's continuation, not a quote.  Trac reads the
+        marker at column 0, so an indented line continues the item up to
+        ``trac_continuation_bound(0, ordered=...)`` -- column 2 under a
+        bullet, 3 under a digits item -- and the first line past it ends the
+        list (measured on /trac_test).  The lines up to the bound go out as
+        written, which CommonMark keeps in the item, and the rest of the run
+        goes through steps 4 and 5 as its own run.  Declined, with master's
+        bytes: a tab in a continuation line's indent, and a ``>`` line (a
+        citation under a column-zero item needs the owner and column the
+        list passes do not track for one).
+
         Steps 2 and 3 run **before** step 4, which is the operator decision on
         ticket #63 applied twice: a run holding both a bullet and a definition
         term is a ``<ul>`` followed by a ``<dl>``, and a run holding a numbered
@@ -1381,6 +1429,18 @@ class TracWikiParser:
                         "\n".join(run), "Lettered or roman ordered list"
                     )
                 )
+                continue
+
+            # Ticket #190: a run straight after a column-0 item, with no
+            # marker in it, continues that item up to Trac's bound.
+            head = self._column_zero_continuation(
+                lines, masked, run, probes, start
+            )
+            if head:
+                stack = []
+                list_may_be_open = True
+                out.extend(run[:head])
+                index = start + head
                 continue
 
             # Ticket #182: indented quote lines directly before the run's
@@ -1529,6 +1589,58 @@ class TracWikiParser:
                 # list that was cut from its run (ticket #182).
                 out.append("")
         return "\n".join(out)
+
+    @staticmethod
+    def _column_zero_continuation(
+        lines: list[str],
+        masked: list[str],
+        run: list[str],
+        probes: list[str],
+        start: int,
+    ) -> int:
+        """How many leading lines of the run at `start` continue the
+        column-0 item straight above it, or 0 (ticket #190).
+
+        Trac reads a column-0 marker as a list marker at column 0, so an
+        indented line continues the item up to
+        ``trac_continuation_bound(0, ordered=...)`` (column 2 under a
+        bullet, 3 under a digits item) and the first line past it ends the
+        list (measured on /trac_test, 2026-11-08). The caller emits those
+        lines as written, where CommonMark keeps them in the item (at or
+        past its text column they continue it, left of it they are a lazy
+        continuation of its paragraph), and the rest of the run goes on
+        through the later steps as its own run.
+
+        0 (master's path) when the previous line, on the masked text, is
+        not a column-0 bullet or digits marker line; when the run holds a
+        list marker (the item's own nested list, which the later passes
+        place); when no line is within the bound; and when a line within
+        the bound has a tab in its indent or is a citation (``>``), whose
+        owner and column the list passes do not track for a column-0 item.
+        """
+        if start == 0 or not _LIST_MARKER_COL0_RE.match(
+            masked[start - 1]
+        ):
+            return 0
+        if any(_LIST_MARKER_RE.match(m) for m in probes):
+            return 0
+        bound = trac_continuation_bound(
+            0,
+            ordered=bool(
+                _DIGITS_ORDERED_COL0_RE.match(masked[start - 1])
+            ),
+        )
+        head = 0
+        for line in run:
+            indent = _indent_of(line)
+            if _indent_width(indent) > bound:
+                break
+            # A tab expands to 8 columns, past every bound, so the tab
+            # test is a guard: a tab line ends the head above.
+            if "\t" in indent or line.lstrip().startswith(">"):
+                return 0
+            head += 1
+        return head
 
     def _marker_run_after_blank_in_list(
         self,

@@ -193,14 +193,14 @@ UNCHANGED = {
         " - x\n\n- a\n  q\n  - b\n",
         " * x\n * a\n   q\n   * b",
     ),
-    # This row pins master's bytes, which are wrong: Trac renders `q` as a
-    # continuation of item `a`, and the read leg writes it as a quote (a
-    # pre-existing defect, not caused by #182). Trac /trac_mcp_server #190
-    # owns the fix; the expected values change with it.
+    # #182 pinned this row at master's bytes (`> q`, the write leg moving
+    # `q` out of the item), which were wrong: Trac renders `q` as a
+    # continuation of item `a`. #190 fixes it: `q` stays in the item, and
+    # the round trip writes it at the item's text column.
     "a column-0 bullet item, no marker after the quote": (
         " * x\n- a\n  q\n",
-        " - x\n\n- a\n> q\n",
-        " * x\n * a\n\n  q",
+        " - x\n\n- a\n  q\n",
+        " * x\n * a\n   q",
     ),
     "a column-0 star item": (
         "P\n\n* a\n  q\n  - b\n",
@@ -212,10 +212,14 @@ UNCHANGED = {
         "P\n\n1. a\n  q\n  - b\n",
         "P\n\n 1. a\n    q\n\n * b",
     ),
+    # #190: the indented lines under a column-0 lettered item (`q` at
+    # column 2, then a nested bullet) are inside Trac's bound for it, so
+    # they join its verbatim fence. Master fenced only `a. a` and read `q`
+    # as a quote and `- b` as a list after it; Trac keeps both in item `a`.
     "a column-0 lettered item": (
         "P\n\na. a\n  q\n  - b\n",
-        "P\n\n```tracwiki-unconverted\na. a\n```\n  q\n  - b\n",
-        "P\n\na. a\n\nq\n\n * b",
+        "P\n\n```tracwiki-unconverted\na. a\n  q\n  - b\n```\n",
+        "P\n\na. a\n  q\n  - b",
     ),
     "a column-0 bullet item straight after a paragraph line": (
         "P\n- a\n  q\n  - b\n",
