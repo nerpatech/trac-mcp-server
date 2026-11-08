@@ -552,6 +552,44 @@ class TestFaultClassification(unittest.TestCase):
         result = self._read("trac://wiki/Foo?version=9")
         self.assertTrue(result.startswith("Error (not_found):"), result)
 
+    def test_403_on_the_probe_is_reported_not_called_missing(self):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+
+        def info(name, version=None):
+            raise xmlrpc.client.Fault(
+                403, "WIKI_VIEW privileges are required on Foo"
+            )
+
+        self.client.get_wiki_page_info.side_effect = info
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertEqual(
+            result,
+            'Error (not_found): Wiki page "Foo" does not exist at '
+            "version 9",
+        )
+        self.assertNotIn("Similar pages", result)
+        self.assertNotIn("_index", result)
+
+    def test_transport_error_on_the_probe_is_reported_not_called_missing(
+        self,
+    ):
+        self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "Foo" does not exist at version 9'
+        )
+
+        def info(name, version=None):
+            raise ConnectionError("connection reset")
+
+        self.client.get_wiki_page_info.side_effect = info
+        result = self._read("trac://wiki/Foo?version=9")
+        self.assertEqual(
+            result,
+            'Error (not_found): Wiki page "Foo" does not exist at '
+            "version 9",
+        )
+
     def test_other_fault_is_server_error(self):
         self.client.get_wiki_page.side_effect = xmlrpc.client.Fault(
             500, "boom"

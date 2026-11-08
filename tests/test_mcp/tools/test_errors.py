@@ -465,6 +465,44 @@ class TestClassifyFault:
     def test_unclassified_is_none(self):
         assert classify_fault(xmlrpc.client.Fault(500, "boom")) is None
 
+    def test_single_quoted_name_with_an_apostrophe_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid Wiki page name 'Bob's/PermissionNotes'"
+        )
+        assert classify_fault(fault, "wiki") is None
+
+    def test_contraction_still_classifies(self):
+        fault = xmlrpc.client.Fault(
+            1, "You don't have permission to do that"
+        )
+        assert classify_fault(fault, "wiki") == "permission_denied"
+
+    def test_unquoted_comment_not_found_still_classifies(self):
+        fault = xmlrpc.client.Fault(
+            1, "Comment 3 not found on ticket #5"
+        )
+        assert classify_fault(fault, "ticket") == "not_found"
+
+    def test_whole_message_quoted_without_the_wrapper(self):
+        fault = xmlrpc.client.Fault(1, "'Wiki page \"Foo\" not found'")
+        assert classify_fault(fault, "wiki") == "not_found"
+
+    def test_whole_message_in_double_quotes(self):
+        fault = xmlrpc.client.Fault(1, '"Page not found"')
+        assert classify_fault(fault, "wiki") == "not_found"
+
+    def test_typographic_single_quoted_name_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid name \u2018PermissionNotes\u2019"
+        )
+        assert classify_fault(fault, "wiki") is None
+
+    def test_typographic_double_quoted_name_is_stripped(self):
+        fault = xmlrpc.client.Fault(
+            1, "Invalid name \u201cNotFoundNotes not found\u201d"
+        )
+        assert classify_fault(fault, "wiki") is None
+
 
 # ---------------------------------------------------------------------------
 # format_timestamp tests

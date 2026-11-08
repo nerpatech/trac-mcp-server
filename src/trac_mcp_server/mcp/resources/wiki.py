@@ -133,8 +133,19 @@ async def handle_read_wiki_resource(
                     info = await run_sync_limited(
                         client.get_wiki_page_info, page_name
                     )
-                except Exception:
+                except xmlrpc.client.Fault as probe_fault:
+                    # Only a not-found probe says the page is missing;
+                    # any other fault (a 403) says nothing about it, so
+                    # report what Trac said to the read, not a guess.
+                    if (
+                        classify_fault(probe_fault, "wiki")
+                        != "not_found"
+                    ):
+                        return f"Error (not_found): {e.faultString}"
                     info = None
+                except Exception:
+                    # A transport error likewise: no claim about the page.
+                    return f"Error (not_found): {e.faultString}"
                 if info and isinstance(info, dict):
                     return f"Error (invalid_version): Version {version} not found for page '{page_name}'.\n\nHint: Use trac://wiki/{page_name} to see the latest version."
                 return await _build_not_found_error(client, page_name)

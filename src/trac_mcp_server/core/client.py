@@ -336,14 +336,17 @@ class _OptionalMethod:
         return True
 
 
-def _unwrap_tracrpc_fault(
+def unwrap_tracrpc_fault(
     err: xmlrpc.client.Fault,
 ) -> xmlrpc.client.Fault:
     """``err`` with TracXMLRPC's "while executing" wrapper removed.
 
     Unwrapped, a fault from the plugin path reads the same as the same
     fault from ``wiki.putPage`` would, and callers can show its message
-    without TracXMLRPC's method wrapper.
+    without TracXMLRPC's method wrapper. A fault that is not wrapped is
+    returned as is (the same object). Public: the client uses it for
+    the faults it re-raises, and ``mcp.tools.errors`` for the text it
+    classifies.
     """
     match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
     if match is None:
@@ -1807,7 +1810,7 @@ class TracClient:
                 A ``ValueError`` subclass.
             xmlrpc.client.Fault: Any other fault, with TracXMLRPC's
                 "while executing" wrapper removed (see
-                ``_unwrap_tracrpc_fault``). Nothing was stored.
+                ``unwrap_tracrpc_fault``). Nothing was stored.
         """
         # A JSON-schema "integer" admits 3.0; the plugin takes an int.
         expected = int(version)
@@ -1853,7 +1856,7 @@ class TracClient:
                 raise self._wiki_not_modified(
                     page_name, version
                 ) from None
-            raise _unwrap_tracrpc_fault(err) from None
+            raise unwrap_tracrpc_fault(err) from None
 
     def _wiki_not_modified(
         self, page_name: str, version: int | None
@@ -1897,7 +1900,7 @@ class TracClient:
         (a server-side save collision). Otherwise -- the version is
         unchanged, or the re-read failed -- the original fault is
         re-raised, with TracXMLRPC's "while executing" wrapper removed
-        (``_unwrap_tracrpc_fault``). The fault text is never consulted
+        (``unwrap_tracrpc_fault``). The fault text is never consulted
         for that decision (Trac /trac_mcp_server #185).
         """
         attrs: dict[str, Any] = {"comment": comment}
@@ -1953,7 +1956,7 @@ class TracClient:
                 ) from None
             if version is None:
                 # A create / unversioned write: nothing to compare.
-                raise _unwrap_tracrpc_fault(err) from None
+                raise unwrap_tracrpc_fault(err) from None
             # A fault is a conflict only if the page moved, which the
             # fault text cannot tell: a save collision's wording is
             # backend-specific (sqlite's "UNIQUE constraint failed:
@@ -1977,7 +1980,7 @@ class TracClient:
                     version,
                     now,
                 ) from None
-            raise _unwrap_tracrpc_fault(err) from None
+            raise unwrap_tracrpc_fault(err) from None
         return result
 
     def _read_back_stored_page(

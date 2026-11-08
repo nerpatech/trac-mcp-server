@@ -13,7 +13,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.client import _unwrap_tracrpc_fault
+from ...core.client import unwrap_tracrpc_fault
 
 
 def build_error_response(
@@ -126,18 +126,32 @@ _DOMAIN_MESSAGES: dict[str, dict[str, str]] = {
 # A quoted span in a fault's text is a NAME the fault mentions (Trac
 # quotes page, milestone and ticket names: 'X' or "X"), not evidence of
 # what went wrong. Single quotes count only where the quote is not inside
-# a word, so "don't" is left alone.
+# a word, so "don't" is left alone. A single-quoted span may itself hold
+# apostrophes (``'Bob's/Notes'``): it ends at the first quote not
+# followed by a word character. Typographic quote pairs count too.
 _DOUBLE_QUOTED = re.compile(r'"[^"]*"')
-_SINGLE_QUOTED = re.compile(r"(?<!\w)'[^']*'(?!\w)")
+_SINGLE_QUOTED = re.compile(r"(?<!\w)'.*?'(?!\w)")
+_TYPOGRAPHIC_SINGLE = re.compile("\u2018[^\u2019]*\u2019")
+_TYPOGRAPHIC_DOUBLE = re.compile("\u201c[^\u201d]*\u201d")
 
 
 def _fault_text(fault: xmlrpc.client.Fault) -> str:
     """A fault's text for keyword tests: TracXMLRPC's "while executing"
-    wrapper removed, every quoted name replaced by a placeholder, then
+    wrapper removed, one outer pair of quotes around the whole message
+    removed, every quoted name replaced by a placeholder, then
     lower-cased."""
-    text = _unwrap_tracrpc_fault(fault).faultString
+    text = unwrap_tracrpc_fault(fault).faultString
+    stripped = text.strip()
+    if (
+        len(stripped) >= 2
+        and stripped[0] in "'\""
+        and stripped[-1] == stripped[0]
+    ):
+        text = stripped[1:-1]
     text = _DOUBLE_QUOTED.sub("<name>", text)
     text = _SINGLE_QUOTED.sub("<name>", text)
+    text = _TYPOGRAPHIC_SINGLE.sub("<name>", text)
+    text = _TYPOGRAPHIC_DOUBLE.sub("<name>", text)
     return text.lower()
 
 
