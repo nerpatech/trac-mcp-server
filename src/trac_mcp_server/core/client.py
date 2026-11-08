@@ -7,6 +7,7 @@ import time
 import weakref
 import xmlrpc.client
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -640,23 +641,13 @@ class TracClient:
         - Single gets are ``get_ticket`` per id, a failure skipping that
           id.
         """
-        ids = list(dict.fromkeys(ticket_ids))
-        out: dict[int, Any] = {}
-        done = 0
-        if ids and self._multicall.available():
-            while done < len(ids):
-                batch = ids[done : done + TICKET_FETCH_BATCH]
-                try:
-                    out.update(self._fetch_ticket_batch(batch))
-                except xmlrpc.client.Fault as err:
-                    if self._multicall.note_fault(err):
-                        break  # no multicall: the rest goes one by one
-                    out.update(self._fetch_tickets_singly(batch))
-                except Exception:
-                    out.update(self._fetch_tickets_singly(batch))
-                done += len(batch)
-        out.update(self._fetch_tickets_singly(ids[done:]))
-        return out
+        return self._batched_multicall(
+            list(dict.fromkeys(ticket_ids)),
+            TICKET_FETCH_BATCH,
+            lambda tid: [{"methodName": "ticket.get", "params": [tid]}],
+            lambda tid, values: values[0],
+            self._fetch_tickets_singly,
+        )
 
     def _fetch_tickets_singly(self, ids: list[int]) -> dict[int, Any]:
         """``get_ticket`` per id, skipping any that fail."""
@@ -668,21 +659,89 @@ class TracClient:
                 continue
         return out
 
-    def _fetch_ticket_batch(self, ids: list[int]) -> dict[int, Any]:
-        """One ``system.multicall`` of ``ticket.get`` for ``ids``. A
-        per-entry fault leaves that id out; a reply that is not a list of
-        ``len(ids)`` entries is read singly."""
-        calls = [
-            {"methodName": "ticket.get", "params": [tid]} for tid in ids
-        ]
+    def _batched_multicall(
+        self,
+        items: list[Any],
+        batch_size: int,
+        calls_for: Callable[[Any], list[dict[str, Any]]],
+        decode: Callable[[Any, list[Any]], Any],
+        fetch_singly: Callable[[list[Any]], dict[Any, Any]],
+    ) -> dict[Any, Any]:
+        """Read ``items`` in ``system.multicall`` batches, falling back
+        to ``fetch_singly``; ``{item: value}`` for each that loaded.
+
+        The one batch-then-fallback loop behind ``get_tickets`` and the
+        wiki search's page fetch (Trac /trac_mcp_server #172).
+
+        - ``calls_for(item)`` is the multicall entries
+          (``{"methodName", "params"}``) that read one item; the count
+          may differ per item.
+        - ``decode(item, values)`` turns the item's result values (one
+          per entry, in order) into its value, or ``None`` to skip it.
+          It runs only when every entry of the item is a value.
+        - ``fetch_singly(items)`` is the one-call-per-item read.
+
+        No items makes no RPC. While the server has ``system.multicall``
+        the items go in batches of ``batch_size``:
+
+        - a reply that is not a list of exactly the batch's entry count
+          sends that batch to ``fetch_singly``;
+        - an entry that is a fault leaves its item absent, with no
+          single retry;
+        - a ``Fault`` that says ``system.multicall`` is missing is
+          remembered (``self._multicall``, shared by every caller) and
+          the rest, that batch included, goes to ``fetch_singly``;
+        - any other ``Fault``, or any other exception (a timeout, a
+          dropped connection, an unparseable reply), sends just that
+          batch to ``fetch_singly`` -- one batch failing must not fail
+          the whole read -- and batching goes on.
+        """
+        out: dict[Any, Any] = {}
+        done = 0
+        if items and self._multicall.available():
+            while done < len(items):
+                batch = items[done : done + batch_size]
+                try:
+                    out.update(
+                        self._multicall_batch(
+                            batch, calls_for, decode, fetch_singly
+                        )
+                    )
+                except xmlrpc.client.Fault as err:
+                    if self._multicall.note_fault(err):
+                        break  # no multicall: the rest goes singly
+                    out.update(fetch_singly(batch))
+                except Exception:
+                    out.update(fetch_singly(batch))
+                done += len(batch)
+        out.update(fetch_singly(items[done:]))
+        return out
+
+    def _multicall_batch(
+        self,
+        batch: list[Any],
+        calls_for: Callable[[Any], list[dict[str, Any]]],
+        decode: Callable[[Any, list[Any]], Any],
+        fetch_singly: Callable[[list[Any]], dict[Any, Any]],
+    ) -> dict[Any, Any]:
+        """One ``system.multicall`` for ``batch``; see
+        ``_batched_multicall``. Raises whatever the RPC raises."""
+        per_item = [calls_for(item) for item in batch]
+        calls = [call for item_calls in per_item for call in item_calls]
         results = self._rpc_request("system", "multicall", calls)
         if not isinstance(results, list) or len(results) != len(calls):
-            return self._fetch_tickets_singly(ids)
-        out = {}
-        for tid, entry in zip(ids, results, strict=True):
-            ok, value = _multicall_value(entry)
-            if ok:
-                out[tid] = value
+            return fetch_singly(batch)
+        out: dict[Any, Any] = {}
+        offset = 0
+        for item, item_calls in zip(batch, per_item, strict=True):
+            entries = results[offset : offset + len(item_calls)]
+            offset += len(item_calls)
+            decoded = [_multicall_value(entry) for entry in entries]
+            if not all(ok for ok, _ in decoded):
+                continue
+            value = decode(item, [v for _, v in decoded])
+            if value is not None:
+                out[item] = value
         return out
 
     def get_ticket_changelog(self, ticket_id: int) -> Any:
@@ -1538,24 +1597,19 @@ class TracClient:
         one call per page when the server has no multicall. A page that
         cannot be read is left out of the result.
         """
-        out: dict[str, tuple[int | None, str | None, str]] = {}
-        done = 0
-        if names and self._multicall.available():
-            while done < len(names):
-                batch = names[done : done + WIKI_FETCH_BATCH_PAGES]
-                try:
-                    out.update(self._fetch_wiki_batch(batch))
-                except xmlrpc.client.Fault as err:
-                    if self._multicall.note_fault(err):
-                        break  # no multicall: the rest goes page by page
-                    out.update(self._fetch_wiki_singly(batch))
-                except Exception:
-                    # A timeout, a dropped connection, an unparseable
-                    # reply: one batch failing must not fail the search.
-                    out.update(self._fetch_wiki_singly(batch))
-                done += len(batch)
-        out.update(self._fetch_wiki_singly(names[done:]))
-        return out
+        # Each page is a getPageInfo then a getPage (in that order, so a
+        # page edited in between is cached under the older version and
+        # re-read next time).
+        return self._batched_multicall(
+            names,
+            WIKI_FETCH_BATCH_PAGES,
+            lambda name: [
+                {"methodName": "wiki.getPageInfo", "params": [name]},
+                {"methodName": "wiki.getPage", "params": [name]},
+            ],
+            lambda name, values: _wiki_page_record(*values),
+            self._fetch_wiki_singly,
+        )
 
     def _fetch_wiki_singly(
         self, names: list[str]
@@ -1572,38 +1626,6 @@ class TracClient:
             except Exception:
                 # Skip pages that can't be read (permission denied, etc.)
                 continue
-            if record is not None:
-                out[name] = record
-        return out
-
-    def _fetch_wiki_batch(
-        self, names: list[str]
-    ) -> dict[str, tuple[int | None, str | None, str]]:
-        """One ``system.multicall`` reading ``names``.
-
-        Each page is a ``getPageInfo`` then a ``getPage`` (in that order,
-        so a page edited in between is cached under the older version and
-        re-read next time). A per-entry fault comes back as a
-        ``{'faultCode', 'faultString'}`` dict: that page is skipped.
-        """
-        calls = []
-        for name in names:
-            calls.append(
-                {"methodName": "wiki.getPageInfo", "params": [name]}
-            )
-            calls.append(
-                {"methodName": "wiki.getPage", "params": [name]}
-            )
-        results = self._rpc_request("system", "multicall", calls)
-        if not isinstance(results, list) or len(results) != len(calls):
-            return {}
-        out = {}
-        for i, name in enumerate(names):
-            info_ok, info = _multicall_value(results[2 * i])
-            text_ok, text = _multicall_value(results[2 * i + 1])
-            if not (info_ok and text_ok):
-                continue
-            record = _wiki_page_record(info, text)
             if record is not None:
                 out[name] = record
         return out
