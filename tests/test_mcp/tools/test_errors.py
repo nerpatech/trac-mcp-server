@@ -169,12 +169,142 @@ class TestTranslateXmlrpcError:
         assert "milestone_update" in text
 
     def test_version_conflict(self):
-        """Version conflict — returns version_conflict."""
-        fault = xmlrpc.client.Fault(1, "Page version conflict detected")
+        """Version conflict — fault code 409 returns version_conflict."""
+        fault = xmlrpc.client.Fault(
+            409, "[wiki-version-conflict current_version=7] page moved"
+        )
         result = translate_xmlrpc_error(fault, "wiki")
 
         text = _get_error_text(result)
         assert "version_conflict" in text
+
+    def test_version_text_alone_is_not_a_conflict(self):
+        """Trac #186: text without the 409 code is no version conflict."""
+        fault = xmlrpc.client.Fault(1, "Page version conflict detected")
+        result = translate_xmlrpc_error(fault, "wiki")
+
+        text = _get_error_text(result)
+        assert "server_error" in text
+        assert "version_conflict" not in text
+
+    def test_page_name_containing_version_is_server_error(self):
+        """Trac #186: a page name containing "version" is no conflict."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'VersionNotes/../x'' while executing"
+            " 'wiki.putPage()'",
+        )
+        result = translate_xmlrpc_error(fault, "wiki")
+
+        text = _get_error_text(result)
+        assert "server_error" in text
+        assert "version_conflict" not in text
+
+    def test_milestone_named_version_is_server_error(self):
+        """Trac #186: a milestone named "Version 2.0" is no conflict."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "'Version 2.0 has tickets' while executing"
+            " 'ticket.milestone.delete()'",
+        )
+        result = translate_xmlrpc_error(fault, "milestone")
+
+        text = _get_error_text(result)
+        assert "server_error" in text
+        assert "version_conflict" not in text
+
+    def test_not_found_by_code_404(self):
+        """Trac #186: ResourceNotFound is code 404, whatever its text."""
+        fault = xmlrpc.client.Fault(
+            404, "No version 3 for comment 2 on Ticket #5"
+        )
+        result = translate_xmlrpc_error(fault, "ticket")
+
+        text = _get_error_text(result)
+        assert "not_found" in text
+        assert "version_conflict" not in text
+
+    def test_permission_denied_by_code_403(self):
+        """Trac #186: PermissionError is code 403, whatever its text."""
+        fault = xmlrpc.client.Fault(403, "WIKI_ADMIN required")
+        result = translate_xmlrpc_error(fault, "wiki")
+
+        text = _get_error_text(result)
+        assert "permission_denied" in text
+
+    def test_version_conflict_by_code_409(self):
+        """Trac #186: code 409 is a version conflict, whatever its text."""
+        fault = xmlrpc.client.Fault(409, "x")
+        result = translate_xmlrpc_error(fault, "ticket")
+
+        text = _get_error_text(result)
+        assert "version_conflict" in text
+
+    def test_409_missing_page_conflict_is_version_conflict(self):
+        """Trac #186: the plugin's missing-page conflict says "does not
+        exist" but is code 409, so it is a conflict, not not_found."""
+        fault = xmlrpc.client.Fault(
+            409,
+            "[wiki-version-conflict current_version=none] Version"
+            ' conflict on wiki page "X": you tried to update version 3'
+            " but the page does not exist.",
+        )
+        result = translate_xmlrpc_error(fault, "wiki", "X")
+
+        text = _get_error_text(result)
+        assert "version_conflict" in text
+        assert "not_found" not in text
+
+    def test_409_conflict_on_page_named_permission_is_version_conflict(
+        self,
+    ):
+        """Trac #186: a 409 on a page named PermissionPolicy is a
+        conflict, not permission_denied."""
+        fault = xmlrpc.client.Fault(
+            409,
+            "[wiki-version-conflict current_version=4] Version conflict"
+            ' on wiki page "PermissionPolicy": you tried to update'
+            " version 3 but its current version is 4.",
+        )
+        result = translate_xmlrpc_error(
+            fault, "wiki", "PermissionPolicy"
+        )
+
+        text = _get_error_text(result)
+        assert "version_conflict" in text
+        assert "permission_denied" not in text
+
+    def test_403_on_milestone_named_not_found_is_permission_denied(
+        self,
+    ):
+        """Trac #186: a 403 whose text names "Not found bugs" is a
+        permission fault, not not_found."""
+        fault = xmlrpc.client.Fault(
+            403,
+            "WIKI_VIEW privileges are required to perform this operation"
+            " on Milestone Not found bugs. You don't have the required"
+            " permissions.",
+        )
+        result = translate_xmlrpc_error(fault, "milestone")
+
+        text = _get_error_text(result)
+        assert "permission_denied" in text
+        assert "TICKET_ADMIN" in text
+        assert "not_found" not in text
+
+    def test_404_on_page_named_permission_is_not_found(self):
+        """Trac #186: a 404 on a page named PermissionNotes is not_found,
+        not permission_denied."""
+        fault = xmlrpc.client.Fault(
+            404, 'Wiki page "PermissionNotes" does not exist'
+        )
+        result = translate_xmlrpc_error(
+            fault, "wiki", "PermissionNotes"
+        )
+
+        text = _get_error_text(result)
+        assert "not_found" in text
+        assert "permission_denied" not in text
 
     def test_not_modified_is_not_a_version_conflict(self):
         """Ticket #174: "Page not modified" is no version conflict."""
@@ -187,7 +317,9 @@ class TestTranslateXmlrpcError:
 
     def test_version_conflict_with_entity(self):
         """Version conflict with entity name — substitutes name in action."""
-        fault = xmlrpc.client.Fault(1, "Page version conflict")
+        fault = xmlrpc.client.Fault(
+            409, "[wiki-version-conflict current_version=7] page moved"
+        )
         result = translate_xmlrpc_error(
             fault, "wiki", entity_name="TestPage"
         )

@@ -341,10 +341,9 @@ def _unwrap_tracrpc_fault(
 ) -> xmlrpc.client.Fault:
     """``err`` with TracXMLRPC's "while executing" wrapper removed.
 
-    The wrapper names the method, and "wiki.putPageIfVersion()" contains
-    "version" -- which ``wiki_update``'s fault handler reads as a version
-    conflict. Unwrapped, a fault from the plugin path reads the same as the
-    same fault from ``wiki.putPage`` would.
+    Unwrapped, a fault from the plugin path reads the same as the same
+    fault from ``wiki.putPage`` would, and callers can show its message
+    without TracXMLRPC's method wrapper.
     """
     match = _TRACRPC_FAULT_WRAPPER.match(err.faultString)
     if match is None:
