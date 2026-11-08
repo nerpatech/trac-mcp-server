@@ -18,7 +18,7 @@ from ...core.client import (
     WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
-from .errors import build_error_response
+from .errors import build_error_response, classify_fault
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
@@ -221,12 +221,12 @@ async def _handle_create(
             "Use wiki_update to modify existing page, or choose a different name.",
         )
     except xmlrpc.client.Fault as e:
-        # Page doesn't exist - this is expected, continue
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" not in fault_lower
-            and "does not exist" not in fault_lower
-        ):
+        # Page doesn't exist - this is expected, continue. Only a
+        # not_found classification counts (codes first, then the text
+        # with quoted names removed): TracXMLRPC sends code 1 for any
+        # TracError, and a page name in a fault is no evidence (Trac
+        # #188, #189).
+        if classify_fault(e) != "not_found":
             # Different error - re-raise
             raise
 
@@ -436,11 +436,7 @@ async def _handle_delete(
     try:
         await run_sync(client.get_wiki_page, page_name)
     except xmlrpc.client.Fault as e:
-        fault_lower = e.faultString.lower()
-        if (
-            "not found" in fault_lower
-            or "does not exist" in fault_lower
-        ):
+        if classify_fault(e) == "not_found":
             return build_error_response(
                 "not_found",
                 f"Wiki page '{page_name}' does not exist",

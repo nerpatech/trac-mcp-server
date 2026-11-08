@@ -244,7 +244,7 @@ def test_check_trac_ping_auth_fault_classified(monkeypatch, capsys):
     from 'authentication failed' to the shared helper's generic Fault branch)."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
-        validate_side_effect=xmlrpc.client.Fault(403, "Forbidden")
+        validate_side_effect=xmlrpc.client.Fault(500, "Forbidden")
     )
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.TracClient",
@@ -538,11 +538,13 @@ def test_from_wiki_auth_missing_prints_friendly_error_and_exits_4(
 def test_from_wiki_page_not_found_prints_friendly_error_and_exits_4(
     monkeypatch, capsys
 ):
-    """Fault(1) -> 'wiki page not found: <page name>'."""
+    """Fault(404, 'Wiki page "<name>" does not exist') -> 'wiki page
+    not found: <page name>': the real TracXMLRPC shape for a missing
+    page, classified by its code."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
         get_wiki_page_side_effect=xmlrpc.client.Fault(
-            1, "page not found"
+            404, 'Wiki page "NoSuchPage" does not exist'
         )
     )
     monkeypatch.setattr(
@@ -555,6 +557,61 @@ def test_from_wiki_page_not_found_prints_friendly_error_and_exits_4(
     assert result == EXIT_TRAC
     err = capsys.readouterr().err
     assert "wiki page not found: NoSuchPage" in err
+
+
+def test_from_wiki_code_1_fault_naming_a_notfound_page_is_not_missing(
+    monkeypatch, capsys
+):
+    """TracXMLRPC sends code 1 for ANY TracError, so code 1 is no
+    evidence of a missing page, and a quoted page name containing
+    'NotFound' is no evidence either (Trac #188, #189): the generic
+    fault message, not 'wiki page not found'."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'NotFoundHandling'' while "
+            "executing 'wiki.getPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "NotFoundHandling", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
+
+
+def test_from_wiki_code_1_fault_naming_a_permission_page_is_not_denied(
+    monkeypatch, capsys
+):
+    """A quoted page name containing 'Permission' is no permission
+    fault (Trac #188, #189)."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'PermissionNotes'' while "
+            "executing 'wiki.getPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "PermissionNotes", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "permission denied" not in err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
 
 
 def test_from_wiki_other_fault_reports_fault_string_and_exits_4(
@@ -1246,6 +1303,34 @@ def test_to_wiki_fault_not_found_reports_page_not_found(
     err = capsys.readouterr().err
     assert "wiki page not found:" in err
     assert "TargetPage" in err
+
+
+def test_to_wiki_code_1_fault_naming_a_notfound_page_is_not_missing(
+    monkeypatch, capsys
+):
+    """The write-path counterpart: a code-1 fault whose quoted page
+    name contains 'NotFound' is the generic fault message, not 'wiki
+    page not found' (Trac #189)."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        put_wiki_page_side_effect=xmlrpc.client.Fault(
+            1,
+            "'Invalid Wiki page name 'NotFoundHandling'' while "
+            "executing 'wiki.putPage()'",
+        )
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello"))
+
+    result = main(["--to-wiki", "NotFoundHandling"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "wiki page not found" not in err
+    assert "Trac fault (" in err
 
 
 def test_to_wiki_permission_denied_fault_classified(
