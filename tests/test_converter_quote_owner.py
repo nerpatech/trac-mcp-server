@@ -43,6 +43,12 @@ Qc). The later ``>`` lines of the run keep that owner and column. Declined
 tab-gap item involved, a tab in the quote's indent. #145's separator then
 puts the blank line and the re-indent after the quote (Qt's ``more``).
 
+Review round 2: the passes that walk raw lines before that one
+(`_list_stack_step`, `_open_list_item`, `_split_past_bound`) apply the same
+close rule to a ``>`` line (``quote_rule``), so a fence, text past the bound or
+a marker after the quote read as Trac renders them (R1-R4); a tab-indented line
+inside a run continues it (R5).
+
 The write leg is unchanged: Q1, Qm and Qc read correctly, but the round trip
 still ends the list at the quote (#145's known limit, #197).
 """
@@ -248,6 +254,62 @@ SHAPES = [
         " * a\n   * b\n     > q\n     > r\n     > s",
         id="run-keeps-its-owner",
     ),
+    # Review round 2 (#187): the passes that run on RAW lines before
+    # `_shift_nested_markers` (`_list_stack_step`, upper_bound=True) closed the
+    # list at a `>` at the root marker's column, which the owner rule keeps.
+    # R1-R6 are measured on /trac_test on 2026-11-08 (see the ticket).
+    pytest.param(
+        " * a\n > q\n   {{{\n   x\n   }}}\n",
+        " - a\n   > q\n   ```\n   x\n   ```\n",
+        [_ul(["a", ("quote", "q"), ("code", "x")])],
+        " * a\n   > q\n   {{{\n   x\n   }}}",
+        id="R1-code-block-after-a-quote-at-the-root-marker",
+    ),
+    pytest.param(
+        " * a\n > q\n\n   * c\n",
+        # `c` stays verbatim outside the list (#183's fence for a marker at
+        # the text column after a blank line); written back, Trac reads it
+        # as a new list, as it did in the source.
+        " - a\n   > q\n\n```tracwiki-unconverted\n   * c\n```\n",
+        [_ul(["a", ("quote", "q")]), ("code", "   * c")],
+        " * a\n   > q\n\n   * c",
+        id="R2-list-after-a-blank-is-a-new-list",
+    ),
+    pytest.param(
+        " * a\n > q\n     more\n",
+        " - a\n   > q\n\n```tracwiki-unconverted\n     more\n```\n",
+        [_ul(["a", ("quote", "q")]), ("code", "     more")],
+        " * a\n   > q\n\n     more",
+        id="R3-text-past-the-bound-is-outside-the-list",
+    ),
+    pytest.param(
+        " * a\n > q\n    more\n",
+        " - a\n   > q\n\n```tracwiki-unconverted\n    more\n```\n",
+        [_ul(["a", ("quote", "q")]), ("code", "    more")],
+        " * a\n   > q\n\n    more",
+        id="R3-variant-at-column-4",
+    ),
+    pytest.param(
+        " * a\n  * b\n > q\n     more\n",
+        " - a\n   - b\n   > q\n\n```tracwiki-unconverted\n     more\n```\n",
+        [_ul(["a", _ul(["b"]), ("quote", "q")]), ("code", "     more")],
+        " * a\n   * b\n\n     q\n\n     more",
+        id="R3-nested-variant",
+    ),
+    pytest.param(
+        " * a\n  * b\n  > q\n    c\n",
+        " - a\n   - b\n     > q\n\n     c\n",
+        [_ul(["a", _ul(["b", ("quote", "q"), "c"])])],
+        " * a\n   * b\n     > q\n     c",
+        id="R4-text-after-a-nested-quote",
+    ),
+    pytest.param(
+        " * a\n  * b\n  > q\n\t> r\n  > s\n",
+        " - a\n   - b\n     > q\n     > r\n     > s\n",
+        [_ul(["a", _ul(["b", ("quote", "q\nr\ns")])])],
+        " * a\n   * b\n     > q\n     > r\n     > s",
+        id="R5-tab-line-continues-the-run",
+    ),
 ]
 
 
@@ -334,6 +396,30 @@ UNCHANGED = [
         " * a\n  * b\n\n  > q\n",
         " - a\n   - b\n\n> > q\n",
         id="quote-after-a-blank-line",
+    ),
+    # KNOWN GAP (#187 review R6, to be filed as its own ticket): Trac puts the
+    # `q` of ` * a/  * b/    {{{/    code/    }}}/  > q` in `b`, after the
+    # code block; the read leg ends the list at the fence and leaves the
+    # quote at column 0 (`_convert_indented_blocks`), the same bytes as on
+    # `master`. Pinned so the fix shows up as a changed pin.
+    pytest.param(
+        " * a\n  * b\n    {{{\n    code\n    }}}\n  > q\n",
+        " - a\n   - b\n     ```\n     code\n     ```\n> > q\n",
+        id="R6-known-gap-quote-after-a-code-block",
+    ),
+    # Review finding 7: a citation is found with `lstrip(" \t")` everywhere,
+    # so a line whose leading whitespace holds a no-break space is not one for
+    # this rule and keeps master's bytes: at column 1 the line is plain text
+    # that ends the list, at column 2 it continues the nested item.
+    pytest.param(
+        " * a\n  * b\n \xa0> q\n",
+        " - a\n   - b\n\n \xa0> q\n",
+        id="no-break-space-in-the-indent-at-column-1",
+    ),
+    pytest.param(
+        " * a\n  * b\n  \xa0> q\n",
+        " - a\n   - b\n     \xa0> q\n",
+        id="no-break-space-in-the-indent-at-column-2",
     ),
 ]
 

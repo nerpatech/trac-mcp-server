@@ -301,6 +301,19 @@ def _lines_since_blank(pieces: list[str]) -> list[str]:
         size *= 4
 
 
+def _deepest_item_at_or_left(
+    columns: Sequence[int], width: int
+) -> int | None:
+    """The index into `columns` (ascending, outermost first) of the deepest
+    item whose marker column is at or left of `width`, or None when there is
+    none. The owner search `_continued_item` (a plain text line) and
+    `_shift_nested_markers`' citation rule (#187) share."""
+    for i in range(len(columns) - 1, -1, -1):
+        if columns[i] <= width:
+            return i
+    return None
+
+
 def _continued_item(
     columns: Sequence[int],
     width: int,
@@ -350,7 +363,7 @@ def _continued_item(
         return len(columns) - 1
     if width <= columns[0]:
         return None
-    return max(i for i, column in enumerate(columns) if column <= width)
+    return _deepest_item_at_or_left(columns, width)
 
 
 _DIGITS_ORDERED_RE = re.compile(rf"^[ \t]+{_NUMERIC_MARKER}(?=[ \t])")
@@ -450,6 +463,7 @@ def _list_stack_step(
     line: str,
     *,
     upper_bound: bool,
+    quote_rule: bool | None = None,
 ) -> None:
     """Advance a list-item stack over one line, in place (the per-line step
     of `_open_list_item`, which documents the walk).
@@ -475,7 +489,31 @@ def _list_stack_step(
     converter already rewrote passes `upper_bound=False`: those sit at an
     item's Markdown text column, past the bound for an item numbered 10 or
     more, and `master`'s pop is what they need. Every caller states it.
+
+    Ticket #187: with `quote_rule`, a citation line (`>` after its indent,
+    no tab in the indent) is Trac's `handle_quote_block`, which is
+    `close_list(depth)`: it closes only the items whose marker column is
+    STRICTLY greater than the `>` column, so a `>` AT an item's marker
+    column stays in that item, and it has no upper bound (#175). The stack
+    is truncated to the items at or left of the `>` and never emptied by
+    the bound, which is what a plain line past the bound does. This is the
+    rule `_shift_nested_markers` applies to the same line; the earlier
+    passes (fences, indented blocks, the split past the bound) walk raw
+    lines and must agree with it. `quote_rule` defaults to `upper_bound`:
+    every raw-line walk that applies the bound gets the rule. Two raw-line
+    walks pass `upper_bound=False` (the bound is decided elsewhere or not
+    at all: `_open_list_item` for the in-item fence, `_split_past_bound`'s
+    per-line step, whose bound check is its own) and still need the quote
+    rule, so they pass `quote_rule=True`; they must not take the plain-text
+    bound, which would move other lines. A walk over rewritten lines gets
+    neither: a `>` already sits at a Markdown text column there and `   > q`
+    at a nested marker's column must close that item, as CommonMark does.
+    A tab in the indent keeps the old pop too. Known limit: the step is
+    per line, so a later line of a run of `>` lines at a smaller column
+    pops again, where Trac closes on the run's first line only.
     """
+    if quote_rule is None:
+        quote_rule = upper_bound
     if not line.strip():
         stack.clear()
         return
@@ -485,6 +523,14 @@ def _list_stack_step(
         while stack and stack[-1][0] >= column:
             stack.pop()
         stack.append((column, found))
+        return
+    if (
+        quote_rule
+        and line.lstrip(" \t").startswith(">")
+        and "\t" not in _indent_of(line)
+    ):
+        while stack and stack[-1][0] > column:
+            stack.pop()
         return
     if stack and _marker_column_rule_applies(stack[-1][1].string, line):
         answer = _stack_continued_item(
@@ -627,7 +673,12 @@ def _open_list_item(lines: list[str]) -> re.Match[str] | None:
     """
     stack: list[tuple[int, re.Match[str]]] = []
     for line in lines:
-        _list_stack_step(stack, line, upper_bound=False)
+        # Raw lines, no plain-text bound (see `_list_stack_step`, #187): a
+        # `>` at an item's marker column keeps that item, so a fence after
+        # the quote is still in it.
+        _list_stack_step(
+            stack, line, upper_bound=False, quote_rule=True
+        )
     return stack[-1][1] if stack else None
 
 
@@ -1716,8 +1767,12 @@ class TracWikiParser:
                         split = idx
                         break
                 # The bound was decided above; the step reads only the
-                # lower side (its default).
-                _list_stack_step(stack, probe, upper_bound=False)
+                # lower side (its default). A citation line closes items by
+                # Trac's quote rule, so the text after it is judged against
+                # the right item (#187).
+                _list_stack_step(
+                    stack, probe, upper_bound=False, quote_rule=True
+                )
             if split is None:
                 segments.append((False, lines[pos:end]))
                 break
@@ -2530,10 +2585,15 @@ class TracWikiParser:
           the FIRST line of a run of `>` lines only, so the later lines of
           the run keep that item and column. The quote counts as the item's
           text for #180's blank line, as it did (CommonMark reads a `4. x`
-          right after it as a lazy continuation of the quote). Declined, keeping `master`'s bytes (the line then takes
-          the per-line path of the previous bullet): no owner (a `>` at
-          column 0, or left of the root marker), the owner or an item the cut
-          would close is frozen or has a tab gap, a tab in the indent;
+          right after it as a lazy continuation of the quote). Declined,
+          keeping `master`'s bytes (the line then takes the per-line path
+          of the previous bullet): no owner (a `>` at column 0, or left of
+          the root marker), the owner or an item the cut would close is
+          frozen or has a tab gap, a tab in the indent of the run's FIRST
+          line (the later lines of an accepted run are written at its
+          column, tabs included). A citation line is found with
+          `lstrip(" \t")` everywhere: other leading whitespace (a no-break
+          space) is not one here;
         * a `{{{#!processor ...}}}` block that is still in the text (a
           container passed through, not stashed like code) is walked as one
           unit, from its opener to its MATCHING closer, nested blocks
@@ -2721,21 +2781,24 @@ class TracWikiParser:
                 out.append(self._move_line(line, shift))
                 text_owner = len(stack) - 1 if after.strip() else None
                 continue
+            # No `idx not in pairs` test: `_BLOCK_OPEN_RE` cannot match a
+            # `>` line, so a citation line is never a block opener.
             if (
                 stack
-                and idx not in pairs
-                and line.lstrip().startswith(">")
-                and "\t" not in indent
+                and line.lstrip(" \t").startswith(">")
+                and (in_quote_run or "\t" not in indent)
             ):
                 # #187: Trac's `handle_quote_block` rule, not
-                # `_continued_item`'s.
+                # `_continued_item`'s. Only the FIRST line of a run is
+                # declined by a tab in its indent: the later lines are
+                # written at the run's column whatever their indent.
                 quote_run = True
                 if not in_quote_run:
                     quote_column = self._quote_text_column(
                         stack, column
                     )
                 if quote_column is not None:
-                    out.append(" " * quote_column + line.lstrip(" "))
+                    out.append(" " * quote_column + line.lstrip(" \t"))
                     text_owner = len(stack) - 1
                     continue
             shift = 0
@@ -2777,13 +2840,8 @@ class TracWikiParser:
         Nothing is changed when the line is declined: no owner (the `>` is
         left of the root marker or at column 0), or the owner or an item the
         cut would close is frozen or has a tab gap."""
-        owner = max(
-            (
-                i
-                for i, item in enumerate(stack)
-                if item.column <= column
-            ),
-            default=None,
+        owner = _deepest_item_at_or_left(
+            [item.column for item in stack], column
         )
         if owner is None or any(
             item.frozen or item.tab_gap for item in stack[owner:]
