@@ -394,30 +394,6 @@ async def _handle_update(
                 )
             ]
         )
-    except xmlrpc.client.Fault as e:
-        # Check for version conflict
-        if "version" in e.faultString.lower():
-            # Fetch current version for error message
-            try:
-                current_info = await run_sync(
-                    client.get_wiki_page_info, page_name
-                )
-                current_version = current_info.get("version", 0)
-                return build_error_response(
-                    "version_conflict",
-                    f"Page has been modified. Current version is {current_version}, you tried to update version {version}.",
-                    f"Fetch current content with wiki_get(page_name='{page_name}'), then retry update with version={current_version}.",
-                )
-            except Exception:
-                # Couldn't get current version, just report the conflict
-                return build_error_response(
-                    "version_conflict",
-                    e.faultString,
-                    f"Fetch current version with wiki_get(page_name='{page_name}'), then retry update.",
-                )
-        else:
-            # Different error - re-raise
-            raise
 
     # Extract new version from result
     new_version = result.get("version", version + 1)

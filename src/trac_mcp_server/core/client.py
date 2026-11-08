@@ -1741,9 +1741,10 @@ class TracClient:
             WikiPageNotModified: If the content is identical to the stored
                 page (Trac stored nothing; ticket #174). A ``ValueError``
                 subclass.
-            ValueError: If page_name or content validation fails, or the
-                server reports a version conflict
-            xmlrpc.client.Fault: If server returns error or permissions denied
+            ValueError: If page_name or content validation fails
+            xmlrpc.client.Fault: If server returns error or permissions
+                denied (a putPage fault is a ``WikiPageConflict`` instead
+                when the page's version moved past ``version``)
             WikiPageStoredReadbackFailed: If putPage returned ``True`` (the
                 page IS stored) but reading back its new version failed.
                 Every other exception above means nothing was stored.
@@ -1888,6 +1889,15 @@ class TracClient:
         Used for creates and unversioned writes, and for versioned ones
         where the server lacks ``wiki.putPageIfVersion``. Returns
         putPage's result.
+
+        A ``putPage`` fault stored nothing. With ``version`` given, the
+        page's version is re-read (best effort) and, if it differs from
+        ``version``, the fault is raised as ``WikiPageConflict`` with the
+        current version: the page moved between the precheck and the save
+        (a server-side save collision). Otherwise -- the version is
+        unchanged, or the re-read failed -- the original fault is
+        re-raised unchanged. The fault text is never consulted for that
+        (Trac /trac_mcp_server #185).
         """
         attrs: dict[str, Any] = {"comment": comment}
         if version is not None:
@@ -1940,13 +1950,33 @@ class TracClient:
                 raise self._wiki_not_modified(
                     page_name, version
                 ) from None
-            elif "version" in fault_str:
-                raise ValueError(
-                    "Version conflict - page was modified by another user"
-                ) from None
-            else:
-                # Re-raise other faults
+            if version is None:
+                # A create / unversioned write: nothing to compare.
                 raise
+            # A fault is a conflict only if the page moved, which the
+            # fault text cannot tell: a save collision's wording is
+            # backend-specific (sqlite's "UNIQUE constraint failed:
+            # wiki.name, wiki.version" is one of several), and the old
+            # `"version" in fault_str` test also caught faults that
+            # merely name a page like VersionNotes (Trac
+            # /trac_mcp_server #185). So decide by state.
+            now: int | None = None
+            try:
+                info = self.get_wiki_page_info(page_name)
+                if isinstance(info, dict) and info:
+                    now = _wiki_version(info.get("version"))
+            except Exception:
+                now = None
+            if now is not None and now != version:
+                raise WikiPageConflict(
+                    f"Version conflict on '{page_name}': you tried to "
+                    f"update version {version} but its current "
+                    f"version is {now}",
+                    page_name,
+                    version,
+                    now,
+                ) from None
+            raise
         return result
 
     def _read_back_stored_page(

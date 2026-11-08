@@ -992,27 +992,15 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("version 6", text)
 
     def test_handle_update_version_conflict(self):
-        """Test _handle_update handles version conflict."""
+        """A WikiPageConflict from put_wiki_page (client precheck, plugin
+        or post-fault re-read) reports the current version."""
         with patch(
             "trac_mcp_server.mcp.tools.wiki_write.run_sync"
         ) as mock_run_sync:
-            # Set up side effect - first call raises conflict, second returns current version
-            call_count = [0]
+            mock_run_sync.side_effect = WikiPageConflict(
+                "Version conflict on 'TestPage'", "TestPage", 5, 7
+            )
 
-            def side_effect_func(*args, **kwargs):
-                call_count[0] += 1
-                if call_count[0] == 1:
-                    # First call is put_wiki_page
-                    raise xmlrpc.client.Fault(
-                        409, "Version conflict - page not modified"
-                    )
-                else:
-                    # Second call is get_wiki_page_info
-                    return {"name": "TestPage", "version": 7}
-
-            mock_run_sync.side_effect = side_effect_func
-
-            # Call handler
             result = asyncio.run(
                 _handle_update(
                     self.mock_client,
@@ -1024,7 +1012,6 @@ class TestHandleUpdate(unittest.TestCase):
                 )
             )
 
-            # Verify response
             self.assertTrue(result.isError)
             self.assertEqual(len(result.content), 1)
             text = result.content[0].text
@@ -1033,6 +1020,66 @@ class TestHandleUpdate(unittest.TestCase):
             self.assertIn("Current version is 7", text)
             self.assertIn("you tried to update version 5", text)
             self.assertIn("version=7", text)
+
+    def test_handle_update_fault_naming_a_version_page_propagates(self):
+        """A Fault is no longer classified by its text here (Trac
+        /trac_mcp_server #185): it propagates to the dispatcher."""
+        fault = xmlrpc.client.Fault(
+            1,
+            "WIKI_MODIFY privileges are required to perform this "
+            "operation on VersionNotes. You don't have the required "
+            "permissions.",
+        )
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = fault
+
+            with self.assertRaises(xmlrpc.client.Fault) as ctx:
+                asyncio.run(
+                    _handle_update(
+                        self.mock_client,
+                        {
+                            "page_name": "VersionNotes",
+                            "content": "# Updated",
+                            "version": 1,
+                        },
+                    )
+                )
+
+            self.assertIs(ctx.exception, fault)
+
+    def test_wiki_update_fault_naming_a_version_page_is_permission_denied(
+        self,
+    ):
+        """End to end through the dispatcher: the same Fault is a
+        permission_denied, not a version_conflict (#185)."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = xmlrpc.client.Fault(
+                1,
+                "WIKI_MODIFY privileges are required to perform this "
+                "operation on VersionNotes. You don't have the "
+                "required permissions.",
+            )
+
+            result = asyncio.run(
+                ToolRegistry(WIKI_WRITE_SPECS).call_tool(
+                    "wiki_update",
+                    {
+                        "page_name": "VersionNotes",
+                        "content": "# Updated",
+                        "version": 1,
+                    },
+                    self.mock_client,
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("Error (permission_denied)", text)
+            self.assertNotIn("version_conflict", text)
 
     def test_handle_update_not_modified_is_an_unchanged_success(self):
         """Ticket #174: identical content stores nothing -- not an error."""
