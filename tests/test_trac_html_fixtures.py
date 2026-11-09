@@ -21,7 +21,7 @@ FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trac_html"
 INTERNAL_RE = re.compile(
     r"192\.168\.|\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b172\.(?:1[6-9]|2\d|3[01])\."
     r"|(?i:kpoxa|fr-tun|mazurov|nerpa\.)|/home/[a-z]|\.lan\b|:809\d\b|:8000\b"
-    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.(?:com|org|net|ru|io)",
+    r"|[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+(?:com|org|net|ru|io)\b",
 )
 
 
@@ -41,13 +41,16 @@ def test_every_fixture_has_source_html_and_manifest_entry():
     manifest = _manifest()
     html = {p.stem for p in FIXTURE_DIR.glob("*.html")}
     src = {p.stem for p in FIXTURE_DIR.glob("*.tracwiki")}
-    assert html == src == set(manifest), (html ^ src) | (html ^ set(manifest))
+    assert html == src == set(manifest), (html ^ src) | (
+        html ^ set(manifest)
+    )
     assert 10 <= len(manifest) <= 20
 
 
 @pytest.mark.parametrize(
     "path",
-    sorted(FIXTURE_DIR.glob("*.html")) + sorted(FIXTURE_DIR.glob("*.tracwiki")),
+    sorted(FIXTURE_DIR.glob("*.html"))
+    + sorted(FIXTURE_DIR.glob("*.tracwiki")),
     ids=lambda p: p.name,
 )
 def test_fixture_carries_no_internal_address(path):
@@ -69,7 +72,10 @@ def test_check_catches_unscrubbed_text(sample):
 
 
 def test_check_passes_placeholders():
-    assert internal_hits(
-        '<a href="https://trac.example.org/trac_mcp_server/wiki/X">'
-        " user@example.org /home/USER HOSTNAME"
-    ) == []
+    assert (
+        internal_hits(
+            '<a href="https://trac.example.org/trac_mcp_server/wiki/X">'
+            " user@example.org /home/USER HOSTNAME"
+        )
+        == []
+    )
