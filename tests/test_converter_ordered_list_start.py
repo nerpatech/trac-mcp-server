@@ -3,7 +3,7 @@
 `markdown_to_tracwiki` numbered every ordered list from 1, ignoring the
 `start` attribute mistune puts on the list token (it sets one only when the
 first number is not 1). So ` 5. a` / ` 6. b`, which Trac renders as
-`<ol start="5">` and the read leg keeps as ` 5.`, came back as ` 1.` / ` 2.`.
+`<ol start="5">`, came back as ` 1.` / ` 2.`.
 
 **Measured on /trac_test on 2026-11-07** (`convert_preview`,
 `format=tracwiki`): Trac takes the FIRST item's number as `start` and counts
