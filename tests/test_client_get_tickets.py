@@ -7,7 +7,6 @@ for the wiki, so the batching, the fault handling and the fallback to
 single gets are the real code.
 """
 
-import os
 import xmlrpc.client
 
 import pytest
@@ -246,17 +245,9 @@ def test_live_get_tickets_matches_get_ticket_on_trac_test():
 
     Requires --run-live and TRAC_URL/USERNAME/PASSWORD env vars.
     """
-    from trac_mcp_server.config import Config
-    from trac_mcp_server.instances import InstanceRegistry
+    from tests.live_helpers import trac_test_client
 
-    config = Config(
-        trac_url=os.environ["TRAC_URL"],
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = InstanceRegistry(config, {}).get_client("/trac_test")
+    client = trac_test_client()
 
     found = list(client.search_tickets("max=3&order=id"))
     assert found, "/trac_test has no tickets to read"

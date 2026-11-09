@@ -593,9 +593,10 @@ class TestWikiDiffLive:
     Writes one Scratch/ page on /trac_test and deletes it afterwards."""
 
     def test_versions_written_by_two_identities(self):
+        from tests.live_helpers import trac_test_registry
         from trac_mcp_server.config import Config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import Identity, InstanceRegistry
+        from trac_mcp_server.instances import Identity
 
         default_config = Config(
             trac_url=os.environ["TRAC_URL"],
@@ -604,7 +605,7 @@ class TestWikiDiffLive:
             insecure=os.environ.get("TRAC_INSECURE", "").lower()
             in ("1", "true", "yes"),
         )
-        registry = InstanceRegistry(default_config, {})
+        registry = trac_test_registry(default_config)
         user_a = os.environ["TRAC_USERNAME"]
         user_b = os.environ["TRAC_USERNAME_2"]
         client_a = TracClient(registry.resolve("/trac_test"))

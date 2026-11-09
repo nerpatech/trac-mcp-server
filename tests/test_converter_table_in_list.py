@@ -159,14 +159,9 @@ def test_live_table_renders_inside_the_list_item():
     """Ticket #142 acceptance, against Trac's own renderer on /trac_test:
     the ticket's input, converted, renders ONE <ul> whose first <li> holds
     the <table>. Read-only (wiki.wikiToHtml writes nothing)."""
-    from trac_mcp_server.config_bootstrap import bootstrap_config
-    from trac_mcp_server.core.client import TracClient
-    from trac_mcp_server.instances import InstanceRegistry
+    from tests.live_helpers import trac_test_client
 
-    config, _ = bootstrap_config()
-    client = TracClient(
-        InstanceRegistry(config, {}).resolve("/trac_test")
-    )
+    client = trac_test_client()
 
     html = client.wiki_to_html(markdown_to_tracwiki(TICKET_INPUT))
 

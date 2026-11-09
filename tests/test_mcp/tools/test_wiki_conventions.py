@@ -652,9 +652,9 @@ class TestWikiConventionsLive:
     def test_declared_style_and_template_round_trip(self):
         import uuid
 
+        from tests.live_helpers import trac_test_registry
         from trac_mcp_server.config import Config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         default_config = Config(
             trac_url=os.environ["TRAC_URL"],
@@ -663,7 +663,7 @@ class TestWikiConventionsLive:
             insecure=os.environ.get("TRAC_INSECURE", "").lower()
             in ("1", "true", "yes"),
         )
-        registry = InstanceRegistry(default_config, {})
+        registry = trac_test_registry(default_config)
         client = TracClient(registry.resolve("/trac_test"))
 
         original = client.get_wiki_page("WikiStart")
