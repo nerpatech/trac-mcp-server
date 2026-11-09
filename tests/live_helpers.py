@@ -53,18 +53,31 @@ def trac_test_url() -> str:
     through ``TRAC_URL``'s host and port any more. Otherwise
     ``/trac_test`` on the scheme, host and port ``TRAC_URL`` names.
 
-    Raises ``ValueError`` when ``TRAC_TEST_URL`` does not end with
-    ``/trac_test``: the write guard (``is_trac_test_url``) would refuse
-    every write to it, and a clear error here beats that.
+    Raises ``ValueError`` when ``TRAC_TEST_URL`` is not an absolute
+    http(s) URL with a host (a scheme-less value would be joined onto
+    ``TRAC_URL``'s host by the registry, i.e. the OLD origin), or does
+    not end with ``/trac_test`` (the write guard, ``is_trac_test_url``,
+    would refuse every write to it). The message names the variable and
+    the defect, never the value: it can carry userinfo, and conftest's
+    sweep logs the exception.
     """
     override = os.environ.get("TRAC_TEST_URL", "").strip()
     if override:
         url = override.rstrip("/")
+        parsed = urlparse(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+        ):
+            raise ValueError(
+                "TRAC_TEST_URL must be an absolute http(s) URL with a "
+                "host (scheme or host missing or not http/https)"
+            )
         if not is_trac_test_url(url):
             raise ValueError(
-                f"TRAC_TEST_URL={override!r} does not end with "
-                f"{TEST_INSTANCE}: the live write guard would refuse "
-                "every write to it"
+                f"TRAC_TEST_URL path {parsed.path!r} does not end "
+                f"with {TEST_INSTANCE}: the live write guard would "
+                "refuse every write to it"
             )
         return url
     parsed = urlparse(os.environ["TRAC_URL"])
@@ -104,7 +117,28 @@ def trac_test_registry(default_config: Config) -> InstanceRegistry:
         password=None,
         insecure=None,
     )
-    return InstanceRegistry(default_config, {TEST_INSTANCE: spec})
+    return _PinnedTestRegistry(default_config, spec)
+
+
+class _PinnedTestRegistry(InstanceRegistry):
+    """An InstanceRegistry that keeps ``/trac_test`` declared.
+
+    ``_reload_if_changed`` replaces ``_declared`` with
+    ``load_declared_instances()`` when a config file or the
+    ``TRAC_INSTANCES`` file changes mtime; mid-run that would drop the
+    ``/trac_test`` spec and resolve would fall back to the ad-hoc join
+    onto ``TRAC_URL``'s host. Re-pin it after every reload.
+    """
+
+    def __init__(self, default_config: Config, spec: InstanceSpec):
+        self._pinned = spec
+        super().__init__(default_config, {spec.name: spec})
+
+    def _reload_if_changed(self) -> None:
+        super()._reload_if_changed()
+        with self._lock:
+            # The reload built a fresh dict; no loader state is shared.
+            self._declared[self._pinned.name] = self._pinned
 
 
 # ---------------------------------------------------------------------

@@ -1872,11 +1872,22 @@ class TestWikiUpdateStaleVersionLive:
     """
 
     def test_stale_version_is_refused_and_the_store_is_unchanged(self):
+        import os
         import uuid
 
-        from tests.live_helpers import trac_test_client
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
+        from trac_mcp_server.core.client import TracClient
 
-        client = trac_test_client()
+        default_config = Config(
+            trac_url=os.environ["TRAC_URL"],
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
+        client = TracClient(
+            trac_test_registry(default_config).resolve(TEST_INSTANCE)
+        )
 
         page = f"Scratch/Ticket120StaleVersion{uuid.uuid4().hex[:8]}"
         v1 = "Ticket 120 stale version scratch, first revision.\n"
@@ -1929,12 +1940,23 @@ class TestWikiSearchLive:
     """
 
     def test_search_follows_create_edit_and_delete(self):
+        import os
         import random
         import string
 
-        from tests.live_helpers import trac_test_client
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
+        from trac_mcp_server.core.client import TracClient
 
-        client = trac_test_client()
+        default_config = Config(
+            trac_url=os.environ["TRAC_URL"],
+            username=os.environ["TRAC_USERNAME"],
+            password=os.environ["TRAC_PASSWORD"],
+            insecure=os.environ.get("TRAC_INSECURE", "").lower()
+            in ("1", "true", "yes"),
+        )
+        client = TracClient(
+            trac_test_registry(default_config).resolve(TEST_INSTANCE)
+        )
 
         # One-token nonsense words, unique to this run. Letters only: the
         # tokenizer also indexes the parts of a name split at digits and

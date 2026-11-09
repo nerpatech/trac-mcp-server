@@ -7,6 +7,8 @@ credentials). `trac_test_registry()` makes a server/handler stack that
 resolves ``instance="/trac_test"`` land on the same URL. No network.
 """
 
+import dataclasses
+
 import pytest
 
 from tests import live_helpers
@@ -67,6 +69,44 @@ class TestTracTestUrl:
         with pytest.raises(ValueError, match="TRAC_TEST_URL"):
             trac_test_url()
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "/trac_test",
+            "trac.example.org:8001/trac_test",
+            "ftp://h/trac_test",
+            "http:///trac_test",
+        ],
+    )
+    def test_a_value_without_http_scheme_and_host_raises(
+        self, env, bad
+    ):
+        env.setenv("TRAC_TEST_URL", bad)
+        with pytest.raises(ValueError, match="TRAC_TEST_URL"):
+            trac_test_url()
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "http://user:s3cret@h:8001/trac_tst",
+            "http://user:s3cret@h:8001/trac_test_x",
+            "user:s3cret@h:8001/trac_test",
+        ],
+    )
+    def test_the_error_never_echoes_the_value(self, env, bad):
+        env.setenv("TRAC_TEST_URL", bad)
+        with pytest.raises(ValueError) as info:
+            trac_test_url()
+        for text in (str(info.value), repr(info.value)):
+            assert "s3cret" not in text
+            assert "user:" not in text
+            assert "TRAC_TEST_URL" in text
+
+    def test_the_path_error_names_the_path(self, env):
+        env.setenv("TRAC_TEST_URL", "http://h:8001/trac_tst")
+        with pytest.raises(ValueError, match="/trac_tst"):
+            trac_test_url()
+
     def test_the_result_always_passes_the_write_guard(self, env):
         assert is_trac_test_url(trac_test_url())
         env.setenv("TRAC_TEST_URL", OWN_ORIGIN + "/")
@@ -109,3 +149,61 @@ class TestTracTestRegistry:
         env.setenv("TRAC_TEST_URL", OWN_ORIGIN)
         registry = live_helpers.trac_test_registry(_default_config())
         assert registry.resolve(None).trac_url == PROJECT_URL
+
+
+class TestRegistryKeepsTheRowsConfig:
+    def test_a_non_default_field_is_inherited(self, env):
+        config = dataclasses.replace(
+            _default_config(), write_gate=False
+        )
+        assert config.write_gate is False
+        for set_var in (False, True):
+            if set_var:
+                env.setenv("TRAC_TEST_URL", OWN_ORIGIN)
+            resolved = live_helpers.trac_test_registry(config).resolve(
+                live_helpers.TEST_INSTANCE
+            )
+            assert resolved.write_gate is False
+            assert resolved.trac_url == trac_test_url()
+
+    def test_unset_config_matches_the_old_empty_registry(self, env):
+        from trac_mcp_server.instances import InstanceRegistry
+
+        config = dataclasses.replace(
+            _default_config(), write_gate=False
+        )
+        old = InstanceRegistry(config, {}).resolve("/trac_test")
+        new = live_helpers.trac_test_registry(config).resolve(
+            "/trac_test"
+        )
+        assert new == old
+
+
+class TestRegistryReload:
+    def test_the_trac_test_spec_survives_a_declared_reload(
+        self, env, monkeypatch
+    ):
+        from trac_mcp_server import instances
+
+        env.setenv("TRAC_TEST_URL", OWN_ORIGIN)
+        monkeypatch.setattr(
+            instances, "load_declared_instances", lambda: {}
+        )
+        cfg = Config(
+            trac_url="http://trac.example.org:8000/proj",
+            username="u",
+            password="p",
+        )
+        registry = live_helpers.trac_test_registry(cfg)
+        before = registry.resolve("/trac_test")
+        assert before.trac_url == OWN_ORIGIN
+        # A config / TRAC_INSTANCES file changed mtime: the real
+        # _reload_if_changed replaces _declared from the loader.
+        monkeypatch.setattr(
+            registry,
+            "_snapshot_mtimes",
+            lambda: {instances.Path("/nonexistent"): 1.0},
+        )
+        after = registry.resolve("/trac_test")
+        assert registry._mtimes != {}  # the reload branch ran
+        assert after.trac_url == OWN_ORIGIN

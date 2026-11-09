@@ -336,9 +336,14 @@ def test_live_paragraphs_render_inside_the_list_item(name):
     one top-level list, no blockquote, every paragraph's text inside the
     first ``<li>`` and the second item a sibling. Read-only
     (wiki.wikiToHtml writes nothing)."""
-    from tests.live_helpers import trac_test_client
+    from tests.live_helpers import TEST_INSTANCE, trac_test_registry
+    from trac_mcp_server.config_bootstrap import bootstrap_config
+    from trac_mcp_server.core.client import TracClient
 
-    client = trac_test_client()
+    config, _ = bootstrap_config()
+    client = TracClient(
+        trac_test_registry(config).resolve(TEST_INSTANCE)
+    )
 
     html = client.wiki_to_html(markdown_to_tracwiki(LIVE[name]))
 

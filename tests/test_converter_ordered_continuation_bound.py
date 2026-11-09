@@ -451,9 +451,14 @@ def test_live_loose_ten_item_list_renders_as_one_list_with_item_10_whole():
     paragraph renders as ONE `<ol>`, the paragraph inside item 10. Read-only
     (`wiki_to_html`, the render path `convert_preview` uses, writes
     nothing)."""
-    from tests.live_helpers import trac_test_client
+    from tests.live_helpers import TEST_INSTANCE, trac_test_registry
+    from trac_mcp_server.config_bootstrap import bootstrap_config
+    from trac_mcp_server.core.client import TracClient
 
-    client = trac_test_client()
+    config, _ = bootstrap_config()
+    client = TracClient(
+        trac_test_registry(config).resolve(TEST_INSTANCE)
+    )
 
     md = "".join(f"{i}. x\n" for i in range(1, 10)) + (
         "10. j\n\n    second para\n"
