@@ -1371,7 +1371,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 ## wiki_file_pull
 
-**Description:** Pull a Trac wiki page, converted to the requested format. Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
+**Description:** Pull a Trac wiki page, converted to the requested format. Markdown is Trac's own rendered HTML for the page translated to Markdown: a one-way export, not meant to be pushed back; `format="tracwiki"` returns the stored source verbatim. Translator warnings come back in `structuredContent.warnings` (always a list). Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
 
 **Parameters:**
 
@@ -1397,12 +1397,13 @@ The version named is the page's current version, re-read after the no-op, so whe
   "format": "markdown",
   "version": 3,
   "converted": true,
+  "warnings": [],
   "content": "# Design\n...",
   "bytes": 4521
 }
 ```
 
-With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
+`warnings` lists what the translator could not map exactly; it is `[]` for `format=tracwiki` and when nothing was lossy. The same warnings follow the summary line in the text block under `Conversion warnings:`. With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
 
 **Error Responses:**
 
@@ -1423,10 +1424,11 @@ With a `file_path` (where `file_access` is `local`), `content`/`bytes` are repla
   ```
 
 **Implementation Notes:**
-- Converts TracWiki to Markdown by default; use `format: "tracwiki"` to get raw content
+- Markdown by default: Trac's rendered HTML for the page, translated (`wiki.getPageHTML`/`getPageHTMLVersion`), with code-block languages taken from the TracWiki source; use `format: "tracwiki"` to get raw content (no HTML is read)
+- For Markdown, the page's version is read first (`getPageInfo`) and the source and the HTML are fetched at that version, so a concurrent edit cannot mix versions
 - An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`
 - Parent directory of `file_path` must exist, and is checked before Trac is called
-- Fetches page info separately for version metadata
+- Fetches page info separately for version metadata (for Markdown, before the source and HTML)
 
 **Example Call:**
 ```json

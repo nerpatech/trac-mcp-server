@@ -21,6 +21,15 @@ from trac_mcp_server.cli.convert import (
 from trac_mcp_server.converters.common import ConversionResult
 
 
+def _render_heading(_text):
+    """A stand-in for Trac's renderer: the HTML of one H1 (Trac #210).
+
+    TracWiki -> Markdown translates the HTML Trac renders; these tests
+    are about what convert_text does with it, not about Trac.
+    """
+    return '<h1 id="Hello">Hello</h1>\n'
+
+
 def test_build_parser_returns_parser():
     """build_parser() returns an ArgumentParser with prog=trac-convert."""
     parser = build_parser()
@@ -121,7 +130,9 @@ def test_convert_text_auto_detects_markdown_source():
 
 
 def test_convert_text_auto_detects_tracwiki_source():
-    result = convert_text("= Hello world =", "auto", "md")
+    result = convert_text(
+        "= Hello world =", "auto", "md", render_html=_render_heading
+    )
     assert result.source_format == "tracwiki"
     assert result.target_format == "markdown"
     assert result.converted is True
@@ -136,7 +147,9 @@ def test_convert_text_honors_explicit_md_source():
 
 
 def test_convert_text_honors_explicit_tracwiki_source():
-    result = convert_text("# Hello", "tracwiki", "md")
+    result = convert_text(
+        "# Hello", "tracwiki", "md", render_html=_render_heading
+    )
     assert result.source_format == "tracwiki"
     assert result.target_format == "markdown"
 
@@ -167,7 +180,9 @@ def test_convert_text_md_to_tracwiki_produces_tracwiki_heading():
 
 
 def test_convert_text_tracwiki_to_md_produces_md_heading():
-    result = convert_text("= Hello =", "tracwiki", "md")
+    result = convert_text(
+        "= Hello =", "tracwiki", "md", render_html=_render_heading
+    )
     # Markdown H1 uses `# Hello`.
     assert result.text.lstrip().startswith("# Hello")
 
@@ -207,17 +222,22 @@ def test_main_writes_verbatim_no_trailing_newline_added(
     assert captured.out == "# Hi"
 
 
-def test_main_auto_detects_when_no_from_flag(monkeypatch, capsys):
+def test_main_auto_detects_when_no_from_flag(
+    monkeypatch, capsys, fake_trac
+):
+    fake_trac.wiki_to_html.return_value = _render_heading("")
     monkeypatch.setattr("sys.stdin", io.StringIO("= Hello ="))
     exit_code = main(["--to", "md"])
     assert exit_code == 0
     captured = capsys.readouterr()
     assert captured.out.startswith("# Hello")
+    # Detection resolved to TracWiki, so Trac was asked to render it.
+    fake_trac.wiki_to_html.assert_called_once_with("= Hello =")
 
 
 def test_main_empty_stdin_is_valid_no_op(monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
-    exit_code = main(["--to", "md"])
+    exit_code = main(["--from", "md", "--to", "md"])
     assert exit_code == 0
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -292,13 +312,13 @@ def test_main_file_input_takes_precedence_when_stdin_also_available(
     monkeypatch, tmp_path, capsys
 ):
     """When both a positional FILE and stdin are present, FILE wins."""
-    in_file = tmp_path / "in.tracwiki"
-    in_file.write_text("= FromFile =", encoding="utf-8")
-    monkeypatch.setattr("sys.stdin", io.StringIO("# FromStdin"))
-    exit_code = main([str(in_file), "--to", "md"])
+    in_file = tmp_path / "in.md"
+    in_file.write_text("# From the file", encoding="utf-8")
+    monkeypatch.setattr("sys.stdin", io.StringIO("# From stdin"))
+    exit_code = main([str(in_file), "--from", "md", "--to", "tracwiki"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert out.startswith("# FromFile")
+    assert out.startswith("= From the file")
 
 
 def test_main_missing_input_file_returns_1_with_stderr_message(
@@ -485,11 +505,13 @@ def test_main_reads_from_clipboard(monkeypatch, capsys):
     """--from-clipboard reads via read_clipboard() and converts."""
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.read_clipboard",
-        lambda: "= Hello =",
+        lambda: "# Hello",
     )
-    exit_code = main(["--from-clipboard", "--to", "md"])
+    exit_code = main(
+        ["--from-clipboard", "--from", "md", "--to", "tracwiki"]
+    )
     assert exit_code == 0
-    assert capsys.readouterr().out.startswith("# Hello")
+    assert capsys.readouterr().out.startswith("= Hello")
 
 
 def test_clipboard_read_error_returns_1(monkeypatch, capsys):
@@ -580,8 +602,9 @@ def test_heading_anchors_off_omits_slug(monkeypatch, capsys):
     assert "#h" not in out
 
 
-def test_heading_anchors_ignored_on_tw_to_md(monkeypatch):
+def test_heading_anchors_ignored_on_tw_to_md(monkeypatch, fake_trac):
     """--heading-anchors off on the wrong direction exits 0 (silently ignored)."""
+    fake_trac.wiki_to_html.return_value = '<h1 id="H">H</h1>\n'
     monkeypatch.setattr("sys.stdin", io.StringIO("= H = #h"))
     exit_code = main(
         [
@@ -596,47 +619,63 @@ def test_heading_anchors_ignored_on_tw_to_md(monkeypatch):
     assert exit_code == 0
 
 
-def test_unknown_macros_preserve_default(monkeypatch, capsys):
-    """--unknown-macros defaults to preserve; [[PageOutline]] stays literal.
+def test_unknown_macros_is_deprecated_and_defaults_to_none():
+    """--unknown-macros has no effect since Trac renders macros itself
+    (Trac #210); it defaults to None so that passing it is detectable."""
+    parser = build_parser()
+    assert parser.parse_args(["--to", "md"]).unknown_macros is None
+    assert (
+        parser.parse_args(
+            ["--to", "md", "--unknown-macros", "drop"]
+        ).unknown_macros
+        == "drop"
+    )
 
-    The former default, "bracket", emitted [MACRO: PageOutline]; it was
-    removed in ticket #63 along with the re-absorption on the other side.
-    """
+
+@pytest.mark.parametrize("value", ["preserve", "drop"])
+def test_unknown_macros_warns_once_and_changes_nothing(
+    value, monkeypatch, capsys, fake_trac
+):
+    """The flag prints one deprecation warning and has no effect: the
+    output is the same with and without it."""
+    fake_trac.wiki_to_html.return_value = "<p>\n[[PageOutline]]\n</p>\n"
     monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
-    exit_code = main(["--from", "tracwiki", "--to", "md"])
+    assert main(["--from", "tracwiki", "--to", "md"]) == 0
+    baseline = capsys.readouterr()
+    assert "--unknown-macros" not in baseline.err
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
+    exit_code = main(
+        ["--from", "tracwiki", "--to", "md", "--unknown-macros", value]
+    )
     assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "[[PageOutline]]" in out
-    assert "[MACRO:" not in out
+    captured = capsys.readouterr()
+    assert captured.out == baseline.out
+    assert (
+        captured.err.count(
+            "warning: --unknown-macros is deprecated and has no effect\n"
+        )
+        == 1
+    )
 
 
-def test_unknown_macros_preserve(monkeypatch, capsys):
-    """--unknown-macros preserve: stdout contains [[PageOutline]] literal."""
-    monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
+def test_unknown_macros_warning_is_silenced_by_quiet(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("# H"))
     exit_code = main(
         [
             "--from",
-            "tracwiki",
-            "--to",
             "md",
+            "--to",
+            "tracwiki",
             "--unknown-macros",
-            "preserve",
+            "drop",
+            "-q",
         ]
     )
     assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "[[PageOutline]]" in out
-
-
-def test_unknown_macros_drop(monkeypatch, capsys):
-    """--unknown-macros drop: stdout does NOT contain PageOutline."""
-    monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
-    exit_code = main(
-        ["--from", "tracwiki", "--to", "md", "--unknown-macros", "drop"]
-    )
-    assert exit_code == 0
-    out = capsys.readouterr().out
-    assert "PageOutline" not in out
+    assert "--unknown-macros" not in capsys.readouterr().err
 
 
 def test_help_lists_new_flags(capsys):
@@ -891,10 +930,18 @@ def test_no_flags_emits_no_info_lines(monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Phase 18-01: Format roundtrip tests (md → tracwiki → md)
+# Markdown -> TracWiki: the direction that runs offline
 # ---------------------------------------------------------------------------
-
-# Module-level fixtures shared by Task 1 (md→tw→md) and Task 2 (tw→md→tw).
+#
+# These were md -> tracwiki -> md round trips (Phase 18-01) and
+# tracwiki -> md -> tracwiki round trips. Trac /trac_mcp_server #210
+# removed the second hop: TracWiki -> Markdown translates Trac's own
+# HTML, so it cannot run offline, and no offline stand-in for Trac's
+# renderer would make a round trip mean anything. What is left is the
+# md -> tracwiki half, asserted on the TracWiki itself; the other half is
+# covered by the translator's fixtures
+# (tests/test_html_to_markdown_fixtures.py) and by the live round-trip
+# rows on /trac_test.
 
 MD_MULTI_CONSTRUCT = """\
 # Project Overview
@@ -923,521 +970,129 @@ def hello():
 See [documentation](https://example.com) for more details.
 """
 
-TW_MULTI_CONSTRUCT = """\
-= Project Overview =
-This module provides '''core''' functionality for ''data processing''.
 
-== Features ==
- * First bullet item
- * Second bullet item
- * Third bullet item
-== Installation ==
- 1. Install dependencies
- 2. Run setup
- 3. Configure options
-Inline `code_example` works here.
-
-{{{#!python
-def hello():
-    return 42
-}}}
-See [https://example.com documentation] for more details.
-"""
+def _md_to_tracwiki(monkeypatch, capsys, md_input, *flags):
+    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
+    rc = main(["--from", "md", "--to", "tracwiki", *flags])
+    assert rc == EXIT_OK
+    return capsys.readouterr().out
 
 
-# ---------------------------------------------------------------------------
-# Task 1: md → tracwiki → md roundtrip tests
-# ---------------------------------------------------------------------------
-
-
-def test_roundtrip_md_headings_preserve_text_and_levels(
+def test_md_headings_become_tracwiki_headings_of_the_same_level(
     monkeypatch, capsys
 ):
-    """H1/H2/H3 heading text and levels survive md → tw → md.
-
-    Uses --heading-anchors off on the first hop so the intermediate
-    TracWiki does not contain #slug anchors that would clutter assertions.
-    """
-    md_input = "# Project Overview\n\n## Features\n\n### Details\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
+        "# Project Overview\n\n## Features\n\n### Details\n",
+        "--heading-anchors",
+        "off",
     )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "# Project Overview" in result
-    assert "## Features" in result
-    assert "### Details" in result
+    assert "= Project Overview =" in out
+    assert "== Features ==" in out
+    assert "=== Details ===" in out
 
 
-def test_roundtrip_md_bullet_list_items_preserved(monkeypatch, capsys):
-    """All bullet list items survive md → tw → md.
-
-    Uses --heading-anchors off for a cleaner intermediate without #slug noise.
-    """
-    md_input = (
+def test_md_bullet_list_items_become_tracwiki_bullets(
+    monkeypatch, capsys
+):
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
         "## Features\n\n"
         "- First bullet item\n"
         "- Second bullet item\n"
-        "- Third bullet item\n"
+        "- Third bullet item\n",
+        "--heading-anchors",
+        "off",
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "First bullet item" in result
-    assert "Second bullet item" in result
-    assert "Third bullet item" in result
+    assert " * First bullet item" in out
+    assert " * Second bullet item" in out
+    assert " * Third bullet item" in out
 
 
-def test_roundtrip_md_numbered_list_items_preserved(
+def test_md_numbered_list_items_become_tracwiki_numbered_items(
     monkeypatch, capsys
 ):
-    """All numbered list items survive md → tw → md.
-
-    Uses --heading-anchors off for a cleaner intermediate without #slug noise.
-    """
-    md_input = (
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
         "## Installation\n\n"
         "1. Install dependencies\n"
         "2. Run setup\n"
-        "3. Configure options\n"
+        "3. Configure options\n",
+        "--heading-anchors",
+        "off",
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
+    assert " 1. Install dependencies" in out
+    assert " 2. Run setup" in out
+    assert " 3. Configure options" in out
+
+
+def test_md_inline_code_stays_inline_code(monkeypatch, capsys):
+    out = _md_to_tracwiki(
+        monkeypatch, capsys, "Inline `code_example` works here.\n"
     )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "Install dependencies" in result
-    assert "Run setup" in result
-    assert "Configure options" in result
+    assert "`code_example`" in out
 
 
-def test_roundtrip_md_inline_code_content_preserved(
+def test_md_fenced_code_block_becomes_a_tracwiki_processor_block(
     monkeypatch, capsys
 ):
-    """Inline code payload text survives md → tw → md."""
-    md_input = "Inline `code_example` works here.\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(["--from", "md", "--to", "tracwiki"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "code_example" in result
-    assert "`code_example`" in result
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
+        "```python\ndef hello():\n    return 42\n```\n",
+    )
+    assert out == "{{{#!python\ndef hello():\n    return 42\n}}}"
 
 
-def test_roundtrip_md_fenced_code_block_content_preserved(
+def test_md_link_becomes_a_tracwiki_link_with_url_and_text(
     monkeypatch, capsys
 ):
-    """Fenced code block body survives md → tw → md verbatim."""
-    md_input = "```python\ndef hello():\n    return 42\n```\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(["--from", "md", "--to", "tracwiki"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "def hello():" in result
-    assert "return 42" in result
-
-
-def test_roundtrip_md_link_url_and_text_preserved(monkeypatch, capsys):
-    """Both the URL and link text survive md → tw → md.
-
-    Uses --heading-anchors off to keep the intermediate clean.
-    """
-    md_input = (
-        "See [documentation](https://example.com) for more details.\n"
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
+        "See [documentation](https://example.com) for more details.\n",
+        "--heading-anchors",
+        "off",
     )
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "https://example.com" in result
-    assert "documentation" in result
+    assert "[https://example.com documentation]" in out
 
 
-def test_roundtrip_md_full_document_preserves_all_construct_markers(
+def test_md_full_document_carries_every_construct_into_tracwiki(
     monkeypatch, capsys
 ):
-    """Full MD_MULTI_CONSTRUCT fixture: all construct types survive md → tw → md.
-
-    Uses --heading-anchors off for a cleaner intermediate; exercises the
-    real pipeline end-to-end (headings, lists, code, link, bold, italic).
-    """
-    monkeypatch.setattr("sys.stdin", io.StringIO(MD_MULTI_CONSTRUCT))
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
+    """MD_MULTI_CONSTRUCT: headings, lists, code, link, bold, italic."""
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
+        MD_MULTI_CONSTRUCT,
+        "--heading-anchors",
+        "off",
     )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    # Headings
-    assert "# Project Overview" in result
-    assert "## Features" in result
-    assert "## Installation" in result
-    # Bullet list items
-    assert "First bullet item" in result
-    assert "Second bullet item" in result
-    assert "Third bullet item" in result
-    # Numbered list items
-    assert "Install dependencies" in result
-    # Inline code
-    assert "code_example" in result
-    # Code block content
-    assert "def hello():" in result
-    # Link URL and text
-    assert "https://example.com" in result
-    assert "documentation" in result
+    assert "= Project Overview =" in out
+    assert "== Features ==" in out
+    assert "== Installation ==" in out
+    assert " * First bullet item" in out
+    assert " 1. Install dependencies" in out
+    assert "`code_example`" in out
+    assert "{{{#!python\ndef hello():\n    return 42\n}}}" in out
+    assert "[https://example.com documentation]" in out
+    assert "'''core'''" in out
+    assert "''data processing''" in out
 
 
-# ---------------------------------------------------------------------------
-# Task 2: tracwiki → md → tracwiki roundtrip tests + expected-divergence
-# ---------------------------------------------------------------------------
-
-
-def test_roundtrip_tw_headings_preserve_text_and_levels(
-    monkeypatch, capsys
-):
-    """H1/H2/H3 heading text and levels survive tw → md → tw."""
-    tw_input = "= Project Overview =\n== Features ==\n=== Details ===\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
+def test_md_heading_anchor_appears_when_on(monkeypatch, capsys):
+    """With --heading-anchors on, the #slug is in the TracWiki."""
+    out = _md_to_tracwiki(
+        monkeypatch,
+        capsys,
+        "# My Heading\n",
+        "--heading-anchors",
+        "on",
     )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "= Project Overview =" in result
-    assert "== Features ==" in result
-    assert "=== Details ===" in result
-
-
-def test_roundtrip_tw_bullet_list_items_preserved(monkeypatch, capsys):
-    """All bullet list items survive tw → md → tw."""
-    tw_input = (
-        "== Features ==\n"
-        " * First bullet item\n"
-        " * Second bullet item\n"
-        " * Third bullet item\n"
-    )
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "First bullet item" in result
-    assert "Second bullet item" in result
-    assert "Third bullet item" in result
-
-
-def test_roundtrip_tw_numbered_list_items_preserved(
-    monkeypatch, capsys
-):
-    """All numbered list items survive tw → md → tw."""
-    tw_input = (
-        "== Installation ==\n"
-        " 1. Install dependencies\n"
-        " 2. Run setup\n"
-        " 3. Configure options\n"
-    )
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "Install dependencies" in result
-    assert "Run setup" in result
-    assert "Configure options" in result
-
-
-def test_roundtrip_tw_code_block_content_preserved(monkeypatch, capsys):
-    """{{{...}}} code block body survives tw → md → tw verbatim."""
-    tw_input = "{{{#!python\ndef hello():\n    return 42\n}}}\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "md", "--to", "tracwiki"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "def hello():" in result
-    assert "return 42" in result
-
-
-def test_roundtrip_tw_link_url_and_text_preserved(monkeypatch, capsys):
-    """TracWiki [url text] link: both URL and text survive tw → md → tw."""
-    tw_input = (
-        "See [https://example.com documentation] for more details.\n"
-    )
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    assert "https://example.com" in result
-    assert "documentation" in result
-
-
-def test_roundtrip_tw_full_document_preserves_all_construct_markers(
-    monkeypatch, capsys
-):
-    """Full TW_MULTI_CONSTRUCT fixture: all construct types survive tw → md → tw."""
-    monkeypatch.setattr("sys.stdin", io.StringIO(TW_MULTI_CONSTRUCT))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-
-    # Headings
-    assert "= Project Overview =" in result
-    assert "== Features ==" in result
-    assert "== Installation ==" in result
-    # Bullet list items
-    assert "First bullet item" in result
-    assert "Second bullet item" in result
-    assert "Third bullet item" in result
-    # Numbered list items
-    assert "Install dependencies" in result
-    # Code block content
-    assert "def hello():" in result
-    # Link URL and text
-    assert "https://example.com" in result
-    assert "documentation" in result
-
-
-# ---------------------------------------------------------------------------
-# Expected-divergence tests: pin down known-lossy roundtrip paths
-# ---------------------------------------------------------------------------
-
-
-def test_roundtrip_tw_unknown_macro_survives_both_hops(
-    monkeypatch, capsys
-):
-    """[[SomeMacro(arg)]] survives tw→md→tw unchanged.
-
-    Only names carrying explicit "(args)" -- which a plain WikiLink never
-    does -- or names on the known-macro allowlist are treated as macros
-    (ticket #28: bare, unrecognized ``[[Word]]`` is now a WikiLink instead,
-    see test_roundtrip_tw_bare_bracket_link_becomes_wikilink below).
-
-    Regression test for ticket #19: the tw→md→tw path used to be lossy
-    here, silently and permanently flattening the macro the first time a
-    page carrying one was edited via the Markdown path. Ticket #19 fixed
-    that by emitting "[MACRO: SomeMacro(arg)]" and re-absorbing it on the
-    way back; ticket #63 removed that detour, and the macro is now simply
-    left literal across both hops. The guarantee under test is unchanged.
-    """
-    tw_input = "[[SomeMacro(arg)]]\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-    # First hop leaves the macro literal rather than flattening it.
-    assert "[[SomeMacro(arg)]]" in intermediate
-    assert "[MACRO:" not in intermediate
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-    # Second hop carries it through unchanged.
-    assert "[[SomeMacro(arg)]]" in result
-    assert "[MACRO:" not in result
-
-
-def test_roundtrip_tw_unknown_macro_preserve_mode_roundtrips(
-    monkeypatch, capsys
-):
-    """[[SomeMacro(arg)]] with --unknown-macros preserve survives tw → md → tw intact.
-
-    When the user opts in to preserve mode, the macro literal passes through
-    unchanged across both hops — a case where the tw→md→tw round trip IS
-    identity for macro syntax.
-    """
-    tw_input = "[[SomeMacro(arg)]]\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(
-        [
-            "--from",
-            "tracwiki",
-            "--to",
-            "md",
-            "--unknown-macros",
-            "preserve",
-        ]
-    )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-    # Preserve mode: [[SomeMacro(arg)]] must survive to the md intermediate
-    assert "[[SomeMacro(arg)]]" in intermediate
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-    assert "[[SomeMacro(arg)]]" in result
-
-
-def test_roundtrip_tw_bare_bracket_link_becomes_wikilink(
-    monkeypatch, capsys
-):
-    """[[SomePage]] converts to a real Markdown link, not inert macro text.
-
-    Regression test for ticket #28: bare, unrecognized ``[[Word]]`` (no
-    "(args)", not a known Trac macro name) is a plain WikiLink in TracWiki,
-    not a macro. Routing it through the macro-placeholder path used to
-    destroy the link (and could corrupt neighboring links). It should
-    survive as ``[SomePage](wiki:SomePage)`` in Markdown and round-trip to
-    the equivalent single-bracket TracWiki link form.
-    """
-    tw_input = "[[SomePage]]\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc1 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-    assert "[SomePage](wiki:SomePage)" in intermediate
-    assert "MACRO" not in intermediate
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "off"]
-    )
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-    assert "[wiki:SomePage SomePage]" in result
-
-
-def test_roundtrip_tw_adjacent_bracket_links_stay_separate(
-    monkeypatch, capsys
-):
-    """Two [[Page]] links on one line convert independently, not merged.
-
-    Regression test for ticket #28's core symptom: [[PageA]], [[PageB]] on
-    the same line used to be merged into one corrupted, unterminated
-    placeholder construct with an embedded raw control character.
-    """
-    tw_input = "See [[PageA]] and [[PageB]] for details.\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(tw_input))
-    rc = main(["--from", "tracwiki", "--to", "md"])
-    assert rc == EXIT_OK
-    result = capsys.readouterr().out
-    assert "[PageA](wiki:PageA)" in result
-    assert "[PageB](wiki:PageB)" in result
-    assert "\x00" not in result
-
-
-def test_roundtrip_md_heading_anchor_survives_when_on(
-    monkeypatch, capsys
-):
-    """With --heading-anchors on, slug appears in tw intermediate but NOT in final md.
-
-    The md→tw→md path drops the anchor cleanly: the TracWiki #slug is not
-    rendered back to Markdown, so the final md is semantically identical
-    to the original (no spurious text).  This documents that the anchor
-    is a tw-level concern, not a md-level one.
-    """
-    md_input = "# My Heading\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO(md_input))
-    # First hop: explicit --heading-anchors on (not the default)
-    rc1 = main(
-        ["--from", "md", "--to", "tracwiki", "--heading-anchors", "on"]
-    )
-    assert rc1 == EXIT_OK
-    intermediate = capsys.readouterr().out
-    # The #slug must appear in the tracwiki intermediate
-    assert "#my-heading" in intermediate
-
-    monkeypatch.setattr("sys.stdin", io.StringIO(intermediate))
-    rc2 = main(["--from", "tracwiki", "--to", "md"])
-    assert rc2 == EXIT_OK
-    result = capsys.readouterr().out
-    # Final md must contain the heading text without the anchor
-    assert "# My Heading" in result
-    assert "#my-heading" not in result
+    assert "#my-heading" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1750,7 +1405,7 @@ def test_empty_input_returns_exit_ok_from_file(tmp_path, capsys):
     """An empty input file returns EXIT_OK with empty stdout (file source)."""
     empty_file = tmp_path / "empty.md"
     empty_file.write_text("", encoding="utf-8")
-    exit_code = main([str(empty_file), "--to", "md"])
+    exit_code = main([str(empty_file), "--from", "md", "--to", "md"])
     assert exit_code == EXIT_OK
     assert capsys.readouterr().out == ""
 
@@ -1762,7 +1417,7 @@ def test_empty_input_returns_exit_ok_from_clipboard(
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.read_clipboard", lambda: ""
     )
-    exit_code = main(["--from-clipboard", "--to", "md"])
+    exit_code = main(["--from-clipboard", "--from", "md", "--to", "md"])
     assert exit_code == EXIT_OK
     assert capsys.readouterr().out == ""
 
@@ -1805,7 +1460,10 @@ def test_convert_text_stays_silent_converting_tracwiki_to_markdown():
     TracWiki, and running it on a TracWiki source would compare a
     document against its own translation."""
     result = convert_text(
-        "{{{#!python\ndef f(x):\n    return 1\n}}}\n", "tracwiki", "md"
+        "{{{#!python\ndef f(x):\n    return 1\n}}}\n",
+        "tracwiki",
+        "md",
+        render_html=_render_heading,
     )
     assert not any(
         "lost leading whitespace" in w for w in result.warnings

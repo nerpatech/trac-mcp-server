@@ -213,7 +213,11 @@ class TestPushTracWikiPassthrough:
 
 
 class TestPullMarkdownConversion:
-    """Integration tests for pull with real TracWiki-to-Markdown conversion."""
+    """Integration tests for pull with the real HTML-to-Markdown translator.
+
+    Markdown comes from Trac's rendered HTML (Trac #210), so each test's
+    fake client serves the HTML Trac renders for its page source.
+    """
 
     async def test_pull_converts_tracwiki_headings_to_markdown(
         self, tmp_path
@@ -224,6 +228,11 @@ class TestPullMarkdownConversion:
         client = _make_client()
         client.get_wiki_page.return_value = (
             "= Title =\n\n== Section ==\n\nContent."
+        )
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Title">Title</h1>\n'
+            '<h2 id="Section">Section</h2>\n'
+            "<p>\nContent.\n</p>\n"
         )
         client.get_wiki_page_info.return_value = {"version": 3}
 
@@ -253,6 +262,7 @@ class TestPullMarkdownConversion:
         client.get_wiki_page.return_value = (
             "'''bold''' and ''italic'' text."
         )
+        client.get_wiki_page_html.return_value = "<p>\n<strong>bold</strong> and <em>italic</em> text.\n</p>\n"
         client.get_wiki_page_info.return_value = {"version": 1}
 
         await _registry.call_tool(
@@ -325,8 +335,14 @@ class TestRoundTripFidelity:
 
         assert "wiki" in pushed_content
 
-        # Now pull back: mock get_wiki_page to return what was pushed
+        # Now pull back: the fake client returns what was pushed, and
+        # the HTML Trac renders for it
         client.get_wiki_page.return_value = pushed_content["wiki"]
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="MainTitle">Main Title</h1>\n'
+            '<h2 id="SectionA">Section A</h2>\n<p>\nContent A.\n</p>\n'
+            '<h2 id="SectionB">Section B</h2>\n<p>\nContent B.\n</p>\n'
+        )
         client.get_wiki_page_info.side_effect = None
         client.get_wiki_page_info.return_value = {"version": 1}
 
@@ -376,8 +392,13 @@ class TestRoundTripFidelity:
         wiki = pushed_content["wiki"]
         assert "* Item one" in wiki or "- Item one" in wiki
 
-        # Pull back
+        # Pull back: what was pushed, and the HTML Trac renders for it
         client.get_wiki_page.return_value = pushed_content["wiki"]
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="ListTest">List Test</h1>\n'
+            "<ul><li>Item one</li>\n<li>Item two</li>\n"
+            "<li>Item three</li>\n</ul>\n"
+        )
         client.get_wiki_page_info.side_effect = None
         client.get_wiki_page_info.return_value = {"version": 1}
 

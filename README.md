@@ -103,14 +103,14 @@ See [HTTP Transport](docs/reference/http-transport.md) for auth, bind-safety rul
 
 ## Format Conversion CLI
 
-The package also installs `trac-convert`, a standalone CLI for converting between TracWiki and Markdown without requiring a Trac connection. Useful for one-off conversions, editor pipelines, and clipboard workflows.
+The package also installs `trac-convert`, a standalone CLI for converting between TracWiki and Markdown. Markdown -> TracWiki runs offline. TracWiki -> Markdown needs a Trac connection: Trac renders the text and `trac-convert` translates its HTML, so with no Trac configured it exits `4` and says what to set. Useful for one-off conversions, editor pipelines, and clipboard workflows.
 
 ```bash
 # Convert Markdown to TracWiki (stdin → stdout)
 trac-convert --from md --to tracwiki < README.md > README.tw
 
-# Convert a file (auto-detects source format)
-trac-convert --to md notes.tw -o notes.md
+# Convert a TracWiki file to Markdown (Trac renders it; needs a Trac connection)
+trac-convert --from tracwiki --to md notes.tw -o notes.md
 
 # Clipboard round-trip
 trac-convert --from-clipboard --to tracwiki --to-clipboard
@@ -138,7 +138,7 @@ trac-convert --from-wiki ReleaseNotes --to md --to-clipboard
 
 Auth setup: use an existing `.trac_mcp/config.yml` (the same file `trac-mcp-server` uses) or supply ad-hoc flags — `--trac-url`, `--trac-username`, `--trac-password-file ~/.trac_pass` (prefer `--trac-password-file` to keep secrets out of shell history). See [Configuration](docs/reference/configuration.md) for the full precedence rules.
 
-Trac errors (auth, network, page-not-found, permission-denied) exit with code `4` and write a human-readable message to stderr; with `--to-wiki`, exit `4` means nothing was stored. If `--to-wiki` stored the page but reading back its new version failed, it exits `5` -- do not retry the write. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
+Trac errors (auth, network, page-not-found, permission-denied, or TracWiki -> Markdown with no Trac to render it) exit with code `4` and write a human-readable message to stderr; with `--to-wiki`, exit `4` means nothing was stored. If `--to-wiki` stored the page but reading back its new version failed, it exits `5` -- do not retry the write. See [CLI Reference](docs/reference/cli.md#trac-wiki-io) for the full flag list.
 
 ## File Transfer CLI
 
@@ -212,7 +212,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 | Tool | Description |
 |------|-------------|
 | `wiki_file_push` | Push local file to wiki (auto format conversion) |
-| `wiki_file_pull` | Pull wiki page to local file |
+| `wiki_file_pull` | Pull wiki page to local file (Markdown is Trac's rendered HTML, translated: a one-way export) |
 | `wiki_file_detect_format` | Detect content format (Markdown/TracWiki) |
 
 ### Wiki Attachments (4)

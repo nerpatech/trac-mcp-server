@@ -83,6 +83,60 @@ def mock_config():
 
 
 @pytest.fixture
+def no_trac_configured(monkeypatch, tmp_path):
+    """Run as if no Trac were configured anywhere (Trac #210).
+
+    TracWiki -> Markdown renders through Trac, so what it does with no
+    Trac configured is a behaviour of its own. Clears the env vars,
+    points HOME and the CWD at an empty directory (no
+    ``.trac_mcp/config.yaml``, project or global) and disables ``.env``.
+
+    An offline run disables ``.env`` for the whole session
+    (``_disable_dotenv``), but under ``--run-live`` it is enabled, and
+    ``bootstrap_config()``'s own ``load_dotenv()`` would find the repo's
+    ``.env`` from the module's directory and configure Trac again. So the
+    switch is set here too, with the same fallback for a python-dotenv
+    that lacks it.
+    """
+    for var in (
+        "TRAC_URL",
+        "TRAC_USERNAME",
+        "TRAC_PASSWORD",
+        "TRAC_MCP_CONFIG",
+        "TRAC_ASSIST_CONFIG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    if not hasattr(dotenv.main, "_load_dotenv_disabled"):
+        monkeypatch.setattr(
+            dotenv.main, "find_dotenv", lambda *_args, **_kwargs: ""
+        )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def fake_trac(monkeypatch):
+    """Trac is configured and ``trac-convert`` talks to a fake client.
+
+    Returns the fake (a ``MagicMock(spec=TracClient)``): set
+    ``fake.wiki_to_html.return_value`` or
+    ``fake.get_wiki_page_html.return_value`` to the HTML Trac would
+    render, and ``fake.get_wiki_page.return_value`` to a page's source.
+    """
+    from trac_mcp_server.core.client import TracClient
+
+    monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+    monkeypatch.setenv("TRAC_USERNAME", "testuser")
+    monkeypatch.setenv("TRAC_PASSWORD", "testpass")
+    fake = MagicMock(spec=TracClient)
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient", lambda _config: fake
+    )
+    return fake
+
+
+@pytest.fixture
 def mock_trac_client(mock_config):
     """Create a mock TracClient instance for testing."""
     from trac_mcp_server.core.client import TracClient

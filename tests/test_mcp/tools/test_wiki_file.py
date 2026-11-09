@@ -1,11 +1,15 @@
 """Tests for wiki_file tool handlers: detect_format, push, pull, and frontmatter stripping."""
 
 import xmlrpc.client
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import mcp.types as types
 import pytest
 
+from trac_mcp_server.converters.html_to_markdown import (
+    trac_html_to_markdown,
+)
 from trac_mcp_server.core.client import (
     WikiPageConflict,
     WikiPageNotModified,
@@ -1092,6 +1096,10 @@ class TestPull:
         client.get_wiki_page.return_value = (
             "= Hello =\n\n'''bold''' text."
         )
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+            "<p>\n<strong>bold</strong> text.\n</p>\n"
+        )
         client.get_wiki_page_info.return_value = {
             "version": 5,
             "author": "admin",
@@ -1155,6 +1163,9 @@ class TestPull:
 
         client = _make_client()
         client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
         client.get_wiki_page_info.return_value = {"version": 1}
 
         result = await _registry.call_tool(
@@ -1173,6 +1184,9 @@ class TestPull:
 
         client = _make_client()
         client.get_wiki_page.return_value = "= Old Version ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="OldVersion">Old Version</h1>\n'
+        )
         client.get_wiki_page_info.return_value = {
             "version": 2,
             "author": "admin",
@@ -1193,7 +1207,83 @@ class TestPull:
 
         # Verify get_wiki_page was called with version=2
         client.get_wiki_page.assert_called_once_with("TestPage", 2)
+        client.get_wiki_page_html.assert_called_once_with("TestPage", 2)
         client.get_wiki_page_info.assert_called_once_with("TestPage", 2)
+
+    @pytest.mark.parametrize("info", [{}, 0, None, {"version": 0}])
+    async def test_pull_markdown_warns_when_version_cannot_be_read(
+        self, tmp_path, info
+    ):
+        """No usable version from get_wiki_page_info: the pull still
+        works, but the source and HTML reads were not pinned to one
+        version, and the caller is told in ``warnings``."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
+        client.get_wiki_page_info.return_value = info
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "TestPage", "file_path": str(out_file)},
+            client,
+        )
+
+        assert not result.isError
+        assert "# Hello" in out_file.read_text()
+        warnings = result.structuredContent["warnings"]
+        assert len(warnings) == 1
+        assert "version could not be read" in warnings[0]
+        assert "not pinned" in warnings[0]
+        assert warnings[0] in result.content[0].text
+        client.get_wiki_page.assert_called_once_with("TestPage", None)
+        client.get_wiki_page_html.assert_called_once_with(
+            "TestPage", None
+        )
+
+    async def test_pull_markdown_with_a_version_has_no_pin_warning(
+        self, tmp_path
+    ):
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
+        client.get_wiki_page_info.return_value = {"version": 4}
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "TestPage",
+                "file_path": str(tmp_path / "page.md"),
+            },
+            client,
+        )
+
+        assert result.structuredContent["warnings"] == []
+
+    async def test_pull_tracwiki_with_no_version_has_no_pin_warning(
+        self, tmp_path
+    ):
+        """tracwiki reads no HTML, so there is nothing to pin."""
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_info.return_value = {}
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "TestPage",
+                "file_path": str(tmp_path / "page.wiki"),
+                "format": "tracwiki",
+            },
+            client,
+        )
+
+        assert result.structuredContent["warnings"] == []
 
     async def test_pull_nonexistent_page(self, tmp_path):
         """Pull a page that doesn't exist returns not_found error."""
@@ -1328,6 +1418,207 @@ class TestPull:
         assert isinstance(result, types.CallToolResult)
         assert result.isError is True
         assert "permission_denied" in result.content[0].text
+
+
+# =============================================================================
+# wiki_file_pull through the HTML -> Markdown translator (Trac #210)
+# =============================================================================
+
+_FIXTURES = Path(__file__).parents[2] / "fixtures" / "trac_html"
+# stock_TracCgi has two ``{{{#!python`` blocks and two translator
+# warnings (a dropped table of contents among them).
+_SLUG = "stock_TracCgi"
+
+
+def _fixture_pair():
+    return (
+        (_FIXTURES / f"{_SLUG}.html").read_text(encoding="utf-8"),
+        (_FIXTURES / f"{_SLUG}.tracwiki").read_text(encoding="utf-8"),
+    )
+
+
+def _fixture_client(version=7):
+    """A fake client serving the #208 fixture's source and HTML.
+
+    ``get_wiki_page_info`` reports ``version`` whatever was asked for,
+    as Trac reports the latest version when none is asked for.
+    """
+    html, source = _fixture_pair()
+    client = _make_client()
+    client.get_wiki_page.return_value = source
+    client.get_wiki_page_html.return_value = html
+    client.get_wiki_page_info.return_value = {
+        "version": version,
+        "author": "admin",
+    }
+    return client
+
+
+async def _pull(client, tmp_path, **extra):
+    """Pull TestPage to a file; return the result and the file's text."""
+    out = tmp_path / "out.md"
+    result = await _registry.call_tool(
+        "wiki_file_pull",
+        {"page_name": "TestPage", "file_path": str(out), **extra},
+        client,
+    )
+    return result, (out.read_text() if out.exists() else None)
+
+
+class TestPullThroughTranslator:
+    """format=markdown is Trac's rendered HTML, translated (Trac #210)."""
+
+    async def test_output_is_the_translator_output(self, tmp_path):
+        html, source = _fixture_pair()
+        expected = trac_html_to_markdown(html, source)
+
+        result, written = await _pull(_fixture_client(), tmp_path)
+
+        assert not result.isError
+        assert written == expected.text
+        assert result.structuredContent["converted"] is True
+
+    async def test_python_block_is_a_fenced_python_block(
+        self, tmp_path
+    ):
+        """The language comes from the source, which the handler must
+        pass to the translator: Trac's HTML does not name it."""
+        _, written = await _pull(_fixture_client(), tmp_path)
+
+        assert "```python\n" in written
+
+    async def test_html_read_is_pinned_to_the_info_version_latest(
+        self, tmp_path
+    ):
+        client = _fixture_client(version=7)
+
+        await _pull(client, tmp_path)
+
+        client.get_wiki_page_info.assert_called_once_with(
+            "TestPage", None
+        )
+        client.get_wiki_page.assert_called_once_with("TestPage", 7)
+        client.get_wiki_page_html.assert_called_once_with("TestPage", 7)
+
+    async def test_html_read_is_pinned_to_the_info_version_asked(
+        self, tmp_path
+    ):
+        client = _fixture_client(version=3)
+
+        await _pull(client, tmp_path, version=3)
+
+        client.get_wiki_page_info.assert_called_once_with("TestPage", 3)
+        client.get_wiki_page.assert_called_once_with("TestPage", 3)
+        client.get_wiki_page_html.assert_called_once_with("TestPage", 3)
+
+    async def test_info_is_read_before_the_source_and_the_html(
+        self, tmp_path
+    ):
+        client = _fixture_client()
+        order = []
+        for name in (
+            "get_wiki_page_info",
+            "get_wiki_page",
+            "get_wiki_page_html",
+        ):
+            mock = getattr(client, name)
+            mock.side_effect = (
+                lambda *a, _n=name, _r=mock.return_value, **k: (
+                    order.append(_n) or _r
+                )
+            )
+
+        await _pull(client, tmp_path)
+
+        assert order[0] == "get_wiki_page_info"
+        assert set(order) == {
+            "get_wiki_page_info",
+            "get_wiki_page",
+            "get_wiki_page_html",
+        }
+
+    async def test_warnings_reach_the_text_block_and_structured_content(
+        self, tmp_path
+    ):
+        html, source = _fixture_pair()
+        warnings = trac_html_to_markdown(html, source).warnings
+        assert warnings  # the fixture is chosen for having some
+
+        result, _ = await _pull(_fixture_client(), tmp_path)
+
+        assert result.structuredContent["warnings"] == warnings
+        text = result.content[0].text
+        assert "Conversion warnings:" in text
+        for warning in warnings:
+            assert warning in text
+
+    async def test_warnings_is_always_a_list(self, tmp_path):
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
+        client.get_wiki_page_info.return_value = {"version": 1}
+
+        result, _ = await _pull(client, tmp_path)
+        assert result.structuredContent["warnings"] == []
+        assert "Conversion warnings:" not in result.content[0].text
+
+        tracwiki, _ = await _pull(client, tmp_path, format="tracwiki")
+        assert tracwiki.structuredContent["warnings"] == []
+
+    async def test_tracwiki_never_reads_the_html(self, tmp_path):
+        client = _fixture_client()
+
+        result, written = await _pull(
+            client, tmp_path, format="tracwiki"
+        )
+
+        client.get_wiki_page_html.assert_not_called()
+        assert written == _fixture_pair()[1]
+        assert result.structuredContent["converted"] is False
+
+    @pytest.mark.parametrize(
+        "failing",
+        ["get_wiki_page_info", "get_wiki_page", "get_wiki_page_html"],
+    )
+    async def test_not_found_from_any_read_is_not_found(
+        self, failing, tmp_path
+    ):
+        client = _fixture_client()
+        getattr(client, failing).side_effect = xmlrpc.client.Fault(
+            404, 'Wiki page "TestPage" does not exist'
+        )
+
+        result, _ = await _pull(client, tmp_path)
+
+        assert result.isError is True
+        assert "Error (not_found)" in result.content[0].text
+        assert "TestPage" in result.content[0].text
+
+    async def test_other_fault_from_the_html_read_is_not_not_found(
+        self, tmp_path
+    ):
+        client = _fixture_client()
+        client.get_wiki_page_html.side_effect = xmlrpc.client.Fault(
+            403, "Permission denied"
+        )
+
+        result, _ = await _pull(client, tmp_path)
+
+        assert result.isError is True
+        assert "permission_denied" in result.content[0].text
+
+    def test_tool_description_says_what_markdown_is(self, tmp_path):
+        from trac_mcp_server.mcp.tools.wiki_file import WIKI_FILE_TOOLS
+
+        tool = next(
+            t for t in WIKI_FILE_TOOLS if t.name == "wiki_file_pull"
+        )
+        text = " ".join(tool.description.split())
+        assert "rendered HTML" in text
+        assert "one-way" in text
+        assert "not meant to be pushed back" in text
 
 
 class TestPushThroughConditionalPut:

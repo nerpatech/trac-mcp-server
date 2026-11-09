@@ -51,6 +51,9 @@ def _make_client():
     client.get_wiki_page_info.return_value = {}
     client.put_wiki_page.return_value = {"version": 1}
     client.get_wiki_page.return_value = "= Title =\n"
+    client.get_wiki_page_html.return_value = (
+        '<h1 id="Title">Title</h1>\n'
+    )
     client.get_ticket_attachment.return_value = b"bytes"
     client.get_wiki_attachment.return_value = b"bytes"
     return client

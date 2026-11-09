@@ -12,6 +12,7 @@ import sys
 import uuid
 import xmlrpc.client
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -59,6 +60,11 @@ def _mock_tracclient(
     get_wiki_page_side_effect=None,
     put_wiki_page_return=None,
     put_wiki_page_side_effect=None,
+    get_wiki_page_html_return=None,
+    get_wiki_page_html_side_effect=None,
+    wiki_to_html_return=None,
+    wiki_to_html_side_effect=None,
+    get_wiki_page_info_return=None,
 ):
     """Return a MagicMock(spec=TracClient) with configurable validate_connection.
 
@@ -69,8 +75,21 @@ def _mock_tracclient(
         get_wiki_page_side_effect: If set, get_wiki_page() raises this instead.
         put_wiki_page_return: The value put_wiki_page() should return on success.
         put_wiki_page_side_effect: If set, put_wiki_page() raises this instead.
+        get_wiki_page_html_return / get_wiki_page_html_side_effect: what
+            get_wiki_page_html() returns or raises (--from-wiki to
+            Markdown reads Trac's HTML, Trac #210).
+        wiki_to_html_return / wiki_to_html_side_effect: the same for
+            wiki_to_html() (file, stdin and clipboard input to Markdown).
+        get_wiki_page_info_return: what get_wiki_page_info() returns
+            (--from-wiki to Markdown pins its reads to that version,
+            Trac #210); defaults to version ``_PAGE_VERSION``.
     """
     mock_client_instance = MagicMock(spec=TracClient)
+    mock_client_instance.get_wiki_page_info.return_value = (
+        {"version": _PAGE_VERSION}
+        if get_wiki_page_info_return is None
+        else get_wiki_page_info_return
+    )
     if validate_side_effect is not None:
         mock_client_instance.validate_connection.side_effect = (
             validate_side_effect
@@ -95,7 +114,32 @@ def _mock_tracclient(
         mock_client_instance.put_wiki_page.return_value = (
             put_wiki_page_return
         )
+    if get_wiki_page_html_side_effect is not None:
+        mock_client_instance.get_wiki_page_html.side_effect = (
+            get_wiki_page_html_side_effect
+        )
+    elif get_wiki_page_html_return is not None:
+        mock_client_instance.get_wiki_page_html.return_value = (
+            get_wiki_page_html_return
+        )
+    if wiki_to_html_side_effect is not None:
+        mock_client_instance.wiki_to_html.side_effect = (
+            wiki_to_html_side_effect
+        )
+    elif wiki_to_html_return is not None:
+        mock_client_instance.wiki_to_html.return_value = (
+            wiki_to_html_return
+        )
     return mock_client_instance
+
+
+# The page version a default mock's get_wiki_page_info() reports.
+_PAGE_VERSION = 7
+
+# The HTML Trac renders for "= Heading =\n\nsome tracwiki body".
+_HEADING_HTML = (
+    '<h1 id="Heading">Heading</h1>\n<p>\nsome tracwiki body\n</p>\n'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +521,8 @@ def test_from_wiki_happy_path_prints_converted_markdown_to_stdout(
     """--from-wiki fetches TracWiki, converts to Markdown, prints to stdout."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
-        get_wiki_page_return="= Heading =\n\nsome tracwiki body"
+        get_wiki_page_return="= Heading =\n\nsome tracwiki body",
+        get_wiki_page_html_return=_HEADING_HTML,
     )
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.TracClient",
@@ -489,6 +534,12 @@ def test_from_wiki_happy_path_prints_converted_markdown_to_stdout(
     assert result == EXIT_OK
     out = capsys.readouterr().out
     assert out.startswith("# Heading")
+    # The page's own HTML, not a render of its source, read at the
+    # version the source was read at.
+    mock_instance.get_wiki_page_html.assert_called_once_with(
+        "MyPage", _PAGE_VERSION
+    )
+    mock_instance.wiki_to_html.assert_not_called()
 
 
 def test_from_wiki_to_tracwiki_is_passthrough_no_conversion(
@@ -516,7 +567,8 @@ def test_from_wiki_silently_overrides_explicit_from_md(
     """--from-wiki forces source_format=tracwiki, silently ignoring --from md."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
-        get_wiki_page_return="= Heading =\n\nbody"
+        get_wiki_page_return="= Heading =\n\nbody",
+        get_wiki_page_html_return='<h1 id="Heading">Heading</h1>\n',
     )
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.TracClient",
@@ -722,14 +774,15 @@ def test_from_wiki_password_never_printed(monkeypatch, capsys):
     monkeypatch.setenv("TRAC_USERNAME", _TEST_USER)
     monkeypatch.setenv("TRAC_PASSWORD", secret)
     mock_instance = _mock_tracclient(
-        get_wiki_page_return="= Heading =\n\nbody"
+        get_wiki_page_return="= Heading =\n\nbody",
+        get_wiki_page_html_return='<h1 id="Heading">Heading</h1>\n',
     )
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.TracClient",
         lambda _: mock_instance,
     )
 
-    main(["--from-wiki", "MyPage", "--to", "md"])
+    assert main(["--from-wiki", "MyPage", "--to", "md"]) == EXIT_OK
 
     captured = capsys.readouterr()
     assert secret not in captured.out
@@ -742,7 +795,8 @@ def test_from_wiki_output_to_clipboard_writes_converted_text(
     """--from-wiki + --to-clipboard writes converted markdown to clipboard."""
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
-        get_wiki_page_return="= Heading =\n\nbody"
+        get_wiki_page_return="= Heading =\n\nbody",
+        get_wiki_page_html_return='<h1 id="Heading">Heading</h1>\n',
     )
     monkeypatch.setattr(
         "trac_mcp_server.cli.convert.TracClient",
@@ -1572,6 +1626,10 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
     _mock_valid_env(monkeypatch)
     mock_instance = _mock_tracclient(
         get_wiki_page_return=source_tracwiki,
+        get_wiki_page_html_return=(
+            '<h1 id="SourceHeading">Source Heading</h1>\n'
+            "<p>\nOriginal body.\n</p>\n"
+        ),
         put_wiki_page_return=_PUT_OK,
     )
     monkeypatch.setattr(
@@ -1583,7 +1641,7 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
     result1 = main(["--from-wiki", "SourcePage", "--to", "md"])
     assert result1 == EXIT_OK
     md_from_leg1 = capsys.readouterr().out
-    # tracwiki_to_markdown turns "= X =" into "# X"
+    # Trac's HTML <h1> comes out as "# X"
     assert md_from_leg1.lstrip().startswith("# ")
     assert "Source Heading" in md_from_leg1
 
@@ -1603,6 +1661,321 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
     assert marker.strip() in put_args[1]
     # Default comment is the Phase 22 constant.
     assert put_args[2] == "Updated via trac-convert"
+
+
+# ---------------------------------------------------------------------------
+# TracWiki -> Markdown translates Trac's rendered HTML (Trac #210)
+# ---------------------------------------------------------------------------
+
+_NEEDS_TRAC = (
+    "trac-convert: TracWiki -> Markdown needs a Trac connection: Trac"
+    " renders the text and trac-convert translates its HTML. Set"
+    " TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD (or"
+    " .trac_mcp/config.yaml), or pass --trac-url. Markdown -> TracWiki"
+    " works offline.\n"
+)
+
+# bootstrap_config's own ValueError for an unconfigured Trac, which the
+# refusal now carries (a bad TRAC_URL would show its own text instead).
+_NO_URL_CONFIG_ERROR = (
+    "  config error: Trac URL not found. Set TRAC_URL environment"
+    " variable, pass --url CLI argument, or add 'url' to config.yaml.\n"
+)
+
+# What an undecided ``--from`` adds to the refusal.
+_AUTO_NOTE = (
+    "  the input was auto-detected as TracWiki; if it is Markdown,"
+    " pass --from md\n"
+)
+
+# stock_TracCgi: Trac's HTML and the TracWiki it was rendered from, with
+# two ``{{{#!python`` blocks (#208 fixture).
+_FIXTURES = Path(__file__).parent / "fixtures" / "trac_html"
+
+
+def _fixture_pair(slug="stock_TracCgi"):
+    return (
+        (_FIXTURES / f"{slug}.html").read_text(encoding="utf-8"),
+        (_FIXTURES / f"{slug}.tracwiki").read_text(encoding="utf-8"),
+    )
+
+
+def _no_trac_args(source, tmp_path, monkeypatch):
+    """argv and stdin for a TracWiki -> Markdown run, by input route."""
+    if source == "file":
+        path = tmp_path / "in.wiki"
+        path.write_text("= Hello =\n", encoding="utf-8")
+        return ["--from", "tracwiki", "--to", "md", str(path)]
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+    if source == "stdin":
+        return ["--from", "tracwiki", "--to", "md"]
+    assert source == "auto"
+    return ["--to", "md"]
+
+
+@pytest.mark.parametrize("source", ["file", "stdin", "auto"])
+def test_tracwiki_to_md_with_no_trac_exits_4_and_writes_nothing(
+    source, no_trac_configured, tmp_path, monkeypatch, capsys
+):
+    """File, stdin and --from auto detection alike: exit 4 (EXIT_TRAC),
+    the message that says what to set, and an empty stdout."""
+    argv = _no_trac_args(source, tmp_path, monkeypatch)
+
+    result = main(argv)
+
+    assert result == EXIT_TRAC
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        _NEEDS_TRAC
+        + _NO_URL_CONFIG_ERROR
+        + (_AUTO_NOTE if source == "auto" else "")
+    )
+
+
+def test_tracwiki_to_md_with_no_trac_writes_no_output_file(
+    no_trac_configured, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+    out = tmp_path / "out.md"
+
+    result = main(["--from", "tracwiki", "--to", "md", "-o", str(out)])
+
+    assert result == EXIT_TRAC
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("from_flag", [["--from", "md"], []])
+def test_md_to_tracwiki_still_runs_with_no_trac(
+    from_flag, no_trac_configured, monkeypatch, capsys
+):
+    """Markdown -> TracWiki never opens Trac, even with --from auto
+    (which resolves first)."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("# Hello\n"))
+
+    result = main([*from_flag, "--to", "tracwiki"])
+
+    assert result == EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out.startswith("= Hello")
+    assert captured.err == ""
+
+
+def test_md_to_tracwiki_never_calls_the_renderer(
+    fake_trac, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("# Hello\n"))
+
+    assert main(["--from", "md", "--to", "tracwiki"]) == EXIT_OK
+
+    fake_trac.wiki_to_html.assert_not_called()
+    fake_trac.get_wiki_page_html.assert_not_called()
+
+
+def test_to_wiki_from_md_with_no_trac_reports_credentials_not_render(
+    no_trac_configured, monkeypatch, capsys
+):
+    """--to-wiki needs Trac for the write; its own message, unchanged."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("# Hello\n"))
+
+    result = main(["--from", "md", "--to-wiki", "MyPage"])
+
+    assert result == EXIT_TRAC
+    assert "no Trac credentials found" in capsys.readouterr().err
+
+
+def test_file_input_is_rendered_by_wiki_to_html_with_the_files_text(
+    fake_trac, tmp_path, capsys
+):
+    path = tmp_path / "in.wiki"
+    text = "= Hello =\n\nsome tracwiki body\n"
+    path.write_text(text, encoding="utf-8")
+    fake_trac.wiki_to_html.return_value = _HEADING_HTML
+
+    result = main([str(path), "--from", "tracwiki", "--to", "md"])
+
+    assert result == EXIT_OK
+    fake_trac.wiki_to_html.assert_called_once_with(text)
+    fake_trac.get_wiki_page_html.assert_not_called()
+    assert capsys.readouterr().out.startswith("# Heading")
+
+
+def test_stdin_input_is_rendered_by_wiki_to_html(
+    fake_trac, monkeypatch, capsys
+):
+    text = "= Hello =\n"
+    fake_trac.wiki_to_html.return_value = _HEADING_HTML
+    monkeypatch.setattr("sys.stdin", io.StringIO(text))
+
+    assert main(["--from", "tracwiki", "--to", "md"]) == EXIT_OK
+
+    fake_trac.wiki_to_html.assert_called_once_with(text)
+
+
+def test_code_block_language_comes_from_the_source(
+    fake_trac, tmp_path, capsys
+):
+    """The translator is given the source text, so a block Trac's HTML
+    does not name comes out fenced with its language."""
+    html, source = _fixture_pair()
+    path = tmp_path / "in.wiki"
+    path.write_text(source, encoding="utf-8")
+    fake_trac.wiki_to_html.return_value = html
+
+    assert main([str(path), "--from", "tracwiki", "--to", "md"]) == 0
+
+    assert "```python\n" in capsys.readouterr().out
+
+
+def test_from_wiki_code_block_language_comes_from_the_page_source(
+    fake_trac, capsys
+):
+    html, source = _fixture_pair()
+    fake_trac.get_wiki_page_info.return_value = {"version": 4}
+    fake_trac.get_wiki_page.return_value = source
+    fake_trac.get_wiki_page_html.return_value = html
+
+    assert main(["--from-wiki", "TracCgi", "--to", "md"]) == EXIT_OK
+
+    assert "```python\n" in capsys.readouterr().out
+    fake_trac.get_wiki_page_html.assert_called_once_with("TracCgi", 4)
+    fake_trac.wiki_to_html.assert_not_called()
+
+
+def test_from_wiki_to_tracwiki_never_reads_the_html(fake_trac, capsys):
+    fake_trac.get_wiki_page.return_value = "= Heading =\n"
+
+    result = main(["--from-wiki", "MyPage", "--to", "tracwiki"])
+
+    assert result == EXIT_OK
+    fake_trac.get_wiki_page_html.assert_not_called()
+    fake_trac.wiki_to_html.assert_not_called()
+
+
+def test_from_wiki_opens_one_client(monkeypatch, capsys):
+    """Fetching the source and reading the HTML share one connection."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n",
+        get_wiki_page_html_return='<h1 id="Heading">Heading</h1>\n',
+    )
+    made = []
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda config: made.append(config) or mock_instance,
+    )
+
+    assert main(["--from-wiki", "MyPage", "--to", "md"]) == EXIT_OK
+
+    assert len(made) == 1
+
+
+@pytest.mark.parametrize(
+    "side_effect, expected",
+    [
+        (
+            xmlrpc.client.Fault(403, "permission denied"),
+            "trac-convert: Trac permission denied (wiki render):"
+            " permission denied\n",
+        ),
+        (
+            xmlrpc.client.Fault(1, "render exploded"),
+            "trac-convert: Trac fault (wiki render): render exploded\n",
+        ),
+        (
+            requests.exceptions.ConnectionError("connection refused"),
+            f"trac-convert: cannot reach Trac at {_TEST_URL}:"
+            " connection refused\n",
+        ),
+    ],
+)
+def test_a_render_failure_exits_4_with_the_classified_message(
+    side_effect, expected, monkeypatch, capsys
+):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        wiki_to_html_side_effect=side_effect
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+
+    result = main(["--from", "tracwiki", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == expected
+
+
+def test_from_wiki_html_read_failure_exits_4(monkeypatch, capsys):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n",
+        get_wiki_page_html_side_effect=xmlrpc.client.Fault(
+            1, "render exploded"
+        ),
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "MyPage", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        "trac-convert: Trac fault (wiki render): render exploded"
+        in captured.err
+    )
+
+
+def test_unreadable_password_file_is_reported_once_and_exits_4(
+    no_trac_configured, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+    missing = tmp_path / "no_such_password"
+
+    result = main(
+        [
+            "--from",
+            "tracwiki",
+            "--to",
+            "md",
+            "--trac-password-file",
+            str(missing),
+        ]
+    )
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert err.count("cannot read --trac-password-file") == 1
+    assert "needs a Trac connection" not in err
+
+
+def test_convert_text_without_a_renderer_raises_for_tracwiki_to_md():
+    from trac_mcp_server.cli.convert import (
+        TracConnectionRequired,
+        convert_text,
+    )
+
+    with pytest.raises(TracConnectionRequired):
+        convert_text("= Hello =", "tracwiki", "md")
+
+
+def test_convert_text_never_calls_the_renderer_for_md_or_passthrough():
+    from trac_mcp_server.cli.convert import convert_text
+
+    def boom(_text):
+        raise AssertionError("renderer must not be called")
+
+    convert_text("# Hello", "md", "tracwiki", render_html=boom)
+    convert_text("= Hello =", "tracwiki", "tracwiki", render_html=boom)
+    convert_text("# Hello", "md", "md", render_html=boom)
 
 
 # ---------------------------------------------------------------------------
@@ -1822,6 +2195,57 @@ def _live_round_trip_steps(capsys, page_name, test_url):
     )
 
 
+@pytest.mark.live
+def test_live_stdin_tracwiki_to_md_renders_through_trac_test(
+    capsys, monkeypatch
+):
+    """Live: trac-convert --from tracwiki --to md on stdin is rendered
+    by wikiToHtml on /trac_test (Trac #210).
+
+    Reads only: wikiToHtml renders text in isolation and stores nothing,
+    so there is no scratch page. Runs on /trac_test ONLY, through
+    --trac-url (TRAC_URL is re-pointed as a second layer), like the
+    round-trip row above.
+    """
+    import os
+    import re
+
+    from tests.live_helpers import trac_test_url
+
+    if not (
+        os.environ.get("TRAC_URL")
+        and os.environ.get("TRAC_USERNAME")
+        and os.environ.get("TRAC_PASSWORD")
+    ):
+        pytest.skip(
+            "TRAC_URL / TRAC_USERNAME / TRAC_PASSWORD must be set"
+            " for --run-live tests"
+        )
+    test_url = trac_test_url()
+    monkeypatch.setenv("TRAC_URL", test_url)
+
+    rc = _main_with_stdin(
+        ["--from", "tracwiki", "--to", "md", "--trac-url", test_url],
+        "= Stdin row =\n"
+        "\n"
+        " * Outer item\n"
+        "   * Nested item\n"
+        "\n"
+        "{{{#!python\n"
+        "def f(x):\n"
+        "    return x + 1\n"
+        "}}}\n",
+    )
+
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert out.startswith("# Stdin row")
+    assert re.search(
+        r"^- Outer item\n +[*-] Nested item$", out, re.M
+    ), out
+    assert "```python\ndef f(x):\n    return x + 1\n```" in out
+
+
 def test_classifying_a_fault_does_not_import_the_mcp_tools():
     """trac-convert's error path imports classify_fault from
     core.faults, a stdlib-only module, not from mcp.tools.errors: that
@@ -1862,3 +2286,255 @@ def test_classifying_a_fault_does_not_import_the_mcp_tools():
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Review fixes for #210: pinned --from-wiki reads, refusal and fault text
+# ---------------------------------------------------------------------------
+
+
+def test_from_wiki_md_reads_source_and_html_at_one_pinned_version(
+    monkeypatch, capsys
+):
+    """A save between the two reads must not pair version N's source
+    with N+1's HTML: the version is read first and both reads name it."""
+    _mock_valid_env(monkeypatch)
+    sources = {7: "= Heading =\n\nversion seven", None: "= Newer ="}
+    htmls = {
+        7: '<h1 id="Heading">Heading</h1>\n',
+        None: '<h1 id="Newer">Newer</h1>\n',
+    }
+    mock_instance = _mock_tracclient(
+        get_wiki_page_info_return={"version": 7}
+    )
+    mock_instance.get_wiki_page.side_effect = (
+        lambda name, version=None: sources[version]
+    )
+    mock_instance.get_wiki_page_html.side_effect = (
+        lambda name, version=None: htmls[version]
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "MyPage", "--to", "md"])
+
+    assert result == EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Heading")
+    assert captured.err == ""
+    mock_instance.get_wiki_page_info.assert_called_once_with("MyPage")
+    mock_instance.get_wiki_page.assert_called_once_with("MyPage", 7)
+    mock_instance.get_wiki_page_html.assert_called_once_with(
+        "MyPage", 7
+    )
+
+
+@pytest.mark.parametrize("info", [{}, 0, None, {"version": 0}])
+def test_from_wiki_md_without_a_usable_version_reads_unpinned_and_warns(
+    info, monkeypatch, capsys
+):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n\nsome tracwiki body",
+        get_wiki_page_html_return=_HEADING_HTML,
+    )
+    mock_instance.get_wiki_page_info.return_value = info
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "MyPage", "--to", "md"])
+
+    assert result == EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Heading")
+    mock_instance.get_wiki_page.assert_called_once_with("MyPage", None)
+    mock_instance.get_wiki_page_html.assert_called_once_with(
+        "MyPage", None
+    )
+    assert "warning: " in captured.err
+    assert "version could not be read" in captured.err
+    assert "not pinned" in captured.err
+
+
+def test_from_wiki_md_unpinned_warning_is_silenced_by_quiet(
+    monkeypatch, capsys
+):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n\nsome tracwiki body",
+        get_wiki_page_html_return=_HEADING_HTML,
+    )
+    mock_instance.get_wiki_page_info.return_value = {}
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    assert (
+        main(["-q", "--from-wiki", "MyPage", "--to", "md"]) == EXIT_OK
+    )
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    "argv_tail",
+    [["--to", "tracwiki"], ["--to-wiki", "DestPage"]],
+)
+def test_from_wiki_to_tracwiki_reads_no_html_and_pins_nothing(
+    argv_tail, monkeypatch, capsys
+):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n\nbody",
+        put_wiki_page_return=_PUT_OK,
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    assert main(["--from-wiki", "MyPage", *argv_tail]) == EXIT_OK
+
+    mock_instance.get_wiki_page_html.assert_not_called()
+    mock_instance.get_wiki_page_info.assert_not_called()
+    mock_instance.get_wiki_page.assert_called_once_with("MyPage")
+
+
+def test_from_wiki_md_version_info_not_found_names_the_page(
+    monkeypatch, capsys
+):
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient()
+    mock_instance.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+        404, 'Wiki page "NoSuchPage" does not exist'
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "NoSuchPage", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    assert (
+        "trac-convert: wiki page not found: NoSuchPage\n"
+        in capsys.readouterr().err
+    )
+
+
+def test_from_wiki_md_html_not_found_names_the_page(
+    monkeypatch, capsys
+):
+    """The HTML read's fault is classified with the page name, so a
+    page deleted between the reads says so, not 'resource not found'."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        get_wiki_page_return="= Heading =\n",
+        get_wiki_page_html_side_effect=xmlrpc.client.Fault(
+            404, 'Wiki page "MyPage" does not exist'
+        ),
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+
+    result = main(["--from-wiki", "MyPage", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "trac-convert: wiki page not found: MyPage\n" in err
+    assert "resource not found" not in err
+
+
+def test_render_text_not_found_without_a_page_stays_generic(
+    monkeypatch, capsys
+):
+    """Text input has no page to name: the generic fault message."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(
+        wiki_to_html_side_effect=xmlrpc.client.Fault(404, "gone")
+    )
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+
+    result = main(["--from", "tracwiki", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    assert "resource not found (fault 404)" in capsys.readouterr().err
+
+
+def test_auto_detected_tracwiki_refusal_says_how_to_force_markdown(
+    no_trac_configured, monkeypatch, capsys
+):
+    """``echo hello | trac-convert --to md`` is detected as TracWiki
+    (the operator-approved drop of the offline path); the refusal says
+    so and names the flag that changes it."""
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello\n"))
+
+    result = main(["--to", "md"])
+
+    assert result == EXIT_TRAC
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert (
+        captured.err == _NEEDS_TRAC + _NO_URL_CONFIG_ERROR + _AUTO_NOTE
+    )
+
+
+def test_explicit_tracwiki_refusal_has_no_auto_detect_note(
+    no_trac_configured, monkeypatch, capsys
+):
+    monkeypatch.setattr("sys.stdin", io.StringIO("hello\n"))
+
+    assert main(["--from", "tracwiki", "--to", "md"]) == EXIT_TRAC
+
+    assert "auto-detected" not in capsys.readouterr().err
+
+
+def test_bad_config_value_is_shown_on_the_tracwiki_to_md_refusal(
+    no_trac_configured, monkeypatch, capsys
+):
+    """A configuration that exists but is invalid is not 'no Trac
+    configured': the ValueError's own text is on the refusal."""
+    monkeypatch.setenv("TRAC_URL", "ftp://trac.example.com")
+    monkeypatch.setenv("TRAC_USERNAME", _TEST_USER)
+    monkeypatch.setenv("TRAC_PASSWORD", _TEST_PASS)
+    monkeypatch.setattr("sys.stdin", io.StringIO("= Hello =\n"))
+
+    result = main(["--from", "tracwiki", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert err.startswith(_NEEDS_TRAC.removesuffix("\n"))
+    assert (
+        "\n  config error: Invalid Trac URL 'ftp://trac.example.com':"
+        " must start with http:// or https://\n"
+    ) in err
+    assert _TEST_PASS not in err
+
+
+def test_bad_config_value_is_shown_on_the_from_wiki_credentials_error(
+    no_trac_configured, monkeypatch, capsys
+):
+    monkeypatch.setenv("TRAC_URL", "ftp://trac.example.com")
+    monkeypatch.setenv("TRAC_USERNAME", _TEST_USER)
+    monkeypatch.setenv("TRAC_PASSWORD", _TEST_PASS)
+
+    result = main(["--from-wiki", "MyPage", "--to", "md"])
+
+    assert result == EXIT_TRAC
+    err = capsys.readouterr().err
+    assert "no Trac credentials found" in err
+    assert (
+        "  config error: Invalid Trac URL 'ftp://trac.example.com':"
+        " must start with http:// or https://\n"
+    ) in err
+    assert "needs a Trac connection" not in err

@@ -131,43 +131,41 @@ def test_subprocess_missing_input_file_exits_1(tmp_path) -> None:
     assert result.stdout == ""
 
 
-def test_subprocess_real_pipe_roundtrip_md_tw_md() -> None:
-    """Two-stage pipe: md→tracwiki→md via two real subprocesses."""
-    p1 = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            CLI_MODULE,
-            "--from",
-            "md",
-            "--to",
-            "tracwiki",
-        ],
-        input="# Hello\n\nBody.\n",
-        capture_output=True,
-        text=True,
-        timeout=30,
+def test_subprocess_real_pipe_md_tw_then_tw_md_needs_trac(
+    tmp_path,
+) -> None:
+    """Two-stage pipe through two real subprocesses.
+
+    md -> tracwiki runs offline. tracwiki -> md needs Trac to render the
+    text (Trac /trac_mcp_server #210): with none configured the second
+    stage exits 4 through the real sys.exit wiring, says what to set on
+    stderr and writes nothing to stdout.
+    """
+    p1 = _run_cli(
+        "--from",
+        "md",
+        "--to",
+        "tracwiki",
+        input_text="# Hello\n\nBody.\n",
     )
     assert p1.returncode == 0
 
-    p2 = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            CLI_MODULE,
-            "--from",
-            "tracwiki",
-            "--to",
-            "md",
-        ],
-        input=p1.stdout,
-        capture_output=True,
-        text=True,
-        timeout=30,
+    p2 = _run_cli_no_trac_env(
+        "--from",
+        "tracwiki",
+        "--to",
+        "md",
+        input_text=p1.stdout,
+        cwd=str(tmp_path),
     )
-    assert p2.returncode == 0
-    assert "# Hello" in p2.stdout
-    assert "Body." in p2.stdout
+    assert p2.returncode == 4
+    assert (
+        "trac-convert: TracWiki -> Markdown needs a Trac connection"
+        in p2.stderr
+    )
+    assert "TRAC_URL" in p2.stderr
+    assert "Traceback" not in p2.stderr
+    assert p2.stdout == ""
 
 
 def test_subprocess_non_ascii_stdin_stdout_pipe() -> None:
