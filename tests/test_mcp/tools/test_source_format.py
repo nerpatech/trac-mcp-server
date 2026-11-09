@@ -819,6 +819,28 @@ class TestConverterIsUnreachable(unittest.TestCase):
                     f"{module.__name__} still imports a converter",
                 )
 
+    def test_inline_read_modules_do_not_import_a_converter(self):
+        """The read tools hand back what Trac stores, and hold no
+        converter in either direction (#214 left only the file tools and
+        convert_preview with one)."""
+        import trac_mcp_server.mcp.tools.milestone as ms
+        import trac_mcp_server.mcp.tools.ticket_read as tr
+        import trac_mcp_server.mcp.tools.wiki_read as wr
+
+        names = (
+            "auto_convert",
+            "trac_html_to_markdown",
+            "markdown_to_tracwiki",
+            "convert_with_warnings",
+        )
+        for module in (tr, wr, ms):
+            for name in names:
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertFalse(
+                        hasattr(module, name),
+                        f"{module.__name__} still imports {name}",
+                    )
+
     def test_the_tracwiki_to_markdown_converter_is_gone(self):
         """No read-path module can import a TracWiki -> Markdown converter:
         the module does not exist (ticket #214). TracWiki becomes Markdown
