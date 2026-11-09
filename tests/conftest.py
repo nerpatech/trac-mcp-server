@@ -89,8 +89,14 @@ def no_trac_configured(monkeypatch, tmp_path):
     TracWiki -> Markdown renders through Trac, so what it does with no
     Trac configured is a behaviour of its own. Clears the env vars,
     points HOME and the CWD at an empty directory (no
-    ``.trac_mcp/config.yaml``, project or global) and leaves ``.env``
-    disabled, as every offline run does.
+    ``.trac_mcp/config.yaml``, project or global) and disables ``.env``.
+
+    An offline run disables ``.env`` for the whole session
+    (``_disable_dotenv``), but under ``--run-live`` it is enabled, and
+    ``bootstrap_config()``'s own ``load_dotenv()`` would find the repo's
+    ``.env`` from the module's directory and configure Trac again. So the
+    switch is set here too, with the same fallback for a python-dotenv
+    that lacks it.
     """
     for var in (
         "TRAC_URL",
@@ -100,6 +106,11 @@ def no_trac_configured(monkeypatch, tmp_path):
         "TRAC_ASSIST_CONFIG",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    if not hasattr(dotenv.main, "_load_dotenv_disabled"):
+        monkeypatch.setattr(
+            dotenv.main, "find_dotenv", lambda *_args, **_kwargs: ""
+        )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
