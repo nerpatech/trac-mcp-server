@@ -33,12 +33,10 @@ from trac_mcp_server.converters.markdown_to_tracwiki import (
 # blank line has passed since the item's marker. Everywhere else the bytes
 # are master's (cf92e87).
 
-# (the TracWiki the Markdown shape came from, the Markdown, what the write
-# leg stores)
+# name -> (the Markdown, what the write leg stores)
 GATE_ROWS = {
     # F3: a tab-indented list is a declined shape.
     "F3 tab-indented": (
-        "\t* a\n\tb\n\t* c\n",
         "\t* a\n\n\tb\n\t* c\n",
         "{{{\n* a\n\nb\n* c\n}}}",
     ),
@@ -46,7 +44,6 @@ GATE_ROWS = {
     # Since #187 the quote stays in item `a`, at its text column, and #145's
     # separator puts the blank line and the re-indent after it.
     "F5 interrupter then continuation": (
-        " * a\n > q\n b\n * c\n",
         " - a\n   > q\n\n   b\n - c\n",
         " * a\n   > q\n   b\n * c",
     ),
@@ -55,7 +52,7 @@ GATE_ROWS = {
 
 @pytest.mark.parametrize("name", list(GATE_ROWS))
 def test_outside_the_gate_the_write_leg_is_masters(name):
-    _wiki, markdown, written = GATE_ROWS[name]
+    markdown, written = GATE_ROWS[name]
     assert markdown_to_tracwiki(markdown) == written
 
 

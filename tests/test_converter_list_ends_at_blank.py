@@ -22,57 +22,48 @@ from trac_mcp_server.converters.markdown_to_tracwiki import (
     markdown_to_tracwiki,
 )
 
-# name -> (the TracWiki the Markdown shape came from, the Markdown, what the
-# write leg stores): the shapes this ticket leaves alone (b5f7557).
+# name -> (the Markdown, what the write leg stores): the shapes this ticket
+# leaves alone (b5f7557).
 UNCHANGED = {
     # #177's sibling case: a marker left of the item's text column.
     "C1 sibling marker": (
-        " * a\n\n * b\n",
         " - a\n\n * b\n",
         " * a\n\n * b",
     ),
     "marker left of the text column": (
-        " * a\n\n  * c\n",
         " - a\n\n  * c\n",
         " * a\n\n * c",
     ),
     "marker left of the outermost text column, past a fenced run": (
-        " * a\n   * b\n\n  * c\n",
         " - a\n   - b\n\n  * c\n",
         " * a\n   * b\n\n * c",
     ),
     # No list above the blank line: the marker is the first item.
     "a marker after a paragraph": (
-        "P\n\n   * c\n",
         "P\n\n   - c\n",
         "P\n\n * c",
     ),
     "a nested marker with a list above, no blank line": (
-        " * a\n   * c\n * d\n",
         " - a\n   - c\n - d\n",
         " * a\n   * c\n * d",
     ),
     # A marker indented 4+ columns, or by a tab, after the head: the cut is
     # declined (its added blank line would make it indented code).
     "a marker 4 columns after the head": (
-        " * a\n\n  q\n    * c\n",
         " - a\n\n  q\n    - c\n",
         " * a\n\nq\n- c",
     ),
     "a marker 5 columns after the head": (
-        " * a\n\n  q\n     * c\n",
         " - a\n\n  q\n     - c\n",
         " * a\n\nq\n- c",
     ),
     "a tab-indented marker after the head": (
-        " * a\n\n  q\n\t* c\n",
         " - a\n\n  q\n\t* c\n",
         " * a\n\nq\n* c",
     ),
     # The marker is moved to the list's own column by #179 when the list
     # above had a nested marker moved; that is a new list in Markdown too.
     "a list whose nested marker #179 moved": (
-        " * a\n  * b\n\n   * c\n",
         " - a\n   - b\n\n * c\n",
         " * a\n   * b\n\n * c",
     ),
@@ -80,7 +71,6 @@ UNCHANGED = {
     # another whitespace character (here the unit separator) keeps master's
     # bytes.
     "a line holding another whitespace character is not a blank line": (
-        " * a\n\x1f\n   c\n * d\n",
         " - a\n\x1f\n   c\n - d\n",
         " * a\n   c\n * d",
     ),
@@ -89,24 +79,20 @@ UNCHANGED = {
     # cannot interrupt a paragraph. A bullet or `1.` interrupts, so
     # #182's bytes for it stay (see CASES for the `2.` row).
     "a heading head before a bullet": (
-        " * a\n\n  = h =\n * d\n",
         " - a\n\n  = h =\n - d\n",
         " * a\n\n= h =\n\n * d",
     ),
     "a heading head before a 1.": (
-        " 1. a\n\n  = h =\n 1. d\n",
         " 1. a\n\n  = h =\n 1. d\n",
         " 1. a\n\n= h =\n\n 1. d",
     ),
     # `[[BR]]` is text at this pass, not a blank line: a line that holds
     # only `[[BR]]` continues the item, and so does what follows it.
     "a [[BR]] line is not a blank line": (
-        " * a\n   [[BR]]\n   c\n * d\n",
         " - a\n     \n   c\n - d\n",
         " * a [[BR]][[BR]]\n   c\n * d",
     ),
     "the write leg's loose item join": (
-        " * a [[BR]][[BR]]\n   c\n * d\n",
         " - a   \n  \n   c\n - d\n",
         " * a [[BR]][[BR]]\n   c\n * d",
     ),
@@ -132,7 +118,7 @@ LOOSE = {
 
 @pytest.mark.parametrize("name", UNCHANGED)
 def test_out_of_scope_shapes_keep_masters_bytes(name):
-    _source, markdown, trip = UNCHANGED[name]
+    markdown, trip = UNCHANGED[name]
     assert markdown_to_tracwiki(markdown) == trip
 
 
