@@ -544,8 +544,8 @@ def test_live_cli_roundtrip_through_real_server(tmp_path):
     import os
     import uuid
 
+    from tests.live_helpers import trac_test_registry
     from trac_mcp_server.config import Config
-    from trac_mcp_server.instances import InstanceRegistry
 
     default_config = Config(
         trac_url=os.environ["TRAC_URL"],
@@ -566,7 +566,7 @@ def test_live_cli_roundtrip_through_real_server(tmp_path):
     blob.write_bytes(bytes(range(256)) * 16)
     instance = ["--instance", "/trac_test"]
 
-    with _served_instances(InstanceRegistry(default_config, {})) as url:
+    with _served_instances(trac_test_registry(default_config)) as url:
         try:
             assert (
                 _cli(url, *instance, "wiki-push", page, str(src))

@@ -41,13 +41,13 @@ class TestIdenticalWikiWriteLive:
     def page(self):
         import uuid
 
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
         client = TracClient(
-            InstanceRegistry(config, {}).resolve("/trac_test")
+            trac_test_registry(config).resolve(TEST_INSTANCE)
         )
         name = f"Scratch/Ticket174NotModified{uuid.uuid4().hex[:8]}"
         client.put_wiki_page(name, self.BODY, "seed")

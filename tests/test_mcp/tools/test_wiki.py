@@ -1875,8 +1875,8 @@ class TestWikiUpdateStaleVersionLive:
         import os
         import uuid
 
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         default_config = Config(
             trac_url=os.environ["TRAC_URL"],
@@ -1886,7 +1886,7 @@ class TestWikiUpdateStaleVersionLive:
             in ("1", "true", "yes"),
         )
         client = TracClient(
-            InstanceRegistry(default_config, {}).resolve("/trac_test")
+            trac_test_registry(default_config).resolve(TEST_INSTANCE)
         )
 
         page = f"Scratch/Ticket120StaleVersion{uuid.uuid4().hex[:8]}"
@@ -1944,8 +1944,8 @@ class TestWikiSearchLive:
         import random
         import string
 
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         default_config = Config(
             trac_url=os.environ["TRAC_URL"],
@@ -1955,7 +1955,7 @@ class TestWikiSearchLive:
             in ("1", "true", "yes"),
         )
         client = TracClient(
-            InstanceRegistry(default_config, {}).resolve("/trac_test")
+            trac_test_registry(default_config).resolve(TEST_INSTANCE)
         )
 
         # One-token nonsense words, unique to this run. Letters only: the

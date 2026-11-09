@@ -2,9 +2,12 @@
 
 Three things live here so the rows and conftest share one copy:
 
-  * ``trac_test_url()`` / ``trac_test_client()``: the destructive-test
-    instance on the host ``TRAC_URL`` names, whatever project or
-    sub-path ``TRAC_URL`` itself carries.
+  * ``trac_test_url()`` / ``trac_test_client()`` /
+    ``trac_test_registry()``: the destructive-test instance. It is
+    ``TRAC_TEST_URL`` when that is set (the instance has its own origin,
+    Trac /trac_mcp_server #203), else ``/trac_test`` on the host and
+    port ``TRAC_URL`` names, whatever project or sub-path ``TRAC_URL``
+    itself carries.
   * the runtime write guard (``live_write_guard``): while it is
     installed, a TracClient XML-RPC WRITE whose client is not on
     ``/trac_test`` is recorded and refused before any byte is sent.
@@ -30,6 +33,7 @@ from urllib.parse import urlparse
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
+from trac_mcp_server.instances import InstanceRegistry, InstanceSpec
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,41 @@ TEST_INSTANCE = "/trac_test"
 
 
 def trac_test_url() -> str:
-    """The ``/trac_test`` instance of the host ``TRAC_URL`` names."""
+    """The ``/trac_test`` instance every live row writes to.
+
+    ``TRAC_TEST_URL`` (trailing ``/`` stripped) when it is set and
+    non-empty: rookery #69 moves /trac_test to its own origin, and a
+    308 across ports drops Basic credentials, so a row cannot reach it
+    through ``TRAC_URL``'s host and port any more. Otherwise
+    ``/trac_test`` on the scheme, host and port ``TRAC_URL`` names.
+
+    Raises ``ValueError`` when ``TRAC_TEST_URL`` is not an absolute
+    http(s) URL with a host (a scheme-less value would be joined onto
+    ``TRAC_URL``'s host by the registry, i.e. the OLD origin), or does
+    not end with ``/trac_test`` (the write guard, ``is_trac_test_url``,
+    would refuse every write to it). The message names the variable and
+    the defect, never the value: it can carry userinfo, and conftest's
+    sweep logs the exception.
+    """
+    override = os.environ.get("TRAC_TEST_URL", "").strip()
+    if override:
+        url = override.rstrip("/")
+        parsed = urlparse(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+        ):
+            raise ValueError(
+                "TRAC_TEST_URL must be an absolute http(s) URL with a "
+                "host (scheme or host missing or not http/https)"
+            )
+        if not is_trac_test_url(url):
+            raise ValueError(
+                f"TRAC_TEST_URL path {parsed.path!r} does not end "
+                f"with {TEST_INSTANCE}: the live write guard would "
+                "refuse every write to it"
+            )
+        return url
     parsed = urlparse(os.environ["TRAC_URL"])
     return f"{parsed.scheme}://{parsed.netloc}{TEST_INSTANCE}"
 
@@ -60,6 +98,47 @@ def trac_test_config() -> Config:
 def trac_test_client() -> TracClient:
     """A TracClient on ``/trac_test`` (see ``trac_test_url``)."""
     return TracClient(trac_test_config())
+
+
+def trac_test_registry(default_config: Config) -> InstanceRegistry:
+    """An InstanceRegistry whose ``/trac_test`` is ``trac_test_url()``.
+
+    For a row that hands a registry to a server, CLI or handler stack
+    and then calls with ``instance="/trac_test"``. ``/trac_test`` is
+    declared, so it is looked up before the ad-hoc ``/path`` branch
+    (which would join it onto ``default_config``'s host and port). The
+    spec sets no credentials, so ``default_config``'s are inherited and
+    a per-caller Identity replaces them, as on the ad-hoc path.
+    """
+    spec = InstanceSpec(
+        name=TEST_INSTANCE,
+        url=trac_test_url(),
+        username=None,
+        password=None,
+        insecure=None,
+    )
+    return _PinnedTestRegistry(default_config, spec)
+
+
+class _PinnedTestRegistry(InstanceRegistry):
+    """An InstanceRegistry that keeps ``/trac_test`` declared.
+
+    ``_reload_if_changed`` replaces ``_declared`` with
+    ``load_declared_instances()`` when a config file or the
+    ``TRAC_INSTANCES`` file changes mtime; mid-run that would drop the
+    ``/trac_test`` spec and resolve would fall back to the ad-hoc join
+    onto ``TRAC_URL``'s host. Re-pin it after every reload.
+    """
+
+    def __init__(self, default_config: Config, spec: InstanceSpec):
+        self._pinned = spec
+        super().__init__(default_config, {spec.name: spec})
+
+    def _reload_if_changed(self) -> None:
+        super()._reload_if_changed()
+        with self._lock:
+            # The reload built a fresh dict; no loader state is shared.
+            self._declared[self._pinned.name] = self._pinned
 
 
 # ---------------------------------------------------------------------

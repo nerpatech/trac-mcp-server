@@ -1285,13 +1285,13 @@ class TestWriteGateLive:
     def page(self):
         import uuid
 
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
         client = TracClient(
-            InstanceRegistry(config, {}).resolve("/trac_test")
+            trac_test_registry(config).resolve(TEST_INSTANCE)
         )
         name = f"Scratch/Ticket159WriteGate{uuid.uuid4().hex[:8]}"
         client.put_wiki_page(
@@ -1403,13 +1403,13 @@ class TestMilestoneWriteGateLive:
 
     @staticmethod
     def _live():
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
         return TracClient(
-            InstanceRegistry(config, {}).resolve("/trac_test")
+            trac_test_registry(config).resolve(TEST_INSTANCE)
         )
 
     @pytest.fixture(autouse=True)
@@ -1566,13 +1566,13 @@ class TestTicketCommentWriteGateLive:
 
     @staticmethod
     def _live():
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
         return TracClient(
-            InstanceRegistry(config, {}).resolve("/trac_test")
+            trac_test_registry(config).resolve(TEST_INSTANCE)
         )
 
     @pytest.fixture
@@ -1861,13 +1861,13 @@ class TestTicket105ChecksLive:
 
     @staticmethod
     def _live():
+        from tests.live_helpers import TEST_INSTANCE, trac_test_registry
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
-        from trac_mcp_server.instances import InstanceRegistry
 
         config, _ = bootstrap_config()
         return TracClient(
-            InstanceRegistry(config, {}).resolve("/trac_test")
+            trac_test_registry(config).resolve(TEST_INSTANCE)
         )
 
     @pytest.fixture

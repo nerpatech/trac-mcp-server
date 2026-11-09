@@ -38,7 +38,7 @@ from mcp.server import Server
 from trac_mcp_server import __version__
 from trac_mcp_server.config import Config
 from trac_mcp_server.config_schema import ServerConfig
-from trac_mcp_server.instances import Identity, InstanceRegistry
+from trac_mcp_server.instances import Identity
 from trac_mcp_server.mcp import server as server_module
 from trac_mcp_server.mcp.http_app import build_http_app
 
@@ -404,6 +404,7 @@ async def _running_production_server(server_config: ServerConfig):
     serve them over the shared uvicorn harness, and tear the globals back
     down afterward so this test cannot leak state into any other test in
     the same process."""
+    from tests.live_helpers import trac_test_registry
     from trac_mcp_server.mcp.server import PING_SPEC
     from trac_mcp_server.mcp.tools import ALL_SPECS, ToolRegistry
     from trac_mcp_server.mcp.tools.instances import (
@@ -422,7 +423,7 @@ async def _running_production_server(server_config: ServerConfig):
         insecure=os.environ.get("TRAC_INSECURE", "").lower()
         in ("1", "true", "yes"),
     )
-    instances = InstanceRegistry(default_config, {})
+    instances = trac_test_registry(default_config)
     all_specs = with_strict_schema(
         with_instance_param(
             with_page_alias([PING_SPEC] + ALL_SPECS), []

@@ -1583,20 +1583,9 @@ async def test_live_chained_update_uses_returned_token():
     """Real Trac (/trac_test): the token ticket_update returns is the
     one Trac now holds -- a second write with it lands, and the
     superseded token is refused (ticket #127)."""
-    import os
-    from urllib.parse import urlparse
+    from tests.live_helpers import trac_test_config
 
-    # The destructive-test instance on the same host, whatever project
-    # or sub-path TRAC_URL itself names.
-    parsed = urlparse(os.environ["TRAC_URL"])
-    config = Config(
-        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = TracClient(config)
+    client = TracClient(trac_test_config())
     ticket_id = client.create_ticket(
         "#127 live test: chained ticket_update",
         "Throwaway; deleted by the test.",
@@ -2729,18 +2718,9 @@ async def test_live_update_reports_comment_number_and_stored_bytes():
     number 1 with an empty comment, so the comment that follows is number
     2, and the byte-for-byte verdict agrees with the changelog (ticket
     #124)."""
-    import os
-    from urllib.parse import urlparse
+    from tests.live_helpers import trac_test_config
 
-    parsed = urlparse(os.environ["TRAC_URL"])
-    config = Config(
-        trac_url=f"{parsed.scheme}://{parsed.netloc}/trac_test",
-        username=os.environ["TRAC_USERNAME"],
-        password=os.environ["TRAC_PASSWORD"],
-        insecure=os.environ.get("TRAC_INSECURE", "").lower()
-        in ("1", "true", "yes"),
-    )
-    client = TracClient(config)
+    client = TracClient(trac_test_config())
     ticket_id = client.create_ticket(
         "#124 live test: comment number",
         "Throwaway; deleted by the test.",
