@@ -1972,6 +1972,32 @@ class TestTicket72NestedBlockExtent(unittest.TestCase):
         md = "```\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n```"
         self.assertEqual(markdown_to_tracwiki(md), src)
 
+    def test_a_quoted_fence_in_a_top_level_block_stays_literal(self):
+        """Ticket #88's two top-level seeds: a four-backtick fence whose
+        body quotes a three-backtick fence, with a language tag and bare.
+
+        `markdown_to_tracwiki` used to rewrite the quoted fence into a
+        `{{{ }}}` block, corrupting content the author quoted on purpose
+        (fixed by deleting the helper that did the rewriting). The quoted
+        fence stays literal inside the one `{{{ }}}` block. Before #214
+        these ran as TracWiki -> Markdown -> TracWiki round trips; the
+        Markdown is what a person writes, so they pin the write leg alone.
+        """
+        for label, md, expected in (
+            (
+                "lang-tagged inner fence",
+                "````\nintro\n```python\ninner\n```\n````",
+                "{{{\nintro\n```python\ninner\n```\n}}}",
+            ),
+            (
+                "bare inner fence",
+                "````\nintro\n```\ninner\n```\n````",
+                "{{{\nintro\n```\ninner\n```\n}}}",
+            ),
+        ):
+            with self.subTest(label):
+                self.assertEqual(markdown_to_tracwiki(md), expected)
+
     def test_a_quoted_backtick_fence_in_a_nested_body_stays_literal(
         self,
     ):
@@ -1979,11 +2005,8 @@ class TestTicket72NestedBlockExtent(unittest.TestCase):
         fence inside a nested ``{{{ }}}`` block (ticket #51's fence
         collision).
 
-        `markdown_to_tracwiki` used to rewrite the quoted ```` ``` ```` fence
-        into a `{{{ }}}` block, corrupting content the author quoted on
-        purpose (ticket #88, fixed by deleting the helper that did the
-        rewriting -- see test_converter_nested_fence_restore.py for that
-        ticket's own seeds). The quoted fence stays literal.
+        The same corruption as the top-level test above (ticket #88); the
+        quoted fence stays literal here too.
         """
         src = "{{{\nouter\n{{{\n```\ninner\n```\n}}}\n}}}"
         md = "````\nouter\n{{{\n```\ninner\n```\n}}}\n````"
