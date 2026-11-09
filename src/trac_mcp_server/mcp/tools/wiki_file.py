@@ -35,6 +35,7 @@ from ...core.client import (
     WikiPageStoredReadbackFailed,
 )
 from ...file_handler import detect_file_format
+from ...link_rewrites import as_dict, validate_link_rewrites
 from ...preview.checks import _allowed_codes
 from .errors import build_error_response, classify_fault
 from .file_io import (
@@ -143,6 +144,12 @@ WIKI_FILE_TOOLS = [
             'pushed back. format="tracwiki" returns the '
             "stored source verbatim. Translator warnings come back in "
             "structuredContent.warnings (always a list). "
+            "link_rewrites ({from, to} URL-prefix rules, longest prefix "
+            "first) rewrites the links (never the images or in-page "
+            "#anchors) of a Markdown pull: given, it replaces the "
+            "server's configured map ([] = no rewriting), omitted the "
+            "configured map applies; structuredContent.link_rewrites_"
+            "source says which was used (call, config or none). "
             "Where the server's file_access is 'off' (the http default) "
             "the text comes back in structuredContent.content and a "
             "file_path is refused; where it is 'local', file_path (a path "
@@ -181,6 +188,34 @@ WIKI_FILE_TOOLS = [
                     "type": "integer",
                     "minimum": 1,
                     "description": "Specific page version to pull",
+                },
+                "link_rewrites": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {
+                                "type": "string",
+                                "minLength": 1,
+                                "description": "URL prefix to replace",
+                            },
+                            "to": {
+                                "type": "string",
+                                "description": "Replacement prefix",
+                            },
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": False,
+                    },
+                    "description": (
+                        "Link-rewrite rules for format=markdown: a "
+                        "link target starting with `from` has that "
+                        "prefix replaced by `to` (longest `from` "
+                        "first). Replaces the server's configured map "
+                        "for this call; [] disables rewriting. Image "
+                        "sources and in-page #anchors are never "
+                        "rewritten. Ignored for format=tracwiki."
+                    ),
                 },
             },
             "required": ["page_name"],
@@ -586,6 +621,28 @@ async def _handle_pull(
             "Use wiki_search to find available pages.",
         )
 
+    # Ticket #213: the map is chosen before any Trac read, so a bad rule
+    # costs no round trip. tracwiki does no conversion: nothing to map.
+    link_rewrites: tuple[tuple[str, str], ...] = ()
+    link_rewrites_source = "none"
+    if fmt == "markdown":
+        if args.get("link_rewrites") is not None:
+            try:
+                link_rewrites = validate_link_rewrites(
+                    args["link_rewrites"], "link_rewrites"
+                )
+            except ValueError as e:
+                return build_error_response(
+                    "validation_error",
+                    str(e),
+                    "Pass link_rewrites as a list of {from, to} "
+                    "objects, or omit it to use the server's map.",
+                )
+            link_rewrites_source = "call"
+        elif client.config.link_rewrites:
+            link_rewrites = client.config.link_rewrites
+            link_rewrites_source = "config"
+
     converted = False
     warnings: list[str] = []
     try:
@@ -617,7 +674,9 @@ async def _handle_pull(
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
-            conversion = trac_html_to_markdown(html, content)
+            conversion = trac_html_to_markdown(
+                html, content, link_map=as_dict(link_rewrites)
+            )
             output_content = conversion.text
             converted = conversion.converted
             warnings.extend(conversion.warnings)
@@ -647,6 +706,7 @@ async def _handle_pull(
         "version": actual_version,
         "converted": converted,
         "warnings": warnings,
+        "link_rewrites_source": link_rewrites_source,
     }
     delivered = await deliver_output(
         args, "file_path", encoded, text=output_content

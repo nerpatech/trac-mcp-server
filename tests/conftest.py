@@ -82,14 +82,12 @@ def mock_config():
     )
 
 
-@pytest.fixture
-def no_trac_configured(monkeypatch, tmp_path):
-    """Run as if no Trac were configured anywhere (Trac #210).
+def _isolate_config_sources(monkeypatch, tmp_path):
+    """No config file, ``.env`` or link-rewrite setting reachable.
 
-    TracWiki -> Markdown renders through Trac, so what it does with no
-    Trac configured is a behaviour of its own. Clears the env vars,
-    points HOME and the CWD at an empty directory (no
-    ``.trac_mcp/config.yaml``, project or global) and disables ``.env``.
+    Clears the variables that name a config file or a rewrite map, points
+    HOME and the CWD at ``tmp_path`` (no ``.trac_mcp/config.yaml``,
+    project or global) and disables ``.env``.
 
     An offline run disables ``.env`` for the whole session
     (``_disable_dotenv``), but under ``--run-live`` it is enabled, and
@@ -99,11 +97,9 @@ def no_trac_configured(monkeypatch, tmp_path):
     that lacks it.
     """
     for var in (
-        "TRAC_URL",
-        "TRAC_USERNAME",
-        "TRAC_PASSWORD",
         "TRAC_MCP_CONFIG",
         "TRAC_ASSIST_CONFIG",
+        "TRAC_MCP_LINK_REWRITES",
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
@@ -113,6 +109,32 @@ def no_trac_configured(monkeypatch, tmp_path):
         )
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def isolated_config(monkeypatch, tmp_path):
+    """Config discovery sees only what the test writes (Trac #213).
+
+    The CWD and HOME are an empty directory, returned: a test that wants
+    a config file writes ``<returned>/.trac_mcp/config.yaml``. The Trac
+    credentials in the environment are left as they are, so this
+    composes with ``fake_trac``.
+    """
+    _isolate_config_sources(monkeypatch, tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def no_trac_configured(monkeypatch, tmp_path):
+    """Run as if no Trac were configured anywhere (Trac #210).
+
+    TracWiki -> Markdown renders through Trac, so what it does with no
+    Trac configured is a behaviour of its own. Clears the Trac env vars
+    and isolates config files and ``.env`` as ``isolated_config`` does.
+    """
+    for var in ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    _isolate_config_sources(monkeypatch, tmp_path)
 
 
 @pytest.fixture

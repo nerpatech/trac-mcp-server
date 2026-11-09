@@ -34,6 +34,12 @@ from ..converters.common import (
 from ..converters.html_to_markdown import trac_html_to_markdown
 from ..converters.markdown_to_tracwiki import convert_with_warnings
 from ..core.client import TracClient, WikiPageStoredReadbackFailed
+from ..link_rewrites import (
+    LinkRewrites,
+    as_dict,
+    parse_pair,
+    validate_link_rewrites,
+)
 
 # ---------------------------------------------------------------------------
 # Exit-code constants
@@ -381,6 +387,23 @@ class _TracSession:
         #: Warnings the session itself raised, for ``main`` to print with
         #: the converter's.
         self.warnings: list[str] = []
+        #: ``--link-map`` (a replacement for the configured map) or, with
+        #: none, the configured ``export.link_rewrites`` /
+        #: ``TRAC_MCP_LINK_REWRITES``, which is known once ``client()``
+        #: has bootstrapped the config (Trac /trac_mcp_server #213).
+        self.explicit_link_map: LinkRewrites | None = None
+        self._configured_link_map: LinkRewrites = ()
+
+    def link_map(self) -> dict[str, str]:
+        """The link-rewrite map TracWiki -> Markdown applies.
+
+        Opens the client when it is not open yet, which the HTML read
+        that precedes the translation has always done.
+        """
+        self.client()
+        if self.explicit_link_map is not None:
+            return as_dict(self.explicit_link_map)
+        return as_dict(self._configured_link_map)
 
     def client(self) -> TracClient:
         """Return the client, opening it on the first call.
@@ -400,6 +423,7 @@ class _TracSession:
                     config_error=str(e)
                 ) from None
             self.url = config.trac_url
+            self._configured_link_map = config.link_rewrites
             self._client = TracClient(config)
         return self._client
 
@@ -633,6 +657,16 @@ def _check_trac(args) -> int:
     return EXIT_OK
 
 
+def _link_map_arg(value: str) -> tuple[str, str]:
+    """argparse type of ``--link-map``: ``FROM=TO`` split at the first
+    ``=``. A value with no ``=`` is a usage error (exit 2)."""
+    try:
+        rule = parse_pair(value, "--link-map")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return rule["from"], rule["to"]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build and return the argument parser.
 
@@ -712,6 +746,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Emit explicit #slug anchors on TracWiki headings"
             " (md → tracwiki only). Default: off."
+        ),
+    )
+    parser.add_argument(
+        "--link-map",
+        dest="link_map",
+        action="append",
+        type=_link_map_arg,
+        default=None,
+        metavar="FROM=TO",
+        help=(
+            "Rewrite links of a TracWiki -> Markdown conversion: a link"
+            " target starting with FROM has that prefix replaced by TO"
+            " (longest FROM first; images and #anchors are never"
+            " rewritten). Repeatable. Replaces the configured map"
+            " (export.link_rewrites, TRAC_MCP_LINK_REWRITES). Has no"
+            " effect in any other direction."
         ),
     )
     parser.add_argument(
@@ -833,6 +883,9 @@ def convert_text(
     *,
     heading_anchors: bool = False,
     render_html: Callable[[str], str] | None = None,
+    link_map: dict[str, str]
+    | Callable[[], dict[str, str]]
+    | None = None,
 ) -> ConversionResult:
     """Convert text between Markdown and TracWiki.
 
@@ -845,6 +898,11 @@ def convert_text(
         (``trac_html_to_markdown(render_html(text), text)``), so it is
         required there: without one, ``TracConnectionRequired`` is
         raised. Markdown→TracWiki and pass-through never call it.
+    link_map: URL prefix -> replacement for the links of TracWiki→Markdown
+        (``trac_html_to_markdown(link_map=)``), or a callable returning
+        it, called after ``render_html`` so a map that comes from the
+        Trac session's config can be read once that session is open.
+        Ignored by every other direction.
 
     Returns a ConversionResult (may be a pass-through with
     converted=False when source and target resolve to the same
@@ -886,7 +944,12 @@ def convert_text(
         return result
     if render_html is None:
         raise TracConnectionRequired(_TRAC_REQUIRED_MESSAGE)
-    result = trac_html_to_markdown(render_html(text), text)
+    html = render_html(text)
+    result = trac_html_to_markdown(
+        html,
+        text,
+        link_map=link_map() if callable(link_map) else link_map,
+    )
     # The translator reports the format it read (HTML); the caller's
     # input, and what --verbose reports, is TracWiki.
     return replace(result, source_format=source)
@@ -929,7 +992,11 @@ def main(argv: list[str] | None = None) -> int:
     Note on direction-scoped flags: --heading-anchors only affects the
     md→tracwiki direction and is silently ignored for tracwiki→md.  This
     is intentional — --from auto may resolve either way at runtime, so
-    mutual-exclusion checks are not applied. --unknown-macros is
+    mutual-exclusion checks are not applied. --link-map is the same: it
+    applies to tracwiki→md only, and any other direction prints one
+    ``warning:`` line saying it has no effect (a ``--link-map`` value
+    with no ``=``, an empty FROM or a repeated FROM is a usage error,
+    exit 2). --unknown-macros is
     deprecated and has no effect: Trac renders macros itself; passing it
     prints one ``warning:`` line (removed in #214).
 
@@ -938,7 +1005,19 @@ def main(argv: list[str] | None = None) -> int:
     format, byte counts) to stderr before warnings. The two flags are
     mutually exclusive via argparse add_mutually_exclusive_group().
     """
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    link_map_flag: LinkRewrites | None = None
+    if args.link_map is not None:
+        # An empty FROM or a repeated FROM is a usage error too.
+        try:
+            link_map_flag = validate_link_rewrites(
+                [{"from": f, "to": t} for f, t in args.link_map],
+                "--link-map",
+            )
+        except ValueError as e:
+            parser.error(str(e))
 
     if args.unknown_macros is not None and not args.quiet:
         sys.stderr.write(
@@ -1036,6 +1115,7 @@ def main(argv: list[str] | None = None) -> int:
     # renders through it, --from-wiki reads through it, and nothing
     # else touches Trac.
     session = _TracSession(args)
+    session.explicit_link_map = link_map_flag
     if args.from_wiki is not None:
         # To Markdown the page's HTML is read too, so both reads are
         # pinned to one version; --to tracwiki / --to-wiki read no HTML.
@@ -1103,6 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.from_wiki is not None
                 else session.render_text
             ),
+            link_map=session.link_map,
         )
     except TracConnectionRequired as e:
         sys.stderr.write(f"trac-convert: {e}\n")
@@ -1122,6 +1203,16 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         sys.stderr.write(f"trac-convert: conversion failed: {e}\n")
         return EXIT_CONVERSION_ERROR
+
+    if link_map_flag is not None and not (
+        result.converted
+        and result.source_format == "tracwiki"
+        and result.target_format == "markdown"
+    ):
+        session.warnings.append(
+            "--link-map has no effect: it rewrites the links of a"
+            " TracWiki -> Markdown conversion only"
+        )
 
     if session.warnings:
         result = replace(

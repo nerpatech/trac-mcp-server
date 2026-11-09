@@ -89,6 +89,7 @@ trac-convert --version
 | `--from-clipboard` | -- | Read input from system clipboard instead of stdin/file. On Linux, requires one of `wl-clipboard`, `xclip`, or `xsel` to be installed (tried in that order, based on `$WAYLAND_DISPLAY` / `$DISPLAY`); falls back to `pyperclip`. On headless terminals without a clipboard tool, use `--from-file PATH` or pipe input on stdin instead. |
 | `--to-clipboard` | -- | Write output to system clipboard instead of stdout/file. Same Linux tool requirement as `--from-clipboard`. |
 | `--heading-anchors {on,off}` | `on` | md→tracwiki only: emit explicit `#slug` anchors on TracWiki headings (silently ignored in tw→md direction) |
+| `--link-map FROM=TO` | -- | TracWiki -> Markdown only (`--from-wiki` and file / stdin / clipboard input): rewrite link targets that start with `FROM` to start with `TO`, longest `FROM` first, split at the first `=`. Repeatable. **Replaces** the configured map (`export.link_rewrites`, `TRAC_MCP_LINK_REWRITES`; see [Configuration](configuration.md#link-rewrites-export)) rather than adding to it. Image sources and in-page `#anchors` are never rewritten, and the link text is kept. In any other direction it prints one `warning: --link-map has no effect ...` line (suppressed by `-q`). A value with no `=`, an empty `FROM`, or a repeated `FROM` is a usage error (exit `2`). |
 | `--unknown-macros {preserve,drop}` | -- | **Deprecated, no effect** (Trac renders macros itself); removed in #214. Passing it prints one `warning: --unknown-macros is deprecated and has no effect` line on stderr unless `-q` is set. |
 | `-v, --verbose` | -- | Emit `info:` diagnostics to stderr (mutually exclusive with `-q`) |
 | `-q, --quiet` | -- | Suppress `warning:` lines to stderr (mutually exclusive with `-v`; does NOT suppress `error:` lines) |
@@ -163,7 +164,7 @@ Unlike `trac-convert --to-wiki`, which talks XML-RPC to Trac directly with local
 
 ```bash
 trac-mcp wiki-push PAGE FILE [--format auto|markdown|tracwiki] [--comment TEXT] [--keep-frontmatter]
-trac-mcp wiki-pull PAGE FILE [--format markdown|tracwiki] [--page-version N]
+trac-mcp wiki-pull PAGE FILE [--format markdown|tracwiki] [--page-version N] [--link-map FROM=TO ...]
 trac-mcp attach-put (--ticket N | --page PAGE) FILE [--filename NAME] [--description TEXT] [--replace]
 trac-mcp attach-get (--ticket N | --page PAGE) NAME FILE
 trac-mcp detect-format FILE        # runs locally, no server call
@@ -185,6 +186,8 @@ The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and s
 When the server reports `possible_overwrite` (the page was updated but reads back as a version other than the one after the version the push was based on, so another write most likely landed just before it and was replaced), `wiki-push` prints a `trac-mcp: warning: possible overwrite ...` line on stderr naming the versions in between, and still exits **0**: the page was stored, and a non-zero code would invite a retry that writes it again. Inspect those versions with the `wiki_diff` tool.
 
 `wiki-pull` prints each warning the server returns for the pull (what the Markdown translation passed through as HTML or dropped, or that the page version could not be read so the reads were not pinned to one version) as a `trac-mcp: warning: ...` line on stderr after writing the file, and still exits **0**.
+
+`wiki-pull --link-map FROM=TO` (repeatable, split at the first `=`) is sent as the `link_rewrites` argument of `wiki_file_pull` and **replaces** the map for that pull. Without it, `wiki-pull` reads `export.link_rewrites` -- that key only, nothing else of the config, and not the `TRAC_MCP_LINK_REWRITES` variable -- from the config file it finds on **this machine** (`.trac_mcp/config.yml` / `.yaml` in the working directory, or the global ones; see [Configuration](configuration.md#configuration-file)) and sends that. If no config file has the key, it sends nothing and the **daemon's** configured map applies. The rewrite map is a publishing choice, so it is kept with the person exporting rather than in the daemon's config. A local config file that cannot be read, or whose `export` section is invalid, is a usage error (exit `2`, one `trac-mcp: wiki-pull: ...` line naming the problem) and nothing is pulled; `--link-map` bypasses the file, and `--format tracwiki` never reads it. Links only: image sources and in-page `#anchors` are never rewritten. See [Link rewrites](configuration.md#link-rewrites-export).
 
 The server's write-time link gate and notes apply to all three writes, as for the equivalent MCP tools.
 

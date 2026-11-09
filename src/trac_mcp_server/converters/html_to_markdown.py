@@ -707,8 +707,8 @@ class _TracConverter(MarkdownConverter):
 
         Trac's chrome is removed (link and image attributes, a cell's
         text alignment, the classes of covered tags, ``missing`` links),
-        ``link_map`` is applied to every ``href`` and ``src``, and
-        nothing else changes. A blank line would end a Markdown HTML
+        ``link_map`` is applied to every ``href`` (never to a ``src``)
+        and nothing else changes. A blank line would end a Markdown HTML
         block, so none is left in the markup.
         """
         el = copy.copy(el)
@@ -716,9 +716,8 @@ class _TracConverter(MarkdownConverter):
             if "missing" in _classes(a):
                 a.unwrap()
         for tag in (el, *el.find_all(True)):
-            for attr in ("href", "src"):
-                if tag.get(attr):
-                    tag[attr] = self._map_url(tag[attr])
+            if tag.get("href"):
+                tag["href"] = self._map_url(tag["href"])
             if tag.name == "a":
                 for attr in ("title", "rel"):
                     tag.attrs.pop(attr, None)
@@ -765,7 +764,12 @@ class _TracConverter(MarkdownConverter):
     # --- links and images ------------------------------------------------
 
     def _map_url(self, url):
-        if url:
+        """Apply ``link_map`` to one ``href``, longest prefix first.
+
+        An in-page anchor (``#...``) is never rewritten, whatever the
+        map says. Images are not mapped at all (#215).
+        """
+        if url and not url.startswith("#"):
             for prefix, replacement in self._link_map:
                 if url.startswith(prefix):
                     return replacement + url[len(prefix) :]
@@ -798,7 +802,7 @@ class _TracConverter(MarkdownConverter):
             not in self.options["keep_inline_images_in"]
         ):
             return alt
-        src = self._map_url(el.get("src") or "")
+        src = el.get("src") or ""
         title = " ".join((el.get("title") or "").split())
         if title:
             title = title.replace("\\", "\\\\").replace('"', '\\"')
@@ -961,7 +965,9 @@ def trac_html_to_markdown(
             code block's language and supplies its exact text; without
             it, code blocks carry no language.
         link_map: URL prefix -> replacement prefix, applied to
-            ``a[href]`` and ``img[src]``, longest prefix first.
+            ``a[href]`` (also inside raw HTML), longest prefix first.
+            An in-page anchor (``#...``) and ``img[src]`` are never
+            rewritten.
         keep_toc: Keep the table of contents a ``[[PageOutline]]`` or
             ``[[TracGuideToc]]`` macro renders; it is dropped otherwise.
         deflist: ``"extra"`` writes a definition list as ``term`` /

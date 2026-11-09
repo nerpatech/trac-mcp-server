@@ -147,7 +147,9 @@ class FakeTrac:
     def __init__(self):
         # write_gate off: the link gate would render through real Trac.
         self.config = SimpleNamespace(
-            trac_url="http://fake/trac_test", write_gate=False
+            trac_url="http://fake/trac_test",
+            write_gate=False,
+            link_rewrites=(),
         )
         self.pages: dict[str, list[str]] = {}
         self.attachments: dict[tuple, bytes] = {}

@@ -264,13 +264,55 @@ def test_link_map_rewrites_by_longest_prefix():
     assert out == "[A](wiki:A)"
 
 
-def test_link_map_applies_to_images_and_leaves_others():
+def test_link_map_applies_to_hrefs_not_images_and_leaves_others():
+    # Images and attachments are #215's: a src is never rewritten.
     html = (
         '<img alt="a" src="https://t.example.org/raw/f.png"/>'
+        '<a href="https://t.example.org/w/A">A</a>'
         '<a href="https://other.org/x">o</a>'
     )
     out = md(html, link_map={"https://t.example.org/": "/"})
-    assert out == "![a](/raw/f.png)[o](https://other.org/x)"
+    assert out == (
+        "![a](https://t.example.org/raw/f.png)"
+        "[A](/w/A)[o](https://other.org/x)"
+    )
+
+
+def test_link_map_longest_prefix_wins_whatever_the_maps_order():
+    html = '<a href="https://t.example.org/p/wiki/A">A</a>'
+    short = ("https://t.example.org/p/", "trac:/")
+    long = ("https://t.example.org/p/wiki/", "wiki:")
+    for rules in ((short, long), (long, short)):
+        assert md(html, link_map=dict(rules)) == "[A](wiki:A)"
+
+
+def test_link_map_never_touches_an_in_page_anchor():
+    # Even a rule whose prefix is "#", or "" ahead of it, leaves
+    # a "#Heading" href alone; the same href elsewhere is mapped.
+    html = (
+        '<p><a href="#Heading">Heading</a> '
+        '<a href="/wiki/Other#Heading">Other</a></p>'
+    )
+    for rules in ({"#": "/x#"}, {"/": "https://b.example/"}):
+        out = md(html, link_map=rules)
+        assert "[Heading](#Heading)" in out, rules
+    out = md(html, link_map={"/wiki/": "https://b.example/"})
+    assert "[Other](https://b.example/Other#Heading)" in out
+
+
+def test_link_map_leaves_the_link_text_alone():
+    # An autolink whose href is rewritten keeps its text: the original
+    # URL is the label, the new URL the destination.
+    html = '<a href="https://t.example.org/w/A">https://t.example.org/w/A</a>'
+    out = md(
+        html, link_map={"https://t.example.org/": "https://b.example/"}
+    )
+    assert out == "[https://t.example.org/w/A](https://b.example/w/A)"
+    out = md(
+        '<a href="https://t.example.org/w/A">the page</a>',
+        link_map={"https://t.example.org/": "https://b.example/"},
+    )
+    assert out == "[the page](https://b.example/w/A)"
 
 
 def test_link_map_default_changes_nothing():
@@ -542,14 +584,17 @@ def test_workflow_graph_is_dropped_with_a_warning():
 # --- images ---------------------------------------------------------------
 
 
-def test_img_is_markdown_with_src_mapped():
+def test_img_is_markdown_with_src_unmapped():
     html = (
-        '<p><a href="/raw/f.png"><img alt="shot" '
+        '<p><a href="https://t.example.org/raw/f.png"><img alt="shot" '
         'src="https://t.example.org/raw/f.png" crossorigin="anonymous"/>'
         "</a></p>"
     )
     out = md(html, link_map={"https://t.example.org/": "/"})
-    assert out == "[![shot](/raw/f.png)](/raw/f.png)"
+    # The enclosing link is a link: mapped. The image is #215's: not.
+    assert (
+        out == "[![shot](https://t.example.org/raw/f.png)](/raw/f.png)"
+    )
 
 
 # --- anchors, headings, quotes ----------------------------------------------
@@ -789,25 +834,34 @@ def test_table_class_wiki_alone_is_still_a_pipe_table():
     assert r.warnings == []
 
 
-def test_link_map_applies_inside_passed_through_html():
+def test_link_map_does_not_touch_an_img_in_passed_through_html():
     r = conv(
         '<img src="/trac/raw/a.png" style="float:right">',
         link_map={"/trac/": "https://t/"},
     )
-    assert (
-        r.text == '<img src="https://t/raw/a.png" style="float:right"/>'
+    assert r.text == '<img src="/trac/raw/a.png" style="float:right"/>'
+
+
+def test_link_map_applies_to_an_href_in_passed_through_html():
+    r = conv(
+        '<table><tr><td colspan="2"><a href="/trac/w">l</a></td></tr></table>',
+        link_map={"/trac/": "https://t/"},
     )
+    assert r.text.startswith("<table>")  # raw HTML, not a pipe table
+    assert 'href="https://t/w"' in r.text
+    assert "/trac/" not in r.text
 
 
-def test_link_map_applies_to_every_element_of_a_passed_through_subtree():
+def test_link_map_in_a_passed_through_subtree_maps_hrefs_only():
     html = (
         '<div class="x"><a href="/trac/w">l</a>'
+        '<a href="#top">t</a>'
         '<img src="/trac/raw/a.png" alt="a"/></div>'
     )
-    out = md(html, link_map={"/trac/": "https://t/"})
+    out = md(html, link_map={"/trac/": "https://t/", "#": "/n#"})
     assert 'href="https://t/w"' in out
-    assert 'src="https://t/raw/a.png"' in out
-    assert "/trac/" not in out
+    assert 'href="#top"' in out
+    assert 'src="/trac/raw/a.png"' in out
 
 
 def test_backslash_before_a_newline_is_escaped_not_a_hard_break():
@@ -876,7 +930,7 @@ def test_img_with_dimensions_passes_through_as_html_without_a_warning():
     # the parser writes attributes in its own order
     assert r.text.startswith("<img ") and r.text.endswith("/>")
     assert BeautifulSoup(r.text, "html.parser").img.attrs == {
-        "src": "/t/a.png",
+        "src": "/trac/a.png",
         "alt": "a",
         "width": "10",
         "height": "5",

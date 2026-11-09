@@ -147,6 +147,7 @@ def _make_client():
     client.config.password = "pass"
     client.config.verify_ssl = True
     client.config.auto_convert = True
+    client.config.link_rewrites = ()
     return client
 
 
@@ -1619,6 +1620,135 @@ class TestPullThroughTranslator:
         assert "rendered HTML" in text
         assert "one-way" in text
         assert "not meant to be pushed back" in text
+
+
+# =============================================================================
+# wiki_file_pull link rewriting (Trac #213)
+# =============================================================================
+
+_PREFIX = "http://localhost/trac/wiki/"
+_RULE = {"from": _PREFIX, "to": "https://blog.example/"}
+_LINKS_HTML = (
+    f'<p><a href="{_PREFIX}Other">Other</a> '
+    '<a href="#Heading">Heading</a> '
+    '<img alt="i" src="http://localhost/trac/raw-attachment/wiki/P/i.png"/>'
+    "</p>\n"
+)
+
+
+def _links_client(configured=()):
+    client = _make_client()
+    client.config.link_rewrites = configured
+    client.get_wiki_page.return_value = "[wiki:Other Other]"
+    client.get_wiki_page_html.return_value = _LINKS_HTML
+    client.get_wiki_page_info.return_value = {"version": 2}
+    return client
+
+
+class TestPullLinkRewrites:
+    async def test_no_map_anywhere_rewrites_nothing(self, tmp_path):
+        result, text = await _pull(_links_client(), tmp_path)
+        assert (
+            result.structuredContent["link_rewrites_source"] == "none"
+        )
+        assert f"[Other]({_PREFIX}Other)" in text
+
+    async def test_the_configured_map_applies_when_the_call_has_none(
+        self, tmp_path
+    ):
+        client = _links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(client, tmp_path)
+        assert result.structuredContent["link_rewrites_source"] == (
+            "config"
+        )
+        assert "[Other](https://blog.example/Other)" in text
+
+    async def test_the_call_replaces_the_configured_map(self, tmp_path):
+        client = _links_client(
+            ((_RULE["from"], "https://cfg.example/"),)
+        )
+        result, text = await _pull(
+            client, tmp_path, link_rewrites=[_RULE]
+        )
+        assert (
+            result.structuredContent["link_rewrites_source"] == "call"
+        )
+        assert "[Other](https://blog.example/Other)" in text
+        assert "cfg.example" not in text
+
+    async def test_an_empty_call_list_disables_rewriting(
+        self, tmp_path
+    ):
+        client = _links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(client, tmp_path, link_rewrites=[])
+        assert (
+            result.structuredContent["link_rewrites_source"] == "call"
+        )
+        assert f"[Other]({_PREFIX}Other)" in text
+
+    async def test_an_in_page_anchor_and_an_image_are_never_rewritten(
+        self, tmp_path
+    ):
+        rules = [
+            _RULE,
+            {"from": "#", "to": "https://blog.example/#"},
+            {"from": "http://localhost/trac/", "to": "/x/"},
+        ]
+        _, text = await _pull(
+            _links_client(), tmp_path, link_rewrites=rules
+        )
+        assert "[Heading](#Heading)" in text
+        assert (
+            "![i](http://localhost/trac/raw-attachment/wiki/P/i.png)"
+            in text
+        )
+        assert "[Other](https://blog.example/Other)" in text
+
+    async def test_tracwiki_ignores_the_map_and_reports_none(
+        self, tmp_path
+    ):
+        client = _links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(
+            client, tmp_path, format="tracwiki", link_rewrites=[_RULE]
+        )
+        assert (
+            result.structuredContent["link_rewrites_source"] == "none"
+        )
+        assert text == "[wiki:Other Other]"
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            [{"from": "", "to": "x"}],
+            [_RULE, _RULE],
+            [{"from": 1, "to": "x"}],
+            [{"from": "a", "to": 2}],
+            [{"from": "a"}],
+            ["a=b"],
+            "a=b",
+        ],
+    )
+    async def test_a_bad_rule_is_a_validation_error_before_any_read(
+        self, tmp_path, bad
+    ):
+        client = _links_client()
+        result, text = await _pull(client, tmp_path, link_rewrites=bad)
+        assert result.isError is True
+        assert "validation_error" in result.content[0].text
+        assert "link_rewrites" in result.content[0].text
+        assert text is None
+        client.get_wiki_page_html.assert_not_called()
+
+    def test_the_input_schema_declares_link_rewrites(self):
+        from trac_mcp_server.mcp.tools.wiki_file import WIKI_FILE_TOOLS
+
+        tool = next(
+            t for t in WIKI_FILE_TOOLS if t.name == "wiki_file_pull"
+        )
+        prop = tool.inputSchema["properties"]["link_rewrites"]
+        assert prop["type"] == "array"
+        assert prop["items"]["required"] == ["from", "to"]
+        assert "link_rewrites_source" in tool.description
 
 
 class TestPushThroughConditionalPut:

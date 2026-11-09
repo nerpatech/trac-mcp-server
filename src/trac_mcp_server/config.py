@@ -21,6 +21,10 @@ Environment variables:
     TRAC_ALLOWED_INSTANCES: Comma-separated instances the default identity may
         reach, each a ``/path`` on the TRAC_URL host or an absolute http(s) URL
         (optional, default: unrestricted; ticket #110)
+    TRAC_MCP_LINK_REWRITES: Whitespace-separated FROM=TO pairs, the link
+        rewrite map of the HTML -> Markdown export (optional; replaces the
+        YAML ``export.link_rewrites`` list whole, empty clears it; ticket
+        #213)
 """
 
 import ipaddress
@@ -29,6 +33,12 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+from .link_rewrites import (
+    LinkRewrites,
+    parse_env,
+    validate_link_rewrites,
+)
 
 if TYPE_CHECKING:
     from .config_schema import ServerConfig
@@ -68,6 +78,10 @@ class Config:
     # preview/targets.py, which see only the client, can enforce the same
     # scope as the resolve() choke point.
     allowed_instances: frozenset[str] | None = None
+    # Ticket #213: the link-rewrite map of the HTML -> Markdown export,
+    # (from, to) URL-prefix pairs, empty = no rewriting. Used by
+    # wiki_file_pull when the call passes none, and by trac-convert.
+    link_rewrites: LinkRewrites = ()
 
 
 def validate_config(config: Config) -> None:
@@ -566,6 +580,20 @@ def load_config(
         else None
     )
 
+    # Ticket #213: the environment replaces the YAML list whole, and a
+    # set-but-empty variable clears it (unlike TRAC_ALLOWED_INSTANCES, an
+    # empty map is a meaningful answer: no rewriting). A malformed rule
+    # fails startup naming the variable or the YAML entry.
+    link_rewrites_raw = os.getenv("TRAC_MCP_LINK_REWRITES")
+    if link_rewrites_raw is not None:
+        final_link_rewrites = parse_env(link_rewrites_raw)
+    elif "link_rewrites" in fb:
+        final_link_rewrites = validate_link_rewrites(
+            fb["link_rewrites"], "export.link_rewrites"
+        )
+    else:
+        final_link_rewrites = ()
+
     config = Config(
         trac_url=trac_url,
         username=trac_username,
@@ -577,6 +605,7 @@ def load_config(
         rpc_timeout=final_rpc_timeout,
         oidc_only=oidc_only,
         write_gate=final_write_gate,
+        link_rewrites=final_link_rewrites,
     )
 
     validate_config(config)

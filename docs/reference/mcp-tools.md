@@ -1371,7 +1371,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 ## wiki_file_pull
 
-**Description:** Pull a Trac wiki page, converted to the requested format. Markdown is Trac's own rendered HTML for the page translated to Markdown: a one-way export, not meant to be pushed back; `format="tracwiki"` returns the stored source verbatim. Translator warnings come back in `structuredContent.warnings` (always a list). Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
+**Description:** Pull a Trac wiki page, converted to the requested format. Markdown is Trac's own rendered HTML for the page translated to Markdown: a one-way export, not meant to be pushed back; `format="tracwiki"` returns the stored source verbatim. Translator warnings come back in `structuredContent.warnings` (always a list). `link_rewrites` (`{from, to}` URL-prefix rules, longest prefix first) rewrites the links -- never the images or in-page `#anchors` -- of a Markdown pull: given, it replaces the server's configured map (`[]` = no rewriting); omitted, the configured map applies. `structuredContent.link_rewrites_source` says which was used (`call`, `config` or `none`). Where the server's `file_access` is `off` (the http default) the text comes back in `structuredContent.content` and a `file_path` is refused; where it is `local`, `file_path` -- on the **server's** filesystem -- is required, as before. To save a page on your own machine, use `trac-mcp wiki-pull PAGE FILE` there.
 
 **Parameters:**
 
@@ -1381,6 +1381,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 | `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` or `tracwiki` |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
+| `link_rewrites` | array of `{from, to}` | No | *(the server's configured map)* | Link-rewrite rules for `format=markdown`: a link target starting with `from` (non-empty string) has that prefix replaced by `to` (string), the longest `from` first. Replaces the configured map for this call; `[]` disables rewriting. Image sources and in-page `#anchors` are never rewritten. A duplicate `from`, an empty `from` or a non-string value is a `validation_error`, returned before Trac is read. Ignored (and not validated) for `format=tracwiki` |
 
 **Success Response:**
 ```json
@@ -1398,12 +1399,13 @@ The version named is the page's current version, re-read after the no-op, so whe
   "version": 3,
   "converted": true,
   "warnings": [],
+  "link_rewrites_source": "none",
   "content": "# Design\n...",
   "bytes": 4521
 }
 ```
 
-`warnings` lists what the translator could not map exactly; it is `[]` for `format=tracwiki` and when nothing was lossy. The same warnings follow the summary line in the text block under `Conversion warnings:`. With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
+`link_rewrites_source` is `call` when the call passed `link_rewrites` (even `[]`), `config` when the server's configured map (`export.link_rewrites` / `TRAC_MCP_LINK_REWRITES`, see [Configuration](configuration.md#link-rewrites-export)) was applied, and `none` when no map was in force -- always `none` for `format=tracwiki`. `warnings` lists what the translator could not map exactly; it is `[]` for `format=tracwiki` and when nothing was lossy. The same warnings follow the summary line in the text block under `Conversion warnings:`. With a `file_path` (where `file_access` is `local`), `content`/`bytes` are replaced by `file_path` and `bytes_written`.
 
 **Error Responses:**
 
@@ -1424,6 +1426,7 @@ The version named is the page's current version, re-read after the no-op, so whe
   ```
 
 **Implementation Notes:**
+- Link rewriting touches `href`s only (including those inside raw HTML the translator passes through); image `src`s and `#anchor` targets are never changed, and the link text is kept, so an autolink whose target is rewritten becomes `[original URL](new URL)`
 - Markdown by default: Trac's rendered HTML for the page, translated (`wiki.getPageHTML`/`getPageHTMLVersion`), with code-block languages taken from the TracWiki source; use `format: "tracwiki"` to get raw content (no HTML is read)
 - For Markdown, the page's version is read first (`getPageInfo`) and the source and the HTML are fetched at that version, so a concurrent edit cannot mix versions
 - An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`

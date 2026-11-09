@@ -187,6 +187,7 @@ STALE_PAGE_PREFIXES = (
     "Scratch/Ticket173",
     "Scratch/TracConvertLive",
     "Scratch/Ticket210PullLive",
+    "Scratch/Ticket213LinkLive",
 )
 # Summary of the throwaway ticket the ticket-attachment row creates.
 STALE_TICKET_SUMMARY = "Ticket173AttachmentLive"
