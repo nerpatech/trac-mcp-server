@@ -2171,14 +2171,32 @@ def _live_round_trip_steps(capsys, page_name, test_url):
     marker = f"\n\nLive round-trip marker {time.time():.6f}\n"
     md_edited = md_original + marker
 
-    # Step 5: --to-wiki with edited MD on stdin, verbose to check
-    #   "info: wrote" line surfaces on stderr.
+    # Step 5a: Trac /trac_mcp_server #212 -- the export's front matter
+    #   names the page, so pushing it back is refused, with nothing
+    #   written, unless forced.
     rc = _main_with_stdin(
         [
             "--to-wiki",
             page_name,
             "--from",
             "md",
+            "--trac-url",
+            test_url,
+        ],
+        md_edited,
+    )
+    assert rc == 1, "the exported Markdown should be refused unforced"
+    assert "refusing to convert" in capsys.readouterr().err
+
+    # Step 5b: --to-wiki --force with edited MD on stdin, verbose to
+    #   check "info: wrote" line surfaces on stderr.
+    rc = _main_with_stdin(
+        [
+            "--to-wiki",
+            page_name,
+            "--from",
+            "md",
+            "--force",
             "-v",
             "--trac-url",
             test_url,
