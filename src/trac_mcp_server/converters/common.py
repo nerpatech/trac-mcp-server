@@ -502,12 +502,16 @@ async def auto_convert(
 
     Returns:
         ConversionResult with converted text and metadata
+
+    Raises:
+        ValueError: The source is TracWiki and the target is Markdown. There
+            is no offline TracWiki -> Markdown conversion: that direction
+            needs Trac's rendered HTML (``trac_html_to_markdown``).
+        ValueError: The Markdown source holds a construct that cannot be
+            converted (see ``markdown_to_tracwiki``).
     """
     from trac_mcp_server.converters.markdown_to_tracwiki import (
         convert_with_warnings as markdown_to_tracwiki,
-    )
-    from trac_mcp_server.converters.tracwiki_to_markdown import (
-        tracwiki_to_markdown,
     )
     from trac_mcp_server.detection.capabilities import (
         get_server_capabilities,
@@ -541,7 +545,10 @@ async def auto_convert(
     elif source_format == "markdown" and target_format == "tracwiki":
         return markdown_to_tracwiki(text)
     elif source_format == "tracwiki" and target_format == "markdown":
-        return tracwiki_to_markdown(text)
+        raise ValueError(
+            "TracWiki -> Markdown needs Trac's rendered HTML: use"
+            " trac_html_to_markdown"
+        )
     else:
         # Unknown format combination, pass through
         return ConversionResult(

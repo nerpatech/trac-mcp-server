@@ -34,6 +34,7 @@ The converters themselves are untouched by #69 and keep their own suites
 """
 
 import asyncio
+import importlib.util
 import unittest
 import xmlrpc.client
 from unittest.mock import MagicMock, patch
@@ -84,16 +85,16 @@ from trac_mcp_server.mcp.tools.wiki_write import (
 # would leave the seed unable to fail.
 SEEDED = '{{{#!python\ndef f(x):\n    return {"a": 1}\n}}}'
 
-# Round-trip bait for the read leg. The Markdown converter escapes the
-# CamelCase word to `!WiFi` and rewrites the table, so a no-op
-# read-edit-write silently rewrote the stored page (ticket #67).
+# Bait for the read path: a converter would escape the CamelCase word to
+# `!WiFi` and rewrite the table, so a no-op read-edit-write silently
+# rewrote the stored page (ticket #67).
 READ_BAIT = "WiFi and LoRa\n\n||=a=||=b=||\n||1||2||\n"
 
 # The same bait on one line, for the two paths that reformat a body
 # before returning it -- changelog indenting and search snippets -- and
 # would otherwise be compared against text the formatter has already
-# reflowed. Measured: the converter turns this into "**bold** and !WiFi",
-# so a body that comes back unchanged really did skip the converter.
+# reflowed. A converter turned this into "**bold** and !WiFi", so a body
+# that comes back unchanged really did skip the converter.
 READ_BAIT_LINE = "'''bold''' and !WiFi"
 
 # Tools that used to carry `format`.
@@ -160,16 +161,6 @@ class TestSeedIsReal(unittest.TestCase):
         mangled = markdown_to_tracwiki(SEEDED)
         self.assertNotEqual(mangled, SEEDED)
         self.assertIn("\nreturn ", mangled)
-
-    def test_read_seed_is_rewritten(self):
-        from trac_mcp_server.converters import tracwiki_to_markdown
-
-        self.assertNotEqual(
-            tracwiki_to_markdown(READ_BAIT).text, READ_BAIT
-        )
-        self.assertNotEqual(
-            tracwiki_to_markdown(READ_BAIT_LINE).text, READ_BAIT_LINE
-        )
 
 
 class TestSchemasCarryNoFormatOrRaw(unittest.TestCase):
@@ -828,17 +819,15 @@ class TestConverterIsUnreachable(unittest.TestCase):
                     f"{module.__name__} still imports a converter",
                 )
 
-    def test_inline_read_modules_do_not_import_a_converter(self):
-        import trac_mcp_server.mcp.tools.milestone as ms
-        import trac_mcp_server.mcp.tools.ticket_read as tr
-        import trac_mcp_server.mcp.tools.wiki_read as wr
-
-        for module in (tr, wr, ms):
-            with self.subTest(module=module.__name__):
-                self.assertFalse(
-                    hasattr(module, "tracwiki_to_markdown"),
-                    f"{module.__name__} still imports a converter",
-                )
+    def test_the_tracwiki_to_markdown_converter_is_gone(self):
+        """No read-path module can import a TracWiki -> Markdown converter:
+        the module does not exist (ticket #214). TracWiki becomes Markdown
+        only through Trac's rendered HTML."""
+        self.assertIsNone(
+            importlib.util.find_spec(
+                "trac_mcp_server.converters.tracwiki_to_markdown"
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 """A GFM table inside a Markdown list item or blockquote (ticket #142).
 
-**Write leg.** mistune parses a table that is indented under a list item (or
+mistune parses a table that is indented under a list item (or
 after a ``>`` marker) as lazy paragraph text unless its ``table_in_list`` /
 ``table_in_quote`` plugins are loaded, so the converter used to glue the
 rows onto the item text (tight item) or emit raw ``| x | y |`` text (loose
@@ -20,30 +20,17 @@ item) -- never a table.
 * In a blockquote, ``||`` rows indented two spaces render as a blockquoted
   table, so the quote case needs only the plugin.
 
-**Read leg.** ``_convert_code_blocks`` fenced a bare ``{{{#!div`` as a code
-block with info ``div`` and ``_convert_tables`` dropped a row group's
-indentation, so the div-wrapped table read back as a broken fence (or as an
-unindented table that ends the list). The read leg unwraps a bare
-``{{{#!div}}}`` that holds only ``||`` rows and sits in a list item, and keeps
-the rows' indentation there; every other div, and every table outside a list
-item, reads back exactly as on ``master``.
-
 The negative rows (shapes that must NOT change) were computed on ``master``
 (f85cdc1) before the change and hard-coded.
 """
 
 import re
 
-import mistune
 import pytest
 
 from trac_mcp_server.converters import find_list_item_splits
 from trac_mcp_server.converters.markdown_to_tracwiki import (
-    _MISTUNE_PLUGINS,
     markdown_to_tracwiki,
-)
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    tracwiki_to_markdown,
 )
 
 TICKET_INPUT = "- a\n\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- d\n"
@@ -151,151 +138,17 @@ def test_top_level_table_is_unchanged():
     assert markdown_to_tracwiki(md) == "||=x=||=y=||\n||1||2||"
 
 
-# -- Read leg ---------------------------------------------------------------
-
-DIV_IN_LIST = (
-    " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n * d"
-)
-DIV_IN_LIST_MD = " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n - d"
+# -- Header-only table -------------------------------------------------------
 
 
-def _md(wiki):
-    return tracwiki_to_markdown(wiki).text
-
-
-def test_div_wrapped_table_in_a_list_item_unwraps_and_keeps_indent():
-    """Master read this as a fence: ' - a\\n   ```div\\n\\n   ||=x=||...'."""
-    assert _md(DIV_IN_LIST) == DIV_IN_LIST_MD
-
-
-def test_div_wrapped_table_in_a_nested_item_keeps_the_deeper_indent():
-    wiki = (
-        " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n"
-        "     ||3||4||\n     }}}\n * d"
-    )
-    assert _md(wiki) == (
-        " - a\n   - b\n     | 1 | 2 |\n     |---|---|\n"
-        "     | 3 | 4 |\n - d"
-    )
-
-
-def test_headerless_div_table_unwraps_too():
-    """The brief's variant ` * b` / `||1||2||` unwraps; Markdown needs a
-    header, so the first row becomes it (same as a top-level table)."""
-    wiki = " * a\n   * b\n     {{{#!div\n     ||1||2||\n     }}}\n * d"
-    assert _md(wiki) == (
-        " - a\n   - b\n     | 1 | 2 |\n     |---|---|\n - d"
-    )
-
-
-# Negatives. Expected values were computed on master (f85cdc1) BEFORE the
-# change and hard-coded; each must stay byte-for-byte.
-@pytest.mark.parametrize(
-    ("name", "wiki", "expected"),
-    [
-        (
-            "top-level bare div",
-            "{{{#!div\n||=x=||=y=||\n||1||2||\n}}}",
-            "```div\n||=x=||=y=||\n||1||2||\n```",
-        ),
-        (
-            "div with an argument in a list item",
-            " * a\n   {{{#!div class=x\n   ||1||2||\n   }}}\n * d",
-            " - a\n   {{{#!div class=x\n| 1 | 2 |\n|---|---|\n   }}}\n - d",
-        ),
-        (
-            "div holding a paragraph in a list item",
-            " * a\n   {{{#!div\n   hello\n   }}}\n * d",
-            # Ticket #144 changed this row: master's output had a blank
-            # line after the opener and the closer at column 0 (the
-            # broken fence). It is still a ```div fence; only its
-            # indentation changed.
-            " - a\n   ```div\n   hello\n   ```\n - d",
-        ),
-        (
-            "div after a blank line (outside the list)",
-            " * a\n\n   {{{#!div\n   ||1||2||\n   }}}\n * d",
-            " - a\n\n   ```div\n\n   ||1||2||\n```\n - d",
-        ),
-        (
-            "div in a blockquote",
-            "  {{{#!div\n  ||1||2||\n  }}}\n",
-            "  ```div\n  ||1||2||\n```\n",
-        ),
-        (
-            "blockquoted || rows",
-            "  ||=x=||=y=||\n  ||1||2||\n",
-            "| x | y |\n|---|---|\n| 1 | 2 |\n",
-        ),
-        (
-            # Review F4: Trac renders bare indented `||` rows OUTSIDE the
-            # list (measured), so master's dropped indent is the faithful
-            # reading; only rows that came from an unwrapped div keep it.
-            "bare indented rows in a list item",
-            " * a\n   ||=x=||=y=||\n   ||1||2||\n * d\n",
-            # Ticket #146 added the blank line before the table, so
-            # Markdown ends the item there as Trac does.
-            " - a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n - d\n",
-        ),
-        (
-            "bare indented rows after a nested item",
-            " * a\n   * b\n     ||=x=||\n     ||1||\n * d\n",
-            " - a\n   - b\n\n| x |\n|---|\n| 1 |\n - d\n",
-        ),
-        (
-            "top-level rows",
-            "||=x=||=y=||\n||1||2||",
-            "| x | y |\n|---|---|\n| 1 | 2 |",
-        ),
-    ],
-)
-def test_other_shapes_read_back_exactly_as_on_master(
-    name, wiki, expected
-):
-    assert _md(wiki) == expected, name
-
-
-# -- Round trips (the acceptance criterion) ---------------------------------
-
-
-def test_round_trip_div_in_list():
-    assert markdown_to_tracwiki(_md(DIV_IN_LIST)) == DIV_IN_LIST
-
-
-def test_round_trip_div_in_nested_item():
-    """The brief's variant used a headerless `||1||2||` row, which cannot
-    round trip anywhere (Markdown needs a header, so the write leg emits
-    `||=1=||=2=||`; a top-level `||1||2||` behaves the same on master).
-    The header row makes the same shape lossless."""
-    wiki = (
-        " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n"
-        "     ||3||4||\n     }}}\n * d"
-    )
-    assert markdown_to_tracwiki(_md(wiki)) == wiki
-
-
-def test_headerless_rows_gain_a_header_as_at_top_level():
-    headerless = (
-        " * a\n   * b\n     {{{#!div\n     ||1||2||\n     }}}\n * d"
-    )
-    assert markdown_to_tracwiki(_md(headerless)) == (
+def test_a_header_only_table_gets_a_header_as_at_top_level():
+    md = " - a\n   - b\n     | 1 | 2 |\n     |---|---|\n - d"
+    assert markdown_to_tracwiki(md) == (
         " * a\n   * b\n     {{{#!div\n     ||=1=||=2=||\n     }}}\n * d"
     )
-    assert markdown_to_tracwiki(_md("||1||2||")) == "||=1=||=2=||"
-
-
-def test_write_then_read_gives_markdown_that_is_a_table_in_the_item():
-    md = "- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n- d\n"
-    back = _md(markdown_to_tracwiki(md))
-    assert back == DIV_IN_LIST_MD
-    parse = mistune.create_markdown(
-        renderer=None, plugins=_MISTUNE_PLUGINS
+    assert (
+        markdown_to_tracwiki("| 1 | 2 |\n|---|---|") == "||=1=||=2=||"
     )
-    first_item = parse(back)[0]["children"][0]
-    assert [c["type"] for c in first_item["children"]] == [
-        "block_text",
-        "table",
-    ]
 
 
 # -- Live: the real renderer on /trac_test ----------------------------------
@@ -327,94 +180,30 @@ def test_live_table_renders_inside_the_list_item():
 # -- Review fixes -------------------------------------------------------------
 
 
-def test_inline_braces_on_the_item_line_do_not_hide_the_item():
+def test_inline_braces_on_the_item_line_are_item_text():
     """F1: ` * use {{{foo}}} here` is still the list-marker line. An inline
-    `{{{x}}}` is not a block opener or closer and must not end the walk."""
-    wiki = (
+    `{{{x}}}` is item text, not a block opener or closer."""
+    md = " - use {{{foo}}} here\n   | x |\n   |---|\n   | 1 |\n - b"
+    assert markdown_to_tracwiki(md) == (
         " * use {{{foo}}} here\n   {{{#!div\n   ||=x=||\n   ||1||\n"
         "   }}}\n * b"
     )
-    md = _md(wiki)
-    assert (
-        md
-        == " - use {{{foo}}} here\n   | x |\n   |---|\n   | 1 |\n - b"
-    )
-    assert markdown_to_tracwiki(md) == wiki
 
 
-def test_backticked_closer_in_a_cell_unwraps_and_round_trips():
+def test_backticked_closer_in_a_cell_is_cell_content():
     """F2: measured on Trac, a cell holding `}}}` in a backtick span renders
     correctly inside the div and the list continues; braces inside a row are
     inline content, not the block's closer."""
-    wiki = " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||`}}}`||2||\n   }}}\n * d"
-    md = _md(wiki)
-    assert (
-        md == " - a\n   | x | y |\n   |---|---|\n   | `}}}` | 2 |\n - d"
-    )
-    assert markdown_to_tracwiki(md) == wiki
-
-
-def test_inline_monospace_in_a_cell_unwraps_and_round_trips():
-    """F2: inline `{{{z}}}` in a cell is cell content; the block unwraps and
-    the cell comes back byte-for-byte."""
-    wiki = " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||{{{z}}}||2||\n   }}}\n * d"
-    md = _md(wiki)
-    assert md == (
-        " - a\n   | x | y |\n   |---|---|\n   | {{{z}}} | 2 |\n - d"
-    )
-    assert markdown_to_tracwiki(md) == wiki
-
-
-TWO_TABLES_MD = (
-    "- a\n\n  | x |\n  |---|\n  | 1 |\n\n  | y |\n  |---|\n  | 2 |\n"
-)
-TWO_TABLES_WIKI = (
-    " * a\n   {{{#!div\n   ||=x=||\n   ||1||\n   }}}\n"
-    "   {{{#!div\n   ||=y=||\n   ||2||\n   }}}"
-)
-
-
-def test_adjacent_div_tables_stay_two_tables_on_read_back():
-    """F3: two adjacent divs unwrap to adjacent row groups; without a blank
-    line between them Markdown reads ONE table and demotes `y` to a data row.
-    The blank line carries no indentation."""
-    assert markdown_to_tracwiki(TWO_TABLES_MD) == TWO_TABLES_WIKI
-    md = _md(TWO_TABLES_WIKI)
-    assert md == (
-        " - a\n   | x |\n   |---|\n   | 1 |\n\n   | y |\n   |---|\n   | 2 |"
-    )
-    parse = mistune.create_markdown(
-        renderer=None, plugins=_MISTUNE_PLUGINS
-    )
-    kinds = [c["type"] for c in parse(md)[0]["children"][0]["children"]]
-    assert kinds.count("table") == 2
-
-
-def test_two_tables_round_trip_is_stable_both_ways():
-    wiki = markdown_to_tracwiki(TWO_TABLES_MD)
-    assert markdown_to_tracwiki(_md(wiki)) == wiki
-    md = _md(wiki)
-    assert _md(markdown_to_tracwiki(md)) == md
-
-
-def test_tab_indented_div_in_a_list_item_unwraps():
-    """F7: Trac's tab is 8 columns (_TAB_WIDTH), so a tab-indented block is
-    deeper than a one-space marker. Counting a tab as 1 column made it
-    equal, and the block was fenced instead."""
-    wiki = " * a\n\t{{{#!div\n\t||=x=||\n\t||1||\n\t}}}\n * b"
-    md = _md(wiki)
-    # Rewritten to the item's content column (3 spaces): a tab is 8
-    # columns, which Markdown would read as an indented code block.
-    assert md == " - a\n   | x |\n   |---|\n   | 1 |\n - b"
+    md = " - a\n   | x | y |\n   |---|---|\n   | `}}}` | 2 |\n - d"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   {{{#!div\n   ||=x=||\n   ||1||\n   }}}\n * b"
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||`}}}`||2||\n   }}}\n * d"
     )
 
 
-def test_crlf_rows_are_rows_for_both_passes():
-    """F8: the unwrap and `_convert_tables` share one row pattern. A row
-    ending in `\\r` is a row for `_convert_tables` (`\\s*$`); the unwrap
-    used `[ \\t]*$` and fenced the block instead."""
-    wiki = " * a\n   {{{#!div\n   ||=x=||\r\n   ||1||\r\n   }}}\n * b"
-    md = _md(wiki)
-    assert md == " - a\n   | x |\n   |---|\n   | 1 |\n - b"
+def test_inline_monospace_in_a_cell_is_cell_content():
+    """F2: inline `{{{z}}}` in a cell is cell content; the cell is written
+    byte-for-byte."""
+    md = " - a\n   | x | y |\n   |---|---|\n   | {{{z}}} | 2 |\n - d"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||{{{z}}}||2||\n   }}}\n * d"
+    )

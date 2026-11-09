@@ -1043,6 +1043,33 @@ class TestAutoConvert(unittest.TestCase):
     @patch(
         "trac_mcp_server.detection.capabilities.get_server_capabilities"
     )
+    def test_tracwiki_to_markdown_is_refused(self, _mock_caps):
+        """There is no offline TracWiki -> Markdown conversion (#214): a
+        TracWiki source with a Markdown target is an error naming the
+        converter that does the job from Trac's rendered HTML, not a
+        pass-through."""
+        from trac_mcp_server.converters.common import auto_convert
+
+        for kwargs in (
+            {"target_format": "markdown"},
+            {"target_format": "markdown", "source_format": "tracwiki"},
+        ):
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError) as caught:
+                    self._run(
+                        auto_convert(
+                            "= Heading =\n\nText", MagicMock(), **kwargs
+                        )
+                    )
+                self.assertEqual(
+                    str(caught.exception),
+                    "TracWiki -> Markdown needs Trac's rendered HTML: "
+                    "use trac_html_to_markdown",
+                )
+
+    @patch(
+        "trac_mcp_server.detection.capabilities.get_server_capabilities"
+    )
     def test_auto_detect_without_markdown_processor(self, mock_caps):
         """target_format=None, no markdown processor — target becomes 'tracwiki'."""
         from trac_mcp_server.converters.common import auto_convert

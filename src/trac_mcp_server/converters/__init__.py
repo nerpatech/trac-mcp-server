@@ -16,7 +16,6 @@ from .markdown_to_tracwiki import (
     find_list_item_splits,
     markdown_to_tracwiki,
 )
-from .tracwiki_to_markdown import tracwiki_to_markdown
 
 __all__ = [
     "ConversionResult",
@@ -30,6 +29,5 @@ __all__ = [
     "find_list_item_splits",
     "markdown_to_tracwiki",
     "markdown_to_tracwiki_lang",
-    "tracwiki_to_markdown",
     "tracwiki_to_markdown_lang",
 ]

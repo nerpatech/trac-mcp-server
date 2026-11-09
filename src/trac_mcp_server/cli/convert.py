@@ -781,16 +781,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--unknown-macros",
-        dest="unknown_macros",
-        choices=("preserve", "drop"),
-        default=None,
-        help=(
-            "Deprecated, no effect (Trac renders macros itself);"
-            " removed in #214."
-        ),
-    )
-    parser.add_argument(
         "--trac-url",
         dest="trac_url",
         default=None,
@@ -1030,9 +1020,7 @@ def main(argv: list[str] | None = None) -> int:
     applies to tracwiki→md only, and any other direction prints one
     ``warning:`` line saying it has no effect (a ``--link-map`` value
     with no ``=``, an empty FROM or a repeated FROM is a usage error,
-    exit 2). --unknown-macros is
-    deprecated and has no effect: Trac renders macros itself; passing it
-    prints one ``warning:`` line (removed in #214).
+    exit 2).
 
     Note on verbosity flags: --quiet suppresses warning: lines (but not
     trac-convert: errors). --verbose emits info: diagnostic lines (source
@@ -1049,11 +1037,6 @@ def main(argv: list[str] | None = None) -> int:
             link_map_flag = parse_pairs(args.link_map, "--link-map")
         except ValueError as e:
             parser.error(str(e))
-
-    if args.unknown_macros is not None and not args.quiet:
-        sys.stderr.write(
-            "warning: --unknown-macros is deprecated and has no effect\n"
-        )
 
     # --- --check-trac: early dispatch before conversion validation ---
     if args.check_trac:
