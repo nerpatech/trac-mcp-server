@@ -94,6 +94,7 @@ trac-convert --version
 | `-v, --verbose` | -- | Emit `info:` diagnostics to stderr (mutually exclusive with `-q`) |
 | `-q, --quiet` | -- | Suppress `warning:` lines to stderr (mutually exclusive with `-v`; does NOT suppress `error:` lines) |
 | `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki); to Markdown it translates the page's own rendered HTML, so relative links resolve as Trac resolves them. The page version is read first and the source and the HTML are both read at it, so a save in between cannot pair one version's source with another's HTML; if the version cannot be read, both reads are the latest and a `warning:` line says they were not pinned. Mutually exclusive with `FILE` positional and `--from-clipboard`. |
+| `--force` | -- | Convert Markdown exported from Trac (front matter carrying `trac_page`) to TracWiki anyway, stripping that front matter. Without it, that conversion (`--to tracwiki` or `--to-wiki`) exits `1` with `trac-convert: refusing to convert: this Markdown was exported from Trac page 'P' (instance I, version V) and the export is one-way; edit the page as TracWiki (trac-convert --from-wiki P --to tracwiki), or pass --force` and writes nothing, to Trac or to the output. `--from-wiki PAGE --to md` starts its output (stdout, `-o` or the clipboard) with that front matter; text, file and clipboard input never gets any. See [Format Conversion](format-conversion.md#front-matter-on-an-export) |
 | `--to-wiki PAGE` | -- | Write output to a Trac wiki page (target format is TracWiki). Mutually exclusive with `-o/--output` and `--to-clipboard`. Bypasses the `--to` requirement. |
 | `--wiki-comment MSG` | `Updated via trac-convert` | Change comment recorded on the wiki page when using `--to-wiki`. Ignored without `--to-wiki`. |
 | `--check-trac` | -- | Print resolved Trac config source per field, ping the server, and exit (no conversion performed). |
@@ -163,7 +164,7 @@ Unlike `trac-convert --to-wiki`, which talks XML-RPC to Trac directly with local
 ### Usage
 
 ```bash
-trac-mcp wiki-push PAGE FILE [--format auto|markdown|tracwiki] [--comment TEXT] [--keep-frontmatter]
+trac-mcp wiki-push PAGE FILE [--format auto|markdown|tracwiki] [--comment TEXT] [--keep-frontmatter] [--force]
 trac-mcp wiki-pull PAGE FILE [--format markdown|html|tracwiki] [--page-version N] [--link-map FROM=TO ...]
 trac-mcp attach-put (--ticket N | --page PAGE) FILE [--filename NAME] [--description TEXT] [--replace]
 trac-mcp attach-get (--ticket N | --page PAGE) NAME FILE
@@ -184,6 +185,8 @@ The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and s
 `wiki-push` exits **4**, not 1, when the page was stored but its new version could not be read back afterwards (the server reports `readback_failed`): do not retry the push. Exit 1 means nothing was stored.
 
 When the server reports `possible_overwrite` (the page was updated but reads back as a version other than the one after the version the push was based on, so another write most likely landed just before it and was replaced), `wiki-push` prints a `trac-mcp: warning: possible overwrite ...` line on stderr naming the versions in between, and still exits **0**: the page was stored, and a non-zero code would invite a retry that writes it again. Inspect those versions with the `wiki_diff` tool.
+
+`wiki-pull` writes what the tool returns, so a Markdown pull starts with YAML front matter (`title`, `source`, `trac_instance`, `trac_page`, `trac_version`, `exported`; see [Format Conversion](format-conversion.md#front-matter-on-an-export)). `wiki-push` of that text is refused by the server (a `validation_error`, exit 1, nothing stored) unless you pass `--force`, which is sent as `force: true` (only when given). Against a daemon that predates the guard `--force` fails with `the server does not know --force: it predates the exported-Markdown guard ...` (exit 1): such a daemon does not refuse the push either, so deploy it or push without `--force`. Deleting the front matter by hand defeats the guard; that is accepted.
 
 `wiki-pull` prints each warning the server returns for the pull (what the Markdown translation passed through as HTML or dropped, or that the page version could not be read so the reads were not pinned to one version) as a `trac-mcp: warning: ...` line on stderr after writing the file, and still exits **0**.
 

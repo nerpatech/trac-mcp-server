@@ -80,13 +80,73 @@ macros, nested lists, tables and links come out as Trac itself reads them.
   paired with the `{{{#!lang` opener of the TracWiki source and fenced with
   that language.
 - The result is a one-way export for reading. It is not meant to be pushed
-  back: a Markdown file pulled this way is Trac's rendering, not the source.
-  Pull `format="tracwiki"` for source that round-trips.
+  back: a Markdown file pulled this way is Trac's rendering, not the source,
+  and its front matter makes the guarded push paths refuse it (see below). Pull
+  `format="tracwiki"` for source that round-trips.
 - Warnings the translator raises (a dropped table of contents, a table
   passed through as HTML, a list style Markdown cannot express) are listed
   in the text block of the `wiki_file_pull` result and in
   `structuredContent.warnings`, and as `warning:` lines on stderr from
   `trac-convert`.
+
+### Front matter on an export
+
+Every Markdown export of a Trac page starts with a YAML front matter block
+(Trac /trac_mcp_server #212): `wiki_file_pull` with `format="markdown"`
+(inline or to a file), `trac-mcp wiki-pull`, and `trac-convert --from-wiki
+PAGE --to md` (to stdout, `-o` or the clipboard). Text, file and clipboard
+input to `trac-convert` never gets one -- there is no page to name.
+
+```yaml
+---
+title: "Blog Post"
+source: "http://host/proj/wiki/Blog/Post"
+trac_instance: "/proj"
+trac_page: "Blog/Post"
+trac_version: 7
+exported: "2026-11-09T12:00:00Z"
+---
+```
+
+| Field | Where the value comes from |
+|-------|----------------------------|
+| `title` | The text of the first `h1` of Trac's HTML, without Trac's anchor and icon marks, whitespace collapsed; the page name when there is no `h1` |
+| `source` | The page's own URL, `<trac_url>/wiki/<page>`, with the page name percent-encoded (`Notes/Q3 #2` is `Notes/Q3%20%232`) |
+| `trac_instance` | The path of the Trac URL (`/proj` for `http://host/proj`, `/` for a URL with no path) |
+| `trac_page` | The page name as asked for |
+| `trac_version` | The version the source and the HTML were read at; `null` when it could not be read and none was requested |
+| `exported` | The UTC time of the export, `YYYY-MM-DDTHH:MM:SSZ` |
+
+Strings are written as JSON strings, which are valid YAML double-quoted
+scalars, so a title with a colon, a quote or non-ASCII text parses back
+exactly (non-ASCII is written as is; the few characters YAML cannot carry
+raw, such as DEL, the C1 controls and U+2028, are written as `\uXXXX`).
+
+**It is a guard.** The export is one-way, so the guarded paths --
+`wiki_file_push`, `trac-mcp wiki-push` and `trac-convert` to TracWiki --
+refuse Markdown whose front matter is a YAML mapping carrying a non-empty
+`trac_page`, unless forced:
+
+- `wiki_file_push` returns a `validation_error` naming the page, instance
+  and version, and stores nothing; `force=true` overrides it (a client
+  that predates the guard has no `force` and does not refuse either).
+  `trac-mcp wiki-push` takes `--force`.
+- `trac-convert` exits `1` with one `trac-convert: refusing to convert: ...`
+  line on stderr when Markdown with that front matter is converted to
+  TracWiki (`--to tracwiki`, or `--to-wiki`, which writes nothing to Trac);
+  `--force` strips the front matter and converts the rest. Converting to
+  Markdown, or Markdown with front matter that has no `trac_page`, is
+  untouched.
+
+Edit such a page as TracWiki instead (`wiki_get`, `trac-mcp wiki-pull
+PAGE FILE --format tracwiki`, `trac-convert --from-wiki PAGE --to
+tracwiki`). The guard is for the accidental pull-edit-push loop, not for a
+determined user: deleting the front matter by hand defeats it, and that is
+accepted. Connected MCP sessions keep the old `wiki_file_push` schema (no
+`force`) until they reconnect. `wiki_update` and `wiki_create` store their
+content verbatim as TracWiki and do not check front matter (they never
+convert, so they cannot re-shape a page; Markdown written there is stored
+as literal text).
 
 `tracwiki_to_markdown` (the old regex converter) is no longer called by
 either; it is removed in #214. The description of its behaviour in the

@@ -256,6 +256,9 @@ class ConversionResult:
         target_format: Format of output text ('markdown' or 'tracwiki')
         converted: True if conversion performed, False if pass-through (formats matched)
         warnings: List of warnings about lossy conversions or unsupported features
+        title: The page title (the text of the first ``h1``) of a
+            conversion from Trac's HTML; None when there is none or the
+            conversion does not read one
     """
 
     text: str
@@ -263,6 +266,7 @@ class ConversionResult:
     target_format: str = "unknown"
     converted: bool = False
     warnings: list[str] = field(default_factory=list)
+    title: str | None = None
 
     # Backward compatibility: tracwiki property returns text
     @property

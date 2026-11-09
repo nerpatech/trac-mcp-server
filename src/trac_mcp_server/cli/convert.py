@@ -14,6 +14,7 @@ verbosity flags (--quiet, --verbose) on top of this skeleton.
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,13 @@ from ..converters.common import (
     ConversionResult,
     describe_indentation_loss,
     find_code_block_indentation_loss,
+)
+from ..converters.front_matter import (
+    build_front_matter,
+    exported_from,
+    instance_path,
+    page_url,
+    split_front_matter,
 )
 from ..converters.html_to_markdown import trac_html_to_markdown
 from ..converters.markdown_to_tracwiki import convert_with_warnings
@@ -835,6 +843,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        help=(
+            "Convert Markdown exported from Trac (front matter carrying "
+            "trac_page) to TracWiki anyway, stripping that front matter"
+        ),
+    )
+    parser.add_argument(
         "--to-wiki",
         dest="to_wiki",
         default=None,
@@ -1180,10 +1197,39 @@ def main(argv: list[str] | None = None) -> int:
     else:
         text = sys.stdin.read()
 
+    # The input as read; --force below replaces ``text`` with the part
+    # after the front matter, but "read N bytes" counts what was read.
+    bytes_read = len(text.encode("utf-8"))
+
     # --- --to-wiki authoritatively knows the target is TracWiki;
     # silently override --to (which may be None or 'md'). ---
     if args.to_wiki is not None:
         args.target_format = "tracwiki"
+
+    # --- Ticket #212: the Markdown export is one-way. Converting text
+    # whose front matter says it came from a Trac page back to TracWiki
+    # (to stdout, a file, the clipboard or --to-wiki) would re-shape the
+    # page, so it is refused before anything is converted or written,
+    # unless forced, which drops that front matter and converts the rest.
+    if args.from_wiki is None and args.target_format == "tracwiki":
+        exported = exported_from(text)
+        if exported:
+            if not args.force:
+                instance = exported.get("trac_instance") or "unknown"
+                version = exported.get("trac_version")
+                if version is None:
+                    version = "unknown"
+                page = exported["trac_page"]
+                sys.stderr.write(
+                    "trac-convert: refusing to convert: this Markdown was "
+                    f"exported from Trac page '{page}' (instance "
+                    f"{instance}, version {version}) and the export is "
+                    "one-way; edit the page as TracWiki (trac-convert "
+                    f"--from-wiki {shlex.quote(page)} --to tracwiki), or pass"
+                    " --force\n"
+                )
+                return EXIT_RUNTIME_ERROR
+            text = split_front_matter(text)[1]
 
     # --- convert ---
     # Translate --heading-anchors on|off to bool before forwarding.
@@ -1233,6 +1279,25 @@ def main(argv: list[str] | None = None) -> int:
             result, warnings=[*session.warnings, *result.warnings]
         )
 
+    # Ticket #212: a Markdown export of a page names the page it came
+    # from, which is what a later push or conversion refuses it by.
+    if (
+        args.from_wiki is not None
+        and result.converted
+        and result.target_format == "markdown"
+    ):
+        result = replace(
+            result,
+            text=build_front_matter(
+                title=result.title or args.from_wiki,
+                source=page_url(session.url, args.from_wiki),
+                trac_instance=instance_path(session.url),
+                trac_page=args.from_wiki,
+                trac_version=session.page_version,
+            )
+            + result.text,
+        )
+
     # --- write output ---
     if args.to_wiki is not None:
         info, write_rc = _put_wiki_page(
@@ -1280,9 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"info: source format: {result.source_format}\n"
         )
-        sys.stderr.write(
-            f"info: read {len(text.encode('utf-8'))} bytes\n"
-        )
+        sys.stderr.write(f"info: read {bytes_read} bytes\n")
         if args.to_wiki is None:
             sys.stderr.write(
                 f"info: wrote {len(result.text.encode('utf-8'))} bytes\n"

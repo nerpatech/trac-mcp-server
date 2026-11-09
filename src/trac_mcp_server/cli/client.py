@@ -632,6 +632,18 @@ def _refuses_format_html(text: str) -> bool:
     return "'html'" in lowered and "not one of" in lowered
 
 
+def _refuses_force(text: str) -> bool:
+    """Whether an error result is the input schema refusing the ``force``
+    argument, as a server that predates #212 does (its strict schema
+    allows no extra property: ``('force' was unexpected)``). The quoted
+    name is matched, not the bare word: an unrelated error that says
+    "enforced" is not this."""
+    lowered = text.lower()
+    return "'force'" in lowered and (
+        "additional properties" in lowered or "unexpected" in lowered
+    )
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -666,12 +678,26 @@ async def _run(
             arguments["comment"] = args.comment
         if args.target_cap is not None:
             arguments["target_cap"] = args.target_cap
+        if args.force:
+            arguments["force"] = True
         result = await call_tool(
             url,
             token,
             "wiki_file_push",
             _with_instance(args, arguments),
         )
+        if (
+            result.isError
+            and args.force
+            and _refuses_force(_result_text(result))
+        ):
+            raise CliError(
+                "the server does not know --force: it predates the "
+                "exported-Markdown guard (Trac /trac_mcp_server #212) and "
+                "does not refuse such a push either. Deploy it, or push "
+                "without --force",
+                EXIT_TOOL_ERROR,
+            )
         rc = _report(result)
         if rc == EXIT_OK and _sc(result).get("readback_failed"):
             # Stored, but the new version could not be read back (Trac
@@ -916,6 +942,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-cap",
         type=int,
         help="Max cross-instance link targets the write gate probes",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Push even if the file is Markdown exported from Trac "
+            "(front matter carrying trac_page)"
+        ),
     )
 
     p = sub.add_parser(
