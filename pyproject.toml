@@ -37,6 +37,8 @@ dependencies = [
     "pyperclip>=1.8.2",
     "starlette>=0.40.0",
     "uvicorn>=0.30.0",
+    "markdownify>=1.2",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +47,8 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-ruff>=0.5.0",
     "pyinstaller>=6.0.0",
+    # The HTML -> Markdown self-check renders the emitted Markdown (#209).
+    "markdown-it-py>=3.0",
     # Exact: CI installs the newest release that matches, and two ruff
     # versions can format the same line differently (Trac #184).
     "ruff==0.17.4",
@@ -87,6 +91,9 @@ select = [
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+# The golden Markdown files are the converter's exact output, Python code
+# blocks included; ruff would reformat those blocks (Trac #209).
+exclude = ["tests/fixtures/trac_html/*.golden.md"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]  # Allow assert True/False in tests

@@ -1,0 +1,20 @@
+# The humidity that was always exactly zero
+
+[#17](https://trac.example.org/bcs/ticket/17) | b-node 4.0.0 (`main/sensor_bme280.c`) | 2026-08-12 \
+Angle: a transcription of Bosch's nested BME280 humidity expression kept every number and every paren balanced and still moved one `>> 14`, so the clamp floored it to 0.0%.
+
+- Reference: one nested C expression per channel; the humidity one ends `... * ((int32_t)dig_H2) + 8192) >> 14))` inside `termA * (termB >> 14)`.
+- Transcription kept the shape (one expression, same nesting, `h->digH6` for `dig_H6`, `int32_t const` locals for Bosch's mutable `v_x1_u32r`), compiled, and diffed identical by eye.
+- Defect: the `>> 14` closed over the whole statement instead of `termB` alone; C's `*` binds tighter than `>>`, so it parsed as `(termA * termB) >> 14`, a different value whenever `termB` is not a multiple of 2<sup>14, which is always.</sup>
+- Not visible by reading: both versions are pristine C with balanced parens; a script counting paren depth is what confirmed it.
+- Symptom on node-b: humidity a boring 0.0%, because the formula's own clamp (`v = v < 0 ? 0 : v`) floored the malformed intermediate; no crash, no sentinel.
+- Temperature (\~24 C) and pressure (\~832 hPa) were right from the first boot, which made it look like a config or wiring problem isolated to one channel.
+- Wrong hypothesis, kept: that BME280 humidity was another case of the DHT22's stuck \~1.0% RH ([#15](https://trac.example.org/bcs/ticket/15)); the BME280 had been added partly to cross-check that bug, and its own 0.0% was a second, unrelated bug in the same session.
+- Unrelated confirmed: temperature and pressure share every line downstream of the I2C read except the compensation math.
+- What caught it: breathing on the sensor; MQTT held at 0.0% through a direct breath test, so a calibration offset (which would still move, just wrong) was out and something was structurally clamping.
+- From there to `bme280CompensateH()` and the five-line Python depth-counter took a few minutes.
+- Fix: split into named terms at the points the reference itself groups: `termA = (((adcH << 14) - ((int32_t)h->digH4 << 20) - ((int32_t)h->digH5 * v)) + 16384) >> 15;` `termB = ((((((v * (int32_t)h->digH6) >> 10) * (((v * (int32_t)h->digH3) >> 11) + 32768)) >> 10) + 2097152) * (int32_t)h->digH2 + 8192) >> 14;` `v = termA * termB;`.
+- Two lines and a comment, and `termB`'s `>> 14` can no longer re-associate with anything; keeping the reference's one-line nesting looked most faithful and was the riskiest.
+- Pure integer math with no I2C calls, so a host test with Bosch's datasheet worked examples would have caught it without hardware; it shipped without one.
+- Resolved (checked 2026-10-12): no host test exists for `bme280CompensateT/P/H()`; `test/` has none, and `git log -S bme280CompensateH` shows only `4f0a610` (4.0.0).
+- Sibling piece, the same session's wire-level check: [scope-verification-vs-plausible-mqtt](https://trac.example.org/bcs/wiki/b-node/blog/scope-verification-vs-plausible-mqtt).

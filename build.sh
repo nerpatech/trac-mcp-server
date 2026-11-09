@@ -43,6 +43,7 @@ HIDDEN_IMPORTS=(
     trac_mcp_server.converters.common
     trac_mcp_server.converters.tracwiki_to_markdown
     trac_mcp_server.converters.markdown_to_tracwiki
+    trac_mcp_server.converters.html_to_markdown
 
     # detection/ subpackage
     trac_mcp_server.detection
@@ -73,6 +74,14 @@ HIDDEN_IMPORTS=(
     mistune
     lxml
     cssselect
+    # html_to_markdown: markdownify parses through bs4's lxml builder.
+    # bs4 registers its builders in try/except imports; naming them
+    # keeps the bundle from depending on the analysis following those.
+    markdownify
+    bs4
+    bs4.builder._lxml
+    soupsieve
+    six
     urllib3
     charset_normalizer
     mcp
