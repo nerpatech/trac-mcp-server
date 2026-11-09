@@ -22,11 +22,11 @@ from ...converters.common import (
     detect_format_heuristic,
     find_code_block_indentation_loss,
 )
+from ...converters.html_to_markdown import trac_html_to_markdown
 from ...converters.markdown_to_tracwiki import (
     describe_list_item_split,
     find_list_item_splits,
 )
-from ...converters.tracwiki_to_markdown import tracwiki_to_markdown
 from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
@@ -138,6 +138,11 @@ WIKI_FILE_TOOLS = [
         name="wiki_file_pull",
         description=(
             "Pull a Trac wiki page, converted to the requested format. "
+            "Markdown is Trac's own rendered HTML for the page "
+            "translated to Markdown: a one-way export, not meant to be "
+            'pushed back. format="tracwiki" returns the '
+            "stored source verbatim. Translator warnings come back in "
+            "structuredContent.warnings (always a list). "
             "Where the server's file_access is 'off' (the http default) "
             "the text comes back in structuredContent.content and a "
             "file_path is refused; where it is 'local', file_path (a path "
@@ -553,9 +558,10 @@ async def _handle_pull(
 ) -> types.CallToolResult:
     """Handle wiki_file_pull.
 
-    Fetches a wiki page from Trac, optionally converts from TracWiki to
-    Markdown, and returns the text inline or, where file_access is
-    ``local``, writes it to a server-side file.
+    Fetches a wiki page from Trac and returns it as TracWiki source or,
+    for Markdown, as Trac's own rendered HTML translated to Markdown
+    (Trac /trac_mcp_server #210). The text is returned inline or, where
+    file_access is ``local``, written to a server-side file.
     """
     page_name = args.get("page_name")
     file_path = args.get("file_path")
@@ -573,36 +579,56 @@ async def _handle_pull(
     fmt = args.get("format", "markdown")
     version = args.get("version")
 
-    # Fetch page from Trac (client already provided)
-
-    try:
-        content = await run_sync(
-            client.get_wiki_page, page_name, version
+    def _not_found() -> types.CallToolResult:
+        return build_error_response(
+            "not_found",
+            f"Wiki page '{page_name}' does not exist",
+            "Use wiki_search to find available pages.",
         )
+
+    converted = False
+    warnings: list[str] = []
+    try:
+        if fmt == "markdown":
+            # Read the version first and fetch the source and the HTML
+            # *at that version*: without it, an edit landing between the
+            # two reads would pair the HTML with another version's source.
+            info = await run_sync(
+                client.get_wiki_page_info, page_name, version
+            )
+            pinned = (
+                info.get("version")
+                if isinstance(info, dict) and info
+                else None
+            ) or version
+            content = await run_sync(
+                client.get_wiki_page, page_name, pinned
+            )
+            html = await run_sync(
+                client.get_wiki_page_html, page_name, pinned
+            )
+            conversion = trac_html_to_markdown(html, content)
+            output_content = conversion.text
+            converted = conversion.converted
+            warnings = list(conversion.warnings)
+        else:
+            # tracwiki: the stored source, unchanged; no HTML read.
+            content = await run_sync(
+                client.get_wiki_page, page_name, version
+            )
+            info = await run_sync(
+                client.get_wiki_page_info, page_name, version
+            )
+            output_content = content
     except xmlrpc.client.Fault as e:
         if classify_fault(e) == "not_found":
-            return build_error_response(
-                "not_found",
-                f"Wiki page '{page_name}' does not exist",
-                "Use wiki_search to find available pages.",
-            )
+            return _not_found()
         raise  # re-raise other faults for outer handler
 
-    info = await run_sync(client.get_wiki_page_info, page_name, version)
     # Handle falsy/non-dict return from some Trac instances
     actual_version = (
         info.get("version", 1) if isinstance(info, dict) and info else 1
     )
-
-    # Convert format
-    converted = False
-    if fmt == "markdown":
-        conversion = tracwiki_to_markdown(content)
-        output_content = conversion.text
-        converted = conversion.converted
-    else:
-        # tracwiki — pass through unchanged
-        output_content = content
 
     encoded = output_content.encode("utf-8")
     structured: dict[str, Any] = {
@@ -610,6 +636,7 @@ async def _handle_pull(
         "format": fmt,
         "version": actual_version,
         "converted": converted,
+        "warnings": warnings,
     }
     delivered = await deliver_output(
         args, "file_path", encoded, text=output_content
@@ -627,6 +654,10 @@ async def _handle_pull(
             f"Pulled wiki page '{page_name}' (version {actual_version}, "
             f"{len(encoded)} bytes, format={fmt}); the text is in "
             "structuredContent.content"
+        )
+    if warnings:
+        text += "\n\nConversion warnings:\n" + "\n".join(
+            f"- {w}" for w in warnings
         )
 
     return types.CallToolResult(

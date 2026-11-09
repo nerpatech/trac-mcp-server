@@ -62,7 +62,7 @@ The `trac-mcp-server` command is registered as an entry point in `pyproject.toml
 
 ## trac-convert
 
-The `trac-convert` command is a standalone binary that converts between TracWiki and Markdown formats. It is designed for interactive shell use and Unix pipe composition. Most operations work without a Trac connection; `--from-wiki`, `--to-wiki`, and `--check-trac` connect to a live Trac instance using the same credentials and config precedence as `trac-mcp-server`.
+The `trac-convert` command is a standalone binary that converts between TracWiki and Markdown formats. It is designed for interactive shell use and Unix pipe composition. Markdown -> TracWiki works without a Trac connection. TracWiki -> Markdown does not: Trac renders the text and `trac-convert` translates the HTML it returns (Trac /trac_mcp_server #210), so it connects to a live Trac instance, as do `--from-wiki`, `--to-wiki`, and `--check-trac`, using the same credentials and config precedence as `trac-mcp-server`. With no Trac configured, TracWiki -> Markdown exits `4` and writes nothing to stdout.
 
 ### Usage
 
@@ -89,10 +89,10 @@ trac-convert --version
 | `--from-clipboard` | -- | Read input from system clipboard instead of stdin/file. On Linux, requires one of `wl-clipboard`, `xclip`, or `xsel` to be installed (tried in that order, based on `$WAYLAND_DISPLAY` / `$DISPLAY`); falls back to `pyperclip`. On headless terminals without a clipboard tool, use `--from-file PATH` or pipe input on stdin instead. |
 | `--to-clipboard` | -- | Write output to system clipboard instead of stdout/file. Same Linux tool requirement as `--from-clipboard`. |
 | `--heading-anchors {on,off}` | `on` | md→tracwiki only: emit explicit `#slug` anchors on TracWiki headings (silently ignored in tw→md direction) |
-| `--unknown-macros {bracket,preserve,drop}` | `bracket` | tw→md only: how to render unknown TracWiki macros — `bracket` = `[MACRO: Name]`, `preserve` = leave `[[Name]]` literal, `drop` = omit (silently ignored in md→tw direction) |
+| `--unknown-macros {preserve,drop}` | -- | **Deprecated, no effect** (Trac renders macros itself); removed in #214. Passing it prints one `warning: --unknown-macros is deprecated and has no effect` line on stderr unless `-q` is set. |
 | `-v, --verbose` | -- | Emit `info:` diagnostics to stderr (mutually exclusive with `-q`) |
 | `-q, --quiet` | -- | Suppress `warning:` lines to stderr (mutually exclusive with `-v`; does NOT suppress `error:` lines) |
-| `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki). Mutually exclusive with `FILE` positional and `--from-clipboard`. |
+| `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki); to Markdown it translates the page's own rendered HTML, so relative links resolve as Trac resolves them. Mutually exclusive with `FILE` positional and `--from-clipboard`. |
 | `--to-wiki PAGE` | -- | Write output to a Trac wiki page (target format is TracWiki). Mutually exclusive with `-o/--output` and `--to-clipboard`. Bypasses the `--to` requirement. |
 | `--wiki-comment MSG` | `Updated via trac-convert` | Change comment recorded on the wiki page when using `--to-wiki`. Ignored without `--to-wiki`. |
 | `--check-trac` | -- | Print resolved Trac config source per field, ping the server, and exit (no conversion performed). |
@@ -110,12 +110,12 @@ trac-convert --version
 | `1` | Runtime error (I/O failure, clipboard unavailable, mutually-exclusive flag conflict) |
 | `2` | Usage error (argparse-emitted: missing required flag, bad choice) |
 | `3` | Conversion error (exception raised inside the converter) |
-| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, and `--to-wiki`. With `--to-wiki`, nothing was stored. |
+| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, `--to-wiki`, and the rendering step of TracWiki -> Markdown. TracWiki -> Markdown with no Trac configured also exits `4`: the message says to set `TRAC_URL`, `TRAC_USERNAME`, `TRAC_PASSWORD` (or `.trac_mcp/config.yaml`) or pass `--trac-url`, and nothing is written to stdout. With `--to-wiki`, nothing was stored. |
 | `5` | `--to-wiki` stored the page, but reading back its new version failed. The message on stderr says the page WAS stored; do not retry the write. |
 
 ### Auto-detection
 
-When `--from auto` is used (the default when omitted), the format is detected via `converters.common.detect_format`: TracWiki markers (`{{{`, `[[`, `= Heading =`) win, otherwise Markdown is assumed. On ambiguous input, prefer the explicit `--from` flag.
+When `--from auto` is used (the default when omitted), the format is detected via `converters.common.detect_format`: TracWiki markers (`{{{`, `[[`, `= Heading =`) win, otherwise Markdown is assumed. On ambiguous input, prefer the explicit `--from` flag. Detection runs before Trac is contacted, so input that resolves to Markdown never needs a connection.
 
 ### Trac Wiki I/O
 
@@ -137,7 +137,7 @@ trac-convert --from-wiki MyPage --to md -o my-page.md
 trac-convert --from-file my-page.md --to-wiki MyPage
 ```
 
-On failure, `trac-convert` exits with code `4` and writes a classified error message (page-not-found, permission-denied, timeout, SSL, connection, generic) to stderr. See [Configuration](configuration.md) for the full auth and config precedence rules.
+On failure, `trac-convert` exits with code `4` and writes a classified error message (page-not-found, permission-denied, timeout, SSL, connection, generic) to stderr; a failed render of TracWiki -> Markdown is reported the same way, with the action `wiki render`. See [Configuration](configuration.md) for the full auth and config precedence rules.
 
 ### Installation
 

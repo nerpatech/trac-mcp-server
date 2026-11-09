@@ -20,7 +20,7 @@ and still maintained. They are reached from three places:
 
 | Consumer | What it converts |
 |----------|------------------|
-| `trac-convert` (standalone binary) | Either direction, on files or stdin |
+| `trac-convert` (standalone binary) | Markdown -> TracWiki offline; TracWiki -> Markdown through Trac's rendered HTML (needs a Trac connection) |
 | `convert_preview` (MCP tool) | Markdown -> TracWiki, without writing |
 | `wiki_file_push` / `wiki_file_pull` | Markdown <-> TracWiki, driven by the file's extension |
 
@@ -37,7 +37,7 @@ on, which the inline tools do not.
 | `ticket_get` / `ticket_changelog` | TracWiki | TracWiki | **None** -- returned byte-for-byte |
 | `milestone_*` | TracWiki | TracWiki | **None** -- byte-for-byte both ways |
 | `wiki_file_push` | Markdown or TracWiki | TracWiki | Converts when the source is Markdown |
-| `wiki_file_pull` | TracWiki | Markdown or TracWiki | Converts when the target is Markdown |
+| `wiki_file_pull` | TracWiki | Markdown or TracWiki | For Markdown, Trac's rendered HTML for the page, translated: a one-way export (see below) |
 | `convert_preview` | Markdown | TracWiki | Converts, without writing anything |
 
 ## Holding Markdown?
@@ -60,6 +60,38 @@ extension:
   }
 }
 ```
+
+## TracWiki to Markdown: Trac's own HTML
+
+Since Trac /trac_mcp_server #210, TracWiki -> Markdown is not a text
+conversion. Trac renders the page (or the text) to HTML and the
+translator (`trac_html_to_markdown`) turns that HTML into Markdown, so
+macros, nested lists, tables and links come out as Trac itself reads them.
+
+- **`wiki_file_pull`** with `format="markdown"` reads the page's version
+  first, then the source and the HTML *at that version*, so an edit landing
+  between the reads cannot pair one version's HTML with another's source.
+- **`trac-convert`** asks Trac to render the input (`wiki.wikiToHtml`) for
+  files, stdin and the clipboard; for `--from-wiki PAGE` it uses the page's
+  own HTML (`wiki.getPageHTML`), so relative links resolve. It needs a
+  Trac connection: with none configured it exits `4`. Markdown -> TracWiki
+  stays offline.
+- Trac's HTML does not say which language a code block was, so each block is
+  paired with the `{{{#!lang` opener of the TracWiki source and fenced with
+  that language.
+- The result is a one-way export for reading. It is not meant to be pushed
+  back: a Markdown file pulled this way is Trac's rendering, not the source.
+  Pull `format="tracwiki"` for source that round-trips.
+- Warnings the translator raises (a dropped table of contents, a table
+  passed through as HTML, a list style Markdown cannot express) are listed
+  in the text block of the `wiki_file_pull` result and in
+  `structuredContent.warnings`, and as `warning:` lines on stderr from
+  `trac-convert`.
+
+`tracwiki_to_markdown` (the old regex converter) is no longer called by
+either; it is removed in #214. The description of its behaviour in the
+"Markup Conversion Examples" below applies to the Markdown -> TracWiki
+direction only.
 
 ## ConversionResult Structure
 
@@ -95,20 +127,12 @@ The converter detects potentially lossy conversions and returns warnings:
 - HTML tags (may not render correctly)
 - TOC macros (use `[[PageOutline]]` instead)
 
-**TracWiki to Markdown:**
-- Unknown macros (preserved as `[MACRO: Name]` notation) -- only genuine
-  macro names (a fixed allowlist of Trac's built-ins, e.g. `TOC`,
-  `PageOutline`, `RecentChanges`) or `[[Name(args)]]` forms carrying explicit
-  arguments are treated as macros. A bare `[[PageName]]` or
-  `[[PageName|Label]]` is a WikiLink and converts to a real Markdown link
-  instead (see Links below) -- unrecognized macro names from third-party
-  plugins that take no arguments will be misread as links, since the
-  converter has no access to the live Trac instance's macro registry.
-- Definition lists (converted to bold text)
-- Table cell spanning (merged into single cell)
-- Multi-line table rows (joined into single line)
-- Processor-based table cells (converted to plain text)
-- TracLinks (preserved but not clickable)
+**TracWiki to Markdown:** the translator's warnings name every lossy
+mapping, each once (Trac #209). They are not a fixed list: anything it does
+not cover passes through as HTML with a warning that names it, so nothing is
+lost silently. Examples: a dropped table of contents, a table with
+`colspan`/`rowspan` cells, a lettered list exported as a numbered list,
+code blocks with no matching source block.
 
 ## Markup Conversion Examples
 

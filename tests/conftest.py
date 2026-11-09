@@ -83,6 +83,49 @@ def mock_config():
 
 
 @pytest.fixture
+def no_trac_configured(monkeypatch, tmp_path):
+    """Run as if no Trac were configured anywhere (Trac #210).
+
+    TracWiki -> Markdown renders through Trac, so what it does with no
+    Trac configured is a behaviour of its own. Clears the env vars,
+    points HOME and the CWD at an empty directory (no
+    ``.trac_mcp/config.yaml``, project or global) and leaves ``.env``
+    disabled, as every offline run does.
+    """
+    for var in (
+        "TRAC_URL",
+        "TRAC_USERNAME",
+        "TRAC_PASSWORD",
+        "TRAC_MCP_CONFIG",
+        "TRAC_ASSIST_CONFIG",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture
+def fake_trac(monkeypatch):
+    """Trac is configured and ``trac-convert`` talks to a fake client.
+
+    Returns the fake (a ``MagicMock(spec=TracClient)``): set
+    ``fake.wiki_to_html.return_value`` or
+    ``fake.get_wiki_page_html.return_value`` to the HTML Trac would
+    render, and ``fake.get_wiki_page.return_value`` to a page's source.
+    """
+    from trac_mcp_server.core.client import TracClient
+
+    monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+    monkeypatch.setenv("TRAC_USERNAME", "testuser")
+    monkeypatch.setenv("TRAC_PASSWORD", "testpass")
+    fake = MagicMock(spec=TracClient)
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient", lambda _config: fake
+    )
+    return fake
+
+
+@pytest.fixture
 def mock_trac_client(mock_config):
     """Create a mock TracClient instance for testing."""
     from trac_mcp_server.core.client import TracClient

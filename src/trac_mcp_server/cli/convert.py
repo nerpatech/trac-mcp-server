@@ -17,21 +17,21 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pyperclip
 
 from .. import __version__
 from ..config_bootstrap import bootstrap_config
-from ..converters import (
-    detect_format_heuristic,
-    tracwiki_to_markdown,
-)
+from ..converters import detect_format_heuristic
 from ..converters.common import (
     ConversionResult,
     describe_indentation_loss,
     find_code_block_indentation_loss,
 )
+from ..converters.html_to_markdown import trac_html_to_markdown
 from ..converters.markdown_to_tracwiki import convert_with_warnings
 from ..core.client import TracClient, WikiPageStoredReadbackFailed
 
@@ -320,39 +320,127 @@ def _classify_trac_error(
     return f"{action} failed: {str(exc) or type(exc).__name__}"
 
 
-def _fetch_wiki_page(page_name: str, args) -> tuple[str | None, int]:
+#: What TracWiki -> Markdown says when it has no Trac to render with.
+_TRAC_REQUIRED_MESSAGE = (
+    "TracWiki -> Markdown needs a Trac connection: Trac renders the text"
+    " and trac-convert translates its HTML. Set TRAC_URL, TRAC_USERNAME,"
+    " TRAC_PASSWORD (or .trac_mcp/config.yaml), or pass --trac-url."
+    " Markdown -> TracWiki works offline."
+)
+
+
+class TracConnectionRequired(RuntimeError):
+    """TracWiki -> Markdown was asked for with no Trac to render it.
+
+    Trac's own HTML is what trac-convert translates (Trac
+    /trac_mcp_server #210), so this direction cannot run offline.
+    """
+
+
+class TracRenderError(RuntimeError):
+    """Trac was reached but rendering failed.
+
+    ``str(exc)`` is the ``_classify_trac_error`` message; it is empty
+    when the cause was already reported on stderr (an unreadable
+    ``--trac-password-file``).
+    """
+
+
+class _TracSession:
+    """The TracClient for one trac-convert run, opened on first use.
+
+    ``--from auto`` has to resolve before anyone knows whether Trac is
+    needed, and Markdown -> TracWiki never needs it, so nothing here
+    bootstraps config or builds a client until ``client()`` is called.
+    """
+
+    def __init__(self, args) -> None:
+        self._args = args
+        self._client: TracClient | None = None
+        self.url: str = ""
+
+    def client(self) -> TracClient:
+        """Return the client, opening it on the first call.
+
+        Raises ``TracConnectionRequired`` when no Trac is configured and
+        ``TracRenderError("")`` when ``--trac-password-file`` could not
+        be read (already reported on stderr).
+        """
+        if self._client is None:
+            overrides = _build_trac_overrides(self._args)
+            if overrides is None:
+                raise TracRenderError("")
+            try:
+                config, _ = bootstrap_config(overrides)
+            except ValueError:
+                raise TracConnectionRequired(
+                    _TRAC_REQUIRED_MESSAGE
+                ) from None
+            self.url = config.trac_url
+            self._client = TracClient(config)
+        return self._client
+
+    def _render(self, call: Callable[[TracClient], str]) -> str:
+        client = self.client()
+        try:
+            return call(client)
+        except Exception as e:
+            raise TracRenderError(
+                _classify_trac_error(e, self.url, action="wiki render")
+            ) from e
+
+    def render_text(self, text: str) -> str:
+        """Trac's HTML for ``text`` (file, stdin, clipboard input)."""
+        return self._render(lambda client: client.wiki_to_html(text))
+
+    def page_renderer(self, page_name: str) -> Callable[[str], str]:
+        """A renderer returning the HTML of wiki page ``page_name``.
+
+        ``--from-wiki``: the page renders with its own context, so
+        relative links resolve; the text passed in is the page's source,
+        which ``convert_text`` hands the translator for its code-block
+        languages.
+        """
+        return lambda _text: self._render(
+            lambda client: client.get_wiki_page_html(page_name)
+        )
+
+
+def _fetch_wiki_page(
+    page_name: str, args, session: _TracSession | None = None
+) -> tuple[str | None, int]:
     """Fetch a TracWiki page's raw source via TracClient.
 
     Reuses _build_trac_overrides() and bootstrap_config() so the same
     layered config precedence (CLI > env > YAML > defaults) that
-    --check-trac uses also applies here.
+    --check-trac uses also applies here. ``session`` is the run's
+    shared Trac session, so the HTML read that follows (--from-wiki to
+    Markdown) reuses this client; one is made when omitted.
 
     Returns (text, EXIT_OK) on success or (None, EXIT_TRAC) on any
     failure. Never prints the password.
     """
-    overrides = _build_trac_overrides(args)
-    if overrides is None:
-        return (
-            None,
-            EXIT_TRAC,
-        )  # password-file diagnostic already written
-
+    session = session or _TracSession(args)
     try:
-        config, _ = bootstrap_config(overrides)
-    except ValueError:
+        client = session.client()
+    except TracConnectionRequired:
         sys.stderr.write(
             "trac-convert: no Trac credentials found.\n"
             "  Set env vars TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD, or\n"
             "  create .trac_mcp/config.yaml (see docs/reference/cli.md).\n"
         )
         return None, EXIT_TRAC
+    except TracRenderError:
+        return (
+            None,
+            EXIT_TRAC,
+        )  # password-file diagnostic already written
 
-    client = TracClient(config)
     try:
         text = client.get_wiki_page(page_name)
     except Exception as e:
         msg = _classify_trac_error(
-            e, config.trac_url, page_name=page_name, action="wiki fetch"
+            e, session.url, page_name=page_name, action="wiki fetch"
         )
         sys.stderr.write(f"trac-convert: {msg}\n")
         return None, EXIT_TRAC
@@ -482,7 +570,12 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="trac-convert",
-        description="Convert between Markdown and TracWiki formats.",
+        description=(
+            "Convert between Markdown and TracWiki formats. "
+            "TracWiki -> Markdown needs a Trac connection (Trac "
+            "renders the text; trac-convert translates its HTML); "
+            "Markdown -> TracWiki runs offline."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -555,14 +648,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--unknown-macros",
         dest="unknown_macros",
         choices=("preserve", "drop"),
-        default="preserve",
+        default=None,
         help=(
-            "How to render unknown TracWiki macros"
-            " (tracwiki → md only). preserve = leave [[Name]] literal,"
-            " drop = omit. Default: preserve."
-            " (The 'bracket' mode, which emitted [MACRO: Name], was"
-            " removed in ticket #63 -- 'preserve' round-trips back to"
-            " TracWiki unchanged, which 'bracket' only simulated.)"
+            "Deprecated, no effect (Trac renders macros itself);"
+            " removed in #214."
         ),
     )
     parser.add_argument(
@@ -673,7 +762,7 @@ def convert_text(
     target_format: str,
     *,
     heading_anchors: bool = False,
-    unknown_macros: str = "preserve",
+    render_html: Callable[[str], str] | None = None,
 ) -> ConversionResult:
     """Convert text between Markdown and TracWiki.
 
@@ -681,8 +770,11 @@ def convert_text(
     target_format: "md" or "tracwiki".
     heading_anchors: forwarded to convert_with_warnings() for md→tracwiki.
         Ignored on the tracwiki→md direction.
-    unknown_macros: forwarded to tracwiki_to_markdown() for tracwiki→md.
-        Ignored on the md→tracwiki direction.
+    render_html: a callable from TracWiki text to Trac's HTML for it.
+        TracWiki→Markdown translates that HTML
+        (``trac_html_to_markdown(render_html(text), text)``), so it is
+        required there: without one, ``TracConnectionRequired`` is
+        raised. Markdown→TracWiki and pass-through never call it.
 
     Returns a ConversionResult (may be a pass-through with
     converted=False when source and target resolve to the same
@@ -722,7 +814,12 @@ def convert_text(
             )
         )
         return result
-    return tracwiki_to_markdown(text, unknown_macros=unknown_macros)  # type: ignore[arg-type]
+    if render_html is None:
+        raise TracConnectionRequired(_TRAC_REQUIRED_MESSAGE)
+    result = trac_html_to_markdown(render_html(text), text)
+    # The translator reports the format it read (HTML); the caller's
+    # input, and what --verbose reports, is TracWiki.
+    return replace(result, source_format=source)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -746,7 +843,11 @@ def main(argv: list[str] | None = None) -> int:
       exception; a ``trac-convert: conversion failed: <reason>`` message
       is written to stderr (no traceback).
     - 4 (EXIT_TRAC): Trac connectivity, auth, or protocol error from
-      --check-trac, --from-wiki, or --to-wiki. Sub-classified into:
+      --check-trac, --from-wiki, --to-wiki, or the rendering step of
+      TracWiki -> Markdown (Trac renders the text and trac-convert
+      translates its HTML, Trac /trac_mcp_server #210). TracWiki ->
+      Markdown with no Trac configured also exits 4, with a message
+      saying what to set; nothing is written to stdout. Sub-classified into:
       wiki-page-not-found, permission-denied, timeout, SSL error,
       network unreachable, or generic Trac fault. Password is never
       written to stdout or stderr. With --to-wiki, nothing was stored.
@@ -756,10 +857,11 @@ def main(argv: list[str] | None = None) -> int:
       (Trac /trac_mcp_server #140).
 
     Note on direction-scoped flags: --heading-anchors only affects the
-    md→tracwiki direction and is silently ignored for tracwiki→md (and
-    vice-versa for --unknown-macros).  This is intentional — --from auto
-    may resolve either way at runtime, so mutual-exclusion checks are not
-    applied.
+    md→tracwiki direction and is silently ignored for tracwiki→md.  This
+    is intentional — --from auto may resolve either way at runtime, so
+    mutual-exclusion checks are not applied. --unknown-macros is
+    deprecated and has no effect: Trac renders macros itself; passing it
+    prints one ``warning:`` line (removed in #214).
 
     Note on verbosity flags: --quiet suppresses warning: lines (but not
     trac-convert: errors). --verbose emits info: diagnostic lines (source
@@ -767,6 +869,11 @@ def main(argv: list[str] | None = None) -> int:
     mutually exclusive via argparse add_mutually_exclusive_group().
     """
     args = build_parser().parse_args(argv)
+
+    if args.unknown_macros is not None and not args.quiet:
+        sys.stderr.write(
+            "warning: --unknown-macros is deprecated and has no effect\n"
+        )
 
     # --- --check-trac: early dispatch before conversion validation ---
     if args.check_trac:
@@ -855,8 +962,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_RUNTIME_ERROR
 
     # --- read input ---
+    # One lazily-opened Trac session per run: TracWiki -> Markdown
+    # renders through it, --from-wiki reads through it, and nothing
+    # else touches Trac.
+    session = _TracSession(args)
     if args.from_wiki is not None:
-        text, fetch_rc = _fetch_wiki_page(args.from_wiki, args)
+        text, fetch_rc = _fetch_wiki_page(args.from_wiki, args, session)
         if text is None:
             return fetch_rc
         # --from-wiki authoritatively knows the source is TracWiki;
@@ -908,8 +1019,19 @@ def main(argv: list[str] | None = None) -> int:
             args.source_format,
             args.target_format,
             heading_anchors=heading_anchors_bool,
-            unknown_macros=args.unknown_macros,
+            render_html=(
+                session.page_renderer(args.from_wiki)
+                if args.from_wiki is not None
+                else session.render_text
+            ),
         )
+    except TracConnectionRequired as e:
+        sys.stderr.write(f"trac-convert: {e}\n")
+        return EXIT_TRAC
+    except TracRenderError as e:
+        if str(e):
+            sys.stderr.write(f"trac-convert: {e}\n")
+        return EXIT_TRAC
     except Exception as e:
         sys.stderr.write(f"trac-convert: conversion failed: {e}\n")
         return EXIT_CONVERSION_ERROR
