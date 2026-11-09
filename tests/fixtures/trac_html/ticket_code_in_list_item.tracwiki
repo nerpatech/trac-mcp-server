@@ -1,0 +1,22 @@
+'''Cloud PR back and verified locally''' (2026-11-04). The work is https://github.com/nerpatech/trac-mcp-server/pull/126, on local branch `ticket-148-glued-bracket-realm`, in two commits:
+ * `90d3c94` fix: regex, tests, fixtures, CHANGELOG.
+ * `84a380b` refactor: removes the dead `]` handling.
+Revert `84a380b` first: without it the fix can't be reverted cleanly.
+
+== Decisions copied from the PR ==
+ 1. '''Regex: one deviation from the comment 2 plan.''' The bracketed alternative is
+{{{
+(?<=\[)HEAD(?:[^\s`\]]+|(?=\]))
+}}}
+ rather than plain `+`. With `+` alone, an empty bracketed target such as `[auto_pm:wiki:]` failed the bracketed alternative. It then fell through to the unbracketed one, which swallowed `]/[...` again. That left this ticket's gap open for that shape, and kept #147's cut reachable. The lookahead fixes this without matching `[p:wiki: label]`, which still matches nothing, as on `master`. The head is factored into `_PREFIX_REALM_HEAD`. The unbracketed alternative is unchanged.
+ 2. '''Dead code: all three pieces removed.''' They were #147's cut, the no-label `endswith("]")` strip, and `_bracket_label`'s `endswith("]")` shortcut. With each replaced by a raise, none fired across the full suite. `_bracket_label` lost its now-unused `raw` parameter, which had one caller. The docstrings and comments are rewritten, and `_code_span_contains`'s boundary note now mentions `]`.
+ 3. '''Tests.''' Two new rows: `row148_glued_bracket_typo_second` warns exactly once, for `auto-pm:wiki:…`, and `row148_glued_bracket_both_resolved` is silent. The silent row joins `SILENT_ROWS`, so the balance count goes from 40 to 41; that changes no row's expected output. There is also a parametrized regex-level test covering the comment 2 table, plus the two empty-target cases. `_row147_prefix_warnings` is renamed to `_prefix_warnings`.
+ 4. '''Seeded defect, red three ways:''' on `master`; with the fix reverted on commit 1; and with it reverted on commit 2. A fourth run with the plan's `+`-only regex fails exactly the two empty-target cases.
+ 5. No existing expected output changed.
+
+== Local verification ==
+ * Code review (Sonnet `/code-review`, base `master`): no findings survived. Nested `[1]`, empty targets, `[[...]]`, labelled brackets and attachment-qualified tokens all yield the same raw token and suffix as `master` after #147's cut. No bracketed-start token can contain `]`.
+ * `ci.sh`: 2761 passed, 41 skipped.
+ * `ci-live.sh`: 2801 passed, 1 skipped, 422 subtests. The cloud session reported a `test_batch_create_success` failure, also present on its `master`; it does not reproduce here.
+
+Ready for `/finish`.

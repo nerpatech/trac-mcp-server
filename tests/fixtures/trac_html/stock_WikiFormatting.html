@@ -1,0 +1,890 @@
+<html><body><h1 class="section" id="WikiFormatting"><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">WikiFormatting</a></h1>
+<p>
+</p><div class="wiki-toc"><h4>Table of Contents</h4><ul><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">Index</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">Installation</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">Customization</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">Plugins</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade">Upgrading</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">Configuration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">Administration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">Backup</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracLogging">Logging</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">Permissions</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">The Wiki</a></li><li class="active"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">Wiki Formatting</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTimeline">Timeline</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBrowser">Repository Browser</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">Revision Log</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracChangeset">Changesets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets">Tickets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">Workflow</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRoadmap">Roadmap</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">Ticket Queries</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBatchModify">Batch Modify</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">Reports</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRss">RSS Support</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">Notification</a></li></ul></div><p>
+</p>
+<p>
+Wiki markup is a core feature in Trac, tightly integrating all the other parts of Trac into a flexible and unified whole.
+</p>
+<p>
+Trac has a powerful wiki rendering engine that implements a subset of the commands from other popular Wikis, such as <a class="ext-link" href="https://moinmo.in/"><span class="icon">​</span>MoinMoin</a> and <a class="ext-link" href="https://trac.edgewall.org/intertrac/WikiCreole" title="WikiCreole in The Trac Project"><span class="icon">​</span>WikiCreole</a>.
+</p>
+<p>
+The sections below provide an overview for the most common syntax, each link in the <em>Category</em> column leads you to the more detailed explanation later in this page.
+</p>
+<p>
+The following wiki pages present the advanced features of the Trac wiki markup in more depth:
+</p>
+<ul><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLinks</a> covers all the possible ways to refer to any Trac resource or parts thereof.
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiPageNames">WikiPageNames</a> covers the various names a wiki page can take, whether in <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/CamelCase">CamelCase</a> or not.
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiMacros">WikiMacros</a> lists the macros available for generating dynamic content.
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors">WikiProcessors</a> and <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiHtml">WikiHtml</a> details how parts of the wiki text can be processed in special ways.
+</li><li><a class="ext-link" href="https://trac.edgewall.org/intertrac/wiki%3ATracDev/Proposals/AdvancedWikiOperations" title="wiki:TracDev/Proposals/AdvancedWikiOperations in The Trac Project"><span class="icon">​</span>AdvancedWikiOperations</a> provides some operations in uncommon or administrative scenarios.
+</li></ul><h2 class="section" id="Commonwikimarkup">Common wiki markup</h2>
+<table class="wiki">
+<tr><th> <strong>Category</strong> </th><th> <strong>Wiki Markup</strong> </th><th> <strong>Display</strong> 
+</th></tr><tr>
+<th rowspan="3"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#FontStyles">Font Styles</a>
+</p>
+</th><td> <code>'''bold'''</code>, <code>''italic''</code>, <code>'''''Wikipedia style'''''</code> 
+</td><td> <strong>bold</strong>, <em>italic</em>, <strong><em>Wikipedia style</em></strong> 
+</td></tr><tr><td> <code>**bold**</code>, <code>//italic//</code>, <code>**//!WikiCreole style//**</code> 
+</td><td> <strong>bold</strong>, <em>italic</em>, <strong><em>WikiCreole style</em></strong> 
+</td></tr><tr><td> <code>`monospaced (''other markup ignored'')`</code> 
+</td><td> <code>monospaced (''other markup ignored'')</code> 
+</td></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Headings">Headings</a> 
+<td><pre class="wiki">== Level 2
+=== Level 3 ^([#hn note])^
+</pre></td><td style="padding-left: 2em"><h2 class="section" id="Level2">Level 2</h2>
+<h3 class="section" id="Level3note">Level 3 <sup>(<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#hn">note</a>)</sup></h3>
+</td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Paragraphs">Paragraphs</a>  
+<td><pre class="wiki">First paragraph
+on multiple lines.
+
+Second paragraph.
+</pre></td><td><p>
+First paragraph
+on multiple lines.
+</p>
+<p>
+Second paragraph.
+</p>
+</td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Lists">Lists</a> 
+<td><pre class="wiki">* bullet list
+  on multiple lines
+  1. nested list
+    a. different numbering
+       styles
+</pre></td><td><ul><li>bullet list
+on multiple lines
+<ol><li>nested list
+<ol class="loweralpha"><li>different numbering
+styles
+</li></ol></li></ol></li></ul></td></th></tr><tr>
+<th><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#DefinitionLists">Definition Lists</a>
+</p>
+</th><td><pre class="wiki"> term:: definition on
+        multiple lines
+</pre></td><td><dl class="wiki"><dt>term</dt><dd>definition on
+multiple lines
+</dd></dl>
+</td></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#PreformattedText">Preformatted Text</a> 
+<td><pre class="wiki">{{{
+multiple lines, ''no wiki'',
+      white space respected
+}}}
+</pre></td><td><pre class="wiki">multiple lines, ''no wiki'',
+      white space respected
+</pre></td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Blockquotes">Blockquotes</a> 
+<td><pre class="wiki">  if there's some leading
+  space the text is quoted
+</pre></td><td><blockquote>
+<p>
+if there's some leading
+space the text is quoted
+</p>
+</blockquote>
+</td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#DiscussionCitations">Discussion Citations</a> 
+<td><pre class="wiki">&gt;&gt; ... (I said)
+&gt; (he replied)
+</pre></td><td><blockquote class="citation">
+<blockquote class="citation">
+<p>
+... (I said)
+</p>
+</blockquote>
+<p>
+(he replied)
+</p>
+</blockquote>
+</td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Tables">Tables</a> 
+<td><pre class="wiki">||= Table Header =|| Cell ||
+||||  (details below)  ||
+</pre></td><td><table class="wiki">
+<tr><th> Table Header </th><td> Cell 
+</td></tr><tr><td colspan="2" style="text-align: center">  (details below)  
+</td></tr></table>
+</td></th></tr><tr>
+<th rowspan="2"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Links">Links</a>
+</p>
+</th><td> <code>https://trac.edgewall.org</code> 
+</td><td> <a class="ext-link" href="https://trac.edgewall.org"><span class="icon">​</span>https://trac.edgewall.org</a> 
+</td></tr><tr><td> <code>WikiFormatting (CamelCase)</code> 
+</td><td> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">WikiFormatting</a> (<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/CamelCase">CamelCase</a>) 
+</td></tr><tr>
+<th rowspan="5"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#TracLinks">TracLinks</a>
+</p>
+</th><td> <code>wiki:WikiFormatting</code>, <code>wiki:"WikiFormatting"</code> 
+</td><td> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">wiki:WikiFormatting</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">wiki:"WikiFormatting"</a> 
+</td></tr><tr><td> <code>#1 (ticket)</code>, <code>[1] (changeset)</code>, <code>{1} (report)</code> 
+</td><td> <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">#1</a> (ticket), <a class="missing changeset" title="No default repository defined">[1]</a> (changeset), <a class="report" href="https://trac.example.org/trac_mcp_server/report/1">{1}</a> (report) 
+</td></tr><tr><td> <code>ticket:1, ticket:1#comment:1, comment:1:ticket:1</code> 
+</td><td> <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">ticket:1</a>, <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1#comment:1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">ticket:1#comment:1</a>, <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1#comment:1" title="Comment 1 for #1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">comment:1:ticket:1</a> 
+</td></tr><tr><td> <code>Ticket [ticket:1]</code>, <code>[ticket:1 ticket one]</code> 
+</td><td> Ticket <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">1</a>, <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">ticket one</a> 
+</td></tr><tr><td> <code>Ticket [[ticket:1]]</code>, <code>[[ticket:1|ticket one]]</code> 
+</td><td> Ticket <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">1</a>, <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">ticket one</a> 
+</td></tr><tr>
+<th rowspan="2"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#SettingAnchors">Setting Anchors</a>
+</p>
+</th><td> <code>[=#point1 (1)] First...</code> 
+</td><td> <span class="wikianchor" id="point1">(1)</span> First... 
+</td></tr><tr><td> <code>see [#point1 (1)]</code> 
+</td><td> see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#point1">(1)</a> 
+</td></tr><tr>
+<th rowspan="3"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Escaping">Escaping Markup</a>
+</p>
+</th><td> <code>!'' doubled quotes</code> 
+</td><td> '' doubled quotes 
+</td></tr><tr><td> <code>!wiki:WikiFormatting</code>, <code>!WikiFormatting</code> 
+</td><td> wiki:WikiFormatting, WikiFormatting 
+</td></tr><tr><td> <code>`{{{-}}}` triple curly brackets</code> 
+</td><td> <code>{{{-}}}</code> triple curly brackets 
+</td></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Images">Images</a> </th><td> <code>[[Image(</code><em>link</em><code>)]]</code> </td><td> <a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" style="padding:0; border:none"><img alt="trac_logo_mini.png" crossorigin="anonymous" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" title="trac_logo_mini.png" /></a> 
+</td></tr><tr>
+<th rowspan="2"><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Macros">Macros</a>
+</p>
+</th><td> <code>[[MacroList(*)]]</code> </td><td style="text-align: center">  <em>(short list of all available macros)</em>  
+</td></tr><tr><td> <code>[[Image?]]</code> </td><td style="text-align: center">  <em>(help for the Image macro)</em>  
+</td></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Processors">Processors</a> 
+<td><pre class="wiki">{{{#!div style="font-size: 80%"
+Code highlighting:
+  {{{#!python
+  hello = lambda: "world"
+  }}}
+}}}
+</pre></td><td style="padding-left: 2em"><div class="wikipage" style="font-size: 80%"><p>
+Code highlighting:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="n">hello</span> <span class="o">=</span> <span class="k">lambda</span><span class="p">:</span> <span class="s2">&quot;world&quot;</span>
+</pre></div></div></div></td></th></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Comments">Comments</a> 
+<td><pre class="wiki">{{{#!comment
+Note to Editors: ...
+}}}
+</pre></td></th><td style="text-align: center">  <em>(comment is shown in edit mode only)</em>  
+</td></tr><tr>
+<th> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Miscellaneous">Miscellaneous</a> 
+<td><pre class="wiki">Line [[br]] break
+Line \\ break
+----
+</pre></td><td style="padding-left: 2em"><p>
+Line <br /> break
+Line <br /> break
+</p>
+<hr />
+</td></th></tr></table>
+<h2 class="section" id="FontStyles">Font Styles</h2>
+<p>
+The Trac wiki supports the following font styles:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> * '''bold''',
+   ''' triple quotes !'''
+   can be bold too if prefixed by ! ''',
+ * ''italic''
+ * '''''bold italic''''' or ''italic and
+   ''' italic bold ''' ''
+ * __underline__
+ * {{{monospace}}} or `monospace`
+   (hence `{{{` or {{{`}}} quoting)
+ * ~~strike-through~~
+ * ^superscript^
+ * ,,subscript,,
+ * **also bold**, //italic as well//,
+   and **'' bold italic **'' //(since 0.12)//
+ * [[span(style=color: #FF0000, a red text )]]
+</pre></td><td><ul><li><strong>bold</strong>,
+<strong> triple quotes '''
+can be bold too if prefixed by ! </strong>,
+</li><li><em>italic</em>
+</li><li><strong><em>bold italic</em></strong> or <em>italic and
+<strong> italic bold </strong> </em>
+</li><li><span class="underline">underline</span>
+</li><li><code>monospace</code> or <code>monospace</code>
+(hence <code>{{{</code> or <code>`</code> quoting)
+</li><li><del>strike-through</del>
+</li><li><sup>superscript</sup>
+</li><li><sub>subscript</sub>
+</li><li><strong>also bold</strong>, <em>italic as well</em>,
+and <strong><em> bold italic </em></strong><em></em> <em>(since 0.12)</em>
+</li><li><span style="color: #FF0000">a red text</span>
+</li></ul></td></tr></table>
+<p>
+Notes:
+</p>
+<ul><li><code>{{{...}}}</code> and <code>`...`</code> commands not only select a monospace font, but also treat their content as verbatim text, meaning that no further wiki processing is done on this text.
+</li><li><code> ! </code> tells wiki parser to not take the following characters as wiki format, so pay attention to put a space after <code>!</code>, e.g. when ending bold.
+</li><li>all the font styles marks have to be used in opening/closing pairs,
+and they must nest properly; in particular, an <code>''</code> italic can't be paired
+with a <code>//</code> one, and <code>'''</code> can't be paired with <code>**</code>.
+</li></ul><h2 class="section" id="Headings">Headings</h2>
+<p>
+You can create a heading by starting a line with one up to six <em>equal</em> characters (<code>=</code>) followed by a single space and the headline text.
+</p>
+<p>
+<span class="wikianchor" id="hn"></span>
+The headline text can be followed by the same number of <code>=</code> characters, but this is not mandatory. That is, <code>=== Section3 ===</code> is identical to <code>=== Section3</code>.
+</p>
+<p>
+Finally, the heading might optionally be followed by an explicit id. If not, an implicit but nevertheless readable id will be generated.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">= Heading =
+== Subheading
+=== About ''this'' ===
+=== Explicit id === #using-explicit-id-in-heading
+== Subheading #sub2
+</pre></td><td style="padding: 1em"><div class="wikipage"><h1 class="section" id="Heading">Heading</h1>
+<h2 class="section" id="Subheading">Subheading</h2>
+<h3 class="section" id="Aboutthis">About <em>this</em></h3>
+<h3 class="section" id="using-explicit-id-in-heading">Explicit id</h3>
+<h2 class="section" id="sub2">Subheading</h2>
+</div></td></tr></table>
+<h2 class="section" id="Paragraphs">Paragraphs</h2>
+<p>
+A new text paragraph is created whenever two blocks of text are separated by one or more empty lines.
+</p>
+<p>
+A forced line break can also be inserted, using:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">Line 1[[BR]]Line 2
+</pre><pre class="wiki">Paragraph
+one
+
+Paragraph
+two
+</pre></td><td><blockquote>
+<p>
+Line 1<br />Line 2
+</p>
+</blockquote>
+<blockquote>
+<p>
+Paragraph
+one
+</p>
+</blockquote>
+<blockquote>
+<p>
+Paragraph
+two
+</p>
+</blockquote>
+</td></tr></table>
+<h2 class="section" id="Lists">Lists</h2>
+<p>
+The wiki supports both ordered/numbered and unordered lists.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> * Item 1
+   * Item 1.1
+      * Item 1.1.1
+      * Item 1.1.2
+      * Item 1.1.3
+   * Item 1.2
+ * Item 2
+- items can start at the beginning of a line
+  and they can span multiple lines
+  - be careful though to continue the line
+  with the appropriate indentation, otherwise
+that will start a new paragraph...
+
+ 1. Item 1
+   a. Item 1.a
+   a. Item 1.b
+      i. Item 1.b.i
+      i. Item 1.b.ii
+ 1. Item 2
+And numbered lists can also be restarted
+with an explicit number:
+ 3. Item 3
+</pre></td><td><ul><li>Item 1
+<ul><li>Item 1.1
+<ul><li>Item 1.1.1
+</li><li>Item 1.1.2
+</li><li>Item 1.1.3
+</li></ul></li><li>Item 1.2
+</li></ul></li><li>Item 2
+</li></ul><ul><li>items can start at the beginning of a line
+and they can span multiple lines
+<ul><li>be careful though to continue the line
+with the appropriate indentation, otherwise
+</li></ul></li></ul><p>
+that will start a new paragraph...
+</p>
+<ol><li>Item 1
+<ol class="loweralpha"><li>Item 1.a
+</li><li>Item 1.b
+<ol class="lowerroman"><li>Item 1.b.i
+</li><li>Item 1.b.ii
+</li></ol></li></ol></li><li>Item 2
+</li></ol><p>
+And numbered lists can also be restarted with an explicit number:
+</p>
+<ol start="3"><li>Item 3
+</li></ol></td></tr></table>
+<h2 class="section" id="DefinitionLists">Definition Lists</h2>
+<p>
+The wiki also supports definition lists.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> llama::
+   some kind of mammal, with hair
+ ppython::
+   some kind of reptile, without hair
+   (can you spot the typo?)
+</pre></td><td><dl class="wiki"><dt>llama</dt><dd>
+some kind of mammal, with hair
+</dd><dt>ppython</dt><dd>
+some kind of reptile, without hair
+(can you spot the typo?)
+</dd></dl>
+</td></tr></table>
+<p>
+Note that you need a space in front of the defined term.
+</p>
+<h2 class="section" id="PreformattedText">Preformatted Text</h2>
+<p>
+Block containing preformatted text are suitable for source code snippets, notes and examples. Use three <em>curly braces</em> wrapped around the text to define a block quote. The curly braces need to be on a separate line.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">{{{
+def HelloWorld():
+    print '''Hello World'''
+}}}
+</pre></td><td><pre class="wiki">def HelloWorld():
+    print '''Hello World'''
+</pre></td></tr></table>
+<p>
+Note that this kind of block is also used for selecting lines that should be processed through <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors">WikiProcessors</a>.
+</p>
+<h2 class="section" id="Blockquotes">Blockquotes</h2>
+<p>
+In order to mark a paragraph as blockquote, indent that paragraph with two spaces.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">Paragraph
+  This text is a quote from someone else.
+</pre></td><td><p>
+Paragraph
+</p>
+<blockquote>
+<p>
+This text is a quote from someone else.
+</p>
+</blockquote>
+</td></tr></table>
+<h2 class="section" id="DiscussionCitations">Discussion Citations</h2>
+<p>
+To delineate a citation in an ongoing discussion thread, such as the ticket comment area, email-like citation marks (<code>&gt;</code>, <code>&gt;&gt;</code>, etc.) may be used.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">&gt;&gt; Someone's original text
+&gt; Someone else's reply text
+&gt;  - which can be any kind of Wiki markup
+My reply text
+</pre></td><td><blockquote class="citation">
+<blockquote class="citation">
+<p>
+Someone's original text
+</p>
+</blockquote>
+<p>
+Someone else's reply text
+</p>
+<ul><li>which can be any kind of Wiki markup
+</li></ul></blockquote>
+<p>
+My reply text
+</p>
+</td></tr></table>
+<h2 class="section" id="Tables">Tables</h2>
+<h3 class="section" id="SimpleTables">Simple Tables</h3>
+<p>
+Simple tables can be created:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">||Cell 1||Cell 2||Cell 3||
+||Cell 4||Cell 5||Cell 6||
+</pre></td><td style="padding: 2em"><table class="wiki">
+<tr><td>Cell 1</td><td>Cell 2</td><td>Cell 3
+</td></tr><tr><td>Cell 4</td><td>Cell 5</td><td>Cell 6
+</td></tr></table>
+</td></tr></table>
+<p>
+Cell headings can be specified by wrapping the content in a pair of <code>=</code> characters.
+Note that the <code>=</code> characters have to stick to the cell separators:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">||        ||= stable =||= latest =||
+||= 0.10 =||  0.10.5  || 0.10.6dev||
+||= 0.11 =||  0.11.6  || 0.11.7dev||
+</pre></td><td style="padding: 2em"><table class="wiki">
+<tr><td style="text-align: center">        </td><th> stable </th><th> latest 
+</th></tr><tr><th> 0.10 </th><td style="text-align: center">  0.10.5  </td><td style="text-align: right"> 0.10.6dev
+</td></tr><tr><th> 0.11 </th><td style="text-align: center">  0.11.6  </td><td style="text-align: right"> 0.11.7dev
+</td></tr></table>
+</td></tr></table>
+<p>
+Finally, specifying an empty cell means that the next non empty cell will span the empty cells:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">|| 1 || 2 || 3 ||
+|||| 1-2 || 3 ||
+|| 1 |||| 2-3 ||
+|||||| 1-2-3 ||
+</pre></td><td style="padding: 2em"><table class="wiki">
+<tr><td> 1 </td><td> 2 </td><td> 3 
+</td></tr><tr><td colspan="2"> 1-2 </td><td> 3 
+</td></tr><tr><td> 1 </td><td colspan="2"> 2-3 
+</td></tr><tr><td colspan="3"> 1-2-3 
+</td></tr></table>
+</td></tr></table>
+<p>
+Note that if the content of a cell sticks to one side of the cell and only one, then the text will be aligned on that side:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">||=Text =||= Numbers =||
+||left align    ||        1.0||
+||  center      ||        4.5||
+||      right align||     4.5||
+|| default alignment ||   2.5||
+||default||         2.5||
+||  default ||      2.5||
+|| default ||       2.5||
+</pre></td><td style="padding: 2em"><table class="wiki">
+<tr><th style="text-align: left">Text </th><th> Numbers 
+</th></tr><tr><td style="text-align: left">left align    </td><td style="text-align: right">        1.0
+</td></tr><tr><td style="text-align: center">  center      </td><td style="text-align: right">        4.5
+</td></tr><tr><td style="text-align: right">      right align</td><td style="text-align: right">     4.5
+</td></tr><tr><td> default alignment </td><td style="text-align: right">   2.5
+</td></tr><tr><td>default</td><td style="text-align: right">         2.5
+</td></tr><tr><td>  default </td><td style="text-align: right">      2.5
+</td></tr><tr><td> default </td><td style="text-align: right">       2.5
+</td></tr></table>
+</td></tr></table>
+<p>
+If contrary to the example above, the cells in your table contain more text, it might be convenient to spread a table row over multiple lines of markup. The <code>\</code> character placed at the end of a line after a cell separator tells Trac to not start a new row for the cells on the next line:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup 
+</th></tr><tr><td><pre class="wiki">|| this is column 1 [https://trac.edgewall.org/newticket new ticket] || \
+|| this is column 2 [https://trac.edgewall.org/roadmap the road ahead] || \
+|| that's column 3 and last one ||
+</pre></td></tr><tr>
+<th> Display 
+</th></tr><tr><td style="padding: 2em"><table class="wiki">
+<tr><td> this is column 1 <a class="ext-link" href="https://trac.edgewall.org/newticket"><span class="icon">​</span>new ticket</a> 
+</td><td> this is column 2 <a class="ext-link" href="https://trac.edgewall.org/roadmap"><span class="icon">​</span>the road ahead</a> 
+</td><td> that's column 3 and last one 
+</td></tr></table>
+</td></tr></table>
+<h3 class="section" id="ComplexTables">Complex Tables</h3>
+<p>
+If the possibilities offered by the simple pipe-based markup (<code>||</code>) for tables described above are not enough for your needs, you can create more elaborate tables by using <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Processors-example-tables">WikiProcessor based tables</a>.
+</p>
+<h2 class="section" id="Links">Links</h2>
+<p>
+Hyperlinks are automatically created for <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiPageNames">WikiPageNames</a> and URLs. WikiPageLinks can be disabled by prepending an exclamation mark (<code>!</code>), such as <code>!WikiPageLink</code>.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">TitleIndex, https://www.edgewall.com/, !NotAlink
+</pre></td><td><p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>, <a class="ext-link" href="https://www.edgewall.com/"><span class="icon">​</span>https://www.edgewall.com/</a>, NotAlink
+</p>
+</td></tr></table>
+<p>
+Links can be given a more descriptive title by writing the link followed by a space and a title and all this inside square brackets.
+If the descriptive title is omitted, then the explicit prefix is discarded, unless the link is an external link. This can be useful for wiki pages not adhering to the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiPageNames">WikiPageNames</a> convention.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> * [https://www.edgewall.com Edgewall Software]
+ * [wiki:TitleIndex Title Index]
+ * [wiki:TitleIndex]
+ * [wiki:ISO9000]
+</pre></td><td><ul><li><a class="ext-link" href="https://www.edgewall.com"><span class="icon">​</span>Edgewall Software</a>
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>
+</li><li><a class="missing wiki" href="https://trac.example.org/trac_mcp_server/wiki/ISO9000" rel="nofollow">ISO9000</a>
+</li></ul></td></tr></table>
+<p>
+Following the <a class="ext-link" href="https://trac.edgewall.org/intertrac/WikiCreole" title="WikiCreole in The Trac Project"><span class="icon">​</span>WikiCreole</a> trend, the descriptive title can also be specified by writing the link followed by a pipe (<code>|</code>) and a title and all this inside <em>double</em> square brackets.
+</p>
+<table class="wiki">
+<tr><td><pre class="wiki"> * [[https://www.edgewall.com|Edgewall Software]]
+ * [[wiki:TitleIndex|Title Index]]
+   or even [[TitleIndex|Title Index]]
+ * [[wiki:TitleIndex]]
+   ''' but not ![[TitleIndex]]! '''
+ * [[ISO9000]]
+</pre></td><td><ul><li><a class="ext-link" href="https://www.edgewall.com"><span class="icon">​</span>Edgewall Software</a>
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
+or even <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
+</li><li><a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>
+<strong> but not [[TitleIndex]]! </strong>
+</li><li><a class="missing wiki" href="https://trac.example.org/trac_mcp_server/wiki/ISO9000" rel="nofollow">ISO9000</a>
+</li></ul></td></tr></table>
+<p>
+<strong>Note</strong>: the <a class="ext-link" href="https://trac.edgewall.org/intertrac/WikiCreole" title="WikiCreole in The Trac Project"><span class="icon">​</span>WikiCreole</a> style for links is quick to type and certainly looks familiar as it is the one used on Wikipedia and in many other wikis. Unfortunately it conflicts with the syntax for <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Macros">macros</a>.
+So in the rare case when you need to refer to a page which is named after a macro (typical examples being <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterTrac">InterTrac</a> and <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterWiki">InterWiki</a>), by writing <code>[[TitleIndex]]</code> you will actually call the macro instead of linking to the page.
+</p>
+<h2 class="section" id="TracLinks">Trac Links</h2>
+<p>
+Wiki pages can link directly to other parts of the Trac system. Pages can refer to tickets, reports, changesets, milestones, source files and other Wiki pages using the following notations:
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> * Tickets: #1 or ticket:1
+ * Reports: {1} or report:1
+ * Changesets: r1, [1] or changeset:1
+ * ...
+ * targeting other Trac instances,
+   so called InterTrac links:
+   - Tickets: #Trac1 or Trac:ticket:1
+   - Changesets: [Trac1] or Trac:changeset:1
+</pre></td><td><ul><li>Tickets: <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">#1</a> or <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/1" title="#1: defect: README Quick Start section should mention .auto_pm/config.yml location (closed: fixed)">ticket:1</a>
+</li><li>Reports: <a class="report" href="https://trac.example.org/trac_mcp_server/report/1">{1}</a> or <a class="report" href="https://trac.example.org/trac_mcp_server/report/1">report:1</a>
+</li><li>Changesets: <a class="missing changeset" title="No default repository defined">r1</a>, <a class="missing changeset" title="No default repository defined">[1]</a> or <a class="missing changeset" title="No default repository defined">changeset:1</a>
+</li><li>...
+</li><li>targeting other Trac instances,
+so called <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterTrac">InterTrac</a> links:
+<ul><li>Tickets: <a class="ext-link" href="https://trac.edgewall.org/intertrac/ticket%3A1" title="ticket:1 in The Trac Project"><span class="icon">​</span>#Trac1</a> or <a class="ext-link" href="https://trac.edgewall.org/intertrac/ticket%3A1" title="ticket:1 in The Trac Project"><span class="icon">​</span>Trac:ticket:1</a>
+</li><li>Changesets: <a class="ext-link" href="https://trac.edgewall.org/intertrac/changeset%3A1" title="changeset:1 in The Trac Project"><span class="icon">​</span>[Trac1]</a> or <a class="ext-link" href="https://trac.edgewall.org/intertrac/changeset%3A1" title="changeset:1 in The Trac Project"><span class="icon">​</span>Trac:changeset:1</a>
+</li></ul></li></ul></td></tr></table>
+<p>
+There are many more flavors of Trac links, see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLinks</a> for more in-depth information and a reference for all the default link resolvers.
+</p>
+<h2 class="section" id="SettingAnchors">Setting Anchors</h2>
+<p>
+An anchor, or more correctly speaking, an <a class="ext-link" href="https://www.w3.org/TR/REC-html40/struct/links.html#h-12.2.1"><span class="icon">​</span>anchor name</a> can be added explicitly at any place in the Wiki page, to uniquely identify a position in the document:
+</p>
+<pre class="wiki">[=#point1]
+</pre><p>
+This syntax was chosen to match the format for explicitly naming the header id <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Headings">documented above</a>:
+</p>
+<pre class="wiki">== Long title == #title
+</pre><p>
+It is also very close to the syntax for the corresponding link to that anchor:
+</p>
+<pre class="wiki">[#point1]
+</pre><p>
+Optionally, a label can be given to the anchor:
+</p>
+<pre class="wiki">[=#point1 '''Point 1''']
+</pre><table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr>
+<td><pre class="wiki">[#point2 jump to the second point]
+
+...
+
+Point2:  [=#point2] Jump here
+</pre></td><td><blockquote>
+<p>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#point2">jump to the second point</a>
+</p>
+</blockquote>
+<blockquote>
+<p>
+...
+</p>
+</blockquote>
+<blockquote>
+<p>
+Point2:  <span class="wikianchor" id="point2"></span> Jump here
+</p>
+</blockquote>
+</td></tr></table>
+<p>
+For more complex anchors (eg when a custom title is wanted), you can use the Span macro: <code>[[span(id=point2, class=wikianchor, title=Point 2, ^(2)^)]]</code>.
+</p>
+<h2 class="section" id="Escaping">Escaping Links, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiPageNames">WikiPageNames</a> and other Markup</h2>
+<p>
+You may avoid making hyperlinks out of <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLinks</a> by preceding an expression with a single exclamation mark (<code>!</code>).
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki"> !NoHyperLink
+ !#42 is not a link
+</pre><pre class="wiki">Various forms of escaping for list markup:
+ ^^- escaped minus sign \\
+ ^^1. escaped number  \\
+ ^^* escaped asterisk sign
+</pre></td><td><blockquote>
+<p>
+NoHyperLink
+#42 is not a link
+</p>
+</blockquote>
+<p>
+Various forms of escaping for list markup:
+</p>
+<blockquote>
+<p>
+<sup></sup>- escaped minus sign <br />
+<sup></sup>1. escaped number  <br />
+<sup></sup>* escaped asterisk sign
+</p>
+</blockquote>
+</td></tr></table>
+<h2 class="section" id="Images">Images</h2>
+<p>
+Urls ending with <code>.png</code>, <code>.gif</code> or <code>.jpg</code> are no longer automatically interpreted as image links, and converted to <code>&lt;img&gt;</code> tags.
+</p>
+<p>
+You now have to use the [[Image]] macro. The simplest way to include an image is to upload it as attachment to the current page, and put the filename in a macro call like <code>[[Image(picture.gif)]]</code>.
+</p>
+<p>
+In addition to the current page, it is possible to refer to other resources:
+</p>
+<ul><li><code>[[Image(wiki:WikiFormatting:picture.gif)]]</code> (referring to attachment on another page)
+</li><li><code>[[Image(ticket:1:picture.gif)]]</code> (file attached to a ticket)
+</li><li><code>[[Image(htdocs:picture.gif)]]</code> (referring to a file inside the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">environment</a> <code>htdocs</code> directory)
+</li><li><code>[[Image(source:/trunk/trac/htdocs/trac_logo_mini.png)]]</code> (a file in repository)
+</li></ul><table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">[[Image(htdocs:../common/trac_logo_mini.png)]]
+</pre></td><td><p>
+<a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" style="padding:0; border:none"><img alt="trac_logo_mini.png" crossorigin="anonymous" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" title="trac_logo_mini.png" /></a>
+</p>
+</td></tr></table>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiMacros">WikiMacros</a> for further documentation on the <code>[[Image()]]</code> macro, which has several useful options (<code>title=</code>, <code>link=</code>, etc.)
+</p>
+<h2 class="section" id="Macros">Macros</h2>
+<p>
+Macros are <em>custom functions</em> that insert dynamic content in a page.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">[[RecentChanges(Trac,3)]]
+</pre></td><td style="padding-left: 2em"><p>
+</p><div class="wikipage"><h3 class="section">11/08/26</h3><ul><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracConvertLiveTest">TracConvertLiveTest</a><small> (<a href="https://trac.example.org/trac_mcp_server/wiki/TracConvertLiveTest?action=diff&amp;version=469">diff</a>)</small>
+</li></ul><h3 class="section">02/14/26</h3><ul><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">TracWorkflow</a>
+</li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">TracWiki</a>
+</li></ul></div><p>
+</p>
+</td></tr></table>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiMacros">WikiMacros</a> for more information, and a list of installed macros.
+</p>
+<p>
+The detailed help for a specific macro can also be obtained more directly by appending a <code>?</code> to the macro name.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">[[MacroList?]]
+</pre></td><td style="padding-left: 2em"><p>
+</p><div class="trac-macrolist"><h3 id="MacroList-macro"><code>[[MacroList]]</code></h3><p>
+Display a list of all installed Wiki macros, including documentation if
+available.
+</p>
+<p>
+Optionally, the name of a specific macro can be provided as an argument. In
+that case, only the documentation for that macro will be rendered.
+</p>
+<p>
+Note that this macro will not be able to display the documentation of
+macros if the <code>PythonOptimize</code> option is enabled for mod_python!
+</p>
+</div><p>
+</p>
+</td></tr></table>
+<h2 class="section" id="Processors">Processors</h2>
+<p>
+Trac supports alternative markup formats using <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors">WikiProcessors</a>. For example, processors are used to write pages in
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiRestructuredText">reStructuredText</a> or <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiHtml">HTML</a>.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr>
+<td align="center" colspan="2" style="border: 0px; font-size: 90%"><blockquote>
+<p>
+<span class="wikianchor" id="Processors-example-html">Example 1:</span> HTML
+</p>
+</blockquote>
+</td></tr><tr>
+<td style="border: 0px"><pre class="wiki">{{{#!html
+&lt;h1 style="text-align: right; color: blue"&gt;
+ HTML Test
+&lt;/h1&gt;
+}}}
+</pre></td><td style="border: 0px" valign="top"><h1 style="text-align: right; color: blue">HTML Test</h1>
+</td></tr><tr>
+<td align="center" colspan="2" style="border: 0px; font-size: 90%"><blockquote>
+<p>
+<span class="wikianchor" id="Processors-example-highlight">Example 2:</span> Code Highlighting
+</p>
+</blockquote>
+</td></tr><tr>
+<td style="border: 0px"><pre class="wiki">{{{#!python
+class Test:
+
+    def __init__(self):
+        print "Hello World"
+if __name__ == '__main__':
+   Test()
+}}}
+</pre></td><td style="border: 0px" valign="top"><div class="wiki-code"><div class="code"><pre><span class="k">class</span><span class="w"> </span><span class="nc">Test</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="nb">print</span> <span class="s2">&quot;Hello World&quot;</span>
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s1">&#39;__main__&#39;</span><span class="p">:</span>
+   <span class="n">Test</span><span class="p">()</span>
+</pre></div></div></td></tr><tr>
+<td align="center" colspan="2" style="border: 0px; font-size: 90%"><blockquote>
+<p>
+<span class="wikianchor" id="Processors-example-tables">Example 3:</span> Complex Tables
+</p>
+</blockquote>
+</td></tr><tr>
+<td style="border: 0px"><pre class="wiki">{{{#!th rowspan=4 align=justify
+With the `#td` and `#th` processors,
+table cells can contain any content:
+}}}
+|----------------
+{{{#!td
+  - lists
+  - embedded tables
+  - simple multiline content
+}}}
+|----------------
+{{{#!td
+As processors can be easily nested,
+so can be tables:
+  {{{#!th
+  Example:
+  }}}
+  {{{#!td style="background: #eef"
+  || must be at the third level now... ||
+  }}}
+}}}
+|----------------
+{{{#!td
+Even when you don't have complex markup,
+this form of table cells can be convenient
+to write content on multiple lines.
+}}}
+</pre></td><td style="border: 0px" valign="top"><table class="wiki">
+<tr><th align="justify" rowspan="4"><p>
+With the <code>#td</code> and <code>#th</code> processors,
+table cells can contain any content:
+</p>
+</th></tr><tr>
+<td><ul><li>lists
+</li><li>embedded tables
+</li><li>simple multiline content
+</li></ul></td></tr><tr>
+<td><p>
+As processors can be easily nested,
+so can be tables:
+</p>
+<table class="wiki">
+<tr><th><p>
+Example:
+</p>
+</th><td style="background: #eef"><table class="wiki">
+<tr><td> must be at the third level now... 
+</td></tr></table>
+</td></tr></table>
+</td></tr><tr>
+<td><p>
+Even when you don't have complex markup,
+this form of table cells can be convenient
+to write content on multiple lines.
+</p>
+</td></tr></table>
+</td></tr></table>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors">WikiProcessors</a> for more information.
+</p>
+<h2 class="section" id="Comments">Comments</h2>
+<p>
+Comments can be added to the plain text. These will not be rendered and will not display in any other format than plain text.
+</p>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><pre class="wiki">Nothing to
+{{{#!comment
+Your comment for editors here
+}}}
+see.
+</pre></td><td><blockquote>
+<p>
+Nothing to
+</p>
+<p>
+see.
+</p>
+</blockquote>
+</td></tr></table>
+<h2 class="section" id="Miscellaneous">Miscellaneous</h2>
+<table class="wiki">
+<tr><th> Wiki Markup </th><th> Display 
+</th></tr><tr><td><blockquote>
+<p>
+Horizontal line:
+</p>
+<pre class="wiki">Four or more dashes will be replaced
+by a horizontal line (&lt;HR&gt;)
+----
+See?
+</pre></blockquote>
+</td><td><p>
+Four or more dashes will be replaced
+by a horizontal line (&lt;HR&gt;)
+</p>
+<hr />
+<p>
+See?
+</p>
+</td></tr><tr>
+<td><blockquote>
+<p>
+Two examples of line breaks:
+</p>
+<pre class="wiki">"macro" style [[BR]] line break
+</pre><p>
+or:
+</p>
+<pre class="wiki">!WikiCreole style \\ line\\break
+</pre></blockquote>
+</td><td><p>
+"macro" style <br /> line break
+</p>
+<p>
+WikiCreole style <br /> line<br />break
+</p>
+</td></tr><tr>
+</tr></table>
+</body></html>

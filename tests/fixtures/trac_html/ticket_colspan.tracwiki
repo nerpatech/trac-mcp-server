@@ -1,0 +1,1 @@
+Fixed and merged to master: https://github.com/nerpatech/trac-mcp-server/pull/21 (commit 1eb5f8b). An empty table cell now renders as a lone space instead of a bare ||, avoiding the |||| colspan-2 collision that shifted headers left by one column.

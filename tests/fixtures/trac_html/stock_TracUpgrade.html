@@ -1,0 +1,363 @@
+<html><body><h1 class="section" id="UpgradeInstructions">Upgrade Instructions</h1>
+<p>
+</p><div class="wiki-toc"><h4>Table of Contents</h4><ul><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">Index</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">Installation</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">Customization</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">Plugins</a></li><li class="active"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade">Upgrading</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">Configuration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">Administration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">Backup</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracLogging">Logging</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">Permissions</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">The Wiki</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">Wiki Formatting</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTimeline">Timeline</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBrowser">Repository Browser</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">Revision Log</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracChangeset">Changesets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets">Tickets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">Workflow</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRoadmap">Roadmap</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">Ticket Queries</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBatchModify">Batch Modify</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">Reports</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRss">RSS Support</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">Notification</a></li></ul></div><p>
+</p><div class="wiki-toc-un">
+    <ol>
+      <li>
+        <a href="#Instructions">Instructions</a>
+        <ol>
+          <li>
+            <a href="#a1.Checkyourplugins">1. Check your plugins</a>
+          </li>
+          <li>
+            <a href="#a2.Bringyourserveroff-line">2. Bring your server off-line</a>
+          </li>
+          <li>
+            <a href="#UpdatetheTracCode">3. Update Trac and dependencies</a>
+          </li>
+          <li>
+            <a href="#UpgradetheTracEnvironment">4. Upgrade the Trac Environment</a>
+          </li>
+          <li>
+            <a href="#UpdatetheTracDocumentation">5. Update the Trac Documentation</a>
+          </li>
+          <li>
+            <a href="#a6.Refreshstaticresources">6. Refresh static resources</a>
+          </li>
+          <li>
+            <a href="#VersionSpecificSteps">7. Steps specific to a given Trac version</a>
+            <ol>
+              <li>
+                <a href="#to1.5">Upgrading from Trac 1.4 to 1.5</a>
+              </li>
+              <li>
+                <a href="#to1.4">Upgrading from Trac 1.2 to 1.4</a>
+              </li>
+              <li>
+                <a href="#to1.2">Upgrading from Trac 1.0 to 1.2</a>
+              </li>
+              <li>
+                <a href="#to1.0">Upgrading from Trac 0.12 to Trac 1.0</a>
+              </li>
+              <li>
+                <a href="#OlderVersions">Upgrading from older versions of Trac</a>
+              </li>
+            </ol>
+          </li>
+        </ol>
+      </li>
+      <li>
+        <a href="#KnownIssues">Known Issues</a>
+        <ol>
+          <li>
+            <a href="#CustomizedTemplates">Customized Templates</a>
+          </li>
+          <li>
+            <a href="#ZipImportError">ZipImportError</a>
+          </li>
+          <li>
+            <a href="#WikiUpgrade">Wiki Upgrade</a>
+          </li>
+          <li>
+            <a href="#Parentdir">Parent dir</a>
+          </li>
+          <li>
+            <a href="#AttachmentsNotMigrated">Attachments not migrated</a>
+          </li>
+        </ol>
+      </li>
+      <li>
+        <a href="#Relatedtopics">Related topics</a>
+        <ol>
+          <li>
+            <a href="#UpgradingPython">Upgrading Python</a>
+          </li>
+        </ol>
+      </li>
+    </ol>
+</div><p>
+</p>
+<h2 class="section" id="Instructions">Instructions</h2>
+<p>
+There are seven recommended steps for upgrading to a newer version of Trac:
+</p>
+<h3 class="section" id="a1.Checkyourplugins">1. Check your plugins</h3>
+<p>
+Check whether your plugins are compatible with the version of Trac that you are upgrading to. Obsolete plugins listed in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#VersionSpecificSteps">version specific steps</a> below should be uninstalled or disabled.
+</p>
+<p>
+If you are upgrading to a minor release, plugin compatibility is usually not a concern because the Trac API is normally unchanged.
+</p>
+<p>
+If your plugins are installed from <a class="ext-link" href="https://trac-hacks.org"><span class="icon">​</span>trac-hacks.org</a> you can check compatibility by looking for a tag on the project page corresponding to a major release (e.g. <code>1.4</code>). If you are unsure, you'll want to contact the plugin author or ask on the <a class="ext-link" href="https://trac.edgewall.org/intertrac/MailingList" title="MailingList in The Trac Project"><span class="icon">​</span>MailingList</a>.
+</p>
+<p>
+If you are running several Trac plugins it is good to test the upgrade and plugin functionality in a staging instance of your site before upgrading your production instance. Remember, plugin authors are responsible for Trac version compatibility and plugins can interact in unexpected ways. Your Trac instance may have a unique combination of plugins and therefore it's advised that you do some verification testing when making any changes to your site.
+</p>
+<h3 class="section" id="a2.Bringyourserveroff-line">2. Bring your server off-line</h3>
+<p>
+It is not a good idea to update a running server: the server processes may have parts of the current packages cached in memory, and updating the code will likely trigger <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#ZipImportError">internal errors</a>.
+</p>
+<p>
+Although a database backup will be implicitly created by default when upgrading the environment, it is always a good idea to perform a full backup of the environment using the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">hotcopy</a> command before beginning. You may also wish to create a full backup of your server.
+</p>
+<h3 class="section" id="UpdatetheTracCode">3. Update Trac and dependencies</h3>
+<p>
+The packages are available through several channels, as described in <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracDownload" title="TracDownload in The Trac Project"><span class="icon">​</span>TracDownload</a>. If your Trac instance was installed through an operating system package manager, proceed with the standard steps that are appropriate for your operating system package manager. If it was installed through a Windows installer, uninstall the old Trac package before installing new Trac package.
+</p>
+<p>
+If you are managing your Trac installation using command line tools, <code>pip</code> is the preferred tool to upgrade a Trac instance because it will uninstall the old version. The following command will upgrade your Trac installation using the package published to <a class="ext-link" href="https://pypi.python.org/pypi/Trac"><span class="icon">​</span>PyPI</a>.
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--upgrade<span class="w"> </span>Trac
+</pre></div></div><p>
+The upgrade command will give you the latest release of Trac. If instead you wish to upgrade to a different version, such as a minor release of Trac when there is a newer major release available, then specify the Trac version in the <code>pip</code> command.
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--upgrade<span class="w"> </span><span class="nv">Trac</span><span class="o">==</span><span class="m">1</span>.4.1
+</pre></div></div><p>
+You should also upgrade dependencies so they are compliant with the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#Dependencies">required versions</a>.
+</p>
+<h3 class="section" id="UpgradetheTracEnvironment">4. Upgrade the Trac Environment</h3>
+<p>
+Environment upgrades are not necessary for minor version releases unless otherwise noted.
+</p>
+<p>
+On starting your web server after upgrading Trac, a message will be displayed for projects that need to be upgraded and the projects will not be accessible until the upgrade is run.
+</p>
+<p>
+The upgrade is run using a <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">trac-admin</a> command:
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span>trac-admin<span class="w"> </span>/path/to/projenv<span class="w"> </span>upgrade
+</pre></div></div><p>
+This command will not have any effect if the environment is already up-to-date.
+</p>
+<p>
+It is recommended that you set the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#logging-log_level-option">log_level</a> to <code>INFO</code> before running the upgrade. The additional information in the logs can be helpful in case something unexpected occurs during the upgrade.
+</p>
+<p>
+Note that a backup of your database will be performed automatically prior to the upgrade. The backup is saved in the location specified by <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#trac-backup_dir-option">backup_dir</a>.
+</p>
+<h3 class="section" id="UpdatetheTracDocumentation">5. Update the Trac Documentation</h3>
+<p>
+By default, every <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">Trac environment</a> includes a copy of the Trac documentation for the installed version. To keep the documentation in sync with the installed version of Trac, upgrade the documentation:
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span>trac-admin<span class="w"> </span>/path/to/projenv<span class="w"> </span>wiki<span class="w"> </span>upgrade
+</pre></div></div><p>
+Note that this procedure will leave your <code>WikiStart</code>, <code>InterMapTxt</code> and <code>SandBox</code> pages unaltered. Local changes to other pages that are distributed with Trac will be overwritten, however these pages are read-only by default for Environments created in Trac 1.3.3 and later.
+</p>
+<h3 class="section" id="a6.Refreshstaticresources">6. Refresh static resources</h3>
+<p>
+If you have configured your web server to serve static resources directly (accessed using the <code>/chrome/</code> URL) then you will need to refresh them using the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#MappingStaticResources">deploy command</a>. The <code>deploy</code> command will extract static resources and CGI scripts (<code>trac.wsgi</code>, etc) from the new Trac version and plugins into <code>/deploy/path</code>.
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span>trac-admin<span class="w"> </span>/path/to/env<span class="w"> </span>deploy<span class="w"> </span>/deploy/path
+</pre></div></div><p>
+Before refreshing, it is recommended that you remove the directory in which your static resources are deployed. The directory location depends on the choice you made during installation. This cleanup is not mandatory, but makes it easier to troubleshoot issues as your installation is uncluttered by unused assets from a previous release. As usual, make a backup before deleting the directory.
+</p>
+<div class="wikipage" style="border: 1pt dotted; margin: 1em"><p>
+<strong>Note:</strong> Some web browsers (IE, Opera) cache CSS and JavaScript files, so you should instruct your users to manually erase the contents of their browser's cache. A forced refreshed (SHIFT + &lt;F5&gt;) should be sufficient.
+</p>
+</div><h3 class="section" id="VersionSpecificSteps">7. Steps specific to a given Trac version</h3>
+<h4 class="section" id="to1.5">Upgrading from Trac 1.4 to 1.5</h4>
+<h5 class="section" id="Python2.7nolongersupported">Python 2.7 no longer supported</h5>
+<p>
+Upgrade Python to 3.5 or later.
+</p>
+<h4 class="section" id="to1.4">Upgrading from Trac 1.2 to 1.4</h4>
+<h5 class="section" id="Python2.6nolongersupported">Python 2.6 no longer supported</h5>
+<p>
+Upgrade Python to 2.7, but not 3.0 or greater.
+</p>
+<h5 class="section" id="MySQL-pythonnolongersupported">MySQL-python no longer supported</h5>
+<p>
+<a class="ext-link" href="https://pypi.python.org/pypi/PyMySQL"><span class="icon">​</span>PyMySQL</a> is the supported MySQL database library, support for <a class="ext-link" href="https://pypi.python.org/pypi/MySQL-python"><span class="icon">​</span>MySQL-python</a> has been removed.
+</p>
+<h5 class="section" id="ObsoletePlugins">Obsolete Plugins</h5>
+<p>
+Trac has added functionality equivalent to the following plugins:
+</p>
+<ul><li><a class="ext-link" href="https://trac-hacks.org/wiki/DynamicVariablesPlugin"><span class="icon">​</span>DynamicVariablesPlugin</a>: dynamic variables are autocompleted
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/NavAddPlugin"><span class="icon">​</span>NavAddPlugin</a>: see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNavigation">TracNavigation</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/FlexibleAssignToPlugin"><span class="icon">​</span>FlexibleAssignToPlugin</a>: subclass <code>ConfigurableTicketWorkflow</code> and override <code>get_allowed_owners</code>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/TracMigratePlugin"><span class="icon">​</span>TracMigratePlugin</a>: Use the <code>trac-admin</code> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin#ChangingDatabaseBackend">convert_db command</a>
+</li></ul><p>
+The plugins should be removed when upgrading Trac to 1.4.
+</p>
+<h5 class="section" id="Jinja2isthenewtemplateengine">Jinja2 is the new template engine</h5>
+<p>
+Content is now generated by using the Jinja2 template
+engine. You should verify that your plugins are
+compatible with this change.
+</p>
+<p>
+If you customized the Trac templates, or the <code>site.html</code>
+template, you'll need to adapt that as well.
+(TODO: expand...) See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#CustomizedTemplates">#CustomizedTemplates</a>. Email <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification#CustomizingContent">notification templates</a> also need to
+be adapted.
+</p>
+<h5 class="section" id="NewpermissionpoliciesforWikiandTicketrealms">New permission policies for Wiki and Ticket realms</h5>
+<p>
+Since 1.3.2 there are new permission policies for the ticket and wiki systems. <code>DefaultTicketPolicy</code> allows an authenticated user with <code>TICKET_APPEND</code> or <code>TICKET_CHPROP</code> to modify the description of a ticket they reported. It also implements the pre-1.3.2 behavior of allowing users to edit their own ticket comments. <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#Newpermissionspolicyforread-onlywikipages">ReadonlyWikiPolicy</a>, added in 1.1.2, is renamed to <code>DefaultWikiPolicy</code>. The new permission policies can be easily replaced with alternate implementations if the default behavior is not desired.
+</p>
+<p>
+If <code>[trac] permission_policy</code> has the default value <code>ReadonlyWikiPolicy, DefaultPermissionPolicy, LegacyAttachmentPolicy</code>, then <code>DefaultWikiPolicy, DefaultTicketPolicy</code> should be automatically appended to the list when upgrading the environment:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[trac]</span>
+<span class="na">permission_policies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">DefaultWikiPolicy,</span>
+<span class="w"> </span><span class="na">DefaultTicketPolicy,</span>
+<span class="w"> </span><span class="na">DefaultPermissionPolicy,</span>
+<span class="w"> </span><span class="na">LegacyAttachmentPolicy</span>
+</pre></div></div><p>
+If other permission policies are enabled, <code>trac.ini</code> will need to be edited to add <code>DefaultWikiPolicy, DefaultTicketPolicy</code> to <code>permission_policies</code>. See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracFineGrainedPermissions#DefaultWikiPolicyandDefaultTicketPolicy">TracFineGrainedPermissions</a> for additional details on the proper ordering.
+</p>
+<h5 class="section" id="enum-description-field">Description field added to ticket enums</h5>
+<p>
+The ticket enums now have a <em>description</em> field. An <em>ambiguous column name</em> error may be seen for reports that reference the <code>description</code> column of another table and join the <code>enum</code> table with that table (e.g. <code>ticket</code>, <code>component</code>). The reports <a class="report" href="https://trac.example.org/trac_mcp_server/report/1">{1}</a>, <a class="report" href="https://trac.example.org/trac_mcp_server/report/2">{2}</a>, <a class="report" href="https://trac.example.org/trac_mcp_server/report/3">{3}</a>, <a class="report" href="https://trac.example.org/trac_mcp_server/report/4">{4}</a>, <a class="report" href="https://trac.example.org/trac_mcp_server/report/5">{5}</a>, <a class="report" href="https://trac.example.org/trac_mcp_server/report/7">{7}</a>, and <a class="report" href="https://trac.example.org/trac_mcp_server/report/8">{8}</a> are modified by an upgrade step to fix the issue, but the modification may not succeed if the default reports have been modified, in which case <code>upgrade</code> will output a message to the terminal instructing the user to modify the reports. User-created reports may also need to be modified.
+</p>
+<p>
+Reports that display the error need to be modified to prefix the <code>description</code> column with the appropriate table name or alias. For example, if the <code>ticket</code> table is aliased as <code>t</code> (<code>ticket t</code> or <code>ticket AS t</code>), replace <code>description</code> with <code>t.description</code> if the report should use the ticket's <code>description</code> column.
+</p>
+<h5 class="section" id="Removedrepostypeandrepospathargumentsfromtrac-admininitenvcommand">Removed <code>&lt;repostype&gt;</code> and <code>&lt;repospath&gt;</code> arguments from <code>trac-admin</code> <code>initenv</code> command</h5>
+<p>
+The <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">TracAdmin</a> <code>initenv</code> command allowed the default repository to be specified using the third and fourth positional arguments of <code>initenv</code>:
+</p>
+<div class="wiki-code"><div class="code"><pre>initenv<span class="w"> </span><span class="o">[</span>&lt;projectname&gt;<span class="w"> </span>&lt;db&gt;<span class="w"> </span><span class="o">[</span>&lt;repostype&gt;<span class="w"> </span>&lt;repospath&gt;<span class="o">]]</span>
+</pre></div></div><p>
+The arguments were an artifact of Trac &lt; 0.12, which only supported a single repository. Trac 0.12 and later supports multiple repositories, which can be specified at the time of environment creation using the <code>--inherit</code> and <code>--config</code> arguments. See the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment#SourceCodeRepository">initenv documentation</a> for details on specifying source code repositories.
+</p>
+<h4 class="section" id="to1.2">Upgrading from Trac 1.0 to 1.2</h4>
+<h5 class="section" id="Python2.5nolongersupported">Python 2.5 no longer supported</h5>
+<p>
+Upgrade Python to at least 2.6 or 2.7, but not 3.0 or greater.
+</p>
+<h5 class="section" id="ObsoletePlugins1">Obsolete Plugins</h5>
+<p>
+Trac has added functionality equivalent to the following plugins:
+</p>
+<ul><li><a class="ext-link" href="https://trac-hacks.org/wiki/AdminEnumListPlugin"><span class="icon">​</span>AdminEnumListPlugin</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/AttachmentNotifyPlugin"><span class="icon">​</span>AttachmentNotifyPlugin</a>: attachment notifications are sent in Trac 1.0.3 and later
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/DateFieldPlugin"><span class="icon">​</span>DateFieldPlugin</a>: see the <strong>time</strong> <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracTicketsCustomFields#AvailableFieldTypesandOptions">custom field type</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/FlexibleReporterNotificationPlugin"><span class="icon">​</span>FlexibleReporterNotificationPlugin</a>: <a class="ext-link" href="https://trac.edgewall.org/intertrac/CookBook/Notification/Subscriptions" title="CookBook/Notification/Subscriptions in The Trac Project"><span class="icon">​</span>custom subscribers</a> can be implemented in the new extensible notification system
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/GroupBasedRedirectionPlugin"><span class="icon">​</span>GroupBasedRedirectionPlugin</a>: the default handler can set as a user preference
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/GroupingAssignToPlugin"><span class="icon">​</span>GroupingAssignToPlugin</a>: groups and permissions can be used in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow#BasicTicketWorkflowCustomization">set_owner</a> workflow attribute
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/LinenoMacro"><span class="icon">​</span>LinenoMacro</a>: see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors#AvailableProcessors">WikiProcessors#AvailableProcessors</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/NeverNotifyUpdaterPlugin"><span class="icon">​</span>NeverNotifyUpdaterPlugin</a>: see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification#notification-subscriber-section">notification subscribers</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/QueryUiAssistPlugin"><span class="icon">​</span>QueryUiAssistPlugin</a>: see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#Filters">TracQuery#Filters</a>.
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/TicketCreationStatusPlugin"><span class="icon">​</span>TicketCreationStatusPlugin</a>: see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#NewWorkflowActions">#NewWorkflowActions</a>
+</li></ul><p>
+The plugins should be removed when upgrading Trac to 1.2.
+</p>
+<h5 class="section" id="NewWorkflowActions">New workflow actions</h5>
+<p>
+The ticket creation step is controlled with a workflow action. The default workflow has <code>create</code> and <code>create_and_assign</code> actions. The <code>create</code> action will always be added when upgrading the database. The <code>create_and_assign</code> action will be added if the workflow has an <em>assigned</em> state. You may want to edit your workflow after upgrading the database to customize the actions available on the <em>New Ticket</em> page.
+</p>
+<h5 class="section" id="Newpermissionspolicyforread-onlywikipages">New permissions policy for read-only wiki pages</h5>
+<p>
+Since 1.1.2 the read-only attribute of wiki pages is enabled and enforced only when <code>ReadonlyWikiPolicy</code> is in the list of active permission policies. If <code>[trac] permission_policy</code> has the default value <code>DefaultPermissionPolicy, LegacyAttachmentPolicy</code>, then <code>ReadonlyWikiPolicy</code> should be automatically appended to the list when upgrading the environment:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[trac]</span>
+<span class="na">permission_policies</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">ReadonlyWikiPolicy,</span>
+<span class="w"> </span><span class="na">DefaultPermissionPolicy,</span>
+<span class="w"> </span><span class="na">LegacyAttachmentPolicy</span>
+</pre></div></div><p>
+If other permission policies are enabled, <code>trac.ini</code> will need to have <code>ReadonlyWikiPolicy</code> appended to the list of active <code>permission_policies</code>. See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracFineGrainedPermissions#ReadonlyWikiPolicy">TracFineGrainedPermissions#ReadonlyWikiPolicy</a> for additional details on the proper ordering.
+</p>
+<h5 class="section" id="NavigationOrderingMoved">Navigation Ordering Moved</h5>
+<p>
+The mainnav and metanav configuration ordering have
+been moved from <code>[trac]</code> <code>mainnav</code> and <code>[trac]</code> <code>metanav</code> to the <code>[mainnav]</code> and <code>[metanav]</code> sections. The ordering is now specified using the <code>order</code> attribute as described in <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNavigation#nav-order">TracNavigation</a>.
+</p>
+<p>
+The new configuration values will be written to trac.ini on upgrade, preserving the navigation order for the environment. You may need to edit trac.ini
+if you use a shared <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#GlobalConfiguration">global configuration</a>.
+For example, if you wish to specify the navigation ordering for several environments in <code>global.ini</code>, you'll
+need to add the <code>[mainnav]</code> and <code>[metanav]</code> sections
+in that file and delete those sections from each
+environment's trac.ini.
+</p>
+<h4 class="section" id="to1.0">Upgrading from Trac 0.12 to Trac 1.0</h4>
+<h5 class="section" id="Python2.4nolongersupported">Python 2.4 no longer supported</h5>
+<p>
+Upgrade Python to at least 2.5, but not 3.0.
+</p>
+<h5 class="section" id="ObsoletePlugins2">Obsolete Plugins</h5>
+<p>
+Trac has added functionality equivalent to the following plugins:
+</p>
+<ul><li><a class="ext-link" href="https://trac-hacks.org/wiki/AnchorMacro"><span class="icon">​</span>AnchorMacro</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/BatchModifyPlugin"><span class="icon">​</span>BatchModifyPlugin</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/GitPlugin"><span class="icon">​</span>GitPlugin</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/OverrideEditPlugin"><span class="icon">​</span>OverrideEditPlugin</a>
+</li><li><a class="ext-link" href="https://trac-hacks.org/wiki/ProgressMeterMacro"><span class="icon">​</span>ProgressMeterMacro</a>
+</li></ul><p>
+The plugins should be removed when upgrading Trac to 1.0.
+</p>
+<h5 class="section" id="Subversioncomponentsnotenabledbydefaultfornewinstallations">Subversion components not enabled by default for new installations</h5>
+<p>
+The Trac components for Subversion support are no longer enabled by default. To enable the svn support, you need to make sure the <code>tracopt.versioncontrol.svn</code> components are enabled, for example by setting the following in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">TracIni</a>:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[components]</span>
+<span class="na">tracopt.versioncontrol.svn.*</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">enabled</span>
+</pre></div></div><p>
+The upgrade procedure should take care of this and change the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">TracIni</a> appropriately, unless you already had the svn components explicitly disabled.
+</p>
+<h5 class="section" id="AttachmentsMigrated">Attachments migrated to new location</h5>
+<p>
+Another step in the automatic upgrade will change the way the attachments are stored. There have been reports that the attachment migration <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#AttachmentsNotMigrated">sometimes fails</a>, so it's extra important that you <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">backup your environment</a>.
+</p>
+<p>
+In case the <code>attachments</code> directory contains some files which are <em>not</em> attachments, the last step of the migration to the new layout will not be completed: the deletion of the now unused <code>attachments</code> directory can't be done if there are still files and folders in it. You may ignore this error, but better to move them elsewhere and remove the <code>attachments</code> directory manually. The attachments themselves are now all located in your environment below the <code>files/attachments</code> directory.
+</p>
+<h5 class="section" id="Behaviorofticketdefault_ownerchanged">Behavior of <code>[ticket] default_owner</code> changed</h5>
+<p>
+Prior to 1.0, the owner field of new tickets always defaulted to <code>[ticket] default_owner</code> when the value was not empty. If the value was empty, the owner field defaulted to to the Component's owner. In 1.0 and later, the <code>default_owner</code> must be set to <code>&lt; default &gt;</code> to make new tickets default to the Component's owner. This change allows the <code>default_owner</code> to be set to an empty value if no default owner is desired.
+</p>
+<h5 class="section" id="Behaviorof-workflowtransition">Behavior of <code>* -&gt; *</code> workflow transition</h5>
+<p>
+The workflow transition <code>* -&gt; *</code> must have the operation
+<code>leave_status</code>. Due to a defect in Trac &lt; 1.0.18
+<code>leave_status</code> was not required, so it may be necessary
+to add the operation when upgrading. The action will not
+display for a <code>* -&gt; *</code> transition if the action does
+not have the <code>leave_status</code> operation.
+</p>
+<h4 class="section" id="OlderVersions">Upgrading from older versions of Trac</h4>
+<p>
+For upgrades from versions older than Trac 0.12, refer first to <a class="ext-link" href="https://trac.edgewall.org/intertrac/wiki%3A0.12/TracUpgrade%23SpecificVersions" title="wiki:0.12/TracUpgrade#SpecificVersions in The Trac Project"><span class="icon">​</span>TracUpgrade for 0.12</a>.
+</p>
+<p>
+For upgrades from versions older than Trac 0.10, refer first to <a class="ext-link" href="https://trac.edgewall.org/intertrac/wiki%3A0.10/TracUpgrade%23SpecificVersions" title="wiki:0.10/TracUpgrade#SpecificVersions in The Trac Project"><span class="icon">​</span>TracUpgrade for 0.10</a>.
+</p>
+<h2 class="section" id="KnownIssues">Known Issues</h2>
+<h3 class="section" id="CustomizedTemplates">Customized Templates</h3>
+<p>
+Trac supports customization of its templates by placing copies of the templates in the <code>&lt;env&gt;/templates</code> folder of your <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">environment</a> or in a common location specified in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#GlobalConfiguration">inherit.templates_dir</a> configuration setting. If you choose to customize the templates, be aware that you will need to repeat your changes on a copy of the new templates when you upgrade to a new release of Trac (even a minor one), as the templates will evolve. So keep a diff around.
+</p>
+<p>
+The preferred way to perform <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">TracInterfaceCustomization</a> is a custom plugin doing client-side JavaScript transformation of the generated output, as this is more robust in case of changes: we usually won't modify an element <code>id</code> or change its CSS <code>class</code>, and if we have to do so, this will be documented in the <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracDev/ApiChanges" title="TracDev/ApiChanges in The Trac Project"><span class="icon">​</span>TracDev/ApiChanges</a> pages.
+</p>
+<h3 class="section" id="ZipImportError">ZipImportError</h3>
+<p>
+Due to internal caching of zipped packages, whenever the content of the packages change on disk, the in-memory zip index will no longer match and you'll get irrecoverable ZipImportError errors. Better to anticipate and bring your server down for maintenance before upgrading.
+See <a class="ext-link" href="https://trac.edgewall.org/intertrac/%237014" title="#7014 in The Trac Project"><span class="icon">​</span>#7014</a> for details.
+</p>
+<h3 class="section" id="WikiUpgrade">Wiki Upgrade</h3>
+<p>
+<code>trac-admin</code> will not delete or remove default wiki pages that were present in a previous version but are no longer in the new version.
+</p>
+<h3 class="section" id="Parentdir">Parent dir</h3>
+<p>
+If you use a Trac parent env configuration and one of the plugins in one child does not work, none of the children will work.
+</p>
+<h3 class="section" id="AttachmentsNotMigrated">Attachments not migrated</h3>
+<p>
+There have been reports that attachments are not <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade#AttachmentsMigrated">migrated</a> when upgrading to Trac 1.0 or later. The cause of the issue has not yet been found. If you encounter this issue, see <a class="ext-link" href="https://trac.edgewall.org/wiki/TracFaq#Q:Attachmentsaremissingafterupgrade"><span class="icon">​</span>the FAQ</a> for a workaround and please report your findings to <a class="ext-link" href="https://trac.edgewall.org/intertrac/%2311370" title="#11370 in The Trac Project"><span class="icon">​</span>#11370</a>.
+</p>
+<h2 class="section" id="Relatedtopics">Related topics</h2>
+<h3 class="section" id="UpgradingPython">Upgrading Python</h3>
+<p>
+Upgrading Python to a newer version will require reinstallation of Python packages: Trac itself of course, but also <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#Dependencies">dependencies</a>. If you are using Subversion, you'll need to upgrade the <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracSubversion" title="TracSubversion in The Trac Project"><span class="icon">​</span>Python bindings for SVN</a>.
+</p>
+<hr />
+<p>
+See also: <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">TracGuide</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">TracInstall</a>
+</p>
+</body></html>

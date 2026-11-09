@@ -1,0 +1,23 @@
+<p>
+<strong>Cloud PR back and verified locally</strong> (2026-11-04). The work is <a class="ext-link" href="https://github.com/nerpatech/trac-mcp-server/pull/126"><span class="icon">​</span>https://github.com/nerpatech/trac-mcp-server/pull/126</a>, on local branch <code>ticket-148-glued-bracket-realm</code>, in two commits:
+</p>
+<ul><li><code>90d3c94</code> fix: regex, tests, fixtures, CHANGELOG.
+</li><li><code>84a380b</code> refactor: removes the dead <code>]</code> handling.
+</li></ul><p>
+Revert <code>84a380b</code> first: without it the fix can't be reverted cleanly.
+</p>
+<h2 class="section" id="DecisionscopiedfromthePR">Decisions copied from the PR</h2>
+<ol><li><strong>Regex: one deviation from the comment 2 plan.</strong> The bracketed alternative is
+<pre class="wiki">(?&lt;=\[)HEAD(?:[^\s`\]]+|(?=\]))
+</pre>rather than plain <code>+</code>. With <code>+</code> alone, an empty bracketed target such as <code>[auto_pm:wiki:]</code> failed the bracketed alternative. It then fell through to the unbracketed one, which swallowed <code>]/[...</code> again. That left this ticket's gap open for that shape, and kept <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/147" title="#147: defect: unconfigured_intertrac_prefix: a label-less bracketed realm link ... (closed: fixed)">#147</a>'s cut reachable. The lookahead fixes this without matching <code>[p:wiki: label]</code>, which still matches nothing, as on <code>master</code>. The head is factored into <code>_PREFIX_REALM_HEAD</code>. The unbracketed alternative is unchanged.
+</li><li><strong>Dead code: all three pieces removed.</strong> They were <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/147" title="#147: defect: unconfigured_intertrac_prefix: a label-less bracketed realm link ... (closed: fixed)">#147</a>'s cut, the no-label <code>endswith("]")</code> strip, and <code>_bracket_label</code>'s <code>endswith("]")</code> shortcut. With each replaced by a raise, none fired across the full suite. <code>_bracket_label</code> lost its now-unused <code>raw</code> parameter, which had one caller. The docstrings and comments are rewritten, and <code>_code_span_contains</code>'s boundary note now mentions <code>]</code>.
+</li><li><strong>Tests.</strong> Two new rows: <code>row148_glued_bracket_typo_second</code> warns exactly once, for <code>auto-pm:wiki:…</code>, and <code>row148_glued_bracket_both_resolved</code> is silent. The silent row joins <code>SILENT_ROWS</code>, so the balance count goes from 40 to 41; that changes no row's expected output. There is also a parametrized regex-level test covering the comment 2 table, plus the two empty-target cases. <code>_row147_prefix_warnings</code> is renamed to <code>_prefix_warnings</code>.
+</li><li><strong>Seeded defect, red three ways:</strong> on <code>master</code>; with the fix reverted on commit 1; and with it reverted on commit 2. A fourth run with the plan's <code>+</code>-only regex fails exactly the two empty-target cases.
+</li><li>No existing expected output changed.
+</li></ol><h2 class="section" id="Localverification">Local verification</h2>
+<ul><li>Code review (Sonnet <code>/code-review</code>, base <code>master</code>): no findings survived. Nested <code>[1]</code>, empty targets, <code>[[...]]</code>, labelled brackets and attachment-qualified tokens all yield the same raw token and suffix as <code>master</code> after <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/147" title="#147: defect: unconfigured_intertrac_prefix: a label-less bracketed realm link ... (closed: fixed)">#147</a>'s cut. No bracketed-start token can contain <code>]</code>.
+</li><li><code>ci.sh</code>: 2761 passed, 41 skipped.
+</li><li><code>ci-live.sh</code>: 2801 passed, 1 skipped, 422 subtests. The cloud session reported a <code>test_batch_create_success</code> failure, also present on its <code>master</code>; it does not reproduce here.
+</li></ul><p>
+Ready for <code>/finish</code>.
+</p>

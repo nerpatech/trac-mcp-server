@@ -1,0 +1,1305 @@
+<html><body><h1 class="section" id="TheTracConfigurationFile">The Trac Configuration File</h1>
+<p>
+</p><div class="wiki-toc"><h4>Table of Contents</h4><ul><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">Index</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">Installation</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">Customization</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">Plugins</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade">Upgrading</a></li><li class="active"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">Configuration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">Administration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">Backup</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracLogging">Logging</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">Permissions</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">The Wiki</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">Wiki Formatting</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTimeline">Timeline</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBrowser">Repository Browser</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">Revision Log</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracChangeset">Changesets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets">Tickets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">Workflow</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRoadmap">Roadmap</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">Ticket Queries</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBatchModify">Batch Modify</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">Reports</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRss">RSS Support</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">Notification</a></li></ul></div><p>
+</p><div class="wiki-toc"><h4 class="section">Contents</h4>
+    <ol>
+      <li>
+        <a href="#GlobalConfiguration">Global Configuration</a>
+      </li>
+      <li>
+        <a href="#Referenceforsettings">Reference for settings</a>
+      </li>
+      <li>
+        <a href="#ConfigureErrorReporting">Configure Error Reporting</a>
+      </li>
+    </ol>
+</div><p>
+</p>
+<p>
+Trac is configured through the <strong><code>trac.ini</code></strong> file, located in the <code>&lt;projectenv&gt;/conf</code> directory. The <code>trac.ini</code> configuration file and its parent directory should be writable by the web server.
+</p>
+<p>
+Trac monitors the timestamp of the file to trigger an environment reload when the timestamp changes. Most changes to the configuration will be reflected immediately, though changes to the <code>[components]</code> or <code>[logging]</code> sections will require restarting the web server. You may also need to restart the web server after creating a <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#GlobalConfiguration">global configuration</a> file when none was previously present.
+</p>
+<h2 class="section" id="GlobalConfiguration">Global Configuration</h2>
+<p>
+Configuration can be shared among environments using one or more global configuration files. Options in the global configuration will be merged with the environment-specific options, with local options overriding global options. The global configuration file is specified as follows:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[inherit]</span>
+<span class="na">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">/path/to/global/trac.ini</span>
+</pre></div></div><p>
+Multiple files can be specified using a comma-separated list. Non-absolute paths are relative to the Environment <code>conf</code> directory.
+</p>
+<p>
+Note that you can also specify a global option file when creating a new project, by adding the option <code>--inherit=/path/to/global/trac.ini</code> to <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin#initenv">trac-admin</a>'s <code>initenv</code> command. If you specify <code>--inherit</code> but nevertheless intend to use a global option file with your new environment, you will have to go through the newly generated <code>conf/trac.ini</code> file and delete the entries that will otherwise override those in the global file.
+</p>
+<p>
+There are three more options in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-section">[inherit]</a> section, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-templates_dir-option">templates_dir</a> for sharing global templates, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-htdocs_dir-option">htdocs_dir</a> for sharing global htdocs and <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-plugins_dir-option">plugins_dir</a>, for sharing plugins. Those options can be specified in the shared configuration file, and in fact, configuration files can even be chained if you specify another <code>[inherit] file</code> there.
+</p>
+<p>
+Note that the templates found in the <code>templates/</code> directory of the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">TracEnvironment</a> have precedence over those found in <code>[inherit] templates_dir</code>. In turn, the latter have precedence over the installed templates, so be careful about what you put there. Notably, if you override a default template, refresh your modifications when you upgrade to a new version of Trac. The preferred way to perform <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">TracInterfaceCustomization</a> is to write a custom plugin doing an appropriate <code>ITemplateStreamFilter</code> transformation.
+</p>
+<h2 class="section" id="Referenceforsettings">Reference for settings</h2>
+<p>
+This is a reference of available configuration options, and their default settings.
+</p>
+<p>
+Documentation improvements should be discussed on the <a class="ext-link" href="https://trac.edgewall.org/intertrac/MailingList%23Trac-dev" title="MailingList#Trac-dev in The Trac Project"><span class="icon">​</span>trac-dev mailing list</a> or described in a <a class="ext-link" href="https://trac.edgewall.org/intertrac/NewTicket" title="NewTicket in The Trac Project"><span class="icon">​</span>ticket</a>. Even better, <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracDev/SubmittingPatches" title="TracDev/SubmittingPatches in The Trac Project"><span class="icon">​</span>submit a patch</a> against the docstrings in the code.
+</p>
+<p>
+</p><div class="tracini"><h3 id="attachment-section"><code>[attachment]</code></h3><table class="wiki"><tbody><tr class="even" id="attachment-max_size-option"><td><a class="tracini-option" href="#attachment-max_size-option"><code>max_size</code></a></td><td><p>
+Maximum allowed file size (in bytes) for attachments.
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="odd" id="attachment-max_zip_size-option"><td><a class="tracini-option" href="#attachment-max_zip_size-option"><code>max_zip_size</code></a></td><td><p>
+Maximum allowed total size (in bytes) for an attachment list to be
+downloadable as a <code>.zip</code>. Set this to -1 to disable download as
+<code>.zip</code>. (<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>2097152</code></td></tr><tr class="even" id="attachment-render_unsafe_content-option"><td><a class="tracini-option" href="#attachment-render_unsafe_content-option"><code>render_unsafe_content</code></a></td><td><p>
+Whether attachments should be rendered in the browser, or
+only made downloadable.
+</p>
+<p>
+Pretty much any file may be interpreted as HTML by the browser,
+which allows a malicious user to attach a file containing cross-site
+scripting attacks.
+</p>
+<p>
+For public sites where anonymous users can create attachments it is
+recommended to leave this option disabled.
+</p>
+</td><td class="default"><code>disabled</code></td></tr></tbody></table><h3 id="browser-section"><code>[browser]</code></h3><table class="wiki"><tbody><tr class="even" id="browser-color_scale-option"><td><a class="tracini-option" href="#browser-color_scale-option"><code>color_scale</code></a></td><td><p>
+Enable colorization of the <em>age</em> column.
+</p>
+<p>
+This uses the same color scale as the source code annotation:
+blue is older, red is newer.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="browser-downloadable_paths-option"><td><a class="tracini-option" href="#browser-downloadable_paths-option"><code>downloadable_paths</code></a></td><td><p>
+List of repository paths that can be downloaded.
+</p>
+<p>
+Leave this option empty if you want to disable all downloads, otherwise
+set it to a comma-separated list of authorized paths (those paths are
+glob patterns, i.e. "*" can be used as a wild card). In a
+multi-repository environment, the path must be qualified with the
+repository name if the path does not point to the default repository
+(e.g. /reponame/trunk). Note that a simple prefix matching is
+performed on the paths, so aliases won't get automatically resolved.
+</p>
+</td><td class="default"><code>/trunk,/branches/*,/tags/*</code></td></tr><tr class="even" id="browser-hide_properties-option"><td><a class="tracini-option" href="#browser-hide_properties-option"><code>hide_properties</code></a></td><td><p>
+Comma-separated list of version control properties to hide from
+the repository browser.
+</p>
+</td><td class="default"><code>svk:merge</code></td></tr><tr class="odd" id="browser-intermediate_color-option"><td><a class="tracini-option" href="#browser-intermediate_color-option"><code>intermediate_color</code></a></td><td><p>
+(r,g,b) color triple to use for the color corresponding
+to the intermediate color, if two linear interpolations are used
+for the color scale (see <code>intermediate_point</code>).
+If not set, the intermediate color between <code>oldest_color</code> and
+<code>newest_color</code> will be used.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="browser-intermediate_point-option"><td><a class="tracini-option" href="#browser-intermediate_point-option"><code>intermediate_point</code></a></td><td><p>
+If set to a value between 0 and 1 (exclusive), this will be the
+point chosen to set the <code>intermediate_color</code> for interpolating
+the color value.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="browser-newest_color-option"><td><a class="tracini-option" href="#browser-newest_color-option"><code>newest_color</code></a></td><td><p>
+(r,g,b) color triple to use for the color corresponding
+to the newest color, for the color scale used in <em>blame</em> or
+the browser <em>age</em> column if <code>color_scale</code> is enabled.
+</p>
+</td><td class="default"><code>(255, 136, 136)</code></td></tr><tr class="even" id="browser-oldest_color-option"><td><a class="tracini-option" href="#browser-oldest_color-option"><code>oldest_color</code></a></td><td><p>
+(r,g,b) color triple to use for the color corresponding
+to the oldest color, for the color scale used in <em>blame</em> or
+the browser <em>age</em> column if <code>color_scale</code> is enabled.
+</p>
+</td><td class="default"><code>(136, 136, 255)</code></td></tr><tr class="odd" id="browser-oneliner_properties-option"><td><a class="tracini-option" href="#browser-oneliner_properties-option"><code>oneliner_properties</code></a></td><td><p>
+Comma-separated list of version control properties to render
+as oneliner wiki content in the repository browser.
+</p>
+</td><td class="default"><code>trac:summary</code></td></tr><tr class="even" id="browser-render_unsafe_content-option"><td><a class="tracini-option" href="#browser-render_unsafe_content-option"><code>render_unsafe_content</code></a></td><td><p>
+Whether raw files should be rendered in the browser, or only made
+downloadable.
+</p>
+<p>
+Pretty much any file may be interpreted as HTML by the browser,
+which allows a malicious user to create a file containing cross-site
+scripting attacks.
+</p>
+<p>
+For open repositories where anyone can check-in a file, it is
+recommended to leave this option disabled.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="browser-wiki_properties-option"><td><a class="tracini-option" href="#browser-wiki_properties-option"><code>wiki_properties</code></a></td><td><p>
+Comma-separated list of version control properties to render
+as wiki content in the repository browser.
+</p>
+</td><td class="default"><code>trac:description</code></td></tr></tbody></table><h3 id="changeset-section"><code>[changeset]</code></h3><table class="wiki"><tbody><tr class="even" id="changeset-max_diff_bytes-option"><td><a class="tracini-option" href="#changeset-max_diff_bytes-option"><code>max_diff_bytes</code></a></td><td><p>
+Maximum total size in bytes of the modified files (their old size
+plus their new size) for which the changeset view will attempt to show
+the diffs inlined.
+</p>
+</td><td class="default"><code>10000000</code></td></tr><tr class="odd" id="changeset-max_diff_files-option"><td><a class="tracini-option" href="#changeset-max_diff_files-option"><code>max_diff_files</code></a></td><td><p>
+Maximum number of modified files for which the changeset view will
+attempt to show the diffs inlined.
+</p>
+</td><td class="default"><code>0</code></td></tr><tr class="even" id="changeset-wiki_format_messages-option"><td><a class="tracini-option" href="#changeset-wiki_format_messages-option"><code>wiki_format_messages</code></a></td><td><p>
+Whether wiki formatting should be applied to changeset messages.
+</p>
+<p>
+If this option is disabled, changeset messages will be rendered as
+pre-formatted text.
+</p>
+</td><td class="default"><code>enabled</code></td></tr></tbody></table><h3 id="components-section"><code>[components]</code></h3><p>
+Enable or disable components provided by Trac and plugins.
+The component to enable/disable is specified by the option name.
+The enabled state is determined by the option value: setting
+the value to <code>enabled</code> or <code>on</code> will enable the component, any
+other value (typically <code>disabled</code> or <code>off</code>) will disable the
+component.
+</p>
+<p>
+The option name is either the fully qualified name of the
+component or the module/package prefix of the component. The
+former enables/disables a specific component, while the latter
+enables/disables any component in the specified package/module.
+</p>
+<p>
+Consider the following configuration snippet:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[components]</span>
+<span class="na">trac.ticket.report.ReportModule</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">disabled</span>
+<span class="na">acct_mgr.*</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">enabled</span>
+</pre></div></div><p>
+The first option tells Trac to disable the
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">report module</a>.
+The second option instructs Trac to enable all components in
+the <code>acct_mgr</code> package. The trailing wildcard is required for
+module/package matching.
+</p>
+<p>
+To view the list of active components, go to the <em>Plugins</em>
+section of <em>About Trac</em> (requires <code>CONFIG_VIEW</code>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">permission</a>).
+</p>
+<p>
+See also: <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">TracPlugins</a>
+</p>
+<h3 id="git-section"><code>[git]</code></h3><table class="wiki"><tbody><tr class="even" id="git-cached_repository-option"><td><a class="tracini-option" href="#git-cached_repository-option"><code>cached_repository</code></a></td><td><p>
+Wrap <code>GitRepository</code> in <code>CachedRepository</code>.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="git-git_bin-option"><td><a class="tracini-option" href="#git-git_bin-option"><code>git_bin</code></a></td><td><p>
+Path to the git executable.
+</p>
+</td><td class="default"><code>git</code></td></tr><tr class="even" id="git-git_fs_encoding-option"><td><a class="tracini-option" href="#git-git_fs_encoding-option"><code>git_fs_encoding</code></a></td><td><p>
+Define charset encoding of paths within git repositories.
+</p>
+</td><td class="default"><code>utf-8</code></td></tr><tr class="odd" id="git-persistent_cache-option"><td><a class="tracini-option" href="#git-persistent_cache-option"><code>persistent_cache</code></a></td><td><p>
+Enable persistent caching of commit tree.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="git-shortrev_len-option"><td><a class="tracini-option" href="#git-shortrev_len-option"><code>shortrev_len</code></a></td><td><p>
+The length at which a sha1 is abbreviated (must be &gt;= 4
+and &lt;= 40).
+</p>
+</td><td class="default"><code>7</code></td></tr><tr class="odd" id="git-trac_user_rlookup-option"><td><a class="tracini-option" href="#git-trac_user_rlookup-option"><code>trac_user_rlookup</code></a></td><td><p>
+Enable reverse mapping of git email addresses to trac user ids.
+Performance will be reduced if there are many users and the
+<code>cached_repository</code> option is <code>disabled</code>.
+</p>
+<p>
+A repository resync is required after changing the value of this
+option.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="git-use_committer_id-option"><td><a class="tracini-option" href="#git-use_committer_id-option"><code>use_committer_id</code></a></td><td><p>
+Use git-committer id instead of git-author id for the
+changeset <em>Author</em> field.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="git-use_committer_time-option"><td><a class="tracini-option" href="#git-use_committer_time-option"><code>use_committer_time</code></a></td><td><p>
+Use git-committer timestamp instead of git-author timestamp
+for the changeset <em>Timestamp</em> field.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="even" id="git-wikishortrev_len-option"><td><a class="tracini-option" href="#git-wikishortrev_len-option"><code>wikishortrev_len</code></a></td><td><p>
+The minimum length at which a hex-string in wiki content
+is formatted as a changeset TracLink (must be &gt;= 4 and &lt;= 40).
+</p>
+</td><td class="default"><code>40</code></td></tr></tbody></table><h3 id="gitweb-repositories-section"><code>[gitweb-repositories]</code></h3><table class="wiki"><tbody><tr class="even" id="gitweb-repositories-projects_base-option"><td><a class="tracini-option" href="#gitweb-repositories-projects_base-option"><code>projects_base</code></a></td><td><p>
+Path to the base of your git projects
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="gitweb-repositories-projects_list-option"><td><a class="tracini-option" href="#gitweb-repositories-projects_list-option"><code>projects_list</code></a></td><td><p>
+Path to a gitweb-formatted projects.list
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="gitweb-repositories-projects_url-option"><td><a class="tracini-option" href="#gitweb-repositories-projects_url-option"><code>projects_url</code></a></td><td><p>
+Template for project URLs. <code>%s</code> will be replaced with the repo
+name
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="gitweb-repositories-sync_per_request-option"><td><a class="tracini-option" href="#gitweb-repositories-sync_per_request-option"><code>sync_per_request</code></a></td><td><p>
+Repositories to sync on every request
+(not recommended).
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="header_logo-section"><code>[header_logo]</code></h3><table class="wiki"><tbody><tr class="even" id="header_logo-alt-option"><td><a class="tracini-option" href="#header_logo-alt-option"><code>alt</code></a></td><td><p>
+Alternative text for the header logo.
+</p>
+</td><td class="default"><code>(please configure the [header_logo] section in trac.ini)</code></td></tr><tr class="odd" id="header_logo-height-option"><td><a class="tracini-option" href="#header_logo-height-option"><code>height</code></a></td><td><p>
+Height of the header logo image in pixels.
+</p>
+</td><td class="default"><code>-1</code></td></tr><tr class="even" id="header_logo-link-option"><td><a class="tracini-option" href="#header_logo-link-option"><code>link</code></a></td><td><p>
+URL to link to, from the header logo.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="header_logo-src-option"><td><a class="tracini-option" href="#header_logo-src-option"><code>src</code></a></td><td><p>
+URL of the image to use as header logo.
+It can be absolute, server relative or relative.
+</p>
+<p>
+If relative, it is relative to one of the <code>/chrome</code> locations:
+<code>site/your-logo.png</code> if <code>your-logo.png</code> is located in the <code>htdocs</code>
+folder within your <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">TracEnvironment</a>;
+<code>common/your-logo.png</code> if <code>your-logo.png</code> is located in the
+folder mapped to the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#trac-section">htdocs_location</a> URL.
+Only specifying <code>your-logo.png</code> is equivalent to the latter.
+</p>
+</td><td class="default"><code>site/your_project_logo.png</code></td></tr><tr class="even" id="header_logo-width-option"><td><a class="tracini-option" href="#header_logo-width-option"><code>width</code></a></td><td><p>
+Width of the header logo image in pixels.
+</p>
+</td><td class="default"><code>-1</code></td></tr></tbody></table><h3 id="http-headers-section"><code>[http-headers]</code></h3><p>
+Headers to be added to the HTTP request. (<em>since 1.2.3</em>)
+</p>
+<p>
+The header name must conform to
+<a class="ext-link" href="https://tools.ietf.org/html/rfc7230"><span class="icon">​</span>RFC7230</a> and the following
+reserved names are not allowed: content-type, content-length,
+location, etag, pragma, cache-control, expires.
+</p>
+<h3 id="inherit-section"><code>[inherit]</code></h3><table class="wiki"><tbody><tr class="even" id="inherit-htdocs_dir-option"><td><a class="tracini-option" href="#inherit-htdocs_dir-option"><code>htdocs_dir</code></a></td><td><p>
+Path to the <em>shared htdocs directory</em>.
+</p>
+<p>
+Static resources in that directory are mapped to /chrome/shared
+under the environment URL, in addition to common and site locations.
+</p>
+<p>
+This can be useful in site.html for common interface customization
+of multiple Trac environments.
+</p>
+<p>
+Non-absolute paths are relative to the Environment <code>conf</code>
+directory.
+(<em>since 1.0</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="inherit-plugins_dir-option"><td><a class="tracini-option" href="#inherit-plugins_dir-option"><code>plugins_dir</code></a></td><td><p>
+Path to the <em>shared plugins directory</em>.
+</p>
+<p>
+Plugins in that directory are loaded in addition to those in
+the directory of the environment <code>plugins</code>, with this one
+taking precedence.
+</p>
+<p>
+Non-absolute paths are relative to the Environment <code>conf</code>
+directory.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="inherit-templates_dir-option"><td><a class="tracini-option" href="#inherit-templates_dir-option"><code>templates_dir</code></a></td><td><p>
+Path to the <em>shared templates directory</em>.
+</p>
+<p>
+Templates in that directory are loaded in addition to those in the
+environments <code>templates</code> directory, but the latter take precedence.
+</p>
+<p>
+Non-absolute paths are relative to the Environment <code>conf</code>
+directory.
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="intertrac-section"><code>[intertrac]</code></h3><p>
+This section configures <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterTrac">InterTrac</a> prefixes. Option names in
+this section that contain a <code>.</code> are of the format
+<code>&lt;name&gt;.&lt;attribute&gt;</code>. Option names that don't contain a <code>.</code> define
+an alias.
+</p>
+<p>
+The <code>.url</code> attribute is mandatory and is used for locating the
+other Trac. This can be a relative path when the other Trac
+environment is located on the same server.
+</p>
+<p>
+The <code>.title</code> attribute is used for generating a tooltip when the
+cursor is hovered over an <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterTrac">InterTrac</a> link.
+</p>
+<p>
+Example configuration:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[intertrac]</span>
+<span class="c1"># -- Example of setting up an alias:</span>
+<span class="na">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">trac</span>
+
+<span class="c1"># -- Link to an external Trac:</span>
+<span class="na">genshi.title</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Edgewall&#39;s Trac for Genshi</span>
+<span class="na">genshi.url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">https://genshi.edgewall.org</span>
+</pre></div></div><h3 id="interwiki-section"><code>[interwiki]</code></h3><p>
+Every option in the <code>[interwiki]</code> section defines one <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/InterWiki">InterWiki</a>
+prefix. The option name defines the prefix. The option value defines
+the URL, optionally followed by a description separated from the URL
+by whitespace. Parametric URLs are supported as well.
+</p>
+<p>
+<strong>Example:</strong>
+</p>
+<pre class="wiki">[interwiki]
+MeatBall = http://www.usemod.com/cgi-bin/mb.pl?
+PEP = http://www.python.org/peps/pep-$1.html Python Enhancement Proposal $1
+tsvn = tsvn: Interact with TortoiseSvn
+</pre><h3 id="logging-section"><code>[logging]</code></h3><table class="wiki"><tbody><tr class="even" id="logging-log_file-option"><td><a class="tracini-option" href="#logging-log_file-option"><code>log_file</code></a></td><td><p>
+If <code>log_type</code> is <code>file</code>, this should be a path to the
+log-file.  Relative paths are resolved relative to the <code>log</code>
+directory of the environment.
+</p>
+</td><td class="default"><code>trac.log</code></td></tr><tr class="odd" id="logging-log_format-option"><td><a class="tracini-option" href="#logging-log_format-option"><code>log_format</code></a></td><td><p>
+Custom logging format.
+</p>
+<p>
+If nothing is set, the following will be used:
+</p>
+<p>
+<code>Trac[$(module)s] $(levelname)s: $(message)s</code>
+</p>
+<p>
+In addition to regular key names supported by the
+<a class="ext-link" href="http://docs.python.org/library/logging.html"><span class="icon">​</span>Python logger library</a>
+one could use:
+</p>
+<ul><li><code>$(path)s</code>     the path for the current environment
+</li><li><code>$(basename)s</code> the last path component of the current environment
+</li><li><code>$(project)s</code>  the project name
+</li></ul><p>
+Note the usage of <code>$(...)s</code> instead of <code>%(...)s</code> as the latter form
+would be interpreted by the ConfigParser itself.
+</p>
+<p>
+Example:
+<code>($(thread)d) Trac[$(basename)s:$(module)s] $(levelname)s: $(message)s</code>
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="logging-log_level-option"><td><a class="tracini-option" href="#logging-log_level-option"><code>log_level</code></a></td><td><p>
+Level of verbosity in log.
+</p>
+<p>
+Should be one of (<code>CRITICAL</code>, <code>ERROR</code>, <code>WARNING</code>, <code>INFO</code>, <code>DEBUG</code>).
+</p>
+</td><td class="default"><code>INFO</code></td></tr><tr class="odd" id="logging-log_type-option"><td><a class="tracini-option" href="#logging-log_type-option"><code>log_type</code></a></td><td><p>
+Logging facility to use.
+</p>
+<p>
+Should be one of (<code>none</code>, <code>file</code>, <code>stderr</code>, <code>syslog</code>, <code>winlog</code>).
+</p>
+</td><td class="default"><code>file</code></td></tr></tbody></table><h3 id="mainnav-section"><code>[mainnav]</code></h3><p>
+Configures the main navigation bar,
+which by default contains <em>Wiki</em>, <em>Timeline</em>, <em>Roadmap</em>,
+<em>Browse Source</em>, <em>View Tickets</em>, <em>New Ticket</em>, <em>Search</em> and
+<em>Admin</em>.
+</p>
+<p>
+The <code>label</code>, <code>href</code>, and <code>order</code> attributes can be specified. Entries
+can be disabled by setting the value of the navigation item to
+<code>disabled</code>.
+</p>
+<p>
+The following example renames the link to <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiStart">WikiStart</a> to <em>Home</em>,
+links the <em>View Tickets</em> entry to a specific report and disables
+the <em>Search</em> entry.
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[mainnav]</span>
+<span class="na">wiki.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Home</span>
+<span class="na">tickets.href</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">/report/24</span>
+<span class="na">search</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">disabled</span>
+</pre></div></div><p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNavigation">TracNavigation</a> for more details.
+</p>
+<h3 id="markdown-section"><code>[markdown]</code></h3><table class="wiki"><tbody><tr class="even" id="markdown-root_pages-option"><td><a class="tracini-option" href="#markdown-root_pages-option"><code>root_pages</code></a></td><td><p>
+List of wiki page names to be used as root pages for a page hierarchy. Wiki subpages of these roots will use Markdown as the default wiki language.<br /><br />For example if the list contains <code>Docs, Note</code> the wiki pages <code>Docs/MyDocument</code> and <code>Note/FirstNote</code> will use Markdown; the wiki page <code>NoteOne</code> will use Trac <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">WikiFormatting</a>.
+</p>
+<p>
+Example:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[markdown]</span>
+<span class="na">root_pages</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Docs, Note</span>
+</pre></div></div><p>
+<strong>Note:</strong> page names are case sensitive.
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="metanav-section"><code>[metanav]</code></h3><p>
+Configures the meta navigation
+entries, which by default are <em>Login</em>, <em>Logout</em>, <em>Preferences</em>,
+<em>Help/Guide</em> and <em>About Trac</em>. The allowed attributes are the
+same as for <code>[mainnav]</code>. Additionally, a special entry is supported -
+<code>logout.redirect</code> is the page the user sees after hitting the logout
+button. For example:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[metanav]</span>
+<span class="na">logout.redirect</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">wiki/Logout</span>
+</pre></div></div><p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNavigation">TracNavigation</a> for more details.
+</p>
+<h3 id="milestone-section"><code>[milestone]</code></h3><table class="wiki"><tbody><tr class="even" id="milestone-default_group_by-option"><td><a class="tracini-option" href="#milestone-default_group_by-option"><code>default_group_by</code></a></td><td><p>
+Default field to use for grouping tickets in the grouped
+progress bar. (<em>since 1.2</em>)
+</p>
+</td><td class="default"><code>component</code></td></tr><tr class="odd" id="milestone-default_retarget_to-option"><td><a class="tracini-option" href="#milestone-default_retarget_to-option"><code>default_retarget_to</code></a></td><td><p>
+Default milestone to which tickets are retargeted when
+closing or deleting a milestone. (<em>since 1.1.2</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="milestone-stats_provider-option"><td><a class="tracini-option" href="#milestone-stats_provider-option"><code>stats_provider</code></a></td><td><p>
+Name of the component implementing <code>ITicketGroupStatsProvider</code>,
+which is used to collect statistics on groups of tickets for display
+in the milestone views.
+</p>
+</td><td class="default"><code>DefaultTicketGroupStatsProvider</code></td></tr></tbody></table><h3 id="milestone-groups-section"><code>[milestone-groups]</code></h3><p>
+As the workflow for tickets is now configurable, there can
+be many ticket states, and simply displaying closed tickets
+vs. all the others is maybe not appropriate in all cases. This
+section enables one to easily create <em>groups</em> of states that
+will be shown in different colors in the milestone progress
+bar.
+</p>
+<p>
+Note that the groups can only be based on the ticket
+<em>status</em>, nothing else. In particular, it's not possible to
+distinguish between different closed tickets based on the
+<em>resolution</em>.
+</p>
+<p>
+Example configuration with three groups, <em>closed</em>, <em>new</em>
+and <em>active</em> (the default only has closed and active):
+</p>
+<pre class="wiki"># the 'closed' group correspond to the 'closed' tickets
+closed = closed
+
+# .order: sequence number in the progress bar
+closed.order = 0
+
+# .query_args: optional parameters for the corresponding
+#              query. In this example, the changes from the
+#              default are two additional columns ('created' and
+#              'modified'), and sorting is done on 'created'.
+closed.query_args = group=resolution,order=time,col=id,col=summary,col=owner,col=type,col=priority,col=component,col=severity,col=time,col=changetime
+
+# .overall_completion: indicates groups that count for overall
+#                      completion percentage
+closed.overall_completion = true
+
+new = new
+new.order = 1
+new.css_class = new
+new.label = new
+
+# Note: one catch-all group for other statuses is allowed
+active = *
+active.order = 2
+
+# .css_class: CSS class for this interval
+active.css_class = open
+
+# .label: displayed label for this group
+active.label = in progress
+</pre><p>
+The definition consists in a comma-separated list of accepted
+status. Also, '*' means any status and could be used to
+associate all remaining states to one catch-all group.
+</p>
+<p>
+The CSS class can be one of: new (yellow), open (no color) or
+closed (green). Other styles can easily be added using custom
+CSS rule: <code>table.progress td.&lt;class&gt; { background: &lt;color&gt; }</code>
+to a <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization#SiteAppearance">site/style.css</a> file
+for example.
+</p>
+<h3 id="mimeviewer-section"><code>[mimeviewer]</code></h3><table class="wiki"><tbody><tr class="even" id="mimeviewer-max_preview_size-option"><td><a class="tracini-option" href="#mimeviewer-max_preview_size-option"><code>max_preview_size</code></a></td><td><p>
+Maximum file size for HTML preview.
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="odd" id="mimeviewer-mime_map-option"><td><a class="tracini-option" href="#mimeviewer-mime_map-option"><code>mime_map</code></a></td><td><p>
+List of additional MIME types and keyword mappings.
+Mappings are comma-separated, and for each MIME type,
+there's a colon (":") separated list of associated keywords
+or file extensions.
+</p>
+</td><td class="default"><code>text/x-dylan:dylan,text/x-idl:ice,text/x-ada:ads:adb</code></td></tr><tr class="even" id="mimeviewer-mime_map_patterns-option"><td><a class="tracini-option" href="#mimeviewer-mime_map_patterns-option"><code>mime_map_patterns</code></a></td><td><p>
+List of additional MIME types associated to filename patterns.
+Mappings are comma-separated, and each mapping consists of a MIME type
+and a Python regexp used for matching filenames, separated by a colon
+(":"). (<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>text/plain:README(?!\.rst)|INSTALL(?!\.rst)|COPYING.*</code></td></tr><tr class="odd" id="mimeviewer-pygments_default_style-option"><td><a class="tracini-option" href="#mimeviewer-pygments_default_style-option"><code>pygments_default_style</code></a></td><td><p>
+The default style to use for Pygments syntax highlighting.
+</p>
+</td><td class="default"><code>trac</code></td></tr><tr class="even" id="mimeviewer-pygments_modes-option"><td><a class="tracini-option" href="#mimeviewer-pygments_modes-option"><code>pygments_modes</code></a></td><td><p>
+List of additional MIME types known by Pygments.
+</p>
+<p>
+For each, a tuple <code>mimetype:mode:quality</code> has to be
+specified, where <code>mimetype</code> is the MIME type,
+<code>mode</code> is the corresponding Pygments mode to be used
+for the conversion and <code>quality</code> is the quality ratio
+associated to this conversion. That can also be used
+to override the default quality ratio used by the
+Pygments render.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="mimeviewer-tab_width-option"><td><a class="tracini-option" href="#mimeviewer-tab_width-option"><code>tab_width</code></a></td><td><p>
+Displayed tab width in file preview.
+</p>
+</td><td class="default"><code>8</code></td></tr><tr class="even" id="mimeviewer-treat_as_binary-option"><td><a class="tracini-option" href="#mimeviewer-treat_as_binary-option"><code>treat_as_binary</code></a></td><td><p>
+Comma-separated list of MIME types that should be treated as
+binary data.
+</p>
+</td><td class="default"><code>application/octet-stream,application/pdf,application/postscript,application/msword,application/rtf</code></td></tr></tbody></table><h3 id="notification-section"><code>[notification]</code></h3><table class="wiki"><tbody><tr class="even" id="notification-admit_domains-option"><td><a class="tracini-option" href="#notification-admit_domains-option"><code>admit_domains</code></a></td><td><p>
+Comma-separated list of domains that should be considered as
+valid for email addresses (such as localdomain).
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-ambiguous_char_width-option"><td><a class="tracini-option" href="#notification-ambiguous_char_width-option"><code>ambiguous_char_width</code></a></td><td><p>
+Width of ambiguous characters that should be used in the table
+of the notification mail.
+</p>
+<p>
+If <code>single</code>, the same width as characters in US-ASCII. This is
+expected by most users. If <code>double</code>, twice the width of
+US-ASCII characters.  This is expected by CJK users.
+</p>
+</td><td class="default"><code>single</code></td></tr><tr class="even" id="notification-batch_subject_template-option"><td><a class="tracini-option" href="#notification-batch_subject_template-option"><code>batch_subject_template</code></a></td><td><p>
+Like <code>ticket_subject_template</code> but for batch modifications.
+(<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>${prefix} Batch modify: ${tickets_descr}</code></td></tr><tr class="odd" id="notification-default_format.email-option"><td><a class="tracini-option" href="#notification-default_format.email-option"><code>default_format.email</code></a></td><td><p>
+Default format to distribute email notifications.
+</p>
+</td><td class="default"><code>text/plain</code></td></tr><tr class="even" id="notification-email_address_resolvers-option"><td><a class="tracini-option" href="#notification-email_address_resolvers-option"><code>email_address_resolvers</code></a></td><td><p>
+Comma separated list of email resolver components in the order
+they will be called. If an email address is resolved, the remaining
+resolvers will not be called.
+</p>
+</td><td class="default"><code>SessionEmailResolver</code></td></tr><tr class="odd" id="notification-email_sender-option"><td><a class="tracini-option" href="#notification-email_sender-option"><code>email_sender</code></a></td><td><p>
+Name of the component implementing <code>IEmailSender</code>.
+</p>
+<p>
+This component is used by the notification system to send emails.
+Trac currently provides <code>SmtpEmailSender</code> for connecting to an SMTP
+server, and <code>SendmailEmailSender</code> for running a <code>sendmail</code>-compatible
+executable.
+</p>
+</td><td class="default"><code>SmtpEmailSender</code></td></tr><tr class="even" id="notification-ignore_domains-option"><td><a class="tracini-option" href="#notification-ignore_domains-option"><code>ignore_domains</code></a></td><td><p>
+Comma-separated list of domains that should not be considered
+part of email addresses (for usernames with Kerberos domains).
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-message_id_hash-option"><td><a class="tracini-option" href="#notification-message_id_hash-option"><code>message_id_hash</code></a></td><td><p>
+Hash algorithm to create unique Message-ID header.
+<em>(since 1.0.13)</em>
+</p>
+</td><td class="default"><code>md5</code></td></tr><tr class="even" id="notification-mime_encoding-option"><td><a class="tracini-option" href="#notification-mime_encoding-option"><code>mime_encoding</code></a></td><td><p>
+Specifies the MIME encoding scheme for emails.
+</p>
+<p>
+Supported values are: <code>none</code>, the default value which uses 7-bit
+encoding if the text is plain ASCII or 8-bit otherwise. <code>base64</code>,
+which works with any kind of content but may cause some issues with
+touchy anti-spam/anti-virus engine. <code>qp</code> or <code>quoted-printable</code>,
+which works best for european languages (more compact than base64) if
+8-bit encoding cannot be used.
+</p>
+</td><td class="default"><code>none</code></td></tr><tr class="odd" id="notification-sendmail_path-option"><td><a class="tracini-option" href="#notification-sendmail_path-option"><code>sendmail_path</code></a></td><td><p>
+Path to the sendmail executable.
+</p>
+<p>
+The sendmail program must accept the <code>-i</code> and <code>-f</code> options.
+</p>
+</td><td class="default"><code>sendmail</code></td></tr><tr class="even" id="notification-smtp_always_bcc-option"><td><a class="tracini-option" href="#notification-smtp_always_bcc-option"><code>smtp_always_bcc</code></a></td><td><p>
+Comma-separated list of email addresses to always send
+notifications to. Addresses are not public (Bcc:).
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-smtp_always_cc-option"><td><a class="tracini-option" href="#notification-smtp_always_cc-option"><code>smtp_always_cc</code></a></td><td><p>
+Comma-separated list of email addresses to always send
+notifications to. Addresses can be seen by all recipients
+(Cc:).
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="notification-smtp_default_domain-option"><td><a class="tracini-option" href="#notification-smtp_default_domain-option"><code>smtp_default_domain</code></a></td><td><p>
+Default host/domain to append to addresses that do not specify
+one. Fully qualified addresses are not modified. The default
+domain is appended to all username/login for which an email
+address cannot be found in the user settings.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-smtp_enabled-option"><td><a class="tracini-option" href="#notification-smtp_enabled-option"><code>smtp_enabled</code></a></td><td><p>
+Enable email notification.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="notification-smtp_from-option"><td><a class="tracini-option" href="#notification-smtp_from-option"><code>smtp_from</code></a></td><td><p>
+Sender address to use in notification emails.
+</p>
+<p>
+At least one of <code>smtp_from</code> and <code>smtp_replyto</code> must be set, otherwise
+Trac refuses to send notification mails.
+</p>
+</td><td class="default"><code>trac@localhost</code></td></tr><tr class="odd" id="notification-smtp_from_author-option"><td><a class="tracini-option" href="#notification-smtp_from_author-option"><code>smtp_from_author</code></a></td><td><p>
+Use the author of the change as the sender in notification emails
+(e.g. reporter of a new ticket, author of a comment). If the
+author hasn't set an email address, <code>smtp_from</code> and
+<code>smtp_from_name</code> are used instead.
+(<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="notification-smtp_from_name-option"><td><a class="tracini-option" href="#notification-smtp_from_name-option"><code>smtp_from_name</code></a></td><td><p>
+Sender name to use in notification emails.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-smtp_password-option"><td><a class="tracini-option" href="#notification-smtp_password-option"><code>smtp_password</code></a></td><td><p>
+Password for authenticating with SMTP server.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="notification-smtp_port-option"><td><a class="tracini-option" href="#notification-smtp_port-option"><code>smtp_port</code></a></td><td><p>
+SMTP server port to use for email notification.
+</p>
+</td><td class="default"><code>25</code></td></tr><tr class="odd" id="notification-smtp_replyto-option"><td><a class="tracini-option" href="#notification-smtp_replyto-option"><code>smtp_replyto</code></a></td><td><p>
+Reply-To address to use in notification emails.
+</p>
+<p>
+At least one of <code>smtp_from</code> and <code>smtp_replyto</code> must be set, otherwise
+Trac refuses to send notification mails.
+</p>
+</td><td class="default"><code>trac@localhost</code></td></tr><tr class="even" id="notification-smtp_server-option"><td><a class="tracini-option" href="#notification-smtp_server-option"><code>smtp_server</code></a></td><td><p>
+SMTP server hostname to use for email notifications.
+</p>
+</td><td class="default"><code>localhost</code></td></tr><tr class="odd" id="notification-smtp_subject_prefix-option"><td><a class="tracini-option" href="#notification-smtp_subject_prefix-option"><code>smtp_subject_prefix</code></a></td><td><p>
+Text to prepend to subject line of notification emails.
+</p>
+<p>
+If the setting is not defined, then <code>[$project_name]</code> is used as the
+prefix. If no prefix is desired, then specifying an empty option
+will disable it.
+</p>
+</td><td class="default"><code>__default__</code></td></tr><tr class="even" id="notification-smtp_user-option"><td><a class="tracini-option" href="#notification-smtp_user-option"><code>smtp_user</code></a></td><td><p>
+Username for authenticating with SMTP server.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="notification-ticket_subject_template-option"><td><a class="tracini-option" href="#notification-ticket_subject_template-option"><code>ticket_subject_template</code></a></td><td><p>
+A Jinja2 text template snippet used to get the notification
+subject.
+</p>
+<p>
+The template variables are documented on the
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification#Customizingthee-mailsubject">TracNotification</a> page.
+</p>
+</td><td class="default"><code>${prefix} #${ticket.id}: ${summary}</code></td></tr><tr class="even" id="notification-use_public_cc-option"><td><a class="tracini-option" href="#notification-use_public_cc-option"><code>use_public_cc</code></a></td><td><p>
+Addresses in the To and Cc fields are visible to all recipients.
+</p>
+<p>
+If this option is disabled, recipients are put in the Bcc list.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="notification-use_short_addr-option"><td><a class="tracini-option" href="#notification-use_short_addr-option"><code>use_short_addr</code></a></td><td><p>
+Permit email address without a host/domain (i.e. username only).
+</p>
+<p>
+The SMTP server should accept those addresses, and either append
+a FQDN or use local delivery. See also <code>smtp_default_domain</code>. Do not
+use this option with a public SMTP server.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="notification-use_tls-option"><td><a class="tracini-option" href="#notification-use_tls-option"><code>use_tls</code></a></td><td><p>
+Use SSL/TLS to send notifications over SMTP.
+</p>
+</td><td class="default"><code>disabled</code></td></tr></tbody></table><h3 id="notification-subscriber-section"><code>[notification-subscriber]</code></h3><p>
+The notifications subscriptions are controlled by plugins. All
+<code>INotificationSubscriber</code> components are in charge. These components
+may allow to be configured via this section in the <code>trac.ini</code> file.
+</p>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">TracNotification</a> for more details.
+</p>
+<p>
+Available subscribers:
+</p><div class="trac-subscriberlist"><table class="wiki"><thead><tr><th>Subscriber</th><th>Description</th></tr></thead><tbody><tr class="even"><td><code>AlwaysEmailSubscriber</code></td><td></td></tr><tr class="odd"><td><code>CarbonCopySubscriber</code></td><td>Ticket that I'm listed in the CC field is modified</td></tr><tr class="even"><td><code>NewTicketSubscriber</code></td><td>Any ticket is created</td></tr><tr class="odd"><td><code>TicketOwnerSubscriber</code></td><td>Ticket that I own is created or modified</td></tr><tr class="even"><td><code>TicketPreviousUpdatersSubscriber</code></td><td>Ticket that I previously updated is modified</td></tr><tr class="odd"><td><code>TicketReporterSubscriber</code></td><td>Ticket that I reported is modified</td></tr><tr class="even"><td><code>TicketUpdaterSubscriber</code></td><td>I update a ticket</td></tr></tbody></table></div><p>
+</p>
+<h3 id="project-section"><code>[project]</code></h3><table class="wiki"><tbody><tr class="even" id="project-admin-option"><td><a class="tracini-option" href="#project-admin-option"><code>admin</code></a></td><td><p>
+E-Mail address of the project's administrator.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="project-admin_trac_url-option"><td><a class="tracini-option" href="#project-admin_trac_url-option"><code>admin_trac_url</code></a></td><td><p>
+Base URL of a Trac instance where errors in this Trac
+should be reported.
+</p>
+<p>
+This can be an absolute or relative URL, or '.' to reference
+this Trac instance. An empty value will disable the reporting
+buttons.
+</p>
+</td><td class="default"><code>.</code></td></tr><tr class="even" id="project-descr-option"><td><a class="tracini-option" href="#project-descr-option"><code>descr</code></a></td><td><p>
+Short description of the project.
+</p>
+</td><td class="default"><code>My example project</code></td></tr><tr class="odd" id="project-footer-option"><td><a class="tracini-option" href="#project-footer-option"><code>footer</code></a></td><td><p>
+Page footer text (right-aligned).
+</p>
+</td><td class="default"><code>Visit the Trac open source project at&lt;br /&gt;&lt;a href="https://trac.edgewall.org/"&gt;https://trac.edgewall.org/&lt;/a&gt;</code></td></tr><tr class="even" id="project-icon-option"><td><a class="tracini-option" href="#project-icon-option"><code>icon</code></a></td><td><p>
+URL of the icon of the project.
+</p>
+</td><td class="default"><code>common/trac.ico</code></td></tr><tr class="odd" id="project-name-option"><td><a class="tracini-option" href="#project-name-option"><code>name</code></a></td><td><p>
+Name of the project.
+</p>
+</td><td class="default"><code>My Project</code></td></tr><tr class="even" id="project-url-option"><td><a class="tracini-option" href="#project-url-option"><code>url</code></a></td><td><p>
+URL of the project web site.
+</p>
+<p>
+This is usually the domain in which the <code>base_url</code> resides.
+For example, the project URL might be https://myproject.com,
+with the Trac site (<code>base_url</code>) residing at either
+https://trac.myproject.com or https://myproject.com/trac.
+The project URL is added to the footer of notification e-mails.
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="pygments-lexer-section"><code>[pygments-lexer]</code></h3><p>
+Configure Pygments <a class="ext-link" href="http://pygments.org/docs/lexers/"><span class="icon">​</span>lexer</a> options.
+</p>
+<p>
+For example, to set the
+<a class="ext-link" href="http://pygments.org/docs/lexers/#lexers-for-php-and-related-languages"><span class="icon">​</span>PhpLexer</a> options
+<code>startinline</code> and <code>funcnamehighlighting</code>:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[pygments-lexer]</span>
+<span class="na">php.startinline</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">True</span>
+<span class="na">php.funcnamehighlighting</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">True</span>
+</pre></div></div><p>
+The lexer name is derived from the class name, with <code>Lexer</code> stripped
+from the end. The lexer <em>short names</em> can also be used in place
+of the lexer name.
+</p>
+<h3 id="query-section"><code>[query]</code></h3><table class="wiki"><tbody><tr class="even" id="query-default_anonymous_query-option"><td><a class="tracini-option" href="#query-default_anonymous_query-option"><code>default_anonymous_query</code></a></td><td><p>
+The default query for anonymous users. The query is either
+in <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#QueryLanguage">query language</a> syntax, or a URL query
+string starting with <code>?</code> as used in <code>query:</code>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#UsingTracLinks">Trac links</a>.
+</p>
+</td><td class="default"><code>status!=closed&amp;cc~=$USER</code></td></tr><tr class="odd" id="query-default_query-option"><td><a class="tracini-option" href="#query-default_query-option"><code>default_query</code></a></td><td><p>
+The default query for authenticated users. The query is either
+in <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#QueryLanguage">query language</a> syntax, or a URL query
+string starting with <code>?</code> as used in <code>query:</code>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#UsingTracLinks">Trac links</a>.
+</p>
+</td><td class="default"><code>status!=closed&amp;owner=$USER</code></td></tr><tr class="even" id="query-items_per_page-option"><td><a class="tracini-option" href="#query-items_per_page-option"><code>items_per_page</code></a></td><td><p>
+Number of tickets displayed per page in ticket queries,
+by default. Set to <code>0</code> to specify no limit.
+</p>
+</td><td class="default"><code>100</code></td></tr><tr class="odd" id="query-ticketlink_query-option"><td><a class="tracini-option" href="#query-ticketlink_query-option"><code>ticketlink_query</code></a></td><td><p>
+The base query to be used when linkifying values of ticket
+fields. The query is a URL query
+string starting with <code>?</code> as used in <code>query:</code>
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery#UsingTracLinks">Trac links</a>.
+</p>
+</td><td class="default"><code>?status=!closed</code></td></tr></tbody></table><h3 id="report-section"><code>[report]</code></h3><table class="wiki"><tbody><tr class="even" id="report-items_per_page-option"><td><a class="tracini-option" href="#report-items_per_page-option"><code>items_per_page</code></a></td><td><p>
+Number of tickets displayed per page in ticket reports,
+by default. Set to <code>0</code> to specify no limit.
+</p>
+</td><td class="default"><code>100</code></td></tr><tr class="odd" id="report-items_per_page_rss-option"><td><a class="tracini-option" href="#report-items_per_page_rss-option"><code>items_per_page_rss</code></a></td><td><p>
+Number of tickets displayed in the rss feeds for reports.
+Set to <code>0</code> to specify no limit.
+</p>
+</td><td class="default"><code>0</code></td></tr></tbody></table><h3 id="repositories-section"><code>[repositories]</code></h3><p>
+One of the methods for registering repositories is to
+populate the <code>[repositories]</code> section of <code>trac.ini</code>.
+</p>
+<p>
+This is especially suited for setting up aliases, using a
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#GlobalConfiguration">shared configuration</a>, or specifying
+repositories at the time of environment creation.
+</p>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracRepositoryAdmin#ReposTracIni">TracRepositoryAdmin</a> for
+details on the format of this section, and look elsewhere on the
+page for information on other repository providers.
+</p>
+<h3 id="revisionlog-section"><code>[revisionlog]</code></h3><table class="wiki"><tbody><tr class="even" id="revisionlog-default_log_limit-option"><td><a class="tracini-option" href="#revisionlog-default_log_limit-option"><code>default_log_limit</code></a></td><td><p>
+Default value for the limit argument in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">TracRevisionLog</a>.
+</p>
+</td><td class="default"><code>100</code></td></tr><tr class="odd" id="revisionlog-graph_colors-option"><td><a class="tracini-option" href="#revisionlog-graph_colors-option"><code>graph_colors</code></a></td><td><p>
+Comma-separated list of colors to use for the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">TracRevisionLog</a>
+graph display. (<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>#cc0,#0c0,#0cc,#00c,#c0c,#c00</code></td></tr></tbody></table><h3 id="roadmap-section"><code>[roadmap]</code></h3><table class="wiki"><tbody><tr class="even" id="roadmap-stats_provider-option"><td><a class="tracini-option" href="#roadmap-stats_provider-option"><code>stats_provider</code></a></td><td><p>
+Name of the component implementing <code>ITicketGroupStatsProvider</code>,
+which is used to collect statistics on groups of tickets for display
+in the roadmap views.
+</p>
+</td><td class="default"><code>DefaultTicketGroupStatsProvider</code></td></tr></tbody></table><h3 id="search-section"><code>[search]</code></h3><table class="wiki"><tbody><tr class="even" id="search-default_disabled_filters-option"><td><a class="tracini-option" href="#search-default_disabled_filters-option"><code>default_disabled_filters</code></a></td><td><p>
+Specifies which search filters should be disabled by
+default on the search page. This will also restrict the
+filters for the quick search function. The filter names
+defined by default components are: <code>wiki</code>, <code>ticket</code>,
+<code>milestone</code> and <code>changeset</code>.  For plugins, look for
+their implementation of the ISearchSource interface, in
+the <code>get_search_filters()</code> method, the first member of
+returned tuple. Once disabled, search filters can still
+be manually enabled by the user on the search page.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="search-min_query_length-option"><td><a class="tracini-option" href="#search-min_query_length-option"><code>min_query_length</code></a></td><td><p>
+Minimum length of query string allowed when performing a search.
+</p>
+</td><td class="default"><code>3</code></td></tr></tbody></table><h3 id="sqlite-section"><code>[sqlite]</code></h3><table class="wiki"><tbody><tr class="even" id="sqlite-extensions-option"><td><a class="tracini-option" href="#sqlite-extensions-option"><code>extensions</code></a></td><td><p>
+Paths to <a class="ext-link" href="https://sqlite.org/loadext.html"><span class="icon">​</span>sqlite extensions</a>.
+The paths may be absolute or relative to the Trac environment.
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="svn-section"><code>[svn]</code></h3><table class="wiki"><tbody><tr class="even" id="svn-authz_file-option"><td><a class="tracini-option" href="#svn-authz_file-option"><code>authz_file</code></a></td><td><p>
+The path to the Subversion
+<a class="ext-link" href="http://svnbook.red-bean.com/en/1.7/svn.serverconfig.pathbasedauthz.html"><span class="icon">​</span>authorization (authz) file</a>.
+To enable authz permission checking, the <code>AuthzSourcePolicy</code>
+permission policy must be added to <code>[trac] permission_policies</code>.
+Non-absolute paths are relative to the Environment <code>conf</code>
+directory.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="svn-authz_module_name-option"><td><a class="tracini-option" href="#svn-authz_module_name-option"><code>authz_module_name</code></a></td><td><p>
+The module prefix used in the <code>authz_file</code> for the default
+repository. If left empty, the global section is used.
+</p>
+</td><td class="nodefault">(no default)</td></tr></tbody></table><h3 id="ticket-section"><code>[ticket]</code></h3><table class="wiki"><tbody><tr class="even" id="ticket-allowed_empty_fields-option"><td><a class="tracini-option" href="#ticket-allowed_empty_fields-option"><code>allowed_empty_fields</code></a></td><td><p>
+Comma-separated list of <code>select</code> fields that can have
+an empty value. (<em>since 1.1.2</em>)
+</p>
+</td><td class="default"><code>milestone,version</code></td></tr><tr class="odd" id="ticket-commit_ticket_update_check_perms-option"><td><a class="tracini-option" href="#ticket-commit_ticket_update_check_perms-option"><code>commit_ticket_update_check_perms</code></a></td><td><p>
+Check that the committer has permission to perform the requested
+operations on the referenced tickets.
+</p>
+<p>
+This requires that the user names be the same for Trac and repository
+operations.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="even" id="ticket-commit_ticket_update_commands.close-option"><td><a class="tracini-option" href="#ticket-commit_ticket_update_commands.close-option"><code>commit_ticket_update_commands.close</code></a></td><td><p>
+Commands that close tickets, as a space-separated list.
+</p>
+</td><td class="default"><code>close closed closes fix fixed fixes</code></td></tr><tr class="odd" id="ticket-commit_ticket_update_commands.refs-option"><td><a class="tracini-option" href="#ticket-commit_ticket_update_commands.refs-option"><code>commit_ticket_update_commands.refs</code></a></td><td><p>
+Commands that add a reference, as a space-separated list.
+</p>
+<p>
+If set to the special value <code>&lt;ALL&gt;</code>, all tickets referenced by the
+message will get a reference to the changeset.
+</p>
+</td><td class="default"><code>addresses re references refs see</code></td></tr><tr class="even" id="ticket-commit_ticket_update_envelope-option"><td><a class="tracini-option" href="#ticket-commit_ticket_update_envelope-option"><code>commit_ticket_update_envelope</code></a></td><td><p>
+Require commands to be enclosed in an envelope.
+</p>
+<p>
+Must be empty or contain two characters. For example, if set to <code>[]</code>,
+then commands must be in the form of <code>[closes #4]</code>.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="ticket-commit_ticket_update_notify-option"><td><a class="tracini-option" href="#ticket-commit_ticket_update_notify-option"><code>commit_ticket_update_notify</code></a></td><td><p>
+Send ticket change notification when updating a ticket.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="even" id="ticket-default_cc-option"><td><a class="tracini-option" href="#ticket-default_cc-option"><code>default_cc</code></a></td><td><p>
+Default cc: list for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="ticket-default_component-option"><td><a class="tracini-option" href="#ticket-default_component-option"><code>default_component</code></a></td><td><p>
+Default component for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="ticket-default_description-option"><td><a class="tracini-option" href="#ticket-default_description-option"><code>default_description</code></a></td><td><p>
+Default description for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="ticket-default_keywords-option"><td><a class="tracini-option" href="#ticket-default_keywords-option"><code>default_keywords</code></a></td><td><p>
+Default keywords for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="ticket-default_milestone-option"><td><a class="tracini-option" href="#ticket-default_milestone-option"><code>default_milestone</code></a></td><td><p>
+Default milestone for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="ticket-default_owner-option"><td><a class="tracini-option" href="#ticket-default_owner-option"><code>default_owner</code></a></td><td><p>
+Default owner for newly created tickets. The component owner
+is used when set to the value <code>&lt; default &gt;</code>.
+</p>
+</td><td class="default"><code>&lt; default &gt;</code></td></tr><tr class="even" id="ticket-default_priority-option"><td><a class="tracini-option" href="#ticket-default_priority-option"><code>default_priority</code></a></td><td><p>
+Default priority for newly created tickets.
+</p>
+</td><td class="default"><code>major</code></td></tr><tr class="odd" id="ticket-default_resolution-option"><td><a class="tracini-option" href="#ticket-default_resolution-option"><code>default_resolution</code></a></td><td><p>
+Default resolution for resolving (closing) tickets.
+</p>
+</td><td class="default"><code>fixed</code></td></tr><tr class="even" id="ticket-default_severity-option"><td><a class="tracini-option" href="#ticket-default_severity-option"><code>default_severity</code></a></td><td><p>
+Default severity for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="ticket-default_summary-option"><td><a class="tracini-option" href="#ticket-default_summary-option"><code>default_summary</code></a></td><td><p>
+Default summary (title) for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="ticket-default_type-option"><td><a class="tracini-option" href="#ticket-default_type-option"><code>default_type</code></a></td><td><p>
+Default type for newly created tickets.
+</p>
+</td><td class="default"><code>defect</code></td></tr><tr class="odd" id="ticket-default_version-option"><td><a class="tracini-option" href="#ticket-default_version-option"><code>default_version</code></a></td><td><p>
+Default version for newly created tickets.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="ticket-max_comment_size-option"><td><a class="tracini-option" href="#ticket-max_comment_size-option"><code>max_comment_size</code></a></td><td><p>
+Maximum allowed comment size in characters.
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="odd" id="ticket-max_description_size-option"><td><a class="tracini-option" href="#ticket-max_description_size-option"><code>max_description_size</code></a></td><td><p>
+Maximum allowed description size in characters.
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="even" id="ticket-max_summary_size-option"><td><a class="tracini-option" href="#ticket-max_summary_size-option"><code>max_summary_size</code></a></td><td><p>
+Maximum allowed summary size in characters. (<em>since 1.0.2</em>)
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="odd" id="ticket-preserve_newlines-option"><td><a class="tracini-option" href="#ticket-preserve_newlines-option"><code>preserve_newlines</code></a></td><td><p>
+Whether Wiki formatter should respect the new lines present
+in the Wiki text.
+If set to 'default', this is equivalent to 'yes' for new environments
+but keeps the old behavior for upgraded environments (i.e. 'no').
+</p>
+</td><td class="default"><code>default</code></td></tr><tr class="even" id="ticket-restrict_owner-option"><td><a class="tracini-option" href="#ticket-restrict_owner-option"><code>restrict_owner</code></a></td><td><p>
+Make the owner field of tickets use a drop-down menu.
+Be sure to understand the performance implications before activating
+this option. See
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets#Assign-toasDrop-DownList">Assign-to as Drop-Down List</a>.
+</p>
+<p>
+Please note that e-mail addresses are <strong>not</strong> obfuscated in the
+resulting drop-down menu, so this option should not be used if
+e-mail addresses must remain protected.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="ticket-workflow-option"><td><a class="tracini-option" href="#ticket-workflow-option"><code>workflow</code></a></td><td><p>
+Ordered list of workflow controllers to use for ticket actions.
+</p>
+</td><td class="default"><code>ConfigurableTicketWorkflow</code></td></tr></tbody></table><h3 id="ticket-custom-section"><code>[ticket-custom]</code></h3><p>
+In this section, you can define additional fields for tickets. See
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracTicketsCustomFields">TracTicketsCustomFields</a> for more details.
+</p>
+<h3 id="ticket-workflow-section"><code>[ticket-workflow]</code></h3><p>
+The workflow for tickets is controlled by plugins. By default,
+there's only a <code>ConfigurableTicketWorkflow</code> component in charge.
+That component allows the workflow to be configured via this section
+in the <code>trac.ini</code> file. See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">TracWorkflow</a> for more details.
+</p>
+<h3 id="timeline-section"><code>[timeline]</code></h3><table class="wiki"><tbody><tr class="even" id="timeline-abbreviated_messages-option"><td><a class="tracini-option" href="#timeline-abbreviated_messages-option"><code>abbreviated_messages</code></a></td><td><p>
+Whether wiki-formatted event messages should be truncated or not.
+</p>
+<p>
+This only affects the default rendering, and can be overridden by
+specific event providers, see their own documentation.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="timeline-changeset_collapse_events-option"><td><a class="tracini-option" href="#timeline-changeset_collapse_events-option"><code>changeset_collapse_events</code></a></td><td><p>
+Whether consecutive changesets from the same author having
+exactly the same message should be presented as one event.
+That event will link to the range of changesets in the log view.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="timeline-changeset_long_messages-option"><td><a class="tracini-option" href="#timeline-changeset_long_messages-option"><code>changeset_long_messages</code></a></td><td><p>
+Whether wiki-formatted changeset messages should be multiline or
+not.
+</p>
+<p>
+If this option is not specified or is false and <code>wiki_format_messages</code>
+is set to true, changeset messages will be single line only, losing
+some formatting (bullet points, etc).
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="timeline-changeset_show_files-option"><td><a class="tracini-option" href="#timeline-changeset_show_files-option"><code>changeset_show_files</code></a></td><td><p>
+Number of files to show (<code>-1</code> for unlimited, <code>0</code> to disable).
+</p>
+<p>
+This can also be <code>location</code>, for showing the common prefix for the
+changed files.
+</p>
+</td><td class="default"><code>0</code></td></tr><tr class="even" id="timeline-default_daysback-option"><td><a class="tracini-option" href="#timeline-default_daysback-option"><code>default_daysback</code></a></td><td><p>
+Default number of days displayed in the Timeline, in days.
+</p>
+</td><td class="default"><code>30</code></td></tr><tr class="odd" id="timeline-max_daysback-option"><td><a class="tracini-option" href="#timeline-max_daysback-option"><code>max_daysback</code></a></td><td><p>
+Maximum number of days (-1 for unlimited) displayable in the
+Timeline.
+</p>
+</td><td class="default"><code>90</code></td></tr><tr class="even" id="timeline-newticket_formatter-option"><td><a class="tracini-option" href="#timeline-newticket_formatter-option"><code>newticket_formatter</code></a></td><td><p>
+Which formatter flavor (e.g. 'html' or 'oneliner') should be
+used when presenting the description for new tickets.
+If 'oneliner', the [timeline] abbreviated_messages option applies.
+</p>
+</td><td class="default"><code>oneliner</code></td></tr><tr class="odd" id="timeline-ticket_show_component-option"><td><a class="tracini-option" href="#timeline-ticket_show_component-option"><code>ticket_show_component</code></a></td><td><p>
+Enable the display of component of tickets in the timeline.
+(<em>since 1.1.1</em>)
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="timeline-ticket_show_details-option"><td><a class="tracini-option" href="#timeline-ticket_show_details-option"><code>ticket_show_details</code></a></td><td><p>
+Enable the display of all ticket changes in the timeline, not only
+open / close operations.
+</p>
+</td><td class="default"><code>enabled</code></td></tr></tbody></table><h3 id="trac-section"><code>[trac]</code></h3><table class="wiki"><tbody><tr class="even" id="trac-anonymous_session_lifetime-option"><td><a class="tracini-option" href="#trac-anonymous_session_lifetime-option"><code>anonymous_session_lifetime</code></a></td><td><p>
+Lifetime of the anonymous session, in days.
+</p>
+<p>
+Set the option to 0 to disable purging old anonymous sessions.
+(<em>since 1.0.17</em>)
+</p>
+</td><td class="default"><code>90</code></td></tr><tr class="odd" id="trac-auth_cookie_domain-option"><td><a class="tracini-option" href="#trac-auth_cookie_domain-option"><code>auth_cookie_domain</code></a></td><td><p>
+Auth cookie domain attribute.
+</p>
+<p>
+The auth cookie can be shared among multiple subdomains
+by setting the value to the domain. (<em>since 1.2</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-auth_cookie_lifetime-option"><td><a class="tracini-option" href="#trac-auth_cookie_lifetime-option"><code>auth_cookie_lifetime</code></a></td><td><p>
+Lifetime of the authentication cookie, in seconds.
+</p>
+<p>
+This value determines how long the browser will cache
+authentication information, and therefore, after how much
+inactivity a user will have to log in again. The value
+of 0 makes the cookie expire at the end of the browsing
+session.
+</p>
+</td><td class="default"><code>0</code></td></tr><tr class="odd" id="trac-auth_cookie_path-option"><td><a class="tracini-option" href="#trac-auth_cookie_path-option"><code>auth_cookie_path</code></a></td><td><p>
+Path for the authentication cookie. Set this to the common
+base path of several Trac instances if you want them to share
+the cookie.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-auto_preview_timeout-option"><td><a class="tracini-option" href="#trac-auto_preview_timeout-option"><code>auto_preview_timeout</code></a></td><td><p>
+Inactivity timeout in seconds after which the automatic wiki preview
+triggers an update. This option can contain floating-point values. The
+lower the setting, the more requests will be made to the server. Set
+this to 0 to disable automatic preview.
+</p>
+</td><td class="default"><code>2.0</code></td></tr><tr class="odd" id="trac-auto_reload-option"><td><a class="tracini-option" href="#trac-auto_reload-option"><code>auto_reload</code></a></td><td><p>
+Automatically reload template files after modification.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="trac-backup_dir-option"><td><a class="tracini-option" href="#trac-backup_dir-option"><code>backup_dir</code></a></td><td><p>
+Database backup location
+</p>
+</td><td class="default"><code>db</code></td></tr><tr class="odd" id="trac-base_url-option"><td><a class="tracini-option" href="#trac-base_url-option"><code>base_url</code></a></td><td><p>
+Base URL of the Trac site.
+</p>
+<p>
+This is used to produce documents outside of the web browsing
+context, such as URLs in notification e-mails that point to
+Trac resources.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-check_auth_ip-option"><td><a class="tracini-option" href="#trac-check_auth_ip-option"><code>check_auth_ip</code></a></td><td><p>
+Whether the IP address of the user should be checked for
+authentication.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="trac-database-option"><td><a class="tracini-option" href="#trac-database-option"><code>database</code></a></td><td><p>
+Database connection
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment#DatabaseConnectionStrings">string</a> for this
+project
+</p>
+</td><td class="default"><code>sqlite:db/trac.db</code></td></tr><tr class="even" id="trac-debug_sql-option"><td><a class="tracini-option" href="#trac-debug_sql-option"><code>debug_sql</code></a></td><td><p>
+Show the SQL queries in the Trac log, at DEBUG level.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="trac-default_charset-option"><td><a class="tracini-option" href="#trac-default_charset-option"><code>default_charset</code></a></td><td><p>
+Charset to be used when in doubt.
+</p>
+</td><td class="default"><code>utf-8</code></td></tr><tr class="even" id="trac-default_date_format-option"><td><a class="tracini-option" href="#trac-default_date_format-option"><code>default_date_format</code></a></td><td><p>
+The date format. Valid options are 'iso8601' for selecting
+ISO 8601 format, or leave it empty which means the default
+date format will be inferred from the browser's default
+language. (<em>since 1.0</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="trac-default_dateinfo_format-option"><td><a class="tracini-option" href="#trac-default_dateinfo_format-option"><code>default_dateinfo_format</code></a></td><td><p>
+The date information format. Valid options are 'relative' for
+displaying relative format and 'absolute' for displaying absolute
+format. (<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>relative</code></td></tr><tr class="even" id="trac-default_handler-option"><td><a class="tracini-option" href="#trac-default_handler-option"><code>default_handler</code></a></td><td><p>
+Name of the component that handles requests to the base
+URL.
+</p>
+<p>
+Options include <code>TimelineModule</code>, <code>RoadmapModule</code>,
+<code>BrowserModule</code>, <code>QueryModule</code>, <code>ReportModule</code>, <code>TicketModule</code>
+and <code>WikiModule</code>.
+</p>
+<p>
+The <a href="https://trac.example.org/trac_mcp_server/prefs/userinterface">session preference</a> for default handler
+take precedence, when set.
+</p>
+</td><td class="default"><code>WikiModule</code></td></tr><tr class="odd" id="trac-default_language-option"><td><a class="tracini-option" href="#trac-default_language-option"><code>default_language</code></a></td><td><p>
+The preferred language to use if no user preference has been set.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-default_timezone-option"><td><a class="tracini-option" href="#trac-default_timezone-option"><code>default_timezone</code></a></td><td><p>
+The default timezone to use
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="trac-htdocs_location-option"><td><a class="tracini-option" href="#trac-htdocs_location-option"><code>htdocs_location</code></a></td><td><p>
+Base URL for serving the core static resources below
+<code>/chrome/common/</code>.
+</p>
+<p>
+It can be left empty, and Trac will simply serve those resources
+itself.
+</p>
+<p>
+Advanced users can use this together with
+<a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">trac-admin ... deploy &lt;deploydir&gt;</a> to allow serving the
+static resources for Trac directly from the web server.
+Note however that this only applies to the <code>&lt;deploydir&gt;/htdocs/common</code>
+directory, the other deployed resources (i.e. those from plugins)
+will not be made available this way and additional rewrite
+rules will be needed in the web server.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-ignore_auth_case-option"><td><a class="tracini-option" href="#trac-ignore_auth_case-option"><code>ignore_auth_case</code></a></td><td><p>
+Whether login names should be converted to lower case.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="trac-jquery_location-option"><td><a class="tracini-option" href="#trac-jquery_location-option"><code>jquery_location</code></a></td><td><p>
+Location of the jQuery JavaScript library (version 3.6.3).
+</p>
+<p>
+An empty value loads jQuery from the copy bundled with Trac.
+</p>
+<p>
+Alternatively, jQuery could be loaded from a CDN, for example:
+<a class="ext-link" href="http://code.jquery.com/jquery-3.6.3.min.js"><span class="icon">​</span>http://code.jquery.com/jquery-3.6.3.min.js</a>,
+<a class="ext-link" href="http://ajax.aspnetcdn.com/ajax/jQuery/jquery-3.6.3.min.js"><span class="icon">​</span>http://ajax.aspnetcdn.com/ajax/jQuery/jquery-3.6.3.min.js</a> or
+<a class="ext-link" href="https://ajax.googleapis.com/ajax/libs/jquery/3.6.3/jquery.min.js"><span class="icon">​</span>https://ajax.googleapis.com/ajax/libs/jquery/3.6.3/jquery.min.js</a>.
+</p>
+<p>
+(<em>since 1.0</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-jquery_ui_location-option"><td><a class="tracini-option" href="#trac-jquery_ui_location-option"><code>jquery_ui_location</code></a></td><td><p>
+Location of the jQuery UI JavaScript library (version 1.13.0).
+</p>
+<p>
+An empty value loads jQuery UI from the copy bundled with Trac.
+</p>
+<p>
+Alternatively, jQuery UI could be loaded from a CDN, for example:
+<a class="ext-link" href="https://ajax.googleapis.com/ajax/libs/jqueryui/1.13.0/jquery-ui.min.js"><span class="icon">​</span>https://ajax.googleapis.com/ajax/libs/jqueryui/1.13.0/jquery-ui.min.js</a>
+or
+<a class="ext-link" href="http://ajax.aspnetcdn.com/ajax/jquery.ui/1.13.0/jquery-ui.min.js"><span class="icon">​</span>http://ajax.aspnetcdn.com/ajax/jquery.ui/1.13.0/jquery-ui.min.js</a>.
+</p>
+<p>
+(<em>since 1.0</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="trac-jquery_ui_theme_location-option"><td><a class="tracini-option" href="#trac-jquery_ui_theme_location-option"><code>jquery_ui_theme_location</code></a></td><td><p>
+Location of the theme to be used with the jQuery UI JavaScript
+library (version 1.13.0).
+</p>
+<p>
+An empty value loads the custom Trac jQuery UI theme from the copy
+bundled with Trac.
+</p>
+<p>
+Alternatively, a jQuery UI theme could be loaded from a CDN, for
+example:
+<a class="ext-link" href="https://ajax.googleapis.com/ajax/libs/jqueryui/1.13.0/themes/start/jquery-ui.css"><span class="icon">​</span>https://ajax.googleapis.com/ajax/libs/jqueryui/1.13.0/themes/start/jquery-ui.css</a>
+or
+<a class="ext-link" href="http://ajax.aspnetcdn.com/ajax/jquery.ui/1.13.0/themes/start/jquery-ui.css"><span class="icon">​</span>http://ajax.aspnetcdn.com/ajax/jquery.ui/1.13.0/themes/start/jquery-ui.css</a>.
+</p>
+<p>
+(<em>since 1.0</em>)
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-never_obfuscate_mailto-option"><td><a class="tracini-option" href="#trac-never_obfuscate_mailto-option"><code>never_obfuscate_mailto</code></a></td><td><p>
+Never obfuscate <code>mailto:</code> links explicitly written in the wiki,
+even if <code>show_email_addresses</code> is false or the user doesn't have
+EMAIL_VIEW permission.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="trac-permission_policies-option"><td><a class="tracini-option" href="#trac-permission_policies-option"><code>permission_policies</code></a></td><td><p>
+List of components implementing <code>IPermissionPolicy</code>, in the order
+in which they will be applied. These components manage fine-grained
+access control to Trac resources.
+</p>
+</td><td class="default"><code>DefaultWikiPolicy,DefaultTicketPolicy,DefaultPermissionPolicy,LegacyAttachmentPolicy</code></td></tr><tr class="even" id="trac-permission_store-option"><td><a class="tracini-option" href="#trac-permission_store-option"><code>permission_store</code></a></td><td><p>
+Name of the component implementing <code>IPermissionStore</code>, which is
+used for managing user and group permissions.
+</p>
+</td><td class="default"><code>DefaultPermissionStore</code></td></tr><tr class="odd" id="trac-request_filters-option"><td><a class="tracini-option" href="#trac-request_filters-option"><code>request_filters</code></a></td><td><p>
+Ordered list of filters to apply to all requests.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="even" id="trac-resizable_textareas-option"><td><a class="tracini-option" href="#trac-resizable_textareas-option"><code>resizable_textareas</code></a></td><td><p>
+Make <code>&lt;textarea&gt;</code> fields resizable. Requires JavaScript.
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="trac-secure_cookies-option"><td><a class="tracini-option" href="#trac-secure_cookies-option"><code>secure_cookies</code></a></td><td><p>
+Restrict cookies to HTTPS connections.
+</p>
+<p>
+When true, set the <code>secure</code> flag on all cookies so that they
+are only sent to the server on HTTPS connections. Use this if
+your Trac instance is only accessible through HTTPS.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="trac-show_email_addresses-option"><td><a class="tracini-option" href="#trac-show_email_addresses-option"><code>show_email_addresses</code></a></td><td><p>
+Show email addresses instead of usernames. If false, email
+addresses are obfuscated for users that don't have EMAIL_VIEW
+permission.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="odd" id="trac-show_full_names-option"><td><a class="tracini-option" href="#trac-show_full_names-option"><code>show_full_names</code></a></td><td><p>
+Show full names instead of usernames. (<em>since 1.2</em>)
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="even" id="trac-timeout-option"><td><a class="tracini-option" href="#trac-timeout-option"><code>timeout</code></a></td><td><p>
+Timeout value for database connection, in seconds.
+Use '0' to specify <em>no timeout</em>.
+</p>
+</td><td class="default"><code>20</code></td></tr><tr class="odd" id="trac-use_base_url_for_redirect-option"><td><a class="tracini-option" href="#trac-use_base_url_for_redirect-option"><code>use_base_url_for_redirect</code></a></td><td><p>
+Optionally use <code>[trac] base_url</code> for redirects.
+</p>
+<p>
+In some configurations, usually involving running Trac behind
+a HTTP proxy, Trac can't automatically reconstruct the URL
+that is used to access it. You may need to use this option to
+force Trac to use the <code>base_url</code> setting also for
+redirects. This introduces the obvious limitation that this
+environment will only be usable when accessible from that URL,
+as redirects are frequently used.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="trac-use_chunked_encoding-option"><td><a class="tracini-option" href="#trac-use_chunked_encoding-option"><code>use_chunked_encoding</code></a></td><td><p>
+If enabled, send contents as chunked encoding in HTTP/1.1.
+Otherwise, send contents with <code>Content-Length</code> header after entire of
+the contents are rendered. (<em>since 1.0.6</em>)
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="trac-use_xsendfile-option"><td><a class="tracini-option" href="#trac-use_xsendfile-option"><code>use_xsendfile</code></a></td><td><p>
+When true, send a <code>X-Sendfile</code> header and no content when sending
+files from the filesystem, so that the web server handles the content.
+This requires a web server that knows how to handle such a header,
+like Apache with <code>mod_xsendfile</code> or lighttpd. (<em>since 1.0</em>)
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="trac-wiki_toolbars-option"><td><a class="tracini-option" href="#trac-wiki_toolbars-option"><code>wiki_toolbars</code></a></td><td><p>
+Add a simple toolbar on top of Wiki &lt;textarea&gt;s.
+(<em>since 1.0.2</em>)
+</p>
+</td><td class="default"><code>enabled</code></td></tr><tr class="odd" id="trac-xsendfile_header-option"><td><a class="tracini-option" href="#trac-xsendfile_header-option"><code>xsendfile_header</code></a></td><td><p>
+The header to use if <code>use_xsendfile</code> is enabled. If Nginx is used,
+set <code>X-Accel-Redirect</code>. (<em>since 1.0.6</em>)
+</p>
+</td><td class="default"><code>X-Sendfile</code></td></tr></tbody></table><h3 id="versioncontrol-section"><code>[versioncontrol]</code></h3><table class="wiki"><tbody><tr class="even" id="versioncontrol-allowed_repository_dir_prefixes-option"><td><a class="tracini-option" href="#versioncontrol-allowed_repository_dir_prefixes-option"><code>allowed_repository_dir_prefixes</code></a></td><td><p>
+Comma-separated list of allowed prefixes for repository
+directories when adding and editing repositories in the repository
+admin panel. If the list is empty, all repository directories are
+allowed.
+</p>
+</td><td class="nodefault">(no default)</td></tr><tr class="odd" id="versioncontrol-default_repository_type-option"><td><a class="tracini-option" href="#versioncontrol-default_repository_type-option"><code>default_repository_type</code></a></td><td><p>
+Default repository connector type.
+</p>
+<p>
+This is used as the default repository type for repositories
+defined in the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#repositories-section">repositories</a> section
+or using the "Repositories" admin panel.
+</p>
+</td><td class="default"><code>svn</code></td></tr></tbody></table><h3 id="wiki-section"><code>[wiki]</code></h3><table class="wiki"><tbody><tr class="even" id="wiki-default_edit_area_height-option"><td><a class="tracini-option" href="#wiki-default_edit_area_height-option"><code>default_edit_area_height</code></a></td><td><p>
+Default height of the textarea on the wiki edit page.
+(<em>Since 1.1.5</em>)
+</p>
+</td><td class="default"><code>20</code></td></tr><tr class="odd" id="wiki-ignore_missing_pages-option"><td><a class="tracini-option" href="#wiki-ignore_missing_pages-option"><code>ignore_missing_pages</code></a></td><td><p>
+Enable/disable highlighting <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/CamelCase">CamelCase</a> links to missing pages.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="wiki-max_size-option"><td><a class="tracini-option" href="#wiki-max_size-option"><code>max_size</code></a></td><td><p>
+Maximum allowed wiki page size in characters.
+</p>
+</td><td class="default"><code>262144</code></td></tr><tr class="odd" id="wiki-render_unsafe_content-option"><td><a class="tracini-option" href="#wiki-render_unsafe_content-option"><code>render_unsafe_content</code></a></td><td><p>
+Enable/disable the use of unsafe HTML tags such as <code>&lt;script&gt;</code> or
+<code>&lt;embed&gt;</code> with the HTML <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiProcessors">WikiProcessor</a>.
+</p>
+<p>
+For public sites where anonymous users can edit the wiki it is
+recommended to leave this option disabled.
+</p>
+</td><td class="default"><code>disabled</code></td></tr><tr class="even" id="wiki-safe_origins-option"><td><a class="tracini-option" href="#wiki-safe_origins-option"><code>safe_origins</code></a></td><td><p>
+List of URIs considered "safe cross-origin", that will be
+rendered as <code>img</code> element without <code>crossorigin="anonymous"</code> attribute
+or used in <code>url()</code> of inline style attribute even if
+<code>[wiki] render_unsafe_content</code> is <code>false</code> (<em>since 1.0.15</em>).
+</p>
+<p>
+To make any origins safe, specify "*" in the list.
+</p>
+</td><td class="default"><code>data:</code></td></tr><tr class="odd" id="wiki-safe_schemes-option"><td><a class="tracini-option" href="#wiki-safe_schemes-option"><code>safe_schemes</code></a></td><td><p>
+List of URI schemes considered "safe", that will be rendered as
+external links even if <code>[wiki] render_unsafe_content</code> is <code>false</code>.
+</p>
+</td><td class="default"><code>cvs,file,ftp,git,irc,http,https,news,sftp,smb,ssh,svn,svn+ssh</code></td></tr><tr class="even" id="wiki-split_page_names-option"><td><a class="tracini-option" href="#wiki-split_page_names-option"><code>split_page_names</code></a></td><td><p>
+Enable/disable splitting the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiPageNames">WikiPageNames</a> with space characters.
+</p>
+</td><td class="default"><code>disabled</code></td></tr></tbody></table></div><p>
+</p>
+<h2 class="section" id="ConfigureErrorReporting">Configure Error Reporting</h2>
+<p>
+The error reporting page has a <em>Create</em> button for reporting
+issues. The site to which issues are reported depends on the
+configuration of the Trac site and the user’s permissions.
+</p>
+<p>
+If the user doesn’t possess TRAC_ADMIN, the site to which a user is directed to create a ticket is determined by the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin_trac_url-option">[trac] admin_trac_url</a> setting:
+</p>
+<ul><li>If empty, there will be no <em>Create</em> button.
+</li><li>If set to the default value (<code>.</code>), the ticket will be
+created on the site which the error occurred.
+</li><li>Otherwise the ticket will be created at the site pointed
+to by <code>admin_trac_url</code>.
+</li></ul><p>
+If <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin-option">[project] admin</a> is not empty, the administrator's email address will be rendered on the error page.
+</p>
+<p>
+If the user possesses TRAC_ADMIN, the <em>Create</em> button will direct the user to report the issue on trac.edgewall.org. If the error was generated in a plugin, the error will be reported to the project URL provided that the plugin author has included the project URL in the plugin installation data. The user possessing TRAC_ADMIN also sees a traceback and system information on the error page.
+</p>
+<hr />
+<p>
+See also: <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">TracAdmin</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">TracEnvironment</a>
+</p>
+</body></html>
