@@ -1432,7 +1432,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 - `format: "html"` reads the version first too and fetches only the HTML at it (`getPageHTML`/`getPageHTMLVersion`; no source is read); `converted` is `true` (it is not the stored source). If the version cannot be read the HTML is the latest and `warnings` says it was not pinned
 - An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`
 - Parent directory of `file_path` must exist, and is checked before Trac is called
-- Fetches page info separately for version metadata (for Markdown, before the source and HTML)
+- Fetches page info separately for version metadata. For `markdown` and `html` it is read first and the HTML (and, for `markdown`, the source) is fetched at that version; `html` reads no source. For `tracwiki` it is read after the source. The reported `version` is the info's when usable, else the requested `version`, else `1` (an unpinned read of an instance whose info answer is unusable, which also adds a `warnings` entry for `markdown` and `html`)
 
 **Example Call:**
 ```json

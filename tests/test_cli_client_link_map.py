@@ -465,6 +465,49 @@ def test_an_unexpected_property_error_without_a_sent_map_is_plain(
     assert "predates" not in capsys.readouterr().err
 
 
+def test_an_old_daemon_refusing_format_html_is_named(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: 'html' is not one of "
+        "['markdown', 'tracwiki']"
+    )
+    rc = _pull(tmp_path, "--format", "html")
+    assert rc == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "the server does not know --format html" in err
+    assert "predates it (Trac /trac_mcp_server #211)" in err
+    assert "use --format markdown|tracwiki" in err
+    assert not (tmp_path / "p.md").exists()
+
+
+def test_another_format_enum_error_is_reported_as_it_is(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: 'html' is not one of ['markdown']"
+    )
+    # The enum text is only claimed as the old daemon's for html.
+    assert (
+        _pull(tmp_path, "--format", "tracwiki") == cli.EXIT_TOOL_ERROR
+    )
+    err = capsys.readouterr().err
+    assert "predates" not in err
+    assert "not one of" in err
+
+
+def test_an_html_error_that_is_not_the_enum_refusal_is_plain(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Error (not_found): Wiki page 'P' does not exist"
+    )
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "predates" not in err
+    assert "does not exist" in err
+
+
 def test_a_reply_that_does_not_confirm_the_map_warns(
     isolated_config, sent, reply, tmp_path, capsys
 ):

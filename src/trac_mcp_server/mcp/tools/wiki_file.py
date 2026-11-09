@@ -185,7 +185,13 @@ WIKI_FILE_TOOLS = [
                     "type": "string",
                     "enum": ["markdown", "html", "tracwiki"],
                     "default": "markdown",
-                    "description": "Output format for the local file",
+                    "description": (
+                        "Output format, for the inline text or the "
+                        "file: markdown (Trac's render translated to "
+                        "Markdown), html (Trac's render as a complete "
+                        "minimal HTML document) or tracwiki (the stored "
+                        "source)"
+                    ),
                 },
                 "version": {
                     "type": "integer",
@@ -597,8 +603,14 @@ async def _handle_push(
 # getPageHTML answers a whole ``<html><body>...</body></html>`` itself
 # (seen on a live instance, and in every wiki capture of the #208 set);
 # wikiToHtml and older Tracs answer a bare fragment.
+# An optional BOM, XML declaration and doctype may precede ``<html>``, and
+# either tag may carry attributes; all of it goes with the wrapper.
 _TRAC_HTML_WRAPPER = re.compile(
-    r"\s*<html\s*>\s*<body\s*>(?P<inner>.*)</body\s*>\s*</html\s*>\s*",
+    r"\ufeff?\s*"
+    r"(?:(?:<\?xml[^>]*\?>|<!doctype[^>]*>)\s*){0,2}"
+    r"<html(?:\s[^>]*)?>\s*<body(?:\s[^>]*)?>"
+    r"(?P<inner>.*)"
+    r"</body\s*>\s*</html\s*>\s*",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -625,6 +637,45 @@ def _html_document(page_name: str, fragment: str) -> str:
         "<body>\n"
         f"{fragment}"
         "</body></html>\n"
+    )
+
+
+def _info_version(info: Any) -> int | None:
+    """The version a ``get_wiki_page_info`` answer names, or None.
+
+    Some Trac instances answer ``{}`` or a non-dict, and a version of 0 is
+    not one.
+    """
+    if isinstance(info, dict) and info:
+        return info.get("version") or None
+    return None
+
+
+def _pinned_version(
+    page_name: str, info: Any, version: int | None, fmt: str
+) -> tuple[int | None, str | None]:
+    """The version the page's other reads are made at, and the warning
+    that goes with there being none.
+
+    The info's own version, else the one the caller asked for. With
+    neither the pull still works, but its reads are "latest": the
+    warning says what an edit landing between them would do (the race
+    pinning closes), worded for what ``fmt`` reads.
+    """
+    pinned = _info_version(info) or version
+    if pinned is not None:
+        return pinned, None
+    if fmt == "markdown":
+        return None, (
+            f"wiki page {page_name}: its version could not be read, so "
+            "the source and the HTML reads were not pinned to one "
+            "version; an edit between them would pair one version's "
+            "source with another's HTML"
+        )
+    return None, (
+        f"wiki page {page_name}: its version could not be read, so the "
+        "HTML read was not pinned to a version and the version reported "
+        "may not be the one the HTML is of"
     )
 
 
@@ -688,69 +739,57 @@ async def _handle_pull(
     converted = False
     warnings: list[str] = []
     try:
-        if fmt in ("markdown", "html"):
+        if fmt == "markdown":
             # Read the version first and fetch the source and the HTML
             # *at that version*: without it, an edit landing between the
             # two reads would pair the HTML with another version's source.
-            # (html reads no source, but is pinned the same way, so the
-            # version reported is the one the HTML is of.)
             info = await run_sync(
                 client.get_wiki_page_info, page_name, version
             )
-            pinned = (
-                info.get("version")
-                if isinstance(info, dict) and info
-                else None
-            ) or version
-            if pinned is None:
-                # Some Trac instances answer with {} or a non-dict. The
-                # pull still works, but both reads below are "latest":
-                # an edit between them is the race pinning closes.
-                if fmt == "markdown":
-                    warnings.append(
-                        f"wiki page {page_name}: its version could not"
-                        " be read, so the source and the HTML reads were"
-                        " not pinned to one version; an edit between"
-                        " them would pair one version's source with"
-                        " another's HTML"
-                    )
-                else:
-                    warnings.append(
-                        f"wiki page {page_name}: its version could not"
-                        " be read, so the HTML read was not pinned to a"
-                        " version and the version reported may not be"
-                        " the one the HTML is of"
-                    )
-            if fmt == "markdown":
-                content = await run_sync(
-                    client.get_wiki_page, page_name, pinned
-                )
+            pinned, warning = _pinned_version(
+                page_name, info, version, fmt
+            )
+            if warning:
+                warnings.append(warning)
+            content = await run_sync(
+                client.get_wiki_page, page_name, pinned
+            )
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
-            if fmt == "html":
-                # Trac's own render, unchanged, in a minimal document.
-                output_content = _html_document(page_name, html)
-                converted = True
-            else:
-                # The page's own URL, as Trac renders a link into it
-                # ("[#Frag x]" is "<this>#Frag"): those are in-page
-                # anchors, written "#Frag" and never rewritten.
-                # client.config is the routed instance's, so the base is
-                # that instance's.
-                document_url = (
-                    f"{client.config.trac_url.rstrip('/')}"
-                    f"/wiki/{page_name}"
-                )
-                conversion = trac_html_to_markdown(
-                    html,
-                    content,
-                    link_map=as_dict(link_rewrites),
-                    document_url=document_url,
-                )
-                output_content = conversion.text
-                converted = conversion.converted
-                warnings.extend(conversion.warnings)
+            # The page's own URL, as Trac renders a link into it
+            # ("[#Frag x]" is "<this>#Frag"): those are in-page anchors,
+            # written "#Frag" and never rewritten. client.config is the
+            # routed instance's, so the base is that instance's.
+            document_url = (
+                f"{client.config.trac_url.rstrip('/')}/wiki/{page_name}"
+            )
+            conversion = trac_html_to_markdown(
+                html,
+                content,
+                link_map=as_dict(link_rewrites),
+                document_url=document_url,
+            )
+            output_content = conversion.text
+            converted = conversion.converted
+            warnings.extend(conversion.warnings)
+        elif fmt == "html":
+            # Trac's own render, unchanged, in a minimal document. No
+            # source is read; the version is still read first so the
+            # HTML is fetched at it and the version reported is its own.
+            info = await run_sync(
+                client.get_wiki_page_info, page_name, version
+            )
+            pinned, warning = _pinned_version(
+                page_name, info, version, fmt
+            )
+            if warning:
+                warnings.append(warning)
+            html = await run_sync(
+                client.get_wiki_page_html, page_name, pinned
+            )
+            output_content = _html_document(page_name, html)
+            converted = True
         else:
             # tracwiki: the stored source, unchanged; no HTML read.
             content = await run_sync(
@@ -765,10 +804,10 @@ async def _handle_pull(
             return _not_found()
         raise  # re-raise other faults for outer handler
 
-    # Handle falsy/non-dict return from some Trac instances
-    actual_version = (
-        info.get("version", 1) if isinstance(info, dict) and info else 1
-    )
+    # The info's version, else the one asked for (the content is that
+    # version), else 1 for an unpinned read of an instance whose info
+    # answer is unusable (warned about above).
+    actual_version = _info_version(info) or version or 1
 
     encoded = output_content.encode("utf-8")
     structured: dict[str, Any] = {
@@ -797,7 +836,10 @@ async def _handle_pull(
             "structuredContent.content"
         )
     if warnings:
-        text += "\n\nConversion warnings:\n" + "\n".join(
+        heading = (
+            "Conversion warnings" if fmt == "markdown" else "Warnings"
+        )
+        text += f"\n\n{heading}:\n" + "\n".join(
             f"- {w}" for w in warnings
         )
 

@@ -1878,6 +1878,65 @@ class TestPullHtml:
         assert text.endswith(inner + "</body></html>\n")
         assert "<body>\n" + inner in text
 
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "",
+            "\ufeff",
+            "<!doctype html>\n",
+            '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"\n'
+            ' "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">\n',
+            '<?xml version="1.0" encoding="utf-8"?>\n',
+            '\ufeff<?xml version="1.0"?>\n<!doctype html>\n',
+            '<!doctype html><?xml version="1.0"?>',
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("html_open", "body_open"),
+        [
+            ("<html>", "<body>"),
+            (
+                '<html lang="en" xmlns="http://www.w3.org/1999/xhtml">',
+                "<body>",
+            ),
+            ("<html>", '<body class="wiki" onload="x()">'),
+            ("<HTML\n  lang=en>", "\n<BODY\tid=b >"),
+        ],
+    )
+    async def test_the_wrapper_with_attributes_bom_or_prolog_is_unwrapped(
+        self, tmp_path, prefix, html_open, body_open
+    ):
+        inner = '<h1 id="X">X</h1>\n<p>\nbody &amp; text\n</p>\n'
+        client = _html_client()
+        client.get_wiki_page_html.return_value = (
+            prefix + html_open + body_open + inner + "</body></html>"
+        )
+        _, text = await _pull(client, tmp_path, format="html")
+
+        assert text.lower().count("<html") == 1
+        assert text.lower().count("<body") == 1
+        assert text.count("<!doctype") == 1
+        assert text.endswith("<body>\n" + inner + "</body></html>\n")
+        assert "xmlns" not in text and "onload" not in text
+        assert "\ufeff" not in text and "<?xml" not in text
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "<html><head><title>t</title></head><body>x</body></html>",
+            "<html><body>x</body></html> trailing",
+            "<body>x</body>",
+            "<htmlx><body>x</body></htmlx>",
+        ],
+    )
+    async def test_anything_else_passes_through_unchanged(
+        self, tmp_path, raw
+    ):
+        client = _html_client()
+        client.get_wiki_page_html.return_value = raw
+        _, text = await _pull(client, tmp_path, format="html")
+        assert text.endswith("<body>\n" + raw + "</body></html>\n")
+
     async def test_the_title_is_the_escaped_page_name(self, tmp_path):
         client = _html_client()
         out = tmp_path / "out.html"
@@ -1986,11 +2045,76 @@ class TestPullHtml:
         assert prop["enum"] == ["markdown", "html", "tracwiki"]
         assert prop["default"] == "markdown"
         assert 'format="html"' in tool.description
+        for name in ("markdown", "html", "tracwiki"):
+            assert name in prop["description"]
 
     async def test_the_default_format_is_still_markdown(self, tmp_path):
         result, text = await _pull(_html_client(), tmp_path)
         assert result.structuredContent["format"] == "markdown"
         assert not text.startswith("<!doctype")
+
+
+class TestPullReportedVersion:
+    """With a version asked for and no usable info, the version reported
+    is the requested one, not 1; unpinned it is still 1 (Trac #211)."""
+
+    @pytest.mark.parametrize("fmt", ["markdown", "html", "tracwiki"])
+    @pytest.mark.parametrize("info", [{}, 0, None, {"version": 0}])
+    async def test_the_requested_version_is_reported(
+        self, tmp_path, fmt, info
+    ):
+        client = _html_client(info)
+        client.get_wiki_page_info.return_value = info
+        client.get_wiki_page.return_value = "= Hello ="
+        result, _ = await _pull(client, tmp_path, format=fmt, version=4)
+
+        assert not result.isError, result.content
+        assert result.structuredContent["version"] == 4
+        # Pinned by the request: nothing to warn about.
+        assert result.structuredContent["warnings"] == []
+
+    @pytest.mark.parametrize("fmt", ["markdown", "html", "tracwiki"])
+    async def test_the_infos_version_wins_when_usable(
+        self, tmp_path, fmt
+    ):
+        client = _html_client({"version": 9})
+        client.get_wiki_page.return_value = "= Hello ="
+        result, _ = await _pull(client, tmp_path, format=fmt, version=4)
+        assert result.structuredContent["version"] == 9
+
+    @pytest.mark.parametrize("fmt", ["markdown", "html", "tracwiki"])
+    async def test_unpinned_and_unreadable_keeps_the_fallback_of_1(
+        self, tmp_path, fmt
+    ):
+        client = _html_client({})
+        client.get_wiki_page_info.return_value = {}
+        client.get_wiki_page.return_value = "= Hello ="
+        result, _ = await _pull(client, tmp_path, format=fmt)
+        assert result.structuredContent["version"] == 1
+        warned = result.structuredContent["warnings"]
+        # tracwiki reads no HTML and has never warned.
+        assert len(warned) == (0 if fmt == "tracwiki" else 1)
+
+
+class TestPullWarningsHeading:
+    @pytest.mark.parametrize(
+        ("fmt", "heading"),
+        [
+            ("markdown", "Conversion warnings:"),
+            ("html", "Warnings:"),
+        ],
+    )
+    async def test_the_heading_names_what_the_warnings_are(
+        self, tmp_path, fmt, heading
+    ):
+        client = _html_client({})
+        client.get_wiki_page_info.return_value = {}
+        client.get_wiki_page.return_value = "= Hello ="
+        result, _ = await _pull(client, tmp_path, format=fmt)
+        text = result.content[0].text
+        assert f"\n\n{heading}\n- " in text
+        if fmt == "html":
+            assert "Conversion warnings" not in text
 
 
 class TestPullInPageAnchors:

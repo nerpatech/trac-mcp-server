@@ -624,6 +624,14 @@ def _refuses_link_rewrites(text: str) -> bool:
     )
 
 
+def _refuses_format_html(text: str) -> bool:
+    """Whether an error result is the input schema refusing
+    ``format="html"`` as not one of its enum, as a server that predates
+    #211 does (its enum is markdown | tracwiki)."""
+    lowered = text.lower()
+    return "'html'" in lowered and "not one of" in lowered
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -724,6 +732,15 @@ async def _run(
             _with_instance(args, arguments),
         )
         if result.isError:
+            if args.format == "html" and _refuses_format_html(
+                _result_text(result)
+            ):
+                raise CliError(
+                    "the server does not know --format html: it predates "
+                    "it (Trac /trac_mcp_server #211). Deploy it, or use "
+                    "--format markdown|tracwiki",
+                    EXIT_TOOL_ERROR,
+                )
             if link_rewrites is not None and _refuses_link_rewrites(
                 _result_text(result)
             ):
