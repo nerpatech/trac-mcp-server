@@ -10,7 +10,7 @@ The search results show the most recent modifications ranked first.
 
 For quick access to project resources, the quick-search field at the top of every page can be used to enter a [TracLink](https://trac.example.org/trac_mcp_server/wiki/TracLinks), which will take you directly to the resource identified by that link:
 
-- [42] -- Opens change set 42
+- \[42\] -- Opens change set 42
 - #42 -- Opens ticket number 42
 - {1} -- Opens report 1
 - /trunk -- Opens the browser for the `trunk` directory in the default repository

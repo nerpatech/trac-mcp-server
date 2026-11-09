@@ -1,9 +1,10 @@
 # Installing Trac as CGI
 
-<div class="important">
-
-> *Please note that using Trac via CGI is the slowest deployment method available. It is slower than [mod_wsgi](https://trac.example.org/trac_mcp_server/wiki/TracModWSGI), [mod_python](https://trac.example.org/trac_mcp_server/wiki/TracModPython), [FastCGI](https://trac.example.org/trac_mcp_server/wiki/TracFastCgi) and even [IIS/AJP](https://trac.edgewall.org/intertrac/TracOnWindowsIisAjp) on Windows.*
-
+<div class="important"><blockquote>
+<p>
+<em>Please note that using Trac via CGI is the slowest deployment method available. It is slower than <a href="https://trac.example.org/trac_mcp_server/wiki/TracModWSGI">mod_wsgi</a>, <a href="https://trac.example.org/trac_mcp_server/wiki/TracModPython">mod_python</a>, <a href="https://trac.example.org/trac_mcp_server/wiki/TracFastCgi">FastCGI</a> and even <a href="https://trac.edgewall.org/intertrac/TracOnWindowsIisAjp">IIS/AJP</a> on Windows.</em>
+</p>
+</blockquote>
 </div>
 
 CGI script is the entry point that the web-server calls when a web-request to an application is made. The `trac.cgi` script can be created using the `trac-admin <env> deploy <dir>` command which automatically substitutes the required paths, see [TracInstall#cgi-bin](https://trac.example.org/trac_mcp_server/wiki/TracInstall#cgi-bin). Make sure the script is executable by your web server.

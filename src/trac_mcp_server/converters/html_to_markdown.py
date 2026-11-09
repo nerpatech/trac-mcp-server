@@ -24,12 +24,11 @@ The rules come from #208's measurements of 2,542 real documents:
 from __future__ import annotations
 
 import copy
-import html as _html
 import re
 import string
 import textwrap
 
-from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import (
     ATX,
     BACKSLASH,
@@ -122,6 +121,30 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+#: The lines of a unified diff that Trac's ``div.diff`` does not show.
+_DIFF_HEADER_RE = re.compile(r"^(?:---|\+\+\+|@@)")
+
+
+def _code_agrees(el: Tag, body: str) -> bool:
+    """Whether the source ``body`` is the text Trac rendered in ``el``.
+
+    Whitespace does not count. A ``div.diff`` has lost the ``+``/``-``
+    columns (and the header lines, which a renderer may leave out), so
+    the body is compared with its leading column removed from each line.
+    A ``table.code`` is compared on its ``td`` cells only, which is what
+    ``_code_text`` returns.
+    """
+    want = _squash(_code_text(el))
+    if el.select_one("div.diff") is None:
+        return want == _squash(body)
+    lines = body.split("\n")
+    shown = [ln for ln in lines if not _DIFF_HEADER_RE.match(ln)]
+    return want in {
+        _squash("\n".join(ln[1:] for ln in kept))
+        for kept in (lines, shown)
+    }
+
+
 def _code_text(el: Tag) -> str:
     """The text of a ``div.wiki-code`` as Trac rendered it.
 
@@ -202,6 +225,13 @@ _BLOCK_TAGS = frozenset(
         "dt",
         "fieldset",
         "form",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
         "li",
         "noscript",
         "ol",
@@ -223,10 +253,14 @@ _LINE_START_PARENTS = frozenset(
         "blockquote",
         "div",
         "dd",
+        "dt",
         "section",
         "article",
     }
 )
+#: Inline parents that add no markup of their own: a text node at their
+#: start sits where they sit.
+_TRANSPARENT_INLINE = frozenset({"span", "small"})
 
 _LETTERED_LISTS = frozenset(
     {"loweralpha", "upperalpha", "lowerroman", "upperroman"}
@@ -302,7 +336,6 @@ _MACRO_CHROME = "div.paging, div.trac-groupprogress"
 
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _PUNCTUATION = frozenset(string.punctuation)
-_BLANK = ""  # stands for "&#10;" until the markup is serialised
 
 
 def _classes(el: Tag) -> list[str]:
@@ -339,6 +372,32 @@ def _dest(url: str) -> str:
     return url
 
 
+_PRE_RE = re.compile(r"<pre\b.*?</pre>", re.S)
+_BLANK_RUN_RE = re.compile(r"[ \t]*\n(?:[ \t]*\n)+[ \t]*")
+
+
+def _without_blank_lines(markup: str) -> str:
+    """``markup`` with no blank line in it (it would end an HTML block).
+
+    Outside a ``pre`` a run of blank lines is one line break. A blank
+    line inside a ``pre`` is kept as a line holding ``&#32;``, so the
+    code text survives.
+    """
+    out = []
+    pos = 0
+    for pre in _PRE_RE.finditer(markup):
+        out.append(_BLANK_RUN_RE.sub("\n", markup[pos : pre.start()]))
+        out.append(
+            "\n".join(
+                f"{ln}&#32;" if not ln.strip(" \t") else ln
+                for ln in pre.group().split("\n")
+            )
+        )
+        pos = pre.end()
+    out.append(_BLANK_RUN_RE.sub("\n", markup[pos:]))
+    return "".join(out)
+
+
 # Markdown text escaping ------------------------------------------------
 
 _LINE_START_ESCAPES = (
@@ -350,7 +409,6 @@ _LINE_START_ESCAPES = (
         re.compile(r"^(\d{1,9})([.)])(?=\s|$)"),
         lambda m: m.group(1) + "\\" + m.group(2),
     ),
-    (re.compile(r"^(?=~{3,})~"), lambda m: "\\~"),
 )
 
 
@@ -484,7 +542,10 @@ class _TracConverter(MarkdownConverter):
         pairs: list[tuple[str, str] | None] = [None] * len(blocks)
         if self._source is not None:
             found = _scan_code_blocks(self._source)
-            if len(found) == len(blocks):
+            if len(found) == len(blocks) and all(
+                _code_agrees(el, body)
+                for el, (_, body) in zip(blocks, found, strict=True)
+            ):
                 pairs = list(found)
             else:
                 pairs = self._pair_by_text(blocks, found)
@@ -508,18 +569,18 @@ class _TracConverter(MarkdownConverter):
 
     @staticmethod
     def _pair_by_text(blocks, found):
-        """Pair by content when the counts differ.
+        """Pair by content when the counts differ or a pair disagrees.
 
-        That happens only with macro-emitted code (``[[TracIni]]``).
+        That happens with macro-emitted code (``[[TracIni]]``), whose
+        blocks have no opener in the source. A block with no source
+        block of its text stays unpaired.
         """
         unused = list(range(len(found)))
         pairs: list[tuple[str, str] | None] = []
         for el in blocks:
-            want = _squash(_code_text(el))
             hit = None
             for k in unused:
-                have = _squash(found[k][1])
-                if want and have and (want in have):
+                if _code_agrees(el, found[k][1]):
                     hit = k
                     break
             if hit is None:
@@ -546,6 +607,12 @@ class _TracConverter(MarkdownConverter):
                 self._warn(
                     f"{desc} is not covered; passed through as HTML"
                 )
+                return self._passthrough(node, parent_tags)
+            if name == "img" and (
+                "width" in node.attrs or "height" in node.attrs
+            ):
+                # Markdown cannot size an image: HTML, and no warning
+                # (nothing is lost).
                 return self._passthrough(node, parent_tags)
         return super().process_tag(node, parent_tags)
 
@@ -576,6 +643,9 @@ class _TracConverter(MarkdownConverter):
 
     def _table_reason(self, table: Tag) -> str | None:
         """Why this table cannot be a pipe table, if it cannot."""
+        desc = self._uncovered(table)  # find_all below skips the table
+        if desc:
+            return f"{desc} is not covered"
         for el in table.find_all(["td", "th"]):
             if el.has_attr("colspan") or el.has_attr("rowspan"):
                 return (
@@ -609,80 +679,88 @@ class _TracConverter(MarkdownConverter):
         return None
 
     def _passthrough(self, el: Tag, parent_tags) -> str:
-        """An element no rule covers: its tags stay, its content converts.
+        """An element no rule covers: its own HTML, as Trac rendered it.
 
-        Markdown inside block HTML is parsed again after a blank line, so
-        a block container keeps its content as Markdown.
+        Nothing inside is converted: Markdown written inside raw tags
+        would be read as text or as a second block, so the whole subtree
+        is serialised. Its uncovered descendants are named in warnings,
+        as they would be had the converter reached them.
         """
-        attrs = "".join(
-            f' {k}="{_html.escape(" ".join(v) if isinstance(v, list) else str(v), quote=True)}"'
-            for k, v in el.attrs.items()
-        )
-        start = f"<{el.name}{attrs}>"
-        if el.can_be_empty_element:
-            return start
-        inner = super().process_tag(el, parent_tags).strip()
-        end = f"</{el.name}>"
+        for inner in el.find_all(True):
+            if inner.name == "table":
+                reason = self._table_reason(inner)
+                if reason:
+                    self._warn(f"{reason}; passed through as HTML")
+                continue
+            desc = self._uncovered(inner)
+            if desc:
+                self._warn(
+                    f"{desc} is not covered; passed through as HTML"
+                )
+        markup = self._html_of(el)
         if el.name in _BLOCK_TAGS and "_inline" not in parent_tags:
-            if not inner:
-                return f"\n\n{start}{end}\n\n"
-            return f"\n\n{start}\n\n{inner}\n\n{end}\n\n"
-        return f"{start}{inner}{end}"
+            return f"\n\n{markup}\n\n"
+        return markup
 
     def _html_of(self, el: Tag) -> str:
         """The element as clean HTML, with no blank line in it.
 
-        A blank line would end a Markdown HTML block, so whitespace runs
-        outside ``pre`` collapse and a blank line inside one is written
-        as ``&#10;``.
+        Trac's chrome is removed (link and image attributes, a cell's
+        text alignment, the classes of covered tags, ``missing`` links),
+        ``link_map`` is applied to every ``href`` and ``src``, and
+        nothing else changes. A blank line would end a Markdown HTML
+        block, so none is left in the markup.
         """
         el = copy.copy(el)
         for a in el.find_all("a"):
             if "missing" in _classes(a):
                 a.unwrap()
-                continue
-            href = a.get("href")
-            a.attrs = {"href": self._map_url(href)} if href else {}
-        for img in el.find_all("img"):
-            keep = {
-                k: v
-                for k, v in img.attrs.items()
-                if k in ("alt", "src")
-            }
-            if "src" in keep:
-                keep["src"] = self._map_url(keep["src"])
-            img.attrs = keep
-        for cell in el.find_all(["td", "th"]):
-            style = cell.get("style")
-            if style is not None and _text_align_only(str(style)):
-                del cell["style"]
-            cell.attrs.pop("align", None)
         for tag in (el, *el.find_all(True)):
+            for attr in ("href", "src"):
+                if tag.get(attr):
+                    tag[attr] = self._map_url(tag[attr])
+            if tag.name == "a":
+                for attr in ("title", "rel"):
+                    tag.attrs.pop(attr, None)
+            elif tag.name == "img":
+                tag.attrs.pop("crossorigin", None)
+            elif tag.name in ("td", "th"):
+                style = tag.get("style")
+                if style is not None and _text_align_only(str(style)):
+                    del tag["style"]
+                tag.attrs.pop("align", None)
             if tag.name in _COVERED_TAGS and tag.name not in (
                 "div",
                 "span",
             ):
-                tag.attrs.pop("class", None)
+                self._strip_chrome_classes(tag)
         for pre in el.find_all("pre"):
-            lang = pre.attrs.pop("data-trac-lang", "")
+            if "data-trac-lang" not in pre.attrs:
+                continue  # Trac's own pre: as it is
+            lang = pre.attrs.pop("data-trac-lang")
             text = pre.get_text()
-            while "\n\n" in text:
-                text = text.replace("\n\n", "\n" + _BLANK)
             pre.clear()
             code = Tag(name="code")
             if lang:
                 code["class"] = f"language-{lang}"
             code.append(NavigableString(text))
             pre.append(code)
-        for text in el.find_all(string=True):
-            if isinstance(text, Comment) or text.find_parent("pre"):
-                continue
-            squashed = re.sub(
-                r"[ \t]*\n(?:[ \t]*\n)+[ \t]*", "\n", str(text)
-            )
-            if squashed != str(text):
-                text.replace_with(NavigableString(squashed))
-        return str(el).replace(_BLANK, "&#10;")
+        return _without_blank_lines(str(el))
+
+    @staticmethod
+    def _strip_chrome_classes(tag: Tag) -> None:
+        """Drop the classes Trac gives a covered tag; keep unknown ones."""
+        if "class" not in tag.attrs:
+            return
+        allowed = _ALLOWED_CLASSES.get(tag.name, frozenset())
+        if allowed is _ANY:
+            del tag["class"]
+            return
+        kept = [c for c in _classes(tag) if c not in allowed]
+        if kept:
+            tag["class"] = kept
+        else:
+            del tag["class"]
 
     # --- links and images ------------------------------------------------
 
@@ -721,6 +799,10 @@ class _TracConverter(MarkdownConverter):
         ):
             return alt
         src = self._map_url(el.get("src") or "")
+        title = " ".join((el.get("title") or "").split())
+        if title:
+            title = title.replace("\\", "\\\\").replace('"', '\\"')
+            return f'![{alt}]({_dest(src)} "{title}")'
         return f"![{alt}]({_dest(src)})"
 
     # --- code ---------------------------------------------------------------
@@ -812,13 +894,16 @@ class _TracConverter(MarkdownConverter):
         """Escape only what could change the Markdown structure."""
         if not text:
             return ""
-        brackets = re.search(r"\]\s*[(\[]|^\s*\[[^\]]*\]:", text, re.M)
         out = []
         for i, ch in enumerate(text):
             before = text[i - 1] if i else ""
             after = text[i + 1] if i + 1 < len(text) else ""
             if ch == "\\":
-                bad = not after or after in _PUNCTUATION
+                bad = (
+                    not after
+                    or after in _PUNCTUATION
+                    or after in "\r\n"
+                )
                 out.append("\\\\" if bad else ch)
             elif ch in "*`":
                 out.append("\\" + ch)
@@ -829,7 +914,7 @@ class _TracConverter(MarkdownConverter):
                 out.append("\\<")
             elif ch == "&" and re.match(r"#?\w+;", text[i + 1 :]):
                 out.append("\\&")
-            elif ch in "[]" and brackets:
+            elif ch in "[]~":  # `~` because `del` is written `~~`
                 out.append("\\" + ch)
             else:
                 out.append(ch)
@@ -847,7 +932,14 @@ class _TracConverter(MarkdownConverter):
         while isinstance(prev, NavigableString) and not prev.strip():
             prev = prev.previous_sibling
         if prev is None:
-            return el.parent.name in _LINE_START_PARENTS
+            parent = el.parent
+            if parent.name in _LINE_START_PARENTS:
+                return True
+            if parent.name in _TRANSPARENT_INLINE and (
+                "underline" not in _classes(parent)
+            ):
+                return _TracConverter._at_line_start(parent)
+            return False
         return isinstance(prev, Tag) and (
             prev.name == "br" or prev.name in _BLOCK_TAGS
         )

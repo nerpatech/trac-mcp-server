@@ -46,11 +46,11 @@ You may want to indent the content of nested blocks for increased clarity, this 
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: none"><pre><code>{{{
+<td style="border: none"><pre>{{{
 #!html
 &lt;h1 style="color: grey"&gt;This is raw HTML&lt;/h1&gt;
 }}}
-</code></pre></td><td style="border: none; padding-left: 2em" valign="top"><h1 style="color: grey">This is raw HTML</h1>
+</pre></td><td style="border: none; padding-left: 2em" valign="top"><h1 style="color: grey">This is raw HTML</h1>
 </td></tr><tr>
 <td colspan="2" style="border: none"><blockquote>
 <p>
@@ -58,15 +58,18 @@ You may want to indent the content of nested blocks for increased clarity, this 
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: none"><pre><code>{{{#!div style="background: #ffd; border: 3px ridge"
-&#10;This is an example of embedded "code" block:
-&#10;  {{{
+<td style="border: none"><pre>{{{#!div style="background: #ffd; border: 3px ridge"
+&#32;
+This is an example of embedded "code" block:
+&#32;
+  {{{
   #!python
   def hello():
       return "world"
   }}}
-&#10;}}}
-</code></pre></td><td style="border: none; padding: 1em" valign="top"><div class="wikipage" style="background: #ffd; border: 3px ridge"><p>
+&#32;
+}}}
+</pre></td><td style="border: none; padding: 1em" valign="top"><div class="wikipage" style="background: #ffd; border: 3px ridge"><p>
 This is an example of embedded "code" block:
 </p>
 <pre><code class="language-python">def hello():
@@ -77,7 +80,7 @@ This is an example of embedded "code" block:
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: none"><pre><code>{{{
+<td style="border: none"><pre>{{{
 #!html
 &lt;form action="/query" method="get"&gt;&lt;div&gt;
 &lt;input type="text" name="keywords" value="~" size="30"/&gt;
@@ -94,7 +97,7 @@ This is an example of embedded "code" block:
 --&gt;
 &lt;/div&gt;&lt;/form&gt;
 }}}
-</code></pre></td><td style="border: none; padding: 1em" valign="top"><form action="/query" method="get"><div>
+</pre></td><td style="border: none; padding: 1em" valign="top"><form action="/query" method="get"><div>
 <input name="keywords" size="30" type="text" value="~"/>
 <input type="submit" value="Search by Keywords"/>
 </div></form>
@@ -139,16 +142,16 @@ Using the MIME type as processor, it is possible to syntax-highlight the same la
 </th></tr><tr><td><p>
 Some examples:
 </p>
-<pre><code>{{{#!text/html
+<pre>{{{#!text/html
 &lt;h1&gt;text&lt;/h1&gt;
 }}}
-</code></pre></td><td><p>
+</pre></td><td><p>
 The result will be syntax highlighted HTML code:
 </p>
 <pre><code class="language-text/html">&lt;h1&gt;text&lt;/h1&gt;</code></pre><p>
 The same is valid for all other <a href="https://trac.example.org/trac_mcp_server/wiki/TracSyntaxColoring#SyntaxColoringSupport">mime types supported</a>.
 </p>
-</td></tr><tr><td><pre><code>{{{#!diff
+</td></tr><tr><td><pre>{{{#!diff
 --- Version 55
 +++ Version 56
 @@ -115,8 +115,9 @@
@@ -165,7 +168,7 @@ The same is valid for all other <a href="https://trac.example.org/trac_mcp_serve
 +    },
  )
 }}}
-</code></pre></td><td><p>
+</pre></td><td><p>
 <strong><code>#!diff</code></strong> has a particularly nice renderer:
 </p>
 <pre><code class="language-diff">--- Version 55

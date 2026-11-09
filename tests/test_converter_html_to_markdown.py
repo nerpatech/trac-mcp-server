@@ -6,6 +6,7 @@ One group per override on small inline HTML; the fixture-wide checks
 """
 
 import pytest
+from bs4 import BeautifulSoup
 
 from trac_mcp_server.converters.html_to_markdown import (
     trac_html_to_markdown,
@@ -169,6 +170,7 @@ def test_diff_block_emits_source_with_plus_and_minus():
         '<div class="wiki-code"><div class="diff"><ul class="entries">'
         '<li class="entry"><table class="trac-diff inline"><tbody>'
         '<tr><th>1</th><td class="l"><span>old</span></td></tr>'
+        '<tr><th>1</th><td class="r"><span>new</span></td></tr>'
         "</tbody></table></li></ul></div></div>"
     )
     out = md(html, "{{{#!diff\n-old\n+new\n}}}")
@@ -460,9 +462,11 @@ def test_unknown_inline_element_passes_through_with_a_warning_naming_it():
     assert "span" in r.warnings[0]
 
 
-def test_unknown_block_element_passes_through_around_markdown():
+def test_unknown_block_element_passes_through_as_its_own_html():
     r = conv('<div class="important"><p>note <em>x</em></p></div>')
-    assert r.text == ('<div class="important">\n\nnote *x*\n\n</div>')
+    assert r.text == (
+        '<div class="important"><p>note <em>x</em></p></div>'
+    )
     assert len(r.warnings) == 1
     assert "div.important" in r.warnings[0]
 
@@ -620,3 +624,271 @@ def test_hr_is_a_thematic_break():
 )
 def test_text_is_escaped_so_it_cannot_become_structure(html, expected):
     assert md(html) == expected
+
+
+# --- review fixes (Trac #209 review) ------------------------------------
+#
+# Each test below is the reviewer's reproduction input.
+
+
+def diff_html(*rows):
+    body = "".join(
+        f'<tr><th>1</th><td class="{side}"><span>{text}</span></td></tr>'
+        for side, text in rows
+    )
+    return (
+        '<div class="wiki-code"><div class="diff"><ul class="entries">'
+        '<li class="entry"><table class="trac-diff inline"><tbody>'
+        f"{body}</tbody></table></li></ul></div></div>"
+    )
+
+
+def test_equal_counts_with_disagreeing_text_do_not_pair_by_position():
+    # [[TracIni]] emits a block the source has no opener for, while the
+    # source's one block is not rendered as code at all.
+    r = conv(code("[server]\nport = 1\n"), "{{{#!mermaid\ngraph\n}}}")
+    assert r.text == "```\n[server]\nport = 1\n```"
+    assert any("no matching source block" in w for w in r.warnings)
+
+
+def test_equal_counts_with_one_disagreeing_pair_pair_by_text_throughout():
+    html = code("[a]\n") + code("x = 1\n")
+    src = "{{{#!python\nx = 1\n}}}\n\n{{{#!mermaid\ngraph\n}}}"
+    r = conv(html, src)
+    assert r.text == "```\n[a]\n```\n\n```python\nx = 1\n```"
+    assert len(r.warnings) == 1
+    assert "1 code block " in r.warnings[0]
+
+
+def test_equal_counts_pair_by_position_when_text_agrees_modulo_space():
+    r = conv(code("a   =   1\n"), "{{{#!python\na = 1\n}}}")
+    assert r.text == "```python\na = 1\n```"
+    assert r.warnings == []
+
+
+def test_diff_agrees_with_its_source_without_the_plus_minus_columns():
+    html = diff_html(("l", "old"), ("r", "new"), ("l", "same"))
+    src = "{{{#!diff\n-old\n+new\n same\n}}}"
+    r = conv(html, src)
+    assert r.text == "```diff\n-old\n+new\n same\n```"
+    assert r.warnings == []
+
+
+def test_diff_header_lines_may_be_absent_from_the_html():
+    html = diff_html(("l", "old"), ("r", "new"))
+    src = "{{{#!diff\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n}}}"
+    r = conv(html, src)
+    assert r.text == (
+        "```diff\n--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n```"
+    )
+    assert r.warnings == []
+
+
+def test_diff_with_disagreeing_text_is_not_paired():
+    html = diff_html(("l", "zzz"))
+    r = conv(html, "{{{#!diff\n-old\n+new\n}}}")
+    assert r.text == "```\nzzz\n```"
+    assert any("no matching source block" in w for w in r.warnings)
+
+
+def test_table_code_is_compared_on_its_td_cells_only():
+    html = (
+        '<div class="wiki-code"><table class="code"><tbody><tr>'
+        "<th>1</th><td>zzz\n</td></tr></tbody></table></div>"
+    )
+    r = conv(html, "{{{#!python lineno=1\n1\nzzz\n}}}")
+    assert r.text == "```\nzzz\n```"
+    assert any("no matching source block" in w for w in r.warnings)
+
+
+@pytest.mark.parametrize(
+    ("html", "expected"),
+    [
+        ('<h1 class="foo">Title</h1>', '<h1 class="foo">Title</h1>'),
+        (
+            '<ul><li style="color:red">red</li></ul>',
+            '<li style="color:red">red</li>',
+        ),
+        (
+            '<p>a <code class="foo">x y</code> b</p>',
+            'a <code class="foo">x y</code> b',
+        ),
+        (
+            '<p>a <a href="/x" onclick="f()">link</a> b</p>',
+            'a <a href="/x" onclick="f()">link</a> b',
+        ),
+        (
+            '<div class="x"><p>n <em>e</em> <a href="/y">l</a></p></div>',
+            '<div class="x"><p>n <em>e</em> <a href="/y">l</a></p></div>',
+        ),
+    ],
+)
+def test_passthrough_is_the_original_html_never_converted_markdown(
+    html, expected
+):
+    r = conv(html)
+    assert r.text == expected
+    assert len(r.warnings) == 1
+
+
+def test_passthrough_nested_uncovered_elements_still_warn():
+    r = conv('<form action="/s"><input name="q"/></form>')
+    assert any("form" in w for w in r.warnings)
+    assert any("input" in w for w in r.warnings)
+
+
+def test_passthrough_has_no_blank_line_even_across_dropped_nodes():
+    html = (
+        '<table><tr><td colspan="2">a\n<span class="wikianchor" '
+        'id="x"></span>\nb</td></tr></table>'
+    )
+    r = conv(html)
+    assert "\n\n" not in r.text
+    assert "a\nb" in r.text
+
+
+def test_passthrough_squashes_blank_lines_in_text():
+    r = conv('<div class="x">a\n\n\n  \nb</div>')
+    assert r.text == '<div class="x">a\nb</div>'
+
+
+def test_blank_line_in_a_passed_through_pre_becomes_a_space_entity():
+    r = conv('<div class="x"><pre>a\n\n\nb</pre></div>')
+    assert "\n\n" not in r.text
+    assert (
+        r.text == '<div class="x"><pre>a\n&#32;\n&#32;\nb</pre></div>'
+    )
+
+
+def test_passed_through_pre_has_no_fence_inside_it():
+    r = conv('<pre class="other">x = 1\n\ny</pre>')
+    assert r.text == '<pre class="other">x = 1\n&#32;\ny</pre>'
+    assert "```" not in r.text
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    ['style="border:none"', 'border="1"', 'cellspacing="0"'],
+)
+def test_table_own_attributes_are_checked_too(attrs):
+    html = (
+        f'<table class="wiki" {attrs}><tr><th>a</th></tr>'
+        "<tr><td>1</td></tr></table>"
+    )
+    r = conv(html)
+    assert r.text.startswith("<table")
+    assert "|" not in r.text
+    assert len(r.warnings) == 1
+    assert "table" in r.warnings[0]
+
+
+def test_table_class_wiki_alone_is_still_a_pipe_table():
+    html = '<table class="wiki"><tr><th>a</th></tr><tr><td>1</td></tr></table>'
+    r = conv(html)
+    assert r.text == "| a |\n| --- |\n| 1 |"
+    assert r.warnings == []
+
+
+def test_link_map_applies_inside_passed_through_html():
+    r = conv(
+        '<img src="/trac/raw/a.png" style="float:right">',
+        link_map={"/trac/": "https://t/"},
+    )
+    assert (
+        r.text == '<img src="https://t/raw/a.png" style="float:right"/>'
+    )
+
+
+def test_link_map_applies_to_every_element_of_a_passed_through_subtree():
+    html = (
+        '<div class="x"><a href="/trac/w">l</a>'
+        '<img src="/trac/raw/a.png" alt="a"/></div>'
+    )
+    out = md(html, link_map={"/trac/": "https://t/"})
+    assert 'href="https://t/w"' in out
+    assert 'src="https://t/raw/a.png"' in out
+    assert "/trac/" not in out
+
+
+def test_backslash_before_a_newline_is_escaped_not_a_hard_break():
+    assert md("<p>foo \\\nbar</p>") == "foo \\\\\nbar"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("# term", "\\# term"),
+        ("1. term", "1\\. term"),
+        ("- term", "\\- term"),
+        ("+ term", "\\+ term"),
+        ("* term", "\\* term"),
+        ("> term", "\\> term"),
+    ],
+)
+def test_line_start_is_escaped_in_a_definition_term(text, expected):
+    html = f'<dl class="wiki"><dt>{text}</dt><dd>d</dd></dl>'
+    assert md(html) == f"{expected}\n:   d"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("# x", "\\# x"),
+        ("1. x", "1\\. x"),
+        ("- x", "\\- x"),
+        ("+ x", "\\+ x"),
+        ("> x", "\\> x"),
+    ],
+)
+def test_line_start_is_escaped_inside_an_inline_only_parent(
+    text, expected
+):
+    assert md(f"<p><span>{text}</span></p>") == expected
+    assert md(f"<p>a<br/><span>{text}</span></p>") == f"a\\\n{expected}"
+
+
+def test_unbalanced_bracket_in_link_text_keeps_the_link():
+    assert md('<a href="/wiki/X">a]b</a>') == "[a\\]b](/wiki/X)"
+
+
+def test_every_bracket_in_text_is_escaped():
+    assert md("<p>a [b c] d [e</p>") == "a \\[b c\\] d \\[e"
+
+
+def test_brackets_in_code_are_left_alone():
+    assert md("<p><code>a[0]</code></p>") == "`a[0]`"
+
+
+def test_tilde_in_text_is_escaped_so_it_is_not_strikethrough():
+    assert md("<p>~~x~~</p>") == "\\~\\~x\\~\\~"
+    assert md("<p>a ~ b</p>") == "a \\~ b"
+
+
+def test_tilde_in_code_is_left_alone():
+    assert md("<p><code>~/x</code></p>") == "`~/x`"
+
+
+def test_img_with_dimensions_passes_through_as_html_without_a_warning():
+    r = conv(
+        '<p><img src="/trac/a.png" alt="a" width="10" height="5"/></p>',
+        link_map={"/trac/": "/t/"},
+    )
+    # the parser writes attributes in its own order
+    assert r.text.startswith("<img ") and r.text.endswith("/>")
+    assert BeautifulSoup(r.text, "html.parser").img.attrs == {
+        "src": "/t/a.png",
+        "alt": "a",
+        "width": "10",
+        "height": "5",
+    }
+    assert r.warnings == []
+
+
+def test_img_title_is_the_markdown_title():
+    out = md('<p><img src="/a.png" alt="a" title="The A"/></p>')
+    assert out == '![a](/a.png "The A")'
+
+
+def test_img_title_quotes_and_backslashes_are_escaped():
+    out = md('<p><img src="/a.png" alt="a" title=\'say "hi" \\\'/></p>')
+    assert out == '![a](/a.png "say \\"hi\\" \\\\")'

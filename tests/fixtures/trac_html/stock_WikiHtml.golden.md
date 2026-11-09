@@ -13,10 +13,10 @@ To inform the wiki engine that a block of text should be treated as HTML, use th
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>{{{#!html
+</th></tr><tr><td><pre>{{{#!html
 &lt;h1 style="text-align: right; color: blue"&gt;HTML Test&lt;/h1&gt;
 }}}
-</code></pre></td><td style="padding-left: 2em"><h1 style="text-align: right; color: blue">HTML Test</h1>
+</pre></td><td style="padding-left: 2em"><h1 style="text-align: right; color: blue">HTML Test</h1>
 </td></tr></table>
 
 Note that Trac sanitizes your HTML code before displaying it. That means that potentially dangerous constructs, such as Javascript event handlers, will be removed from the output.
@@ -27,29 +27,29 @@ The filtering is done by [Genshi](https://genshi.edgewall.org/) and the output w
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>{{{#!div class="important"
+</th></tr><tr><td><pre>{{{#!div class="important"
 **important** is a predefined class.
 }}}
-</code></pre><pre><code>{{{#!div style="border: 1pt dotted; margin: 1em"
+</pre><pre>{{{#!div style="border: 1pt dotted; margin: 1em"
 **wikipage** is another predefined class that will
 be used when no class is specified.
 }}}
-</code></pre><pre><code>{{{#!div class="compact" style="border: 1pt dotted; margin: 1em"
+</pre><pre>{{{#!div class="compact" style="border: 1pt dotted; margin: 1em"
 **compact** is another predefined class reducing
 the padding within the `&lt;div&gt;` to a minimum.
 }}}
-</code></pre><pre><code>{{{#!div class="wikipage compact" style="border: 1pt dotted"
+</pre><pre>{{{#!div class="wikipage compact" style="border: 1pt dotted"
 Classes can be combined (here **wikipage** and **compact**)
 which results in this case in reduced //vertical//
 padding but there's still some horizontal space for coping
 with headings.
 }}}
-</code></pre><pre><code>{{{#!div class="" style="border: 1pt dotted; margin: 1em"
+</pre><pre>{{{#!div class="" style="border: 1pt dotted; margin: 1em"
 Explicitly specifying no classes is //not// the same
 as specifying no class attribute, as this will remove
 the //wikipage// default class.
 }}}
-</code></pre></td><td style="padding-left: 2em"><div class="important"><p>
+</pre></td><td style="padding-left: 2em"><div class="important"><p>
 <strong>important</strong> is a predefined class.
 </p>
 </div><div class="wikipage" style="border: 1pt dotted; margin: 1em"><p>
@@ -79,9 +79,9 @@ For spans, you should use the Macro call syntax:
 
 <table>
 <tr><th> Wiki Markup 
-</th></tr><tr><td><pre><code>Hello
+</th></tr><tr><td><pre>Hello
 [[span(''WORLD'' (click [#anchor here]), style=color: green; font-size: 120%, id=anchor)]]!
-</code></pre></td></tr><tr>
+</pre></td></tr><tr>
 <th> Display 
 </th></tr><tr><td style="padding-left: 2em"><blockquote>
 <p>
@@ -97,7 +97,7 @@ The `#!td` or `#!th` processors should be used to create table data and table he
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>Simple 2x2 table with rich content:
+</th></tr><tr><td><pre>Simple 2x2 table with rich content:
 {{{#!th align=left
  - Left
  - Header
@@ -120,12 +120,15 @@ The `#!td` or `#!th` processors should be used to create table data and table he
 {{{#!td colspan=2
 Pick the style the more appropriate
 to your content
-&#10;See WikiFormatting#Tables for details
+&#32;
+See WikiFormatting#Tables for details
 on the pipe-based table syntax.
 }}}
-&#10;If one needs to add some
+&#32;
+If one needs to add some
 attributes to the table itself...
-&#10;{{{#!table style="border:none;text-align:center;margin:auto"
+&#32;
+{{{#!table style="border:none;text-align:center;margin:auto"
   {{{#!tr ====================================
     {{{#!th style="border: none"
     Left header
@@ -151,8 +154,9 @@ attributes to the table itself...
     }}}
   }}}
 }}}
-&#10;
-</code></pre></td><td valign="top"><p>
+&#32;
+&#32;
+</pre></td><td valign="top"><p>
 Simple 2x2 table with rich content:
 </p>
 <table>
@@ -205,13 +209,13 @@ Right header
 Note that by default tables are assigned the "wiki" CSS class, which gives a distinctive look to the header cells and a default border to the table and cells, as can be seen for the tables on this page. By removing this class (`#!table class=""`), one regains complete control on the table presentation. In particular, neither the table nor the rows nor the cells will have a border, so this is a more effective way to get such an effect rather than having to specify a `style="border: no"` parameter everywhere.
 
 <table><tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>{{{#!table class=""
+</th></tr><tr><td><pre>{{{#!table class=""
 ||  0||  1||  2||
 || 10|| 20|| 30||
 || 11|| 22|| 33||
 ||||||=  numbers  =||
 }}}
-</code></pre></td><td><table><tr><td>  0</td><td>  1</td><td>  2
+</pre></td><td><table><tr><td>  0</td><td>  1</td><td>  2
 </td></tr><tr><td> 10</td><td> 20</td><td> 30
 </td></tr><tr><td> 11</td><td> 22</td><td> 33
 </td></tr><tr><th colspan="3">  numbers  
@@ -221,13 +225,13 @@ Other classes can be specified as alternatives (remember that you can define you
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>{{{#!table class="listing"
+</th></tr><tr><td><pre>{{{#!table class="listing"
 ||  0||  1||  2||
 || 10|| 20|| 30||
 || 11|| 22|| 33||
 ||||||=  numbers  =||
 }}}
-</code></pre></td><td><table><tr><td>  0</td><td>  1</td><td>  2
+</pre></td><td><table><tr><td>  0</td><td>  1</td><td>  2
 </td></tr><tr><td> 10</td><td> 20</td><td> 30
 </td></tr><tr><td> 11</td><td> 22</td><td> 33
 </td></tr><tr><th colspan="3">  numbers  
@@ -239,17 +243,17 @@ HTML comments are stripped from the output of the `html` processor. To add an HT
 
 <table>
 <tr><th> Wiki Markup 
-</th></tr><tr><td><pre><code>{{{#!htmlcomment
+</th></tr><tr><td><pre>{{{#!htmlcomment
 This block is translated to an HTML comment.
 It can contain &lt;tags&gt; and &amp;entities; that will not be escaped in the output.
 }}}
-</code></pre></td></tr><tr>
+</pre></td></tr><tr>
 <th> Display 
-</th></tr><tr><td><pre><code>&lt;!--
+</th></tr><tr><td><pre>&lt;!--
 This block is translated to an HTML comment.
 It can contain &lt;tags&gt; and &amp;entities; that will not be escaped in the output.
 --&gt;
-</code></pre></td></tr></table>
+</pre></td></tr></table>
 
 The character sequence `--` is not allowed in HTML comments, and will generate a rendering error.
 

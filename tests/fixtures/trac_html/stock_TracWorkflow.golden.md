@@ -218,7 +218,7 @@ But if even that is not enough, you can disable the ConfigurableTicketWorkflow c
 
 ## Adding Workflow States to Milestone Progress Bars
 
-If you add additional states to your workflow, you may want to customize your milestone progress bars as well. See the [[milestone-groups]](https://trac.example.org/trac_mcp_server/wiki/TracIni#milestone-groups-section) section.
+If you add additional states to your workflow, you may want to customize your milestone progress bars as well. See the [\[milestone-groups\]](https://trac.example.org/trac_mcp_server/wiki/TracIni#milestone-groups-section) section.
 
 ## Ideas for next steps
 

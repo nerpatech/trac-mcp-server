@@ -30,16 +30,17 @@ The following wiki pages present the advanced features of the Trac wiki markup i
 </td><td> <code>monospaced (''other markup ignored'')</code>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Headings">Headings</a>
-</th><td><pre><code>== Level 2
+</th><td><pre>== Level 2
 === Level 3 ^([#hn note])^
-</code></pre></td><td style="padding-left: 2em"><h2 id="Level2">Level 2</h2>
+</pre></td><td style="padding-left: 2em"><h2 id="Level2">Level 2</h2>
 <h3 id="Level3note">Level 3 <sup>(<a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#hn">note</a>)</sup></h3>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Paragraphs">Paragraphs</a>
-</th><td><pre><code>First paragraph
+</th><td><pre>First paragraph
 on multiple lines.
-&#10;Second paragraph.
-</code></pre></td><td><p>
+&#32;
+Second paragraph.
+</pre></td><td><p>
 First paragraph
 on multiple lines.
 </p>
@@ -48,12 +49,12 @@ Second paragraph.
 </p>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Lists">Lists</a>
-</th><td><pre><code>* bullet list
+</th><td><pre>* bullet list
   on multiple lines
   1. nested list
     a. different numbering
        styles
-</code></pre></td><td><ul><li>bullet list
+</pre></td><td><ul><li>bullet list
 on multiple lines
 <ol><li>nested list
 <ol><li>different numbering
@@ -62,24 +63,24 @@ styles
 <th><p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#DefinitionLists">Definition Lists</a>
 </p>
-</th><td><pre><code> term:: definition on
+</th><td><pre> term:: definition on
         multiple lines
-</code></pre></td><td><dl><dt>term</dt><dd>definition on
+</pre></td><td><dl><dt>term</dt><dd>definition on
 multiple lines
 </dd></dl>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#PreformattedText">Preformatted Text</a>
-</th><td><pre><code>{{{
+</th><td><pre>{{{
 multiple lines, ''no wiki'',
       white space respected
 }}}
-</code></pre></td><td><pre><code>multiple lines, ''no wiki'',
+</pre></td><td><pre>multiple lines, ''no wiki'',
       white space respected
-</code></pre></td></tr><tr>
+</pre></td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Blockquotes">Blockquotes</a>
-</th><td><pre><code>  if there's some leading
+</th><td><pre>  if there's some leading
   space the text is quoted
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <p>
 if there's some leading
 space the text is quoted
@@ -87,9 +88,9 @@ space the text is quoted
 </blockquote>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#DiscussionCitations">Discussion Citations</a>
-</th><td><pre><code>&gt;&gt; ... (I said)
+</th><td><pre>&gt;&gt; ... (I said)
 &gt; (he replied)
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <blockquote>
 <p>
 ... (I said)
@@ -101,9 +102,9 @@ space the text is quoted
 </blockquote>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Tables">Tables</a>
-</th><td><pre><code>||= Table Header =|| Cell ||
+</th><td><pre>||= Table Header =|| Cell ||
 ||||  (details below)  ||
-</code></pre></td><td><table>
+</pre></td><td><table>
 <tr><th> Table Header </th><td> Cell 
 </td></tr><tr><td colspan="2">  (details below)  
 </td></tr></table>
@@ -148,7 +149,7 @@ space the text is quoted
 </td></tr><tr><td> <code>`{{{-}}}` triple curly brackets</code>
 </td><td> <code>{{{-}}}</code> triple curly brackets 
 </td></tr><tr>
-<th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Images">Images</a> </th><td> <code>[[Image(</code><em>link</em><code>)]]</code> </td><td> <a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png"><img alt="trac_logo_mini.png" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png"/></a>
+<th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Images">Images</a> </th><td> <code>[[Image(</code><em>link</em><code>)]]</code> </td><td> <a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" style="padding:0; border:none"><img alt="trac_logo_mini.png" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" title="trac_logo_mini.png"/></a>
 </td></tr><tr>
 <th rowspan="2"><p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Macros">Macros</a>
@@ -157,27 +158,27 @@ space the text is quoted
 </td></tr><tr><td> <code>[[Image?]]</code> </td><td> <em>(help for the Image macro)</em>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Processors">Processors</a>
-</th><td><pre><code>{{{#!div style="font-size: 80%"
+</th><td><pre>{{{#!div style="font-size: 80%"
 Code highlighting:
   {{{#!python
   hello = lambda: "world"
   }}}
 }}}
-</code></pre></td><td style="padding-left: 2em"><div class="wikipage" style="font-size: 80%"><p>
+</pre></td><td style="padding-left: 2em"><div class="wikipage" style="font-size: 80%"><p>
 Code highlighting:
 </p>
 <pre><code class="language-python">hello = lambda: "world"</code></pre></div></td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Comments">Comments</a>
-</th><td><pre><code>{{{#!comment
+</th><td><pre>{{{#!comment
 Note to Editors: ...
 }}}
-</code></pre></td><td> <em>(comment is shown in edit mode only)</em>
+</pre></td><td> <em>(comment is shown in edit mode only)</em>
 </td></tr><tr>
 <th> <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#Miscellaneous">Miscellaneous</a>
-</th><td><pre><code>Line [[br]] break
+</th><td><pre>Line [[br]] break
 Line \\ break
 ----
-</code></pre></td><td style="padding-left: 2em"><p>
+</pre></td><td style="padding-left: 2em"><p>
 Line <br/> break
 Line <br/> break
 </p>
@@ -190,7 +191,7 @@ The Trac wiki supports the following font styles:
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> * '''bold''',
+</th></tr><tr><td><pre> * '''bold''',
    ''' triple quotes !'''
    can be bold too if prefixed by ! ''',
  * ''italic''
@@ -205,7 +206,7 @@ The Trac wiki supports the following font styles:
  * **also bold**, //italic as well//,
    and **'' bold italic **'' //(since 0.12)//
  * [[span(style=color: #FF0000, a red text )]]
-</code></pre></td><td><ul><li><strong>bold</strong>,
+</pre></td><td><ul><li><strong>bold</strong>,
 <strong> triple quotes '''
 can be bold too if prefixed by ! </strong>,
 </li><li><em>italic</em>
@@ -240,12 +241,12 @@ Finally, the heading might optionally be followed by an explicit id. If not, an 
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>= Heading =
+</th></tr><tr><td><pre>= Heading =
 == Subheading
 === About ''this'' ===
 === Explicit id === #using-explicit-id-in-heading
 == Subheading #sub2
-</code></pre></td><td style="padding: 1em"><div class="wikipage"><h1 id="Heading">Heading</h1>
+</pre></td><td style="padding: 1em"><div class="wikipage"><h1 id="Heading">Heading</h1>
 <h2 id="Subheading">Subheading</h2>
 <h3 id="Aboutthis">About <em>this</em></h3>
 <h3 id="using-explicit-id-in-heading">Explicit id</h3>
@@ -260,12 +261,13 @@ A forced line break can also be inserted, using:
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>Line 1[[BR]]Line 2
-</code></pre><pre><code>Paragraph
+</th></tr><tr><td><pre>Line 1[[BR]]Line 2
+</pre><pre>Paragraph
 one
-&#10;Paragraph
+&#32;
+Paragraph
 two
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <p>
 Line 1<br/>Line 2
 </p>
@@ -290,7 +292,7 @@ The wiki supports both ordered/numbered and unordered lists.
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> * Item 1
+</th></tr><tr><td><pre> * Item 1
    * Item 1.1
       * Item 1.1.1
       * Item 1.1.2
@@ -302,7 +304,8 @@ The wiki supports both ordered/numbered and unordered lists.
   - be careful though to continue the line
   with the appropriate indentation, otherwise
 that will start a new paragraph...
-&#10; 1. Item 1
+&#32;
+ 1. Item 1
    a. Item 1.a
    a. Item 1.b
       i. Item 1.b.i
@@ -311,7 +314,7 @@ that will start a new paragraph...
 And numbered lists can also be restarted
 with an explicit number:
  3. Item 3
-</code></pre></td><td><ul><li>Item 1
+</pre></td><td><ul><li>Item 1
 <ul><li>Item 1.1
 <ul><li>Item 1.1.1
 </li><li>Item 1.1.2
@@ -343,12 +346,12 @@ The wiki also supports definition lists.
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> llama::
+</th></tr><tr><td><pre> llama::
    some kind of mammal, with hair
  ppython::
    some kind of reptile, without hair
    (can you spot the typo?)
-</code></pre></td><td><dl><dt>llama</dt><dd>
+</pre></td><td><dl><dt>llama</dt><dd>
 some kind of mammal, with hair
 </dd><dt>ppython</dt><dd>
 some kind of reptile, without hair
@@ -364,13 +367,13 @@ Block containing preformatted text are suitable for source code snippets, notes 
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>{{{
+</th></tr><tr><td><pre>{{{
 def HelloWorld():
     print '''Hello World'''
 }}}
-</code></pre></td><td><pre><code>def HelloWorld():
+</pre></td><td><pre>def HelloWorld():
     print '''Hello World'''
-</code></pre></td></tr></table>
+</pre></td></tr></table>
 
 Note that this kind of block is also used for selecting lines that should be processed through [WikiProcessors](https://trac.example.org/trac_mcp_server/wiki/WikiProcessors).
 
@@ -380,9 +383,9 @@ In order to mark a paragraph as blockquote, indent that paragraph with two space
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>Paragraph
+</th></tr><tr><td><pre>Paragraph
   This text is a quote from someone else.
-</code></pre></td><td><p>
+</pre></td><td><p>
 Paragraph
 </p>
 <blockquote>
@@ -398,11 +401,11 @@ To delineate a citation in an ongoing discussion thread, such as the ticket comm
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>&gt;&gt; Someone's original text
+</th></tr><tr><td><pre>&gt;&gt; Someone's original text
 &gt; Someone else's reply text
 &gt;  - which can be any kind of Wiki markup
 My reply text
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <blockquote>
 <p>
 Someone's original text
@@ -426,9 +429,9 @@ Simple tables can be created:
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>||Cell 1||Cell 2||Cell 3||
+</th></tr><tr><td><pre>||Cell 1||Cell 2||Cell 3||
 ||Cell 4||Cell 5||Cell 6||
-</code></pre></td><td style="padding: 2em"><table>
+</pre></td><td style="padding: 2em"><table>
 <tr><td>Cell 1</td><td>Cell 2</td><td>Cell 3
 </td></tr><tr><td>Cell 4</td><td>Cell 5</td><td>Cell 6
 </td></tr></table>
@@ -439,10 +442,10 @@ Note that the `=` characters have to stick to the cell separators:
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>||        ||= stable =||= latest =||
+</th></tr><tr><td><pre>||        ||= stable =||= latest =||
 ||= 0.10 =||  0.10.5  || 0.10.6dev||
 ||= 0.11 =||  0.11.6  || 0.11.7dev||
-</code></pre></td><td style="padding: 2em"><table>
+</pre></td><td style="padding: 2em"><table>
 <tr><td> </td><th> stable </th><th> latest 
 </th></tr><tr><th> 0.10 </th><td>  0.10.5  </td><td> 0.10.6dev
 </td></tr><tr><th> 0.11 </th><td>  0.11.6  </td><td> 0.11.7dev
@@ -453,11 +456,11 @@ Finally, specifying an empty cell means that the next non empty cell will span t
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>|| 1 || 2 || 3 ||
+</th></tr><tr><td><pre>|| 1 || 2 || 3 ||
 |||| 1-2 || 3 ||
 || 1 |||| 2-3 ||
 |||||| 1-2-3 ||
-</code></pre></td><td style="padding: 2em"><table>
+</pre></td><td style="padding: 2em"><table>
 <tr><td> 1 </td><td> 2 </td><td> 3 
 </td></tr><tr><td colspan="2"> 1-2 </td><td> 3 
 </td></tr><tr><td> 1 </td><td colspan="2"> 2-3 
@@ -469,7 +472,7 @@ Note that if the content of a cell sticks to one side of the cell and only one, 
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>||=Text =||= Numbers =||
+</th></tr><tr><td><pre>||=Text =||= Numbers =||
 ||left align    ||        1.0||
 ||  center      ||        4.5||
 ||      right align||     4.5||
@@ -477,7 +480,7 @@ Note that if the content of a cell sticks to one side of the cell and only one, 
 ||default||         2.5||
 ||  default ||      2.5||
 || default ||       2.5||
-</code></pre></td><td style="padding: 2em"><table>
+</pre></td><td style="padding: 2em"><table>
 <tr><th>Text </th><th> Numbers 
 </th></tr><tr><td>left align    </td><td>        1.0
 </td></tr><tr><td>  center      </td><td>        4.5
@@ -493,10 +496,10 @@ If contrary to the example above, the cells in your table contain more text, it 
 
 <table>
 <tr><th> Wiki Markup 
-</th></tr><tr><td><pre><code>|| this is column 1 [https://trac.edgewall.org/newticket new ticket] || \
+</th></tr><tr><td><pre>|| this is column 1 [https://trac.edgewall.org/newticket new ticket] || \
 || this is column 2 [https://trac.edgewall.org/roadmap the road ahead] || \
 || that's column 3 and last one ||
-</code></pre></td></tr><tr>
+</pre></td></tr><tr>
 <th> Display 
 </th></tr><tr><td style="padding: 2em"><table>
 <tr><td> this is column 1 <a href="https://trac.edgewall.org/newticket">new ticket</a>
@@ -515,8 +518,8 @@ Hyperlinks are automatically created for [WikiPageNames](https://trac.example.or
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>TitleIndex, https://www.edgewall.com/, !NotAlink
-</code></pre></td><td><p>
+</th></tr><tr><td><pre>TitleIndex, https://www.edgewall.com/, !NotAlink
+</pre></td><td><p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>, <a href="https://www.edgewall.com/">https://www.edgewall.com/</a>, NotAlink
 </p>
 </td></tr></table>
@@ -526,11 +529,11 @@ If the descriptive title is omitted, then the explicit prefix is discarded, unle
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> * [https://www.edgewall.com Edgewall Software]
+</th></tr><tr><td><pre> * [https://www.edgewall.com Edgewall Software]
  * [wiki:TitleIndex Title Index]
  * [wiki:TitleIndex]
  * [wiki:ISO9000]
-</code></pre></td><td><ul><li><a href="https://www.edgewall.com">Edgewall Software</a>
+</pre></td><td><ul><li><a href="https://www.edgewall.com">Edgewall Software</a>
 </li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
 </li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>
 </li><li>ISO9000
@@ -539,13 +542,13 @@ If the descriptive title is omitted, then the explicit prefix is discarded, unle
 Following the [WikiCreole](https://trac.edgewall.org/intertrac/WikiCreole) trend, the descriptive title can also be specified by writing the link followed by a pipe (`|`) and a title and all this inside *double* square brackets.
 
 <table>
-<tr><td><pre><code> * [[https://www.edgewall.com|Edgewall Software]]
+<tr><td><pre> * [[https://www.edgewall.com|Edgewall Software]]
  * [[wiki:TitleIndex|Title Index]]
    or even [[TitleIndex|Title Index]]
  * [[wiki:TitleIndex]]
    ''' but not ![[TitleIndex]]! '''
  * [[ISO9000]]
-</code></pre></td><td><ul><li><a href="https://www.edgewall.com">Edgewall Software</a>
+</pre></td><td><ul><li><a href="https://www.edgewall.com">Edgewall Software</a>
 </li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
 or even <a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">Title Index</a>
 </li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TitleIndex">TitleIndex</a>
@@ -562,7 +565,7 @@ Wiki pages can link directly to other parts of the Trac system. Pages can refer 
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> * Tickets: #1 or ticket:1
+</th></tr><tr><td><pre> * Tickets: #1 or ticket:1
  * Reports: {1} or report:1
  * Changesets: r1, [1] or changeset:1
  * ...
@@ -570,7 +573,7 @@ Wiki pages can link directly to other parts of the Trac system. Pages can refer 
    so called InterTrac links:
    - Tickets: #Trac1 or Trac:ticket:1
    - Changesets: [Trac1] or Trac:changeset:1
-</code></pre></td><td><ul><li>Tickets: <a href="https://trac.example.org/trac_mcp_server/ticket/1">#1</a> or <a href="https://trac.example.org/trac_mcp_server/ticket/1">ticket:1</a>
+</pre></td><td><ul><li>Tickets: <a href="https://trac.example.org/trac_mcp_server/ticket/1">#1</a> or <a href="https://trac.example.org/trac_mcp_server/ticket/1">ticket:1</a>
 </li><li>Reports: <a href="https://trac.example.org/trac_mcp_server/report/1">{1}</a> or <a href="https://trac.example.org/trac_mcp_server/report/1">report:1</a>
 </li><li>Changesets: r1, [1] or changeset:1
 </li><li>...
@@ -611,10 +614,12 @@ Optionally, a label can be given to the anchor:
 <table>
 <tr><th> Wiki Markup </th><th> Display 
 </th></tr><tr>
-<td><pre><code>[#point2 jump to the second point]
-&#10;...
-&#10;Point2:  [=#point2] Jump here
-</code></pre></td><td><blockquote>
+<td><pre>[#point2 jump to the second point]
+&#32;
+...
+&#32;
+Point2:  [=#point2] Jump here
+</pre></td><td><blockquote>
 <p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting#point2">jump to the second point</a>
 </p>
@@ -639,13 +644,13 @@ You may avoid making hyperlinks out of [TracLinks](https://trac.example.org/trac
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code> !NoHyperLink
+</th></tr><tr><td><pre> !NoHyperLink
  !#42 is not a link
-</code></pre><pre><code>Various forms of escaping for list markup:
+</pre><pre>Various forms of escaping for list markup:
  ^^- escaped minus sign \\
  ^^1. escaped number  \\
  ^^* escaped asterisk sign
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <p>
 NoHyperLink
 #42 is not a link
@@ -667,7 +672,7 @@ Various forms of escaping for list markup:
 
 Urls ending with `.png`, `.gif` or `.jpg` are no longer automatically interpreted as image links, and converted to `<img>` tags.
 
-You now have to use the [[Image]] macro. The simplest way to include an image is to upload it as attachment to the current page, and put the filename in a macro call like `[[Image(picture.gif)]]`.
+You now have to use the \[\[Image\]\] macro. The simplest way to include an image is to upload it as attachment to the current page, and put the filename in a macro call like `[[Image(picture.gif)]]`.
 
 In addition to the current page, it is possible to refer to other resources:
 
@@ -678,9 +683,9 @@ In addition to the current page, it is possible to refer to other resources:
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>[[Image(htdocs:../common/trac_logo_mini.png)]]
-</code></pre></td><td><p>
-<a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png"><img alt="trac_logo_mini.png" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png"/></a>
+</th></tr><tr><td><pre>[[Image(htdocs:../common/trac_logo_mini.png)]]
+</pre></td><td><p>
+<a href="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" style="padding:0; border:none"><img alt="trac_logo_mini.png" src="https://trac.example.org/trac_mcp_server/chrome/site/../common/trac_logo_mini.png" title="trac_logo_mini.png"/></a>
 </p>
 </td></tr></table>
 
@@ -692,8 +697,8 @@ Macros are *custom functions* that insert dynamic content in a page.
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>[[RecentChanges(Trac,3)]]
-</code></pre></td><td style="padding-left: 2em"><p>
+</th></tr><tr><td><pre>[[RecentChanges(Trac,3)]]
+</pre></td><td style="padding-left: 2em"><p>
 </p><div class="wikipage"><h3>11/08/26</h3><ul><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracConvertLiveTest">TracConvertLiveTest</a><small> (<a href="https://trac.example.org/trac_mcp_server/wiki/TracConvertLiveTest?action=diff&amp;version=469">diff</a>)</small>
 </li></ul><h3>02/14/26</h3><ul><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">TracWorkflow</a>
 </li><li><a href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">TracWiki</a>
@@ -707,8 +712,8 @@ The detailed help for a specific macro can also be obtained more directly by app
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>[[MacroList?]]
-</code></pre></td><td style="padding-left: 2em"><p>
+</th></tr><tr><td><pre>[[MacroList?]]
+</pre></td><td style="padding-left: 2em"><p>
 </p><div class="trac-macrolist"><h3 id="MacroList-macro"><code>[[MacroList]]</code></h3><p>
 Display a list of all installed Wiki macros, including documentation if
 available.
@@ -739,12 +744,12 @@ Trac supports alternative markup formats using [WikiProcessors](https://trac.exa
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: 0px"><pre><code>{{{#!html
+<td style="border: 0px"><pre>{{{#!html
 &lt;h1 style="text-align: right; color: blue"&gt;
  HTML Test
 &lt;/h1&gt;
 }}}
-</code></pre></td><td style="border: 0px" valign="top"><h1 style="text-align: right; color: blue">HTML Test</h1>
+</pre></td><td style="border: 0px" valign="top"><h1 style="text-align: right; color: blue">HTML Test</h1>
 </td></tr><tr>
 <td colspan="2" style="border: 0px; font-size: 90%"><blockquote>
 <p>
@@ -752,14 +757,15 @@ Trac supports alternative markup formats using [WikiProcessors](https://trac.exa
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: 0px"><pre><code>{{{#!python
+<td style="border: 0px"><pre>{{{#!python
 class Test:
-&#10;    def __init__(self):
+&#32;
+    def __init__(self):
         print "Hello World"
 if __name__ == '__main__':
    Test()
 }}}
-</code></pre></td><td style="border: 0px" valign="top"><pre><code class="language-python">class Test:
+</pre></td><td style="border: 0px" valign="top"><pre><code class="language-python">class Test:
     def __init__(self):
         print "Hello World"
 if __name__ == '__main__':
@@ -770,7 +776,7 @@ if __name__ == '__main__':
 </p>
 </blockquote>
 </td></tr><tr>
-<td style="border: 0px"><pre><code>{{{#!th rowspan=4 align=justify
+<td style="border: 0px"><pre>{{{#!th rowspan=4 align=justify
 With the `#td` and `#th` processors,
 table cells can contain any content:
 }}}
@@ -797,7 +803,7 @@ Even when you don't have complex markup,
 this form of table cells can be convenient
 to write content on multiple lines.
 }}}
-</code></pre></td><td style="border: 0px" valign="top"><table>
+</pre></td><td style="border: 0px" valign="top"><table>
 <tr><th rowspan="4"><p>
 With the <code>#td</code> and <code>#th</code> processors,
 table cells can contain any content:
@@ -836,12 +842,12 @@ Comments can be added to the plain text. These will not be rendered and will not
 
 <table>
 <tr><th> Wiki Markup </th><th> Display 
-</th></tr><tr><td><pre><code>Nothing to
+</th></tr><tr><td><pre>Nothing to
 {{{#!comment
 Your comment for editors here
 }}}
 see.
-</code></pre></td><td><blockquote>
+</pre></td><td><blockquote>
 <p>
 Nothing to
 </p>
@@ -859,11 +865,11 @@ see.
 <p>
 Horizontal line:
 </p>
-<pre><code>Four or more dashes will be replaced
+<pre>Four or more dashes will be replaced
 by a horizontal line (&lt;HR&gt;)
 ----
 See?
-</code></pre></blockquote>
+</pre></blockquote>
 </td><td><p>
 Four or more dashes will be replaced
 by a horizontal line (&lt;HR&gt;)
@@ -877,12 +883,12 @@ See?
 <p>
 Two examples of line breaks:
 </p>
-<pre><code>"macro" style [[BR]] line break
-</code></pre><p>
+<pre>"macro" style [[BR]] line break
+</pre><p>
 or:
 </p>
-<pre><code>!WikiCreole style \\ line\\break
-</code></pre></blockquote>
+<pre>!WikiCreole style \\ line\\break
+</pre></blockquote>
 </td><td><p>
 "macro" style <br/> line break
 </p>

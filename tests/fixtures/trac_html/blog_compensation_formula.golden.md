@@ -8,8 +8,8 @@ Angle: a transcription of Bosch's nested BME280 humidity expression kept every n
 - Defect: the `>> 14` closed over the whole statement instead of `termB` alone; C's `*` binds tighter than `>>`, so it parsed as `(termA * termB) >> 14`, a different value whenever `termB` is not a multiple of 2<sup>14, which is always.</sup>
 - Not visible by reading: both versions are pristine C with balanced parens; a script counting paren depth is what confirmed it.
 - Symptom on node-b: humidity a boring 0.0%, because the formula's own clamp (`v = v < 0 ? 0 : v`) floored the malformed intermediate; no crash, no sentinel.
-- Temperature (~24 C) and pressure (~832 hPa) were right from the first boot, which made it look like a config or wiring problem isolated to one channel.
-- Wrong hypothesis, kept: that BME280 humidity was another case of the DHT22's stuck ~1.0% RH ([#15](https://trac.example.org/bcs/ticket/15)); the BME280 had been added partly to cross-check that bug, and its own 0.0% was a second, unrelated bug in the same session.
+- Temperature (\~24 C) and pressure (\~832 hPa) were right from the first boot, which made it look like a config or wiring problem isolated to one channel.
+- Wrong hypothesis, kept: that BME280 humidity was another case of the DHT22's stuck \~1.0% RH ([#15](https://trac.example.org/bcs/ticket/15)); the BME280 had been added partly to cross-check that bug, and its own 0.0% was a second, unrelated bug in the same session.
 - Unrelated confirmed: temperature and pressure share every line downstream of the I2C read except the compensation math.
 - What caught it: breathing on the sensor; MQTT held at 0.0% through a direct breath test, so a calibration offset (which would still move, just wrong) was out and something was structurally clamping.
 - From there to `bme280CompensateH()` and the five-line Python depth-counter took a few minutes.

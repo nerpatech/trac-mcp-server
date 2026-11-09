@@ -76,10 +76,9 @@ $ trac-admin /path/to/env deploy /deploy/path
 
 Before refreshing, it is recommended that you remove the directory in which your static resources are deployed. The directory location depends on the choice you made during installation. This cleanup is not mandatory, but makes it easier to troubleshoot issues as your installation is uncluttered by unused assets from a previous release. As usual, make a backup before deleting the directory.
 
-<div class="wikipage" style="border: 1pt dotted; margin: 1em">
-
-**Note:** Some web browsers (IE, Opera) cache CSS and JavaScript files, so you should instruct your users to manually erase the contents of their browser's cache. A forced refreshed (SHIFT + \<F5>) should be sufficient.
-
+<div class="wikipage" style="border: 1pt dotted; margin: 1em"><p>
+<strong>Note:</strong> Some web browsers (IE, Opera) cache CSS and JavaScript files, so you should instruct your users to manually erase the contents of their browser's cache. A forced refreshed (SHIFT + &lt;F5&gt;) should be sufficient.
+</p>
 </div>
 
 ### 7. Steps specific to a given Trac version

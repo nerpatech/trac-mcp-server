@@ -17,7 +17,7 @@ Multiple files can be specified using a comma-separated list. Non-absolute paths
 
 Note that you can also specify a global option file when creating a new project, by adding the option `--inherit=/path/to/global/trac.ini` to [trac-admin](https://trac.example.org/trac_mcp_server/wiki/TracAdmin#initenv)'s `initenv` command. If you specify `--inherit` but nevertheless intend to use a global option file with your new environment, you will have to go through the newly generated `conf/trac.ini` file and delete the entries that will otherwise override those in the global file.
 
-There are three more options in the [[inherit]](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-section) section, [templates_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-templates_dir-option) for sharing global templates, [htdocs_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-htdocs_dir-option) for sharing global htdocs and [plugins_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-plugins_dir-option), for sharing plugins. Those options can be specified in the shared configuration file, and in fact, configuration files can even be chained if you specify another `[inherit] file` there.
+There are three more options in the [\[inherit\]](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-section) section, [templates_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-templates_dir-option) for sharing global templates, [htdocs_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-htdocs_dir-option) for sharing global htdocs and [plugins_dir](https://trac.example.org/trac_mcp_server/wiki/TracIni#inherit-plugins_dir-option), for sharing plugins. Those options can be specified in the shared configuration file, and in fact, configuration files can even be chained if you specify another `[inherit] file` there.
 
 Note that the templates found in the `templates/` directory of the [TracEnvironment](https://trac.example.org/trac_mcp_server/wiki/TracEnvironment) have precedence over those found in `[inherit] templates_dir`. In turn, the latter have precedence over the installed templates, so be careful about what you put there. Notably, if you override a default template, refresh your modifications when you upgrade to a new version of Trac. The preferred way to perform [TracInterfaceCustomization](https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization) is to write a custom plugin doing an appropriate `ITemplateStreamFilter` transformation.
 
@@ -560,7 +560,7 @@ in the `trac.ini` file. See [TracWorkflow](https://trac.example.org/trac_mcp_ser
 | [`changeset_show_files`](#timeline-changeset_show_files-option) | Number of files to show (`-1` for unlimited, `0` to disable).  This can also be `location`, for showing the common prefix for the changed files. | `0` |
 | [`default_daysback`](#timeline-default_daysback-option) | Default number of days displayed in the Timeline, in days. | `30` |
 | [`max_daysback`](#timeline-max_daysback-option) | Maximum number of days (-1 for unlimited) displayable in the Timeline. | `90` |
-| [`newticket_formatter`](#timeline-newticket_formatter-option) | Which formatter flavor (e.g. 'html' or 'oneliner') should be used when presenting the description for new tickets. If 'oneliner', the [timeline] abbreviated_messages option applies. | `oneliner` |
+| [`newticket_formatter`](#timeline-newticket_formatter-option) | Which formatter flavor (e.g. 'html' or 'oneliner') should be used when presenting the description for new tickets. If 'oneliner', the \[timeline\] abbreviated_messages option applies. | `oneliner` |
 | [`ticket_show_component`](#timeline-ticket_show_component-option) | Enable the display of component of tickets in the timeline. (*since 1.1.1*) | `disabled` |
 | [`ticket_show_details`](#timeline-ticket_show_details-option) | Enable the display of all ticket changes in the timeline, not only open / close operations. | `enabled` |
 
@@ -630,7 +630,7 @@ The error reporting page has a *Create* button for reporting
 issues. The site to which issues are reported depends on the
 configuration of the Trac site and the user’s permissions.
 
-If the user doesn’t possess TRAC_ADMIN, the site to which a user is directed to create a ticket is determined by the [[trac] admin_trac_url](https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin_trac_url-option) setting:
+If the user doesn’t possess TRAC_ADMIN, the site to which a user is directed to create a ticket is determined by the [\[trac\] admin_trac_url](https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin_trac_url-option) setting:
 
 - If empty, there will be no *Create* button.
 - If set to the default value (`.`), the ticket will be
@@ -638,7 +638,7 @@ If the user doesn’t possess TRAC_ADMIN, the site to which a user is directed t
 - Otherwise the ticket will be created at the site pointed
   to by `admin_trac_url`.
 
-If [[project] admin](https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin-option) is not empty, the administrator's email address will be rendered on the error page.
+If [\[project\] admin](https://trac.example.org/trac_mcp_server/wiki/TracIni#project-admin-option) is not empty, the administrator's email address will be rendered on the error page.
 
 If the user possesses TRAC_ADMIN, the *Create* button will direct the user to report the issue on trac.edgewall.org. If the error was generated in a plugin, the error will be reported to the project URL provided that the plugin author has included the project URL in the plugin installation data. The user possessing TRAC_ADMIN also sees a traceback and system information on the error page.
 

@@ -51,36 +51,36 @@ or <a href="https://trac.example.org/trac_mcp_server/changeset?new=3539&amp;new_
 **Note:** The [wiki:CamelCase](https://trac.example.org/trac_mcp_server/wiki/CamelCase) form is rarely used, but it can be convenient to refer to pages whose names do not follow [WikiPageNames](https://trac.example.org/trac_mcp_server/wiki/WikiPageNames) rules, ie single words, non-alphabetic characters, etc. See [WikiPageNames](https://trac.example.org/trac_mcp_server/wiki/WikiPageNames) for more about features specific to links to Wiki page names.
 
 <table><tr><td colspan="2"> Trac links using the full (non-shorthand) notation can also be given a custom link title like this: 
-</td></tr><tr><td><pre><code>[ticket:1 This is a link to ticket number one] or
+</td></tr><tr><td><pre>[ticket:1 This is a link to ticket number one] or
 [[ticket:1|This is another link to ticket number one]].
-</code></pre></td><td><p>
+</pre></td><td><p>
 <a href="https://trac.example.org/trac_mcp_server/ticket/1">This is a link to ticket number one</a> or
 <a href="https://trac.example.org/trac_mcp_server/ticket/1">This is another link to ticket number one</a>.
 </p>
 </td></tr><tr>
 <td colspan="2"> If the title is omitted, only the id (the part after the colon) is displayed:  
-</td></tr><tr><td><pre><code>[ticket:1] or [[ticket:2]]
-</code></pre></td><td><p>
+</td></tr><tr><td><pre>[ticket:1] or [[ticket:2]]
+</pre></td><td><p>
 <a href="https://trac.example.org/trac_mcp_server/ticket/1">1</a> or <a href="https://trac.example.org/trac_mcp_server/ticket/2">2</a>
 </p>
 </td></tr><tr>
 <td colspan="2"> <code>wiki</code> is the default if the namespace part of a full link is omitted:  
-</td></tr><tr><td><pre><code>[SandBox the sandbox] or
+</td></tr><tr><td><pre>[SandBox the sandbox] or
 [[SandBox|the sandbox]]
-</code></pre></td><td><p>
+</pre></td><td><p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/SandBox">the sandbox</a> or
 <a href="https://trac.example.org/trac_mcp_server/wiki/SandBox">the sandbox</a>
 </p>
 </td></tr><tr>
 <td colspan="2"> The short form <em>realm:target</em> can also be wrapped within a &lt;...&gt; pair, <br/> which allow for arbitrary characters (i.e. anything but &gt;)  
-</td></tr><tr><td><pre><code>&lt;wiki:Strange(page@!)&gt;
-</code></pre></td><td><p>
+</td></tr><tr><td><pre>&lt;wiki:Strange(page@!)&gt;
+</pre></td><td><p>
 &lt;wiki:Strange(page@!)&gt;
 </p>
 </td></tr><tr>
 <td colspan="2"> Quoting can be used with the full notation to allow brackets in the label. 
-</td></tr><tr><td><pre><code>[TracIni#logging-log_type-option "[logging] log_type"]
-</code></pre></td><td><p>
+</td></tr><tr><td><pre>[TracIni#logging-log_type-option "[logging] log_type"]
+</pre></td><td><p>
 <a href="https://trac.example.org/trac_mcp_server/wiki/TracIni#logging-log_type-option">[logging] log_type</a>
 </p>
 </td></tr></table>
@@ -193,7 +193,7 @@ This can be seen as a kind of [InterWiki](https://trac.example.org/trac_mcp_serv
 
 Any type of Trac link can be written in one Trac environment and actually refer to resources in another Trac environment. All that is required is to prefix the Trac link with the name of the other Trac environment followed by a colon. The other Trac environment must be registered on the [InterTrac](https://trac.example.org/trac_mcp_server/wiki/InterTrac) page.
 
-A distinct advantage of [InterTrac](https://trac.example.org/trac_mcp_server/wiki/InterTrac) links over [InterWiki](https://trac.example.org/trac_mcp_server/wiki/InterWiki) links is that the shorthand form of Trac links can also be used, such as `{}`, `r`, `#`. For example, if T was set as an alias for Trac, then links to Trac tickets can be written as #T234, and links to Trac changesets can be written as [[trac 1508]](https://trac.edgewall.org/intertrac/changeset%3A1508).
+A distinct advantage of [InterTrac](https://trac.example.org/trac_mcp_server/wiki/InterTrac) links over [InterWiki](https://trac.example.org/trac_mcp_server/wiki/InterWiki) links is that the shorthand form of Trac links can also be used, such as `{}`, `r`, `#`. For example, if T was set as an alias for Trac, then links to Trac tickets can be written as #T234, and links to Trac changesets can be written as [\[trac 1508\]](https://trac.edgewall.org/intertrac/changeset%3A1508).
 See [InterTrac](https://trac.example.org/trac_mcp_server/wiki/InterTrac) for the complete details.
 
 ### Server-relative links
@@ -230,8 +230,8 @@ Examples:
 
 Note that by using [WikiCreole](https://trac.edgewall.org/intertrac/WikiCreole) style links, it's quite natural to write links containing spaces:
 
-- [[The whitespace convention]]
-- [[attachment:the file.txt]]
+- \[\[The whitespace convention\]\]
+- \[\[attachment:the file.txt\]\]
 
 ### Escaping Links
 
@@ -245,7 +245,7 @@ To prevent parsing of a TracLink, you can escape it by preceding it with a '!' (
 Display:
 
 > NoLinkHere.
-> [42] is not a link either.
+> \[42\] is not a link either.
 
 ### Parameterized Trac links
 
@@ -274,7 +274,7 @@ Note that the older way, putting the filename at the end, is still supported: at
 
 If you'd like to create a direct link to the content of the attached file instead of a link to the attachment page, simply use `raw-attachment:` instead of `attachment:`.
 
-This can be useful for pointing directly to an HTML document, for example. Note that for this use case, you'd have to allow the web browser to render the content by setting [[attachment] render_unsafe_content](https://trac.example.org/trac_mcp_server/wiki/TracIni#attachment-render_unsafe_content-option) = `enabled`. Caveat: only do that in environments for which you're 100% confident you can trust the people who are able to attach files, as this opens up your site to [cross-site scripting](https://en.wikipedia.org/wiki/Cross-site_scripting) attacks.
+This can be useful for pointing directly to an HTML document, for example. Note that for this use case, you'd have to allow the web browser to render the content by setting [\[attachment\] render_unsafe_content](https://trac.example.org/trac_mcp_server/wiki/TracIni#attachment-render_unsafe_content-option) = `enabled`. Caveat: only do that in environments for which you're 100% confident you can trust the people who are able to attach files, as this opens up your site to [cross-site scripting](https://en.wikipedia.org/wiki/Cross-site_scripting) attacks.
 
 See also [#export:links](https://trac.example.org/trac_mcp_server/wiki/TracLinks#export:links).
 
@@ -372,7 +372,7 @@ To force the download of a file in the repository, as opposed to displaying it i
 - `export:/some/file@123` - get revision 123 of the specified file
 - `export:/some/file@named-branch` - get latest revision of the specified file in `named-branch` (DVCS such as Git or Mercurial).
 
-This can be very useful for displaying XML or HTML documentation with correct stylesheets and images, in case that has been checked in into the repository. Note that for this use case, you'd have to allow the web browser to render the content by setting [[browser] render_unsafe_content](https://trac.example.org/trac_mcp_server/wiki/TracIni#browser-render_unsafe_content-option) = `enabled`, otherwise Trac will force the files to be downloaded as attachments for security concerns.
+This can be very useful for displaying XML or HTML documentation with correct stylesheets and images, in case that has been checked in into the repository. Note that for this use case, you'd have to allow the web browser to render the content by setting [\[browser\] render_unsafe_content](https://trac.example.org/trac_mcp_server/wiki/TracIni#browser-render_unsafe_content-option) = `enabled`, otherwise Trac will force the files to be downloaded as attachments for security concerns.
 
 If the path is to a directory in the repository instead of a specific file, the source browser will be used to display the directory (identical to the result of `source:/some/dir`).
 
