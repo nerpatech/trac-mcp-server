@@ -85,6 +85,18 @@ class TestExport:
         assert rest.startswith("# Heading")
         assert out.startswith("---\n")
 
+    def test_source_is_percent_encoded_for_an_awkward_page_name(
+        self, trac, capsys
+    ):
+        rc = main(["--from-wiki", "Notes/Q3 #2", "--to", "md"])
+
+        assert rc == EXIT_OK
+        meta = yaml.safe_load(
+            split_front_matter(capsys.readouterr().out)[0]
+        )
+        assert meta["source"] == f"{_TEST_URL}/wiki/Notes/Q3%20%232"
+        assert meta["trac_page"] == "Notes/Q3 #2"
+
     def test_the_title_falls_back_to_the_page_name(
         self, monkeypatch, capsys
     ):
@@ -154,6 +166,19 @@ class TestGuard:
         assert captured.err == _REFUSAL
         trac.put_wiki_page.assert_not_called()
 
+    def test_the_hint_quotes_a_page_name_with_a_space(
+        self, trac, tmp_path, capsys
+    ):
+        text = '---\ntrac_page: "My Page"\n---\n\nBody\n'
+
+        rc = main([self._file(tmp_path, text), "--to", "tracwiki"])
+
+        assert rc == EXIT_RUNTIME_ERROR
+        assert (
+            "trac-convert --from-wiki 'My Page' --to tracwiki), or pass"
+            in capsys.readouterr().err
+        )
+
     def test_refused_to_an_output_file_writes_nothing(
         self, trac, tmp_path
     ):
@@ -208,6 +233,19 @@ class TestGuard:
         assert "---" not in captured.out
         assert captured.err == ""
 
+    def test_force_verbose_reports_the_bytes_read(
+        self, trac, tmp_path, capsys
+    ):
+        rc = main(
+            [self._file(tmp_path), "--to", "tracwiki", "--force", "-v"]
+        )
+
+        assert rc == EXIT_OK
+        assert (
+            f"info: read {len(_EXPORT.encode('utf-8'))} bytes\n"
+            in capsys.readouterr().err
+        )
+
     def test_force_with_to_wiki_stores_without_the_front_matter(
         self, trac, tmp_path
     ):
@@ -233,6 +271,28 @@ class TestGuard:
         out = capsys.readouterr().out
         # Left alone: whatever the converter did with it before.
         assert "Hello" in out
+
+    def test_an_impossible_date_in_front_matter_converts_cleanly(
+        self, trac, tmp_path, capsys
+    ):
+        text = (
+            "---\ntitle: Post\ndate: 2024-02-30\n---\n\n# Hello\n\nx\n"
+        )
+
+        rc = main(
+            [
+                self._file(tmp_path, text),
+                "--from",
+                "md",
+                "--to",
+                "tracwiki",
+            ]
+        )
+
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        assert "Hello" in captured.out
+        assert "Traceback" not in captured.err
 
     def test_markdown_target_is_not_guarded(
         self, trac, tmp_path, capsys

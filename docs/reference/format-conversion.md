@@ -81,7 +81,7 @@ macros, nested lists, tables and links come out as Trac itself reads them.
   that language.
 - The result is a one-way export for reading. It is not meant to be pushed
   back: a Markdown file pulled this way is Trac's rendering, not the source,
-  and its front matter makes every push path refuse it (see below). Pull
+  and its front matter makes the guarded push paths refuse it (see below). Pull
   `format="tracwiki"` for source that round-trips.
 - Warnings the translator raises (a dropped table of contents, a table
   passed through as HTML, a list style Markdown cannot express) are listed
@@ -111,7 +111,7 @@ exported: "2026-11-09T12:00:00Z"
 | Field | Where the value comes from |
 |-------|----------------------------|
 | `title` | The text of the first `h1` of Trac's HTML, without Trac's anchor and icon marks, whitespace collapsed; the page name when there is no `h1` |
-| `source` | The page's own URL, `<trac_url>/wiki/<page>` |
+| `source` | The page's own URL, `<trac_url>/wiki/<page>`, with the page name percent-encoded (`Notes/Q3 #2` is `Notes/Q3%20%232`) |
 | `trac_instance` | The path of the Trac URL (`/proj` for `http://host/proj`, `/` for a URL with no path) |
 | `trac_page` | The page name as asked for |
 | `trac_version` | The version the source and the HTML were read at; `null` when it could not be read and none was requested |
@@ -119,10 +119,12 @@ exported: "2026-11-09T12:00:00Z"
 
 Strings are written as JSON strings, which are valid YAML double-quoted
 scalars, so a title with a colon, a quote or non-ASCII text parses back
-exactly.
+exactly (non-ASCII is written as is; the few characters YAML cannot carry
+raw, such as DEL, the C1 controls and U+2028, are written as `\uXXXX`).
 
-**It is a guard.** The export is one-way, so every push path refuses
-Markdown whose front matter is a YAML mapping carrying a non-empty
+**It is a guard.** The export is one-way, so the guarded paths --
+`wiki_file_push`, `trac-mcp wiki-push` and `trac-convert` to TracWiki --
+refuse Markdown whose front matter is a YAML mapping carrying a non-empty
 `trac_page`, unless forced:
 
 - `wiki_file_push` returns a `validation_error` naming the page, instance
@@ -141,7 +143,10 @@ PAGE FILE --format tracwiki`, `trac-convert --from-wiki PAGE --to
 tracwiki`). The guard is for the accidental pull-edit-push loop, not for a
 determined user: deleting the front matter by hand defeats it, and that is
 accepted. Connected MCP sessions keep the old `wiki_file_push` schema (no
-`force`) until they reconnect.
+`force`) until they reconnect. `wiki_update` and `wiki_create` store their
+content verbatim as TracWiki and do not check front matter (they never
+convert, so they cannot re-shape a page; Markdown written there is stored
+as literal text).
 
 `tracwiki_to_markdown` (the old regex converter) is no longer called by
 either; it is removed in #214. The description of its behaviour in the

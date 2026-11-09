@@ -2354,6 +2354,25 @@ class TestPullFrontMatter:
         assert re.search(rf'^exported: "{_ISO_Z}"$', text, re.M)
         assert rest.startswith("\n# Hello Page")
 
+    async def test_source_is_percent_encoded_for_an_awkward_page_name(
+        self, tmp_path
+    ):
+        client = _fm_client()
+        out = tmp_path / "out.md"
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "Notes/Q3 #2", "file_path": str(out)},
+            client,
+        )
+
+        assert not result.isError, result.content
+        meta, _ = _fm_block(out.read_text())
+        assert (
+            meta["source"] == "http://h:8000/proj/wiki/Notes/Q3%20%232"
+        )
+        assert meta["trac_page"] == "Notes/Q3 #2"
+
     async def test_the_markdown_after_the_block_is_the_translator_output(
         self, tmp_path
     ):
@@ -2522,6 +2541,17 @@ class TestPushRefusesExportedMarkdown:
         assert not result.isError, result.content
         stored = client.put_wiki_page.call_args[0][1]
         assert "date:" not in stored
+        assert "Hello" in stored
+
+    async def test_impossible_date_in_front_matter_is_stripped(self):
+        content = "---\ntitle: Post\ndate: 2024-02-30\n---\n\n# Hello\n\nWorld\n"
+
+        client, result = await _fm_push(content)
+
+        assert not result.isError, result.content
+        stored = client.put_wiki_page.call_args[0][1]
+        assert "date:" not in stored
+        assert not stored.startswith("---")
         assert "Hello" in stored
 
     def test_schema_has_force_default_false(self):

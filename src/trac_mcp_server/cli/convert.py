@@ -14,6 +14,7 @@ verbosity flags (--quiet, --verbose) on top of this skeleton.
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,7 @@ from ..converters.front_matter import (
     build_front_matter,
     exported_from,
     instance_path,
+    page_url,
     split_front_matter,
 )
 from ..converters.html_to_markdown import trac_html_to_markdown
@@ -1195,6 +1197,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         text = sys.stdin.read()
 
+    # The input as read; --force below replaces ``text`` with the part
+    # after the front matter, but "read N bytes" counts what was read.
+    bytes_read = len(text.encode("utf-8"))
+
     # --- --to-wiki authoritatively knows the target is TracWiki;
     # silently override --to (which may be None or 'md'). ---
     if args.to_wiki is not None:
@@ -1219,7 +1225,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"exported from Trac page '{page}' (instance "
                     f"{instance}, version {version}) and the export is "
                     "one-way; edit the page as TracWiki (trac-convert "
-                    f"--from-wiki {page} --to tracwiki), or pass --force\n"
+                    f"--from-wiki {shlex.quote(page)} --to tracwiki), or pass"
+                    " --force\n"
                 )
                 return EXIT_RUNTIME_ERROR
             text = split_front_matter(text)[1]
@@ -1283,7 +1290,7 @@ def main(argv: list[str] | None = None) -> int:
             result,
             text=build_front_matter(
                 title=result.title or args.from_wiki,
-                source=session.document_url(args.from_wiki),
+                source=page_url(session.url, args.from_wiki),
                 trac_instance=instance_path(session.url),
                 trac_page=args.from_wiki,
                 trac_version=session.page_version,
@@ -1338,9 +1345,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(
             f"info: source format: {result.source_format}\n"
         )
-        sys.stderr.write(
-            f"info: read {len(text.encode('utf-8'))} bytes\n"
-        )
+        sys.stderr.write(f"info: read {bytes_read} bytes\n")
         if args.to_wiki is None:
             sys.stderr.write(
                 f"info: wrote {len(result.text.encode('utf-8'))} bytes\n"

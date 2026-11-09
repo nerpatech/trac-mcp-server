@@ -9,6 +9,7 @@ from trac_mcp_server.converters.front_matter import (
     build_front_matter,
     exported_from,
     instance_path,
+    page_url,
     split_front_matter,
 )
 
@@ -155,7 +156,68 @@ class TestSplit:
         assert split_front_matter(text) == (None, text)
 
 
+class TestYamlUnsafeCharacters:
+    """Characters PyYAML rejects or folds survive the round trip (#212)."""
+
+    @pytest.mark.parametrize(
+        "char",
+        ["\x7f", "\x85", "\x9f", "\u2028", "\u2029", "\ufffe"],
+        ids=["del", "nel", "c1-end", "ls", "ps", "fffe"],
+    )
+    def test_value_round_trips_exactly(self, char):
+        title = f"a{char}b"
+        page = f"P{char}Q"
+
+        data = exported_from(
+            _build(title=title, trac_page=page, source=f"s{char}") + "x"
+        )
+
+        assert data is not None
+        assert data["title"] == title
+        assert data["trac_page"] == page
+        assert data["source"] == f"s{char}"
+
+    def test_a_lone_surrogate_round_trips(self):
+        title = "a\ud800b"
+
+        data = exported_from(_build(title=title) + "x")
+
+        assert data is not None
+        assert data["title"] == title
+
+    def test_readable_non_ascii_stays_literal(self):
+        block = _build(title="\u00dcber \u4e2d\u6587")
+
+        assert 'title: "\u00dcber \u4e2d\u6587"\n' in block
+        assert "\\u00dc" not in block
+
+
+class TestPageUrl:
+    def test_plain_page(self):
+        assert (
+            page_url("http://h:8000/proj/", "Notes/Q3")
+            == "http://h:8000/proj/wiki/Notes/Q3"
+        )
+
+    def test_space_and_hash_are_percent_encoded(self):
+        assert (
+            page_url("http://h/proj", "Notes/Q3 #2")
+            == "http://h/proj/wiki/Notes/Q3%20%232"
+        )
+
+
 class TestExportedFrom:
+    def test_a_date_shaped_non_date_is_none(self):
+        assert exported_from("---\ndate: 2024-02-30\n---\nbody") is None
+
+    def test_any_parser_exception_is_none(self, monkeypatch):
+        def boom(_raw):
+            raise RecursionError("deep")
+
+        monkeypatch.setattr(yaml, "safe_load", boom)
+
+        assert exported_from("---\ntrac_page: P\n---\nbody") is None
+
     def test_a_dict_with_trac_page(self):
         data = exported_from(_build() + "# T\n")
         assert data is not None

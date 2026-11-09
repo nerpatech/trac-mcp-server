@@ -27,6 +27,7 @@ from ...converters.front_matter import (
     build_front_matter,
     exported_from,
     instance_path,
+    page_url,
     split_front_matter,
 )
 from ...converters.html_to_markdown import trac_html_to_markdown
@@ -814,7 +815,7 @@ async def _handle_pull(
             output_content = (
                 build_front_matter(
                     title=conversion.title or page_name,
-                    source=document_url,
+                    source=page_url(client.config.trac_url, page_name),
                     trac_instance=instance_path(client.config.trac_url),
                     trac_page=page_name,
                     trac_version=pinned,

@@ -2,9 +2,12 @@
 
 Every Markdown export (``wiki_file_pull``, ``trac-mcp wiki-pull``,
 ``trac-convert --from-wiki``) starts with a front matter block naming the
-Trac page it came from. Every push path refuses Markdown carrying
-``trac_page`` unless forced: the export is one-way (Trac's HTML
+Trac page it came from. The guarded paths -- ``wiki_file_push``,
+``trac-mcp wiki-push`` and ``trac-convert`` to TracWiki -- refuse Markdown
+carrying ``trac_page`` unless forced: the export is one-way (Trac's HTML
 translated to Markdown), and pushing it back re-shapes the page.
+``wiki_update`` and ``wiki_create`` store their content verbatim and do
+not check front matter.
 
 The block is a guard against the accidental loop, not against a
 determined user: deleting it by hand defeats it.
@@ -13,16 +16,30 @@ determined user: deleting it by hand defeats it.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import yaml
 
+# What ``json.dumps(ensure_ascii=False)`` leaves raw but a YAML
+# double-quoted scalar cannot carry: DEL and the C1 controls (PyYAML
+# rejects them; U+0085 is also folded as a line break), U+2028/U+2029
+# (folded as line breaks), lone surrogates and U+FFFE/U+FFFF (rejected).
+_YAML_UNSAFE = re.compile(
+    "[\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]"
+)
+
 
 def _scalar(value: str) -> str:
-    # A JSON string is a valid YAML double-quoted scalar.
-    return json.dumps(value, ensure_ascii=False)
+    # A JSON string is a valid YAML double-quoted scalar. Non-ASCII stays
+    # readable; the characters YAML cannot hold raw become \uXXXX, which
+    # both JSON and YAML double-quoted strings read back exactly.
+    return _YAML_UNSAFE.sub(
+        lambda m: f"\\u{ord(m.group()):04x}",
+        json.dumps(value, ensure_ascii=False),
+    )
 
 
 def build_front_matter(
@@ -101,7 +118,10 @@ def exported_from(text: str) -> dict[str, Any] | None:
         return None
     try:
         data = yaml.safe_load(raw)
-    except yaml.YAMLError:
+    except Exception:
+        # Not only yaml.YAMLError: a date-shaped value that is not a date
+        # (``date: 2024-02-30``) raises ValueError, and a deeply nested
+        # one RecursionError. Text this cannot parse is not an export.
         return None
     if not isinstance(data, dict):
         return None
@@ -114,3 +134,8 @@ def exported_from(text: str) -> dict[str, Any] | None:
 def instance_path(trac_url: str) -> str:
     """The instance path of a Trac URL: ``http://h:8000/proj`` -> ``/proj``."""
     return urlsplit(trac_url).path.rstrip("/") or "/"
+
+
+def page_url(trac_url: str, page_name: str) -> str:
+    """The URL of wiki page ``page_name``, percent-encoded for ``source``."""
+    return f"{trac_url.rstrip('/')}/wiki/{quote(page_name, safe='/')}"
