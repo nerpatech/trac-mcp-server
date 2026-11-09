@@ -181,6 +181,67 @@ def test_tracwiki_with_the_flag_warns_and_sends_none(
     assert "--link-map has no effect" in err
 
 
+def test_html_is_a_choice_and_writes_the_servers_document(
+    isolated_config, sent, reply, tmp_path
+):
+    document = (
+        "<!doctype html>\n<html>\n<head>\n"
+        '<meta charset="utf-8">\n<title>P</title>\n</head>\n'
+        "<body>\n<h1>P</h1>\n</body></html>\n"
+    )
+    reply["result"] = SimpleNamespace(
+        isError=False,
+        content=[SimpleNamespace(text="Pulled ...")],
+        structuredContent={
+            "content": document,
+            "version": 3,
+            "format": "html",
+        },
+    )
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
+    assert _args(sent)["format"] == "html"
+    assert (tmp_path / "p.md").read_text() == document
+
+
+def test_html_sends_no_link_rewrites_and_ignores_a_local_config(
+    isolated_config, sent, tmp_path, capsys
+):
+    # A broken config would be a usage error for markdown; for html it
+    # is never read, as for tracwiki.
+    _write_config(isolated_config, "export: [oops]\n")
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
+    assert "link_rewrites" not in _args(sent)
+    assert capsys.readouterr().err == ""
+
+
+def test_html_sends_no_link_rewrites_from_a_valid_local_config(
+    isolated_config, sent, tmp_path
+):
+    _write_config(isolated_config, _YAML)
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
+    assert "link_rewrites" not in _args(sent)
+
+
+def test_html_with_the_flag_warns_and_sends_none(
+    isolated_config, sent, tmp_path, capsys
+):
+    rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_OK
+    assert "link_rewrites" not in _args(sent)
+    err = capsys.readouterr().err
+    assert "--link-map has no effect with --format html" in err
+
+
+def test_tracwiki_warning_names_tracwiki(
+    isolated_config, sent, tmp_path, capsys
+):
+    _pull(tmp_path, "--format", "tracwiki", "--link-map", "/a/=/b/")
+    assert (
+        "--link-map has no effect with --format tracwiki"
+        in capsys.readouterr().err
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [
@@ -329,6 +390,17 @@ def test_through_the_server_a_local_map_beats_the_daemons(
     assert "daemon.example" not in text
 
 
+def test_through_the_server_html_is_a_document_around_trac_html(
+    isolated_config, tmp_path
+):
+    text = _served_pull(tmp_path, "--format", "html")
+    assert text.startswith("<!doctype html>\n<html>\n<head>\n")
+    assert '<meta charset="utf-8">' in text
+    assert "<title>P</title>" in text
+    assert f'<a href="{_PREFIX}Other">Other</a>' in text
+    assert text.endswith("</body></html>\n")
+
+
 # --- an old daemon, and a server that does not confirm ---------------------
 
 
@@ -391,6 +463,49 @@ def test_an_unexpected_property_error_without_a_sent_map_is_plain(
     )
     assert _pull(tmp_path) == cli.EXIT_TOOL_ERROR  # nothing was sent
     assert "predates" not in capsys.readouterr().err
+
+
+def test_an_old_daemon_refusing_format_html_is_named(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: 'html' is not one of "
+        "['markdown', 'tracwiki']"
+    )
+    rc = _pull(tmp_path, "--format", "html")
+    assert rc == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "the server does not know --format html" in err
+    assert "predates it (Trac /trac_mcp_server #211)" in err
+    assert "use --format markdown|tracwiki" in err
+    assert not (tmp_path / "p.md").exists()
+
+
+def test_another_format_enum_error_is_reported_as_it_is(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: 'html' is not one of ['markdown']"
+    )
+    # The enum text is only claimed as the old daemon's for html.
+    assert (
+        _pull(tmp_path, "--format", "tracwiki") == cli.EXIT_TOOL_ERROR
+    )
+    err = capsys.readouterr().err
+    assert "predates" not in err
+    assert "not one of" in err
+
+
+def test_an_html_error_that_is_not_the_enum_refusal_is_plain(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Error (not_found): Wiki page 'P' does not exist"
+    )
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "predates" not in err
+    assert "does not exist" in err
 
 
 def test_a_reply_that_does_not_confirm_the_map_warns(
