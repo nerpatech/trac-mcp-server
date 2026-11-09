@@ -49,9 +49,40 @@ server:
   disabled_tools: []
   allowed_hosts: []
   allowed_origins: []
+
+export:
+  link_rewrites:
+    - from: https://trac.example.com/wiki/
+      to: https://blog.example/
 ```
 
 All fields are optional. Omitted fields use built-in defaults or can be supplied via environment variables. `server:` settings govern the MCP server *process itself* (transport, bind address, auth), not the Trac connection -- see [HTTP Transport](http-transport.md) for the full field reference and bind-safety rules.
+
+### Link rewrites (`export:`)
+
+The Markdown export (`wiki_file_pull` with `format=markdown`, `trac-mcp wiki-pull`, `trac-convert` on TracWiki) writes each link as Trac rendered it: a link to another wiki page points at Trac. `export.link_rewrites` rewrites those targets, for a page published somewhere else -- say, the sibling posts of a blog.
+
+```yaml
+export:
+  link_rewrites:
+    - from: https://trac.example.com/wiki/   # URL prefix to replace
+      to: https://blog.example/              # what replaces it
+```
+
+- A link target (`href`) that starts with `from` has that prefix replaced by `to`. When several rules match, the **longest** `from` wins, whatever the order of the list.
+- The link text is never changed: `[https://trac.example.com/wiki/A](https://blog.example/A)` keeps the original URL as its label.
+- **Image sources** (`src`) are never rewritten (images and attachments are a separate ticket, #215), and neither is an in-page anchor. Trac renders `[#Heading x]` as the document's own URL plus the fragment (`<trac_url>/wiki/<page>#Heading` for a page, `<trac_url>#Heading` for text rendered with no page), so a link whose URL before the `#` is the document's own (two absolute URLs are compared by path only, after percent-decoding and ignoring one trailing `/`, because Trac builds its URLs from its own base URL, which can name another host than the daemon's `TRAC_URL`) and that has a fragment is written `#Heading` and left alone, as is a bare `#Heading`, with or without rules. A link to the same page with no fragment, or to another page with one, is an ordinary link and is rewritten.
+- `from` must be a non-empty string, `to` a string (it may be empty), and two rules may not share a `from`. A bad entry fails config loading, naming it (`export.link_rewrites[1]`).
+- `TRAC_MCP_LINK_REWRITES` replaces the list whole: whitespace-separated `FROM=TO` pairs, each split at the first `=`. Set to an empty value, it clears the list. It cannot express a prefix that contains whitespace; use the YAML list for that. A pair with no `=` is refused at startup.
+- Precedence is the same as for other settings: environment variable (or `.env`) over YAML over none.
+
+Where each tool reads the map:
+
+| Consumer | Map used |
+|----------|----------|
+| `wiki_file_pull` (daemon) | its `link_rewrites` argument if given (`[]` = none), else the **daemon's** configured map |
+| `trac-convert` (TracWiki -> Markdown) | `--link-map` if given, else the configured map of the machine it runs on |
+| `trac-mcp wiki-pull` | `--link-map` if given, else the `export.link_rewrites` key of the local `.trac_mcp/config.yaml` (that key only, no `TRAC_MCP_LINK_REWRITES`; `.env` is loaded first, so `${VAR}` in a rule resolves as it does for the daemon), else nothing is sent and the daemon's map applies |
 
 ### Environment Variable Interpolation
 
@@ -112,6 +143,7 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
+| `TRAC_MCP_LINK_REWRITES` | No | -- | Whitespace-separated `FROM=TO` link-rewrite rules of the Markdown export, split at the first `=`; replaces the YAML `export.link_rewrites` list whole, an empty value clears it. See [Link rewrites](#link-rewrites-export) |
 | `LOG_FILE` | No | `/tmp/trac-mcp-server.log` (stdio) / none (http) | Log file path, used when `--log-file` is not given. Set it to an empty string for no log file (stdio then logs to stderr). Read by the logger, not by the config file; `logging.file` above does not set it |
 
 Boolean variables (`TRAC_INSECURE`, `TRAC_DEBUG`) accept `true`, `1`, `yes`, or `on` (case-insensitive). Any other value is treated as `false`.

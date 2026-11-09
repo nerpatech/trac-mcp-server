@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .link_rewrites import as_entries, validate_link_rewrites
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -252,6 +254,39 @@ class LoggingConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class ExportConfig(BaseModel):
+    """Settings of the HTML -> Markdown export (Trac /trac_mcp_server #213).
+
+    Attributes:
+        link_rewrites: ``{from, to}`` rules applied to every link target
+            (``href``) of an exported page: a target starting with
+            ``from`` has that prefix replaced by ``to``, the longest
+            ``from`` first. Image sources and in-page ``#`` anchors are
+            never rewritten.
+    """
+
+    link_rewrites: list[dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "Link-rewrite rules for the Markdown export: a list of "
+            "{from: <URL prefix>, to: <URL prefix>}"
+        ),
+    )
+
+    @field_validator("link_rewrites", mode="before")
+    @classmethod
+    def _check_link_rewrites(cls, value: Any) -> Any:
+        # The shared validator names the bad entry; it raises ValueError,
+        # which pydantic reports as a ValidationError.
+        if value is None:
+            return []
+        return as_entries(
+            validate_link_rewrites(value, "export.link_rewrites")
+        )
+
+    model_config = {"frozen": True}
+
+
 # ---------------------------------------------------------------------------
 # Top-level unified config
 # ---------------------------------------------------------------------------
@@ -268,6 +303,7 @@ class UnifiedConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
+    export: ExportConfig = Field(default_factory=ExportConfig)
 
     model_config = {"frozen": True}
 

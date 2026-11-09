@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 import sys
@@ -41,6 +42,7 @@ from typing import Any
 from .. import __version__
 from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
+from ..link_rewrites import link_map_arg
 
 EXIT_OK = 0
 EXIT_TOOL_ERROR = 1  # the server answered with an error result
@@ -561,6 +563,66 @@ async def _ticket_pull(
     return EXIT_OK
 
 
+def _link_rewrites_to_send(
+    args: argparse.Namespace,
+) -> list[dict[str, str]] | None:
+    """The ``link_rewrites`` argument of a ``wiki-pull``, or None to send
+    none (Trac /trac_mcp_server #213).
+
+    ``--link-map`` on the command line, else ``export.link_rewrites``
+    from this machine's ``.trac_mcp/config.yaml`` -- only that key, and
+    the environment is not read -- else nothing, and the server's own map
+    applies. A TracWiki pull converts nothing, so it sends none (the
+    server would ignore it, and a broken local config should not stop it).
+    """
+    from ..link_rewrites import as_entries, parse_pairs
+
+    if args.format != "markdown":
+        if args.link_map:
+            print(
+                "trac-mcp: warning: --link-map has no effect with "
+                "--format tracwiki",
+                file=sys.stderr,
+            )
+        return None
+    if args.link_map is not None:
+        try:
+            return as_entries(parse_pairs(args.link_map, "--link-map"))
+        except ValueError as e:
+            raise CliError(str(e), EXIT_USAGE_ERROR) from None
+    from ..config_bootstrap import load_local_link_rewrites
+
+    # load_hierarchical_config logs a traceback for an unreadable file;
+    # the CliError below says it in one line.
+    loader_log = logging.getLogger("trac_mcp_server.config_loader")
+    previous = loader_log.level
+    loader_log.setLevel(logging.CRITICAL)
+    try:
+        local = load_local_link_rewrites()
+    except ValueError as e:
+        raise CliError(
+            f"wiki-pull: {e} (the export.link_rewrites key of "
+            ".trac_mcp/config.yaml; pass --link-map to override it)",
+            EXIT_USAGE_ERROR,
+        ) from None
+    finally:
+        loader_log.setLevel(previous)
+    return None if local is None else as_entries(local)
+
+
+def _refuses_link_rewrites(text: str) -> bool:
+    """Whether an error result is the input schema refusing the
+    ``link_rewrites`` argument, as a server that predates #213 does (its
+    strict schema allows no extra property). A current server's own
+    ``validation_error`` about a rule does not say "unexpected"."""
+    lowered = text.lower()
+    return "link_rewrites" in lowered and (
+        "additional properties" in lowered
+        or "unexpected" in lowered
+        or "unknown" in lowered
+    )
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -651,6 +713,9 @@ async def _run(
         arguments = {"page_name": args.page, "format": args.format}
         if args.page_version is not None:
             arguments["version"] = args.page_version
+        link_rewrites = _link_rewrites_to_send(args)
+        if link_rewrites is not None:
+            arguments["link_rewrites"] = link_rewrites
         result = await call_tool(
             url,
             token,
@@ -658,8 +723,27 @@ async def _run(
             _with_instance(args, arguments),
         )
         if result.isError:
+            if link_rewrites is not None and _refuses_link_rewrites(
+                _result_text(result)
+            ):
+                raise CliError(
+                    "the server does not know link_rewrites: it predates "
+                    "link rewriting (Trac /trac_mcp_server #213). Deploy "
+                    "it, or remove export.link_rewrites from the local "
+                    "config / drop --link-map",
+                    EXIT_TOOL_ERROR,
+                )
             return _report(result)
         sc = result.structuredContent or {}
+        if (
+            link_rewrites is not None
+            and sc.get("link_rewrites_source") != "call"
+        ):
+            print(
+                "trac-mcp: warning: the server did not confirm the "
+                "link map was applied",
+                file=sys.stderr,
+            )
         data = _payload(result, "content").encode("utf-8")
         _write_bytes(args.file, data)
         _say(
@@ -831,6 +915,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--page-version",
         type=int,
         help="Specific page version to pull",
+    )
+    p.add_argument(
+        "--link-map",
+        action="append",
+        type=link_map_arg,
+        default=None,
+        metavar="FROM=TO",
+        help=(
+            "Rewrite the page's links: a link target starting with FROM "
+            "has that prefix replaced by TO (longest FROM first; "
+            "images and #anchors are never rewritten). Repeatable. "
+            "Replaces export.link_rewrites of .trac_mcp/config.yaml, "
+            "which is sent when this is not given. Markdown only."
+        ),
     )
 
     for name, helptext in (

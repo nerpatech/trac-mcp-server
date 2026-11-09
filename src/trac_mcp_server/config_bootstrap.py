@@ -20,6 +20,7 @@ from .config_loader import (
 )
 from .config_schema import ServerConfig, build_config
 from .instances import load_identities
+from .link_rewrites import LinkRewrites, validate_link_rewrites
 
 
 def bootstrap_config(
@@ -82,6 +83,12 @@ def bootstrap_config(
             for k, v in unified.trac.model_dump().items()
             if v is not None
         }
+        # Ticket #213: the export section is not a trac setting, but
+        # load_config takes every YAML fallback through this one dict.
+        if unified.export.link_rewrites:
+            yaml_fallbacks["link_rewrites"] = list(
+                unified.export.link_rewrites
+            )
         sources.append(f"config file: {config_files[0]}")
 
     # Step 3: Single call to load_config with all sources merged
@@ -101,6 +108,56 @@ def bootstrap_config(
     sources.append("environment variables")
 
     return config, sources
+
+
+def load_local_link_rewrites() -> LinkRewrites | None:
+    """Read ``export.link_rewrites`` -- and nothing else -- from the
+    workstation's config files (Trac /trac_mcp_server #213).
+
+    For ``trac-mcp wiki-pull``, which has no other use for a config file:
+    it finds the files the way every other command does
+    (``discover_config_files``), merges them (``load_hierarchical_config``)
+    and validates only the ``export`` section, so an unrelated broken
+    section never stops a pull. ``.env`` is loaded first, as
+    ``bootstrap_config`` does, so a ``${VAR}`` in a rule resolves the
+    same here as for the daemon and ``trac-convert``. The
+    ``TRAC_MCP_LINK_REWRITES`` variable is not read: only the file's key
+    is.
+
+    Returns:
+        The rules, or ``None`` when no config file has the key (so the
+        caller sends no map and the daemon's applies). A present empty
+        list gives ``()``: no rewriting.
+
+    Raises:
+        ValueError: a config file cannot be read or parsed, its
+            ``export`` section is not a mapping, or a rule is invalid.
+    """
+    load_dotenv()
+    try:
+        raw = load_hierarchical_config()
+    except Exception as e:
+        # A YAML error spans several lines; the CLI reports one.
+        detail = " ".join(str(e).split())
+        raise ValueError(
+            f"cannot read the config file: {detail}"
+        ) from e
+    export = raw.get("export")
+    if export is None:
+        return None
+    if not isinstance(export, dict):
+        raise ValueError(
+            "the config file's 'export' section must be a mapping, "
+            f"not {type(export).__name__}"
+        )
+    if export.get("link_rewrites") is None:
+        return None
+    try:
+        return validate_link_rewrites(
+            export["link_rewrites"], "export.link_rewrites"
+        )
+    except ValueError as e:
+        raise ValueError(f"invalid config file: {e}") from e
 
 
 _BOOL_TRUE = frozenset({"true", "1", "yes", "on"})
