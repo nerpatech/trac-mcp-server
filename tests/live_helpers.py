@@ -2,9 +2,12 @@
 
 Three things live here so the rows and conftest share one copy:
 
-  * ``trac_test_url()`` / ``trac_test_client()``: the destructive-test
-    instance on the host ``TRAC_URL`` names, whatever project or
-    sub-path ``TRAC_URL`` itself carries.
+  * ``trac_test_url()`` / ``trac_test_client()`` /
+    ``trac_test_registry()``: the destructive-test instance. It is
+    ``TRAC_TEST_URL`` when that is set (the instance has its own origin,
+    Trac /trac_mcp_server #203), else ``/trac_test`` on the host and
+    port ``TRAC_URL`` names, whatever project or sub-path ``TRAC_URL``
+    itself carries.
   * the runtime write guard (``live_write_guard``): while it is
     installed, a TracClient XML-RPC WRITE whose client is not on
     ``/trac_test`` is recorded and refused before any byte is sent.
@@ -30,6 +33,7 @@ from urllib.parse import urlparse
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
+from trac_mcp_server.instances import InstanceRegistry, InstanceSpec
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,28 @@ TEST_INSTANCE = "/trac_test"
 
 
 def trac_test_url() -> str:
-    """The ``/trac_test`` instance of the host ``TRAC_URL`` names."""
+    """The ``/trac_test`` instance every live row writes to.
+
+    ``TRAC_TEST_URL`` (trailing ``/`` stripped) when it is set and
+    non-empty: rookery #69 moves /trac_test to its own origin, and a
+    308 across ports drops Basic credentials, so a row cannot reach it
+    through ``TRAC_URL``'s host and port any more. Otherwise
+    ``/trac_test`` on the scheme, host and port ``TRAC_URL`` names.
+
+    Raises ``ValueError`` when ``TRAC_TEST_URL`` does not end with
+    ``/trac_test``: the write guard (``is_trac_test_url``) would refuse
+    every write to it, and a clear error here beats that.
+    """
+    override = os.environ.get("TRAC_TEST_URL", "").strip()
+    if override:
+        url = override.rstrip("/")
+        if not is_trac_test_url(url):
+            raise ValueError(
+                f"TRAC_TEST_URL={override!r} does not end with "
+                f"{TEST_INSTANCE}: the live write guard would refuse "
+                "every write to it"
+            )
+        return url
     parsed = urlparse(os.environ["TRAC_URL"])
     return f"{parsed.scheme}://{parsed.netloc}{TEST_INSTANCE}"
 
@@ -60,6 +85,26 @@ def trac_test_config() -> Config:
 def trac_test_client() -> TracClient:
     """A TracClient on ``/trac_test`` (see ``trac_test_url``)."""
     return TracClient(trac_test_config())
+
+
+def trac_test_registry(default_config: Config) -> InstanceRegistry:
+    """An InstanceRegistry whose ``/trac_test`` is ``trac_test_url()``.
+
+    For a row that hands a registry to a server, CLI or handler stack
+    and then calls with ``instance="/trac_test"``. ``/trac_test`` is
+    declared, so it is looked up before the ad-hoc ``/path`` branch
+    (which would join it onto ``default_config``'s host and port). The
+    spec sets no credentials, so ``default_config``'s are inherited and
+    a per-caller Identity replaces them, as on the ad-hoc path.
+    """
+    spec = InstanceSpec(
+        name=TEST_INSTANCE,
+        url=trac_test_url(),
+        username=None,
+        password=None,
+        insecure=None,
+    )
+    return InstanceRegistry(default_config, {TEST_INSTANCE: spec})
 
 
 # ---------------------------------------------------------------------

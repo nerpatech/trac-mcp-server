@@ -267,6 +267,11 @@ are the only place this project exercises the real Trac substrate, so run
 without them it exits non-zero without running pytest — *not run* must not be
 able to look like *passed*.
 
+The live rows write only to the `/trac_test` instance: by default the one on
+`TRAC_URL`'s host and port. If that instance has its own origin, set
+`TRAC_TEST_URL` (for example `http://trac.example.org:8001/trac_test`; the
+path must end with `/trac_test`) and every live row follows it.
+
 `ci.sh` runs the offline suite with `TRAC_*` scrubbed from the environment,
 and `.env` is loaded only under `--run-live`. An offline test that needs
 credentials therefore fails locally rather than only on Actions.
