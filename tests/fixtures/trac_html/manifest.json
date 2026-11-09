@@ -575,7 +575,7 @@
   "ticket_colspan": {
     "origin": "/trac_mcp_server ticket #20 comment 1",
     "rendered_with": "wikiToHtml",
-    "why": "a table cell with colspan",
+    "why": "prose containing || that Trac parses as a table row with a colspan; bare text sits inside <tr> before the first <td>, which an HTML5 parser moves out of the table",
     "combos": [
       "a|ext-link",
       "span|icon",
