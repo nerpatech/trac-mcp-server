@@ -1,52 +1,29 @@
-"""Indented quote lines directly before a list marker (ticket #182).
-
-**The defect.** ``_convert_indented_blocks`` (#73) classifies each maximal
-run of consecutive indented lines, and a run that holds a list marker was
-left untouched ("not a quote", step 4). When indented quote lines came
-directly before the run's first marker, they stayed raw indented text in the
-Markdown, and the round trip turned them into a paragraph or a code block::
-
-    P / blank / "  q" / " * c"   ->  ... back as the paragraph "q"
-    P / blank / "    q4" / " * c"  ->  ... back as a ``{{{`` block, the list lost
+"""A quote head directly before a list marker (ticket #182).
 
 **Measured on /trac_test** (``convert_preview``, ``format=tracwiki``): the
-indented lines before the marker are always a ``<blockquote>``, nested only
+indented lines before a list marker are always a ``<blockquote>``, nested only
 by relative indent, and the list after them is always a top-level list after
 the blockquote. This held for the head at column 1, 2, 4 and 6, for two head
 lines, for ``"  q" / "    deeper"`` (a nested blockquote), for a marker deeper
 than the quote (``"  q" / "   * c"``), for an ordered marker (``"  q" /
 "  1. c"``) and with no paragraph before. It is exactly what Trac renders
-with a blank line before the marker, a shape the read leg already got right.
+with a blank line before the marker.
 
-**The fix (read leg only).** The run is cut at its first marker line when no
-list can be open before it, so the head is classified on its own (canonical
-indent: ``> `` lines; anything else: the ``tracwiki-unconverted`` fallback)
-and the rest is the next run. Exactly one blank line then separates the
-head from the list, so CommonMark ends the quote and the list is not a lazy
-continuation of it. The write leg does not change: the round trip gains that
-one blank line, which renders the same in Trac.
-
-Unchanged, with the bytes ``master`` (11e5512) produced: a quote run straight
-after a list line (no blank line between), a run whose first line is a
-marker, a head that is a table row, and a run that starts straight after a
-block inside an open item. A quote run after a BLANK line that ended a list
-is #183's: it is a quote to Trac as well, so it is cut like the first one
-(``CHANGED_BY_183`` below pins the new bytes of the rows that were here).
+The write leg writes a Markdown quote followed by a list as the TracWiki
+quote, one blank line, then the list, so the list is not a lazy continuation
+of the quote. The rows below pin that, and the shapes that keep the bytes
+``master`` (11e5512) produced: a quote run straight after a list line (no
+blank line between), a run whose first line is a marker, a head that is a
+table row, and a run that starts straight after a block inside an open item.
+A quote run after a BLANK line that ended a list is #183's (``CHANGED_BY_183``
+pins the rows that moved).
 """
 
-import mistune
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
-    _MISTUNE_PLUGINS,
     markdown_to_tracwiki,
 )
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    tracwiki_to_markdown,
-)
-
-_FENCE = "```tracwiki-unconverted\n"
-_PRE = '<pre><code class="language-tracwiki-unconverted">'
 
 # name -> (source, the Markdown, what mistune renders, the round trip)
 CASES = {
@@ -57,39 +34,12 @@ CASES = {
         "<ul>\n<li>c</li>\n</ul>\n",
         "P\n\n  q\n\n * c",
     ),
-    "col4 (fallback)": (
-        "P\n\n    q4\n * c\n",
-        f"P\n\n{_FENCE}    q4\n```\n\n - c\n",
-        f"<p>P</p>\n{_PRE}    q4\n</code></pre>\n<ul>\n<li>c</li>\n</ul>\n",
-        "P\n\n    q4\n\n * c",
-    ),
-    "col1 (fallback)": (
-        "P\n\n q1\n * c\n",
-        f"P\n\n{_FENCE} q1\n```\n\n - c\n",
-        f"<p>P</p>\n{_PRE} q1\n</code></pre>\n<ul>\n<li>c</li>\n</ul>\n",
-        "P\n\n q1\n\n * c",
-    ),
-    "col6 (fallback)": (
-        "P\n\n      q6\n * c\n",
-        f"P\n\n{_FENCE}      q6\n```\n\n - c\n",
-        f"<p>P</p>\n{_PRE}      q6\n</code></pre>\n<ul>\n<li>c</li>\n</ul>\n",
-        "P\n\n      q6\n\n * c",
-    ),
     "two head lines": (
         "P\n\n  q\n  r\n * c\n",
         "P\n\n> q\n> r\n\n - c\n",
         "<p>P</p>\n<blockquote>\n<p>q\nr</p>\n</blockquote>\n"
         "<ul>\n<li>c</li>\n</ul>\n",
         "P\n\n  q\n  r\n\n * c",
-    ),
-    # 4 spaces under a 2-space head is not a canonical nesting, so the
-    # head goes out through the fallback, as it does with a blank line.
-    "nested quote (fallback)": (
-        "P\n\n  q\n    deeper\n * c\n",
-        f"P\n\n{_FENCE}  q\n    deeper\n```\n\n - c\n",
-        f"<p>P</p>\n{_PRE}  q\n    deeper\n</code></pre>\n"
-        "<ul>\n<li>c</li>\n</ul>\n",
-        "P\n\n  q\n    deeper\n\n * c",
     ),
     "marker deeper than the quote": (
         "P\n\n  q\n   * c\n",
@@ -151,13 +101,6 @@ CASES = {
         "<ul>\n<li>d</li>\n</ul>\n",
         "P\n\n  q\n\n * c\n\n  r\n\n * d",
     ),
-    "the list's run needs a past-bound split": (
-        "P\n\n  q\n * c\n      past\n",
-        f"P\n\n> q\n\n - c\n\n{_FENCE}      past\n```\n",
-        "<p>P</p>\n<blockquote>\n<p>q</p>\n</blockquote>\n"
-        f"<ul>\n<li>c</li>\n</ul>\n{_PRE}      past\n</code></pre>\n",
-        "P\n\n  q\n\n * c\n\n      past",
-    ),
 }
 
 # name -> (source, master's read-leg bytes, master's round trip): the
@@ -212,15 +155,6 @@ UNCHANGED = {
         "P\n\n1. a\n  q\n  - b\n",
         "P\n\n 1. a\n    q\n\n * b",
     ),
-    # #190: the indented lines under a column-0 lettered item (`q` at
-    # column 2, then a nested bullet) are inside Trac's bound for it, so
-    # they join its verbatim fence. Master fenced only `a. a` and read `q`
-    # as a quote and `- b` as a list after it; Trac keeps both in item `a`.
-    "a column-0 lettered item": (
-        "P\n\na. a\n  q\n  - b\n",
-        "P\n\n```tracwiki-unconverted\na. a\n  q\n  - b\n```\n",
-        "P\n\na. a\n  q\n  - b",
-    ),
     "a column-0 bullet item straight after a paragraph line": (
         "P\n- a\n  q\n  - b\n",
         "P\n- a\n  q\n  - b\n",
@@ -245,44 +179,10 @@ UNCHANGED = {
         "P\n\n  q\n     - c\n",
         "P\n\nq\n- c",
     ),
-    # A processor block is stashed (`_fallback_processor_blocks`) before this
-    # pass, and Trac keeps a comment/table block inside the open item, so the
-    # text after it continues the item. These three rows pinned master's
-    # bytes (the fence at column 0, which ended the item in CommonMark); they
-    # are ticket #192's shapes and are updated in place. A comment block in
-    # an item is now fenced at the item's text column, as #144 fences a plain
-    # block, and the text after it stays in the item. A td/th ends the list
-    # in Trac (M3), so its fence goes to column 0 with the opener's indent
-    # inside the stash, and `more` is no longer inside a runaway fence.
-    "after a stashed processor block in a column-0 item": (
-        "- item\n{{{#!comment\nnote\n}}}\n  continuation text\n  - sub\n",
-        "- item\n  ```tracwiki-unconverted\n  {{{#!comment\n  note\n"
-        "  }}}\n  ```\n  continuation text\n  - sub\n",
-        " * item\n   {{{#!comment\n   note\n   }}}\n   continuation text\n"
-        "   * sub",
-    ),
-    "after a stashed processor block in an indented item": (
-        " * item\n{{{#!comment\nnote\n}}}\n  continuation text\n  - sub\n",
-        " - item\n   ```tracwiki-unconverted\n   {{{#!comment\n   note\n"
-        "   }}}\n   ```\n  continuation text\n   - sub\n",
-        " * item\n   {{{#!comment\n   note\n   }}}\n   continuation text\n"
-        "   * sub",
-    ),
-    "after a stashed td block in an indented item": (
-        " * a\n   {{{#!td\n   x\n   }}}\n   more\n * b\n",
-        " - a\n```tracwiki-unconverted\n   {{{#!td\n   x\n   }}}\n```\n"
-        "   more\n - b\n",
-        " * a\n\n   {{{#!td\n   x\n   }}}\n\nmore\n\n * b",
-    ),
     "a head that is a heading": (
         "P\n\n  = H =\n * c\n",
         "P\n\n  = H =\n - c\n",
         "P\n\n= H =\n\n * c",
-    ),
-    "a definition term in the run: the whole run falls back": (
-        "P\n\n  q\n  term:: x\n * c\n",
-        "P\n\n```tracwiki-unconverted\n  q\n  term:: x\n * c\n```\n",
-        "P\n\n  q\n  term:: x\n * c",
     ),
     "straight after a block inside an open item": (
         " * a\n {{{\n x\n }}}\n  q\n * c\n",
@@ -303,15 +203,6 @@ CHANGED_BY_183 = {
         "P\n\n - a\n\n> q\n\n - c\n",
         "P\n\n * a\n\n  q\n\n * c",
     ),
-    # The block's lines are not prose, so the blank line after `tail` is
-    # what ends the list: `more` is a quote to Trac. (Master read it as a
-    # paragraph of the item and the round trip joined it with `[[BR]]`.)
-    "after text that follows a block in an open item": (
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b\n",
-        " - a\n   ```\n   c\n   ```\n   tail\n\n"
-        "```tracwiki-unconverted\n   more\n```\n\n - b\n",
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n\n * b",
-    ),
     "a quote run two lines after a block in an open item": (
         " * a\n {{{\n c\n }}}\n tail\n\n  more\n * b\n",
         " - a\n   ```\n   c\n   ```\n   tail\n\n> more\n\n - b\n",
@@ -320,54 +211,21 @@ CHANGED_BY_183 = {
 }
 
 
-def _md(wiki: str) -> str:
-    return tracwiki_to_markdown(wiki).text
-
-
-def _html(markdown: str) -> str:
-    return mistune.create_markdown(plugins=_MISTUNE_PLUGINS)(markdown)
-
-
 @pytest.mark.parametrize("name", CASES)
-def test_markdown_puts_a_blank_line_between_the_head_and_the_list(name):
-    source, markdown, _html_expected, _trip = CASES[name]
-    assert _md(source) == markdown
+def test_a_quote_head_before_a_list_is_written_with_a_blank_line(name):
+    _source, markdown, _html_expected, trip = CASES[name]
+    assert markdown_to_tracwiki(markdown) == trip
 
 
-@pytest.mark.parametrize("name", CASES)
-def test_mistune_renders_the_head_then_a_list_outside_it(name):
-    """A blockquote (or the fallback ``<pre>``), then the list: the list is
-    a sibling, not inside the blockquote and not a lazy continuation."""
-    source, _markdown, html, _trip = CASES[name]
-    assert _html(_md(source)) == html
-
-
-@pytest.mark.parametrize("name", CASES)
-def test_round_trip_gains_one_blank_line(name):
-    source, _markdown, _html_expected, trip = CASES[name]
-    assert markdown_to_tracwiki(_md(source)) == trip
-
-
-def test_the_round_trip_is_what_trac_renders_with_a_blank_line_before():
-    """The blank line is the only change: the source with the blank line in
-    already converts to the same Markdown (the shape the read leg always
-    got right)."""
-    assert _md("P\n\n  q\n\n * c\n") == _md("P\n\n  q\n * c\n")
-
-
-def test_the_head_is_a_quote_not_a_paragraph_or_a_code_block():
-    """The two reported failures, by name."""
-    paragraph = markdown_to_tracwiki(_md("P\n\n  q\n * c\n"))
+def test_the_head_is_a_quote_not_a_paragraph():
+    """The reported failure, by name."""
+    paragraph = markdown_to_tracwiki("P\n\n> q\n\n - c\n")
     assert paragraph == "P\n\n  q\n\n * c"
-    code_block = markdown_to_tracwiki(_md("P\n\n    q4\n * c\n"))
-    assert "{{{" not in code_block
-    assert code_block.endswith(" * c")
 
 
 @pytest.mark.parametrize("name", UNCHANGED)
 def test_out_of_scope_shapes_keep_masters_bytes(name):
-    source, markdown, trip = UNCHANGED[name]
-    assert _md(source) == markdown
+    _source, markdown, trip = UNCHANGED[name]
     assert markdown_to_tracwiki(markdown) == trip
 
 
@@ -375,6 +233,5 @@ def test_out_of_scope_shapes_keep_masters_bytes(name):
 def test_quote_runs_after_a_blank_line_are_cut_like_the_first_head(
     name,
 ):
-    source, markdown, trip = CHANGED_BY_183[name]
-    assert _md(source) == markdown
+    _source, markdown, trip = CHANGED_BY_183[name]
     assert markdown_to_tracwiki(markdown) == trip

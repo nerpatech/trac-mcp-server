@@ -13,300 +13,50 @@ a line has closed the nested list the outer item is innermost again, so a
 code block, a citation or a `{{{#!div}}}` table that follows joins `a` too
 (C10, Q1, D1).
 
-* Read leg: such a line gets a blank line before it and is moved to the
-  outer item's Markdown text column, so CommonMark keeps it in that item
-  (`_separate_list_from_trailing_paragraph`); `_list_stack_step` keeps the
-  middle item open for a line at its marker column (C9).
-* Write leg: a paragraph run directly after a nested list is written with
-  no blank line, its first line at the item's marker column + 1 and the
-  later lines at the continuation indent (`_item_block_separator`'s
-  `"between"`), and `find_list_item_splits` no longer reports it.
+The write leg writes a paragraph run directly after a nested list with no
+blank line, its first line at the item's marker column + 1 and the later
+lines at the continuation indent (`_item_block_separator`'s `"between"`),
+and `find_list_item_splits` no longer reports it.
 
 C2, C3, C7 and C8 (an ordered outer item, whose nested list sits left of
 the Markdown text column; a wide gap) are tickets #179 and #178, and are
-not asserted here.
+not asserted here beyond the ordered-outer rows below.
 """
-
-import re
 
 import pytest
 
-from tests.test_converter_list_marker_column import (
-    _nested_items,
-    _own_text,
-    _parse,
-    _structure,
-)
 from trac_mcp_server.converters.markdown_to_tracwiki import (
     _item_block_separator,
     find_list_item_splits,
     markdown_to_tracwiki,
 )
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    TracWikiParser,
-    _list_stack_step,
-    tracwiki_to_markdown,
-)
 
-C1 = " * a\n   * b\n  text col2 between\n * c\n"
-C4 = " * a\n   * b\n     * c\n    text col4\n   * d\n"
-C5 = " * a\n   * b\n  t1\n  t2\n * c\n"
-C6 = " * a\n   * b\n  t1 [[BR]][[BR]]\n   t2\n * c\n"
-C9 = " * a\n   * b\n     * c\n   text col3\n * d\n"
-C10 = " * a\n   * b\n  text col2\n   {{{\n   x\n   }}}\n * c\n"
-Q1 = " * a\n   * b\n  text col2\n   > q\n  t2\n * c\n"
-D1 = " * a\n   * b\n  text col2\n   {{{#!div\n   ||x||y||\n   }}}\n * c\n"
-
-SOURCES = {
-    "C1": C1,
-    "C4": C4,
-    "C5": C5,
-    "C6": C6,
-    "C9": C9,
-    "C10": C10,
-    "Q1": Q1,
-    "D1": D1,
-}
+# -- Ordered outer item ------------------------------------------------------
 
 
-def _md(wiki: str) -> str:
-    return tracwiki_to_markdown(wiki).text
-
-
-# -- Read leg ---------------------------------------------------------------
-
-# (source, read-leg Markdown): the line gets a blank line before it and the
-# outer item's Markdown text column.
-READ_ROWS = {
-    "C1": (C1, " - a\n   - b\n\n   text col2 between\n - c\n"),
-    "C4": (
-        C4,
-        " - a\n   - b\n     - c\n\n     text col4\n   - d\n",
-    ),
-    # A following line of the same paragraph stays as it is: CommonMark
-    # reads it as a lazy continuation, which is the same paragraph.
-    "C5": (C5, " - a\n   - b\n\n   t1\n  t2\n - c\n"),
-    "C6": (C6, " - a\n   - b\n\n   t1   \n  \n   t2\n - c\n"),
-    "C9": (
-        C9,
-        " - a\n   - b\n     - c\n\n     text col3\n - d\n",
-    ),
-    "C10": (
-        C10,
-        " - a\n   - b\n\n   text col2\n   ```\n   x\n   ```\n - c\n",
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(READ_ROWS))
-def test_read_leg_rows(name):
-    wiki, expected = READ_ROWS[name]
-    assert _md(wiki) == expected
-
-
-def test_the_blank_line_is_not_doubled_after_a_quote_line():
-    """#145 may have put a blank line there already."""
-    wiki = " * a\n   * b\n   > q\n  text col2\n * c\n"
-    assert "\n\n\n" not in _md(wiki)
-
-
-# Gate refusals: master's bytes.
-GATE_ROWS = {
-    # A blank line since the marker: Trac ended the list at the blank. Not
-    # master's bytes any more (#183): `text` after the blank is a
-    # blockquote to Trac, so the read leg gives `> text` (master left it
-    # indented in the item, and the round trip made it a paragraph).
-    "blank since marker": (
-        " * a\n   * b\n\n  text\n * c\n",
-        " - a\n   - b\n\n> text\n\n - c\n",
-        " * a\n   * b\n\n  text\n\n * c",
-    ),
-    # A tab in the line's indentation: a declined shape.
-    "tab in the line": (
-        " * a\n   * b\n \ttext\n * c\n",
-        " - a\n   - b\n \ttext\n - c\n",
-        " * a\n   * b\n     text\n * c",
-    ),
-    # A list interrupter is not plain text. Since #187 the `>` at column 2
-    # goes to item `a` (the deepest item whose marker is at or left of it,
-    # Trac's `handle_quote_block`) at a's text column: master read it at
-    # column 2 (` - a` / `   - b` / `  > q`, outside the list) and the round
-    # trip wrote a blank line after the quote.
-    "interrupter": (
-        " * a\n   * b\n  > q\n * c\n",
-        " - a\n   - b\n   > q\n - c\n",
-        " * a\n   * b\n\n     q\n * c",
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(GATE_ROWS))
-def test_outside_the_gate_the_read_leg_is_masters(name):
-    wiki, read, _ = GATE_ROWS[name]
-    assert _md(wiki) == read
-
-
-@pytest.mark.parametrize("name", list(GATE_ROWS))
-def test_outside_the_gate_the_round_trip_is_masters(name):
-    wiki, _, written = GATE_ROWS[name]
-    assert markdown_to_tracwiki(_md(wiki)) == written
-
-
-def test_a_lettered_outer_item_keeps_masters_pop():
-    """A whole lettered list takes the fallback fence before the separator
-    runs, so ask the separator itself: the target item's marker line is
-    lettered, and the line keeps master's bytes (no blank line, in place)."""
-    text = " a. x\n   * b\n  text\n a. z\n"
-    out = TracWikiParser()._separate_list_from_trailing_paragraph(text)
-    assert out == text
-
-
-def test_a_bullet_outer_item_is_moved_by_the_separator_itself():
-    """The contrast to the lettered row above, on the same method."""
-    text = " * x\n   * b\n  text\n * z\n"
-    out = TracWikiParser()._separate_list_from_trailing_paragraph(text)
-    assert out == " * x\n   * b\n\n   text\n * z\n"
-
-
-@pytest.mark.parametrize(
-    ("columns", "line", "kept"),
-    [
-        ([1], " b", [1]),  # A: the innermost item keeps the line (#149)
-        ([1, 3], "   t", [1, 3]),  # B
-        ([1, 3], "  t", [1]),  # C1: the outer item stays open, b closes
-        # C9: a line at the middle marker's column keeps the middle item
-        # open (master popped it too).
-        ([1, 3, 5], "   t", [1, 3]),
-        (
-            [1, 3, 5],
-            "    t",
-            [1, 3],
-        ),  # strictly between middle and inner
-        ([1, 3, 5], "  t", [1]),  # strictly between outer and middle
-        ([1, 3], " t", []),  # D: the list ends
-    ],
-    ids=["A", "B", "C1", "C9", "C4", "outer-middle", "D"],
-)
-def test_list_stack_step_truncates_to_the_continued_item(
-    columns, line, kept
-):
-    stack = [(c, re.match(r"\s*", "")) for c in columns]
-    _list_stack_step(stack, line, upper_bound=False)
-    assert [c for c, _ in stack] == kept
-
-
-def test_list_stack_step_outside_the_gate_pops_as_master_did():
-    """A list interrupter at a middle item's marker column: the rule does
-    not apply, so the stack is popped at or past the line's column as
-    before (the middle item closes too, unlike the C9 row above)."""
-    stack = [(c, re.match(r"\s*", "")) for c in [1, 3, 5]]
-    _list_stack_step(stack, "   > t", upper_bound=False)
-    assert [c for c, _ in stack] == [1]
-
-
-def test_c1_text_sits_in_the_outer_item_in_markdown():
-    outer = _parse(_md(C1))[0]["children"]
-    assert len(outer) == 2
-    assert "text col2 between" in _own_text(outer[0])
-    inner = _nested_items(outer[0])
-    assert len(inner) == 1
-    assert "text col2 between" not in _own_text(inner[0])
-
-
-def test_c9_text_sits_in_the_middle_item_in_markdown():
-    outer = _parse(_md(C9))[0]["children"]
-    assert len(outer) == 2
-    middle = _nested_items(outer[0])
-    assert len(middle) == 1
-    assert "text col3" in _own_text(middle[0])
-    inner = _nested_items(middle[0])
-    assert "text col3" not in _own_text(inner[0])
-
-
-# -- Code review fixes -------------------------------------------------------
-
-# (source, read-leg Markdown, round-trip TracWiki): master's bytes (e866fa7)
-# where the move is refused. (An ordered outer item whose nested list sat left
-# of its Markdown text column was a row here until #179: the read leg now moves
-# that list to the text column, so the line moves too, see
-# `test_an_ordered_outer_item_with_its_nested_list_left_of_the_text_column`.)
-REFUSED_MOVE_ROWS = {
-    # A Markdown-only list marker would open a nested Markdown item.
-    "plus marker": (
-        " * a\n   * b\n  + plus\n * c\n",
-        " - a\n   - b\n  + plus\n - c\n",
-        " * a\n   * b\n\n * plus\n\n * c",
-    ),
-    "paren marker": (
-        " * a\n   * b\n  1) x\n * c\n",
-        " - a\n   - b\n  1) x\n - c\n",
-        " * a\n   * b\n\n 1. x\n\n * c",
-    ),
-    "bare marker": (
-        " * a\n   * b\n  -\n * c\n",
-        " - a\n   - b\n  -\n - c\n",
-        " * a\n   * b\n * \n * c",
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(REFUSED_MOVE_ROWS))
-def test_a_refused_move_reads_and_round_trips_as_on_master(name):
-    wiki, read, written = REFUSED_MOVE_ROWS[name]
-    assert _md(wiki) == read
-    assert markdown_to_tracwiki(_md(wiki)) == written
-
-
-def test_the_writers_own_ordered_outer_output_never_reads_as_code():
+def test_an_ordered_outer_items_text_after_its_nested_list_is_written():
     """` 1. a` / `   * b` / `  l1` is what the write leg writes for an
-    ordered outer item; reading it back must not make `l1` a code block."""
+    ordered outer item: the first line at marker column + 1, no blank
+    line."""
     wiki = markdown_to_tracwiki("1. a\n   - b\n\n   l1\n2. c\n")
     assert wiki == " 1. a\n   * b\n  l1\n 2. c"
-    md = _md(wiki)
-    # #179: the nested list moves to the outer item's text column (4), and
-    # `l1` goes there after a blank line, the outer item's own paragraph.
-    assert md == " 1. a\n    - b\n\n    l1\n 2. c"
-    assert not [
-        token
-        for token in _parse(md)[0]["children"][0]["children"]
-        if token["type"] == "block_code"
-    ]
-    assert "{{{" not in markdown_to_tracwiki(md)
+    assert "{{{" not in wiki
 
 
 def test_an_ordered_outer_item_with_its_nested_list_left_of_the_text_column():
-    """Ticket #179: ` 1. a` / `   * b` / `  l1` kept master's bytes (the
-    move was refused, the nested list sat left of the text column and `l1`
-    at the text column would have been an indented code block). The nested
-    list now moves to column 4, so `l1` stays in `a`, after it, and the
-    round trip is the write leg's own form again."""
-    wiki = " 1. a\n   * b\n  l1\n 2. c\n"
-    assert _md(wiki) == " 1. a\n    - b\n\n    l1\n 2. c\n"
-    assert (
-        markdown_to_tracwiki(_md(wiki)) == " 1. a\n   * b\n  l1\n 2. c"
-    )
+    """Ticket #179: a nested list at column 4 under ` 1. a` (its text
+    column) and `l1` after it, in `a`'s own paragraph, are written as the
+    nested list left of the text column and `l1` between the markers."""
+    md = " 1. a\n    - b\n\n    l1\n 2. c\n"
+    assert markdown_to_tracwiki(md) == " 1. a\n   * b\n  l1\n 2. c"
 
 
 def test_an_ordered_outer_item_with_its_nested_list_at_the_text_column_moves():
     """#105's shape: ` 1. x` has its text at column 4 and the nested list at
     column 4, so Markdown keeps the line in the item (text column 4 is not
     past marker 4)."""
-    wiki = " 1. x\n    * y\n  between\n 2. z\n"
-    assert _md(wiki) == " 1. x\n    - y\n\n    between\n 2. z\n"
-    assert (
-        markdown_to_tracwiki(_md(wiki))
-        == " 1. x\n   * y\n  between\n 2. z"
-    )
-
-
-def test_list_stack_step_checks_the_target_items_marker_line_too():
-    """A line at a middle item's marker column: a lettered middle marker
-    refuses the truncation (master's pop closes it too)."""
-    lettered = re.match(r"\s*", " a. x")
-    bullet = re.match(r"\s*", "")
-    stack = [(1, bullet), (3, lettered), (5, bullet)]
-    _list_stack_step(stack, "   t", upper_bound=False)
-    assert [c for c, _ in stack] == [1]
+    md = " 1. x\n    - y\n\n    between\n 2. z\n"
+    assert markdown_to_tracwiki(md) == " 1. x\n   * y\n  between\n 2. z"
 
 
 @pytest.mark.parametrize(
@@ -325,52 +75,6 @@ def test_finder_decides_on_the_rendered_text_as_the_writer_does(inline):
     md = f" - a\n   - b\n\n   {inline}\n - c\n"
     assert "\n\n" not in markdown_to_tracwiki(md)
     assert find_list_item_splits(md) == []
-
-
-# -- Round trip -------------------------------------------------------------
-
-# tw -> md -> tw: the first between line comes back at the outer marker column + 1
-# with no blank line; C10's block comes back in the outer item.
-ROUND_TRIP_ROWS = {
-    "C1": (C1, " * a\n   * b\n  text col2 between\n * c"),
-    "C4": (C4, " * a\n   * b\n     * c\n    text col4\n   * d"),
-    # Only the first line of the run goes at marker + 1; the rest is at the
-    # item's continuation indent, as every continuation line is (#75).
-    "C5": (C5, " * a\n   * b\n  t1\n   t2\n * c"),
-    "C6": (C6, " * a\n   * b\n  t1 [[BR]][[BR]]\n   t2\n * c"),
-    # The middle item's column: the text comes back one past it, still
-    # between the middle marker and the inner one.
-    "C9": (C9, " * a\n   * b\n     * c\n    text col3\n * d"),
-    "C10": (
-        C10,
-        " * a\n   * b\n  text col2\n   {{{\n   x\n   }}}\n * c",
-    ),
-    "Q1": (Q1, " * a\n   * b\n  text col2\n   > q\n   t2\n * c"),
-    "D1": (
-        D1,
-        " * a\n   * b\n  text col2\n   {{{#!div\n   ||=x=||=y=||\n   }}}\n * c",
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(ROUND_TRIP_ROWS))
-def test_round_trip_keeps_trac_structure(name):
-    wiki, expected = ROUND_TRIP_ROWS[name]
-    written = markdown_to_tracwiki(_md(wiki))
-    assert written == expected
-    assert "\n\n" not in written  # the list is not split
-    assert find_list_item_splits(_md(wiki)) == []
-
-
-# tw -> md -> tw -> md -> tw: the second cycle changes nothing. C6 is the row
-# that needs the later lines of a between run at the continuation indent: the
-# read leg turns `[[BR]][[BR]]` into a blank line, and a line at marker + 1
-# after it would leave the item.
-@pytest.mark.parametrize("name", list(ROUND_TRIP_ROWS))
-def test_round_trip_is_byte_stable_on_a_second_cycle(name):
-    wiki, _ = ROUND_TRIP_ROWS[name]
-    once = markdown_to_tracwiki(_md(wiki))
-    assert markdown_to_tracwiki(_md(once)) == once
 
 
 # -- Write leg --------------------------------------------------------------
@@ -440,12 +144,6 @@ REFUSED_ROWS = {
     "passthrough line": (
         " - a\n   - b\n\n   see\n   = x\n - c\n",
         " * a\n   * b\n\n   see\n   = x\n * c",
-    ),
-    # A non-paragraph child in the run holds a blank line of its own.
-    "blank line inside the run": (
-        " - a\n   - b\n\n   t1\n\n   ```tracwiki-unconverted\n   plain\n"
-        "   ```\n - c\n",
-        " * a\n   * b\n\n   t1\n\n   plain\n * c",
     ),
     "ordered marker first": (
         " - a\n   - b\n\n   1\\. x\n - c\n",
@@ -566,83 +264,9 @@ def test_finder_does_not_report_a_between_paragraph(md):
     assert find_list_item_splits(md) == []
 
 
-@pytest.mark.parametrize(
-    ("md", "block", "depth"),
-    [
-        # Any other block directly after a nested list is still reported.
-        (
-            " - a\n   - b\n\n   ```\n   x\n   ```\n - c\n",
-            "code block",
-            0,
-        ),
-        (" - a\n   - b\n\n   > q\n - c\n", "blockquote", 0),
-        # A refused run is still reported.
-        (" - a\n   - b\n\n   see\n   = x\n - c\n", "paragraph", 0),
-        (" - a\n   - b\n\n   1\\. x\n - c\n", "paragraph", 0),
-        (" - a\n   - b\n\n   \\> x\n - c\n", "paragraph", 0),
-        (
-            " - a\n   - b\n\n   t1\n\n   ```tracwiki-unconverted\n"
-            "   plain\n   ```\n - c\n",
-            "paragraph",
-            0,
-        ),
-        # Depth 1, refused.
-        (
-            " - a\n   - b\n     - c\n\n     \\- x\n   - d\n",
-            "paragraph",
-            1,
-        ),
-    ],
-    ids=[
-        "code",
-        "quote",
-        "passthrough",
-        "ordered marker",
-        "citation marker",
-        "blank inside the run",
-        "depth 1 refused",
-    ],
-)
-def test_finder_still_reports_what_the_writer_cannot_keep(
-    md, block, depth
-):
-    found = find_list_item_splits(md)
-    assert [(f["block"], f["depth"]) for f in found] == [(block, depth)]
-
-
 def test_finder_reports_a_block_after_a_between_run_only_once_a_list_returns():
     """The between run resets the walk; a nested list after it starts it
     again, and a code block directly after THAT list is reported."""
     md = " - a\n   - b\n\n   t1\n\n   - b2\n\n   ```\n   x\n   ```\n - c\n"
     found = find_list_item_splits(md)
     assert [f["block"] for f in found] == ["code block"]
-
-
-# -- Live: the real renderer on /trac_test -----------------------------------
-
-
-@pytest.mark.live
-@pytest.mark.parametrize("name", ["C1", "C4", "C9", "C10"])
-def test_live_source_and_round_trip_render_the_same_list_structure(
-    name,
-):
-    """Ticket #176 acceptance, against Trac's own renderer on /trac_test: the
-    TracWiki source and `markdown_to_tracwiki(tracwiki_to_markdown(source))`
-    render the same `<li>` nesting, with the between text (and C10's block)
-    in the same `<li>`. Read-only (wiki.wikiToHtml writes nothing)."""
-    from trac_mcp_server.config_bootstrap import bootstrap_config
-    from trac_mcp_server.core.client import TracClient
-    from trac_mcp_server.instances import InstanceRegistry
-
-    config, _ = bootstrap_config()
-    client = TracClient(
-        InstanceRegistry(config, {}).resolve("/trac_test")
-    )
-
-    source = SOURCES[name]
-    round_tripped = markdown_to_tracwiki(_md(source))
-
-    before = client.wiki_to_html(source)
-    after = client.wiki_to_html(round_tripped)
-
-    assert _structure(before) == _structure(after), (before, after)

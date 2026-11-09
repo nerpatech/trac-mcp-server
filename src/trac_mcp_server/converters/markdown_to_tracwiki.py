@@ -6,17 +6,12 @@ from typing import Any, Literal
 import mistune
 
 from .common import (
+    _LIST_MARKER_RE,
     SCHEME_RE,
     TRACLINK_SCHEMES,
     ConversionResult,
     markdown_to_tracwiki_lang,
     trac_continuation_bound,
-)
-from .tracwiki_to_markdown import (
-    _FALLBACK_PROCESSOR_RE,
-    _LIST_MARKER_RE,
-    FALLBACK_FENCE_INFO,
-    TracWikiParser,
 )
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
@@ -29,14 +24,9 @@ _SLUG_DROP_RE = re.compile(r"[^\w\- ]+")
 _SLUG_WS_RE = re.compile(r"\s+")
 
 # Double-bracket syntax ([[Page]], [[Page|Label]], [[TOC]], ...) typed
-# directly in Markdown source, and -- since ticket #63 -- also the form a
-# macro arrives in from `tracwiki_to_markdown`, which now leaves it
-# literal rather than flattening it to `[MACRO: ...]` for this module to
-# rebuild. Stashed before parsing starts, so a macro/link name that
-# happens to be CamelCase-shaped (e.g. [[PageOutline]]) never has the
-# CamelCase pass below stuff a `!` inside the brackets. This one pass now
-# carries the whole wiki_get -> edit -> wiki_update round trip that
-# ticket #19 added `_MACRO_PLACEHOLDER_RE` for.
+# directly in Markdown source. Stashed before parsing starts, so a
+# macro/link name that happens to be CamelCase-shaped (e.g. [[PageOutline]])
+# never has the CamelCase pass below stuff a `!` inside the brackets.
 _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
 
 # Sentinel used by `_stash_bracket_syntax`/`_restore_bracket_syntax`.
@@ -55,8 +45,7 @@ _PLACEHOLDER_RE = re.compile(r"\x00WK(\d+)\x00")
 # table matcher runs; the original body -- pipes and all -- is restored
 # verbatim afterwards, once the table's cell structure has already been
 # fixed using the correct (higher) column count. Only single-backtick
-# spans are handled, mirroring the equivalent regex on the read-path
-# converter (`tracwiki_to_markdown._convert_code_blocks`).
+# spans are handled.
 _CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
 
 # Trac's own WikiCamelCase auto-link pattern: a word with two or more
@@ -222,9 +211,8 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 
 
 # The TracLink resolver allowlist and `scheme:target` pattern live in
-# `common` so both conversion directions share one definition — a target
-# this module emits verbatim must not be re-parsed as a link by
-# `tracwiki_to_markdown` on the way back (tickets #8, #13, #14, #17).
+# `common`, shared with the link-target checks there (tickets #8, #13, #14,
+# #17).
 
 
 # The mistune plugin set for every parse of Markdown in this module. The
@@ -258,8 +246,7 @@ def _indent_text_lines(
     column) from the first EMPTY line on, or from the start when `list_open`
     is False (an empty line was already emitted before the run). Trac ends a
     list at an empty line, so the marker + 3 cap (`text_indent`, #178) means
-    nothing after one, and the read leg reads those lines as the next
-    block's. A blank line stays blank."""
+    nothing after one. A blank line stays blank."""
     out: list[str] = []
     for line in lines:
         if not line:
@@ -271,38 +258,6 @@ def _indent_text_lines(
                 + line
             )
     return out
-
-
-def _is_fallback_fence(info: str | None) -> bool:
-    """True when a fenced block's info string is the #63 verbatim-unwrap
-    marker (`FALLBACK_FENCE_INFO`). The one test, for `block_code()` and
-    the list-item run split."""
-    return bool(info) and info.strip() == FALLBACK_FENCE_INFO
-
-
-def _is_processor_run(raw: str) -> bool:
-    """True when `raw`, the body of a #63 fallback fence, is exactly one
-    coalesced run of ``{{{#!comment}}}`` / ``{{{#!table}}}`` blocks and
-    nothing else (ticket #192): the shape the read leg fences in a list
-    item. Checked with the read leg's own regex and brace matcher, so the
-    two cannot disagree. Anything else in the body (a td/th block at top
-    level, text before or after, an unterminated block) is False."""
-    pos = 0
-    while True:
-        found = _FALLBACK_PROCESSOR_RE.match(raw, pos)
-        if not found or found.group(1).lower() not in (
-            "comment",
-            "table",
-        ):
-            return False
-        end = TracWikiParser._matching_brace(raw, pos)
-        if end == -1:
-            return False
-        pos = end
-        while pos < len(raw) and raw[pos] in " \t\n":
-            pos += 1
-        if pos >= len(raw):
-            return True
 
 
 def _is_paragraph_token(token: dict[str, Any]) -> bool:
@@ -337,7 +292,7 @@ def _has_passthrough_line(
 def _starts_a_block_in_trac(text: str) -> bool:
     """True when the first line of `text`, stripped, starts a Trac block of
     its own: a ``>`` citation line, or a list marker (``*``, ``-``, ``1.``,
-    ``a.``, ``ii.``; the grammar of the read leg's `_LIST_MARKER_RE`).
+    ``a.``, ``ii.``; Trac's list-marker grammar, `_LIST_MARKER_RE`).
     Directly under a citation either would join the quote or open a nested
     item (#145 review F3, e.g. a Markdown ``\\>`` or ``1\\.``)."""
     first = text.lstrip().split("\n", 1)[0].strip()
@@ -356,12 +311,8 @@ def _item_runs(
     The kinds are ``list`` (one nested list), ``table`` (#142: a GFM table,
     rendered as a ``{{{#!div}}}`` block), ``quote`` (#145: a blockquote,
     only once the item has content and only when it is not empty),
-    ``code`` (#144: a fenced block that is not the #63 fallback fence, whose
-    body is TracWiki source and stays in the text run; #192: except a
-    fallback fence whose body is exactly one run of ``{{{#!comment}}}`` /
-    ``{{{#!table}}}`` blocks, which Trac keeps inside the item as it keeps a
-    code block, so it takes the same no-blank-line placement) and ``text``
-    (every other child, adjacent ones merged into one run). Every list,
+    ``code`` (#144: a fenced block) and ``text`` (every other child,
+    adjacent ones merged into one run). Every list,
     table, code block and quote is a run of its own.
     """
     runs: list[tuple[str, list[dict[str, Any]]]] = []
@@ -382,12 +333,6 @@ def _item_runs(
             )
             else "code"
             if child_type == "block_code"
-            and (
-                not _is_fallback_fence(
-                    (child.get("attrs") or {}).get("info")
-                )
-                or _is_processor_run(child.get("raw") or "")
-            )
             else "text"
         )
         if child_type != "blank_line":
@@ -416,8 +361,8 @@ def _item_block_separator(
       ``para``.
     * ``"adjacent"``: the next paragraph goes on the line after a ``code``
       or ``table`` child, no blank line.
-    * ``"blank"``: everything else (#63 fallback fence, a text run after a
-      nested list that ``"between"`` refuses, ...).
+    * ``"blank"``: everything else (a text run after a nested list that
+      ``"between"`` refuses, ...).
     * ``"quote_gap"`` (#145): a lone ``>`` line, between two sibling
       blockquotes of one item. Trac shows one blockquote with two paragraphs.
     * ``"between"`` (#176): a ``para`` run directly after a nested list
@@ -590,8 +535,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
         concept, so any such word reaching this method was never meant as
         a link (ticket #27).
 
-        Literal `[[...]]` syntax typed in the Markdown source (or arriving
-        from `tracwiki_to_markdown`) never reaches this method -- it is
+        Literal `[[...]]` syntax typed in the Markdown source never
+        reaches this method -- it is
         stashed as sentinel placeholders by `_stash_bracket_syntax` before
         mistune even starts parsing (ticket #19), so a macro/page name
         that happens to be CamelCase-shaped is never escaped inside its
@@ -712,7 +657,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         paragraph follows on the next line. The leading space is always
         there: ``Done![[BR]]`` is Trac's ``!`` escape of the first macro,
         and ``wiki:Foo[[BR]]`` reads as one link target (#29). Any other
-        neighbour of a paragraph (blockquote, heading, #63 fallback fence)
+        neighbour of a paragraph (blockquote, heading)
         keeps today's blank line, and so does a paragraph with a line of
         passed-through TracWiki (``_item_block_separator``, review F1).
         """
@@ -780,11 +725,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         verbatim, so those delimiters are content, not a construct of
         their own (ticket #72), and are emitted back unchanged. A helper
         used to rewrite a quoted backtick fence found in that literal
-        text into a `{{{ }}}` block, restoring a shape the read leg no
-        longer produces (ticket #51, superseded by #72's read-leg fix);
-        removed rather than kept, since by ticket #88 it had become a
-        pure source of corruption -- rewriting fences the author quoted
-        on purpose, that were never a real nested block at all.
+        text into a `{{{ }}}` block (ticket #51); removed rather than
+        kept, since by ticket #88 it had become a pure source of
+        corruption -- rewriting fences the author quoted on purpose, that
+        were never a real nested block at all.
 
         Ends with a blank line (two trailing newlines), like `paragraph()`
         and `table()`, so a sibling block immediately following in the
@@ -796,17 +740,6 @@ class TracWikiRenderer(mistune.BaseRenderer):
         here never leaks into their output.
         """
         code = code.rstrip("\n")
-        if _is_fallback_fence(info):
-            # Unwrap, per the operator decision on ticket #63: the read leg
-            # emitted this fence around TracWiki it could not express, and the
-            # body is the ORIGINAL SOURCE verbatim.  Restoring it is a literal
-            # unwrap with nothing to infer -- unlike the [MACRO: ...]
-            # placeholder deleted earlier on this ticket, which had to be
-            # reconstructed by guessing and carried the bugs that came with
-            # that.  Without this, a read-edit-write cycle would demote the
-            # construct to a literal code block: text-lossless but no longer a
-            # table.
-            return f"{code}\n\n"
         if info:
             # Map Markdown language to TracWiki processor directive
             tracwiki_lang = markdown_to_tracwiki_lang(info)
@@ -916,7 +849,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
         Refuses non-URL-shaped "links" (e.g., sentinels like ``auto-pm:``)
         so state-marker syntax such as ``[auto-pm: state NEEDS_CODE]``
-        survives round-tripping instead of getting mangled into a broken
+        is kept as typed instead of getting mangled into a broken
         TracWiki link.
         """
         # A link's label is opaque to Trac's WikiFormatting -- undo any
@@ -945,9 +878,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
         # Already-resolved TracLinks (`wiki:Page`, `ticket:42`,
         # `source:trunk/f.py`, ...) are valid TracWiki targets as they
-        # stand — emit them verbatim. This is what `tracwiki_to_markdown`
-        # produces, so a wiki_get -> wiki_update round-trip that leaves
-        # existing links untouched no longer corrupts them (ticket #17).
+        # stand — emit them verbatim; wrapping one in a second `wiki:`
+        # prefix would corrupt it (ticket #17).
         traclink = SCHEME_RE.match(url)
         if (
             traclink
@@ -1190,8 +1122,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     # the same reason -- it goes under the item text at the
                     # continuation indent with no blank line before it, in
                     # a tight or a loose item alike (Trac strips the indent
-                    # back off the body). A #63 fallback fence stays in the
-                    # text run: its body is TracWiki source, unwrapped.
+                    # back off the body).
                     # Ticket #145: a blockquote child is its own run kind
                     # ("quote"), rendered as Trac citation lines. Not when
                     # it is the item's first non-blank child: no Trac form
@@ -1253,8 +1184,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # text: a code or table block joins at any indent (#144), and
                 # a `>` citation line stays inside the item at marker + 4
                 # (measured), so those keep the text column
-                # (`continuation_indent`). The read leg moves a line at this
-                # column back to the Markdown text column. The cap holds only
+                # (`continuation_indent`). The cap holds only
                 # while Trac still has the list open: a line after an EMPTY
                 # line keeps `continuation_indent` (`_indent_text_lines`).
                 # For a bullet the bound IS the text column, so the `min` is
@@ -1379,13 +1309,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             # line is a continuation line at the usual
                             # indent (measured C6: both paragraphs stay in
                             # the item), and what follows behaves as in an
-                            # item with no nested list. The read leg needs
-                            # the later lines at `text_indent`, the text
-                            # column (marker + 3 for an ordered item numbered
-                            # 10 or more, #178, which it moves to the text
-                            # column): it turns `[[BR]][[BR]]` into a blank
-                            # line, and a line at marker + 1 after one would
-                            # leave the item.
+                            # item with no nested list. The later lines go
+                            # at `text_indent`, the text column (marker + 3
+                            # for an ordered item numbered 10 or more, #178):
+                            # a line at marker + 1 after a `[[BR]][[BR]]`
+                            # break would leave the item.
                             first, *rest = rendered.split("\n")
                             parts.append(
                                 " " * (len(indent) + 1) + first
@@ -1445,8 +1373,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
 # Markdown footnote syntax (ticket #63).  TracWiki has no footnote construct,
 # and this is the one Markdown input the write leg cannot express -- see
-# _reject_unrepresentable_footnotes for why it fails the call rather than
-# wrapping the way the read leg does.
+# _reject_unrepresentable_footnotes for why it fails the call.
 _FOOTNOTE_DEF_RE = re.compile(r"^\[\^([^\]\n]+)\]:", re.MULTILINE)
 _FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]\n]+)\](?!:)")
 
@@ -1454,10 +1381,9 @@ _FOOTNOTE_REF_RE = re.compile(r"\[\^([^\]\n]+)\](?!:)")
 def _markdown_verbatim_mask(text: str) -> str:
     """Return ``text`` with code regions blanked to ``\\x01`` fillers.
 
-    Mirrors ``tracwiki_to_markdown._verbatim_mask`` on the other leg, and
-    exists for the same reason: a check that runs before the converter's own
-    stashing has to do its own shielding, or it fires on syntax the author
-    quoted rather than wrote.  Newlines are preserved so the mask stays
+    Exists because a check that runs before the converter's own stashing
+    has to do its own shielding, or it fires on syntax the author quoted
+    rather than wrote.  Newlines are preserved so the mask stays
     line-aligned and ``re.MULTILINE`` anchors still land correctly.
 
     Covers fenced blocks and inline code spans.  Indented code blocks need no
@@ -1506,9 +1432,8 @@ def _markdown_verbatim_mask(text: str) -> str:
 def _reject_unrepresentable_footnotes(markdown_text: str) -> None:
     """Fail the conversion on a Markdown footnote that would be destroyed.
 
-    Operator decision on ticket #63, option (c).  The read leg answers an
-    unrepresentable construct by emitting it verbatim in a fallback fence, but
-    that answer does not work here: a footnote is not a block.  Its reference
+    Operator decision on ticket #63, option (c).  Wrapping the construct
+    verbatim does not work here: a footnote is not a block.  Its reference
     and its definition sit in *different places* in the document, so wrapping
     either half alone breaks the pairing and wrapping the whole document to
     catch both is disproportionate.

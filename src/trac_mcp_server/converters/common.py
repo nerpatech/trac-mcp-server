@@ -151,11 +151,10 @@ def tracwiki_to_markdown_lang(processor: str) -> str:
 # Link target validation
 # =============================================================================
 #
-# Both converters need the same answer to one question: "is this string a
-# real link target, or is it prose that merely looks bracket-shaped?"
-# Keeping the rule in one place is what makes the two directions symmetric —
-# a target that markdown_to_tracwiki emits verbatim must not be re-parsed as
-# a link by tracwiki_to_markdown on the way back (tickets #13, #14, #17).
+# One answer to one question: "is this string a real link target, or is it
+# prose that merely looks bracket-shaped?" A sentinel such as ``auto-pm:``
+# typed in Markdown must stay literal, not become a broken link (tickets
+# #13, #14, #17).
 # =============================================================================
 
 # TracLink resolvers that Trac understands natively as the target of
@@ -240,10 +239,22 @@ def trac_continuation_bound(
     ordered item, + 2 for a bullet (ticket #175, measured on /trac_test).
     A line past it ends the list.
 
-    The one place the bound lives: the read leg's `_continued_item` and its
-    #178 text-column rule, and the write leg's cap on an ordered item's text
-    continuation lines (#178), all use it."""
+    The one place the bound lives: the write leg's cap on an ordered item's
+    text continuation lines (#178) uses it."""
     return marker_column + (3 if ordered else 2)
+
+
+# Trac's list-marker grammar: a bullet, a digits-only ordered marker, or a
+# single-letter / roman-numeral lettered marker, indented, then whitespace.
+# `_starts_a_block_in_trac` (markdown_to_tracwiki) uses it to escape a marker
+# that would otherwise open a nested item under a citation. Exact rather than
+# generous: " Hello. World" and " 1)" are blockquotes to Trac, not lists.
+_BULLET_MARKER = r"[*-]"
+_NUMERIC_MARKER = r"\d+\."
+_ALPHA_MARKER = r"(?:[a-zA-Z]|[ivxlcdmIVXLCDM]{2,})\."
+_LIST_MARKER_RE = re.compile(
+    rf"^[ \t]+(?:{_BULLET_MARKER}|{_NUMERIC_MARKER}|{_ALPHA_MARKER})(?=[ \t])"
+)
 
 
 @dataclass

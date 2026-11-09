@@ -9,15 +9,11 @@ from trac_mcp_server.converters import (
     ConversionResult,
     convert_with_warnings,
     markdown_to_tracwiki,
-    tracwiki_to_markdown,
 )
 from trac_mcp_server.converters.common import (
     is_link_target,
     markdown_to_tracwiki_lang,
     tracwiki_to_markdown_lang,
-)
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    FALLBACK_FENCE_INFO,
 )
 
 
@@ -217,9 +213,8 @@ plain code
         """`wiki:`-prefixed link targets convert to working TracWiki links.
 
         Regression test for ticket #17: ``[Hardware](wiki:BnodeHardware)``
-        -- exactly what ``tracwiki_to_markdown`` emits for a native
-        ``[wiki:BnodeHardware Hardware]`` link -- was left as literal
-        Markdown by the ``":" in url and "/" not in url`` guard, and the
+        -- the Markdown form of a native ``[wiki:BnodeHardware Hardware]``
+        link -- was left as literal Markdown by the ``":" in url and "/" not in url`` guard, and the
         multi-segment form ``wiki:b-node/blog`` was double-prefixed into
         ``[wiki:wiki:b-node/blog Blog]``. Both must now emit the target
         verbatim.
@@ -261,28 +256,6 @@ plain code
             with self.subTest(url=url):
                 self.assertEqual(
                     markdown_to_tracwiki(f"[{text}]({url})"), expected
-                )
-
-    def test_traclink_round_trips_through_both_converters(self):
-        """wiki_get -> wiki_update round-trip leaves existing links intact.
-
-        The end-to-end shape of ticket #17: pull TracWiki through
-        ``tracwiki_to_markdown``, push the untouched result back through
-        ``markdown_to_tracwiki``, and the link must come out identical.
-        """
-        for tracwiki in [
-            "[wiki:BnodeHardware Hardware]",
-            "[wiki:b-node/blog Blog]",
-            "[ticket:42 Bug]",
-            "[source:trunk/foo.py file]",
-            "[milestone:1.0 M]",
-            "[http://example.com ext]",
-            "[#anchor jump]",
-        ]:
-            with self.subTest(tracwiki=tracwiki):
-                markdown = tracwiki_to_markdown(tracwiki).text
-                self.assertEqual(
-                    markdown_to_tracwiki(markdown).strip(), tracwiki
                 )
 
     def test_traclink_autolink_form(self):
@@ -525,136 +498,16 @@ Second paragraph."""
         self.assertIn("=== Subsection ===", result)
 
 
-class TestTracWikiToMarkdownConverter(unittest.TestCase):
-    """Test TracWiki to Markdown conversion."""
+class TestFenceHoldingTracWikiBlocks(unittest.TestCase):
+    """A Markdown fence whose body holds ``{{{ }}}`` delimiters."""
 
-    def test_heading_level_1(self):
-        """Test H1 heading conversion."""
-        result = tracwiki_to_markdown("= Heading 1 =")
-        self.assertEqual(result.text, "# Heading 1")
-
-    def test_heading_level_2(self):
-        """Test H2 heading conversion."""
-        result = tracwiki_to_markdown("== Heading 2 ==")
-        self.assertEqual(result.text, "## Heading 2")
-
-    def test_heading_level_3(self):
-        """Test H3 heading conversion."""
-        result = tracwiki_to_markdown("=== Heading 3 ===")
-        self.assertEqual(result.text, "### Heading 3")
-
-    def test_heading_level_4(self):
-        """Test H4 heading conversion."""
-        result = tracwiki_to_markdown("==== Heading 4 ====")
-        self.assertEqual(result.text, "#### Heading 4")
-
-    def test_heading_level_5(self):
-        """Test H5 heading conversion."""
-        result = tracwiki_to_markdown("===== Heading 5 =====")
-        self.assertEqual(result.text, "##### Heading 5")
-
-    def test_heading_level_6(self):
-        """Test H6 heading conversion."""
-        result = tracwiki_to_markdown("====== Heading 6 ======")
-        self.assertEqual(result.text, "###### Heading 6")
-
-    def test_heading_without_trailing_equals(self):
-        """Trailing = is optional in TracWiki."""
-        result = tracwiki_to_markdown("= Heading 1")
-        self.assertEqual(result.text, "# Heading 1")
-
-    def test_heading_h2_without_trailing_equals(self):
-        """Trailing == is optional in TracWiki."""
-        result = tracwiki_to_markdown("== Heading 2")
-        self.assertEqual(result.text, "## Heading 2")
-
-    def test_heading_h3_without_trailing_equals(self):
-        """Trailing === is optional in TracWiki."""
-        result = tracwiki_to_markdown("=== Heading 3")
-        self.assertEqual(result.text, "### Heading 3")
-
-    def test_bold_text(self):
-        """Test bold text conversion."""
-        result = tracwiki_to_markdown("'''bold text'''")
-        self.assertEqual(result.text, "**bold text**")
-
-    def test_italic_text(self):
-        """Test italic text conversion."""
-        result = tracwiki_to_markdown("''italic text''")
-        self.assertEqual(result.text, "*italic text*")
-
-    def test_bold_italic_text(self):
-        """Test bold italic text conversion."""
-        result = tracwiki_to_markdown("'''''bold italic'''''")
-        self.assertEqual(result.text, "***bold italic***")
-
-    def test_link_with_text(self):
-        """Test link with text conversion."""
-        result = tracwiki_to_markdown("[https://example.com link text]")
-        self.assertEqual(
-            result.text, "[link text](https://example.com)"
-        )
-
-    def test_link_without_text(self):
-        """Test link without text conversion."""
-        result = tracwiki_to_markdown("[https://example.com]")
-        self.assertEqual(result.text, "<https://example.com>")
-
-    def test_code_block_with_language(self):
-        """Test code block with language conversion."""
-        tracwiki = """{{{#!python
-def hello():
-    print("world")
-}}}"""
-        expected = """```python
-def hello():
-    print("world")
-```"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_code_block_without_language(self):
-        """Test code block without language conversion."""
-        tracwiki = """{{{
-plain code
-}}}"""
-        expected = """```
-plain code
-```"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_nested_code_block_no_placeholder_leak(self):
-        """A {{{ }}} block nested inside another restores both bodies
-        fully, with no unresolved \\x00CODEn\\x00 sentinel surviving into
-        the output (ticket #51).
-
-        Ticket #72 changed what the Markdown looks like. The inner block
-        used to be converted in its own right, into a fence the outer one
-        had to be widened past; it is now carried verbatim as what it
-        actually is -- literal text inside a block Trac renders verbatim
-        -- so one plain fence holds the whole thing. The guarantee #51
-        states is unchanged and asserted below: both bodies survive with
-        no sentinel leak, and no fence terminates another early.
-        """
-        tracwiki = """{{{
-{{{#!comment
-AGENT: do the thing
-}}}
-}}}"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertNotIn("\x00", result.text)
-        self.assertIn("AGENT: do the thing", result.text)
-        self.assertEqual(
-            result.text,
-            "```\n{{{#!comment\nAGENT: do the thing\n}}}\n```",
-        )
-
-    def test_nested_code_block_round_trip(self):
-        """The Markdown produced for a nested {{{ }}} block converts back
-        to the original TracWiki nesting, not literal fence text (ticket
-        #51 retest -- a same-length outer/inner fence pair round-tripped
-        as flattened raw content with the block structure destroyed).
+    def test_nested_code_block_in_a_fence_is_written_as_nested_tracwiki(
+        self,
+    ):
+        """A fence whose body holds a nested ``{{{ }}}`` block converts to
+        the outer block with the inner delimiters as literal content (ticket
+        #51 retest -- a same-length outer/inner fence pair was flattened to
+        raw content with the block structure destroyed).
 
         No trailing paragraph after the block: markdown_to_tracwiki drops
         the blank line between a code block and a following paragraph
@@ -662,364 +515,23 @@ AGENT: do the thing
         reproduces the same way for an unnested block on current master),
         so asserting on that spacing here would conflate two bugs.
         """
-        tracwiki = """Intro line.
+        markdown = """Intro line.
+
+```
+{{{#!comment
+AGENT: do the thing
+}}}
+```"""
+        expected = """Intro line.
 
 {{{
 {{{#!comment
 AGENT: do the thing
 }}}
 }}}"""
-        markdown = tracwiki_to_markdown(tracwiki).text
-        self.assertNotIn("\x00", markdown)
         restored = markdown_to_tracwiki(markdown)
         self.assertNotIn("\x00", restored)
-        self.assertEqual(restored, tracwiki)
-
-    def test_unordered_list(self):
-        """Test unordered list conversion."""
-        tracwiki = """ * item 1
- * item 2
- * item 3"""
-        expected = """ - item 1
- - item 2
- - item 3"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_ordered_list(self):
-        """Test ordered list conversion."""
-        tracwiki = """ 1. first
- 2. second
- 3. third"""
-        # Ordered lists are already compatible
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, tracwiki)
-
-    def test_horizontal_rule(self):
-        """Test horizontal rule conversion."""
-        result = tracwiki_to_markdown("----")
-        self.assertEqual(result.text, "---")
-
-    def test_line_break(self):
-        """[[BR]] converts to a CommonMark hard break, not a soft break."""
-        result = tracwiki_to_markdown("Line one[[BR]]Line two")
-        self.assertEqual(result.text, "Line one  \nLine two")
-
-    def test_line_break_case_insensitive(self):
-        """Test line break is case insensitive."""
-        result = tracwiki_to_markdown("Line one[[br]]Line two")
-        self.assertEqual(result.text, "Line one  \nLine two")
-
-    def test_image(self):
-        """Test image conversion."""
-        result = tracwiki_to_markdown("[[Image(screenshot.png)]]")
-        self.assertEqual(result.text, "![](screenshot.png)")
-
-    def test_image_case_insensitive(self):
-        """Test image macro is case insensitive."""
-        result = tracwiki_to_markdown("[[image(screenshot.png)]]")
-        self.assertEqual(result.text, "![](screenshot.png)")
-
-    def test_unknown_macro_passthrough(self):
-        """Macros are left literal, so they survive the trip back (#63)."""
-        result = tracwiki_to_markdown("[[TOC]]")
-        self.assertEqual(result.text, "[[TOC]]")
-
-    def test_blockquote(self):
-        """Test blockquote conversion."""
-        tracwiki = """  This is quoted
-  Another quoted line"""
-        expected = """> This is quoted
-> Another quoted line"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_mixed_content(self):
-        """Test real-world mixed content."""
-        tracwiki = """= Bug Report =
-
-This is a '''critical''' bug in the ''login'' system.
-
-Reproduction steps:
- 1. Navigate to [https://example.com login page]
- 2. Enter invalid credentials
- 3. Observe error
-
-Code that fails:
-{{{#!python
-def login(user, password):
-    return False
-}}}
-
-See screenshot: [[Image(error.png)]]"""
-
-        result = tracwiki_to_markdown(tracwiki)
-
-        # Check key conversions
-        self.assertIn("# Bug Report", result.text)
-        self.assertIn("**critical**", result.text)
-        self.assertIn("*login*", result.text)
-        self.assertIn(
-            "1. Navigate to [login page](https://example.com)",
-            result.text,
-        )
-        self.assertIn("```python", result.text)
-        self.assertIn("![](error.png)", result.text)
-
-    def test_inline_code_passthrough(self):
-        """Test inline code passes through unchanged."""
-        result = tracwiki_to_markdown("`inline code`")
-        self.assertEqual(result.text, "`inline code`")
-
-    def test_nested_lists(self):
-        """Test nested list conversion with proper indentation format."""
-        tracwiki = """ * item 1
-   * nested 1
-   * nested 2
- * item 2"""
-        expected = """ - item 1
-   - nested 1
-   - nested 2
- - item 2"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_multiple_headings(self):
-        """Test multiple headings in document."""
-        tracwiki = """= Title =
-== Section ==
-=== Subsection ==="""
-        expected = """# Title
-## Section
-### Subsection"""
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, expected)
-
-    def test_mixed_formatting_inline(self):
-        """Test mixed formatting in single line."""
-        result = tracwiki_to_markdown(
-            "This is '''bold''' and ''italic'' text"
-        )
-        self.assertEqual(
-            result.text, "This is **bold** and *italic* text"
-        )
-
-    def test_longer_horizontal_rule(self):
-        """Test longer horizontal rule converts."""
-        result = tracwiki_to_markdown("--------")
-        self.assertEqual(result.text, "---")
-
-
-class TestUnknownMacrosOption(unittest.TestCase):
-    """Tests for the unknown_macros kwarg added in Phase 16.
-
-    Verifies that the default "preserve" leaves the macro literal -- so a
-    tw->md->tw round trip restores it unchanged -- and that "drop" omits it,
-    without either disturbing known macros (Image, BR) or the lossy-elements
-    warning. The former default, "bracket", emitted a [MACRO: ...] placeholder
-    that existed only for markdown_to_tracwiki to rebuild; it was removed in
-    ticket #63 because "preserve" reaches the same round trip directly.
-    """
-
-    def test_default_preserve(self):
-        """unknown_macros defaults to "preserve": [[Name]] stays literal."""
-        result = tracwiki_to_markdown("[[PageOutline]]")
-        self.assertIn("[[PageOutline]]", result.text)
-        self.assertNotIn("[MACRO:", result.text)
-
-    def test_preserve_explicit(self):
-        """Explicit unknown_macros="preserve" matches the default."""
-        default = tracwiki_to_markdown("[[PageOutline]]")
-        explicit = tracwiki_to_markdown(
-            "[[PageOutline]]", unknown_macros="preserve"
-        )
-        self.assertEqual(default.text, explicit.text)
-
-    def test_preserve_keeps_literal(self):
-        """unknown_macros="preserve" leaves [[MacroName]] verbatim."""
-        result = tracwiki_to_markdown(
-            "[[PageOutline]]", unknown_macros="preserve"
-        )
-        self.assertIn("[[PageOutline]]", result.text)
-        self.assertNotIn("[MACRO:", result.text)
-
-    def test_drop_removes_macro(self):
-        """unknown_macros="drop" silently omits the macro."""
-        result = tracwiki_to_markdown(
-            "before [[PageOutline]] after", unknown_macros="drop"
-        )
-        self.assertNotIn("PageOutline", result.text)
-        self.assertIn("before", result.text)
-        self.assertIn("after", result.text)
-
-    def test_known_macros_unaffected_bracket(self):
-        """Image macro is converted to Markdown img regardless of mode."""
-        result = tracwiki_to_markdown(
-            "[[Image(foo.png)]]", unknown_macros="bracket"
-        )
-        self.assertIn("![](foo.png)", result.text)
-
-    def test_known_macros_unaffected_preserve(self):
-        """Image macro converts correctly under preserve mode too."""
-        result = tracwiki_to_markdown(
-            "[[Image(foo.png)]]", unknown_macros="preserve"
-        )
-        self.assertIn("![](foo.png)", result.text)
-
-    def test_known_macros_unaffected_drop(self):
-        """Image macro converts correctly under drop mode too."""
-        result = tracwiki_to_markdown(
-            "[[Image(foo.png)]]", unknown_macros="drop"
-        )
-        self.assertIn("![](foo.png)", result.text)
-
-    def test_macro_with_args_preserve(self):
-        """[[TOC(depth=2)]] under preserve stays literal."""
-        result = tracwiki_to_markdown(
-            "[[TOC(depth=2)]]", unknown_macros="preserve"
-        )
-        self.assertIn("[[TOC(depth=2)]]", result.text)
-
-    def test_warning_fires_under_all_modes(self):
-        """_detect_lossy_elements warning fires regardless of rendering mode."""
-        for mode in ("preserve", "drop"):
-            with self.subTest(mode=mode):
-                result = tracwiki_to_markdown(
-                    "[[PageOutline]]",
-                    unknown_macros=mode,  # type: ignore[arg-type]
-                )
-                self.assertTrue(
-                    any(
-                        "Trac macros detected" in w
-                        for w in result.warnings
-                    ),
-                    f"Expected macro warning in mode={mode!r}",
-                )
-
-
-class TestTracWikiEnhancements(unittest.TestCase):
-    """Test TracWiki to Markdown enhancements (macros, TracLinks, tables, etc)."""
-
-    def test_tracwiki_unknown_macros(self):
-        """Macros stay literal and still raise the lossy-elements warning."""
-        result = tracwiki_to_markdown("[[PageOutline]]")
-        self.assertIn("[[PageOutline]]", result.text)
-        self.assertTrue(
-            any("macro" in w.lower() for w in result.warnings)
-        )
-
-    def test_tracwiki_traclinks_preserved(self):
-        """Test TracLinks are preserved and warnings issued."""
-        result = tracwiki_to_markdown("See #123 and ticket:456")
-        # TracLinks should be preserved in text
-        self.assertIn("#123", result.text)
-        self.assertIn("ticket:456", result.text)
-        # Should issue warning about TracLinks
-        self.assertTrue(
-            any("traclink" in w.lower() for w in result.warnings)
-        )
-
-    def test_tracwiki_definition_lists(self):
-        """Test definition lists take the verbatim fallback, with a warning.
-
-        The input gained its leading space for ticket #71.  It previously read
-        ``"term:: definition"`` at column zero, which Trac renders as an
-        ordinary paragraph -- so the old form asserted the very false positive
-        that ticket fixed.
-
-        The *guarantee* changed on ticket #63: a definition list no longer
-        converts to a bold term, because Markdown has no definition list to
-        convert it to and the bold form did not survive the way back (stored
-        at column zero it is prose, not a ``<dl>``).  It is now carried
-        verbatim in a fallback fence and round-trips byte-for-byte.  The
-        detailed rows live in ``test_converter_definition_lists.py``.
-        """
-        result = tracwiki_to_markdown(" term:: definition")
-        self.assertNotIn("**term**:", result.text)
-        self.assertIn(FALLBACK_FENCE_INFO, result.text)
-        self.assertTrue(
-            any("definition" in w.lower() for w in result.warnings)
-        )
-        self.assertEqual(
-            markdown_to_tracwiki(result.text), " term:: definition"
-        )
-
-    def test_tracwiki_definition_list_needs_indentation(self):
-        """The column-zero form the previous test used to pass is prose.
-
-        Measured against Trac's own renderer (ticket #71): ``term:: definition``
-        at column zero is a ``<p>``, not a ``<dl>``.  Pinned here so the
-        rewrite above cannot be quietly undone by restoring the old input.
-        """
-        result = tracwiki_to_markdown("term:: definition")
-        self.assertEqual(result.text, "term:: definition")
-        self.assertFalse(
-            any("definition list" in w.lower() for w in result.warnings)
-        )
-
-    def test_tracwiki_tables(self):
-        """Test basic table conversion from TracWiki to Markdown."""
-        result = tracwiki_to_markdown("||cell1||cell2||")
-        # Should convert to Markdown table
-        self.assertIn("| cell1 | cell2 |", result.text)
-        self.assertIn("|---|---|", result.text)
-
-    def test_tracwiki_table_headers(self):
-        """Test TracWiki header row (||= ... =||) converts to Markdown header."""
-        result = tracwiki_to_markdown("||= H1 =||= H2 =||\n||a||b||")
-        lines = result.text.split("\n")
-        self.assertEqual(lines[0], "| H1 | H2 |")
-        # Header cells with = markers are centered by default
-        self.assertIn(":---:", lines[1])
-        self.assertEqual(lines[2], "| a | b |")
-
-    def test_tracwiki_table_alignment(self):
-        """Test TracWiki table alignment converts to Markdown separator."""
-        # TracWiki: space on right = left, space on left = right, both = center
-        result = tracwiki_to_markdown(
-            "||=Left =||= Center =||= Right=||\n||left || center || right||"
-        )
-        lines = result.text.split("\n")
-        # Check separator row has correct alignment markers
-        self.assertIn(":---", lines[1])  # left
-        self.assertIn(":---:", lines[1])  # center
-        self.assertIn("---:", lines[1])  # right
-
-    def test_tracwiki_table_spanning(self):
-        """Cell spanning is preserved verbatim and warned (ticket #63).
-
-        Rewritten rather than deleted.  The guarantee these tests were
-        written for -- spanning is detected, warned about, and the content
-        survives -- is unchanged.  What changed is the mechanism: the old
-        [span:N] reconstruction produced a row with fewer cells than its
-        header, which mistune rejected, so the whole table was stored as
-        literal text and silently stopped being a table.  Asserting on
-        "[span:" pinned that broken reconstruction rather than the guarantee.
-        """
-        src = "||= A =||= B =||= C =||\n|||| Span 2 || 3 ||"
-        result = tracwiki_to_markdown(src)
-        self.assertIn("Span 2", result.text)
-        self.assertTrue(
-            any("span" in w.lower() for w in result.warnings)
-        )
-        # The point of the change: it survives the round trip intact.
-        self.assertEqual(markdown_to_tracwiki(result.text), src)
-
-    def test_tracwiki_table_multiline(self):
-        """Multi-line rows are preserved verbatim and warned (ticket #63).
-
-        Same rewrite as the spanning test above.  The old behaviour joined
-        the rows into one over-wide row that read back as a *header* row --
-        a silent semantic change the previous assertion could not see.
-        """
-        src = "||= H1 =||= H2 =||\n|| column 1 \\\n|| column 2 ||"
-        result = tracwiki_to_markdown(src)
-        self.assertIn("column 1", result.text)
-        self.assertIn("column 2", result.text)
-        self.assertTrue(
-            any("multi-line" in w.lower() for w in result.warnings)
-        )
-        self.assertEqual(markdown_to_tracwiki(result.text), src)
+        self.assertEqual(restored, expected)
 
 
 class TestFormatDetection(unittest.TestCase):
@@ -1198,14 +710,6 @@ class TestBlankInlineCodeSpans(unittest.TestCase):
 class TestConversionResultMetadata(unittest.TestCase):
     """Test ConversionResult metadata and backward compatibility."""
 
-    def test_conversion_result_metadata(self):
-        """Test ConversionResult contains correct metadata."""
-        result = tracwiki_to_markdown("= Test =")
-        self.assertEqual(result.source_format, "tracwiki")
-        self.assertEqual(result.target_format, "markdown")
-        self.assertEqual(result.converted, True)
-        self.assertIn("# Test", result.text)
-
     def test_conversion_result_backward_compat(self):
         """Test backward compatibility with old .tracwiki property."""
         from trac_mcp_server.converters import convert_with_warnings
@@ -1283,125 +787,18 @@ class TestTableConversion(unittest.TestCase):
         self.assertIn("''Italic''", result)
         self.assertIn("`code`", result)
 
-    # TracWiki to Markdown tests
 
-    def test_tw_to_md_basic_table(self):
-        """Test basic TracWiki table converts to Markdown."""
-        tw = "||A||B||\n||1||2||"
-        result = tracwiki_to_markdown(tw)
-        self.assertIn("| A | B |", result.text)
-        self.assertIn("|---|---|", result.text)
-        self.assertIn("| 1 | 2 |", result.text)
+class TestMacroInProse(unittest.TestCase):
+    """A ``[[Macro]]`` typed in Markdown prose."""
 
-    def test_tw_to_md_header_row(self):
-        """Test TracWiki header row converts to Markdown header."""
-        tw = "||= H1 =||= H2 =||\n||a||b||"
-        result = tracwiki_to_markdown(tw)
-        lines = result.text.split("\n")
-        self.assertEqual(lines[0], "| H1 | H2 |")
-        self.assertEqual(lines[2], "| a | b |")
-
-    def test_tw_to_md_alignment(self):
-        """Test TracWiki alignment converts to Markdown separator."""
-        tw = "||=Left =||= Center =||= Right=||\n||left || center || right||"
-        result = tracwiki_to_markdown(tw)
-        # Check separator has alignment markers
-        sep_line = result.text.split("\n")[1]
-        self.assertIn(":---", sep_line)
-        self.assertIn(":---:", sep_line)
-        self.assertIn("---:", sep_line)
-
-    def test_tw_to_md_spanning_warning(self):
-        """Test TracWiki cell spanning produces warning."""
-        tw = "||= A =||= B =||\n|||| Span ||"
-        result = tracwiki_to_markdown(tw)
-        self.assertTrue(
-            any("span" in w.lower() for w in result.warnings)
-        )
-
-    def test_tw_to_md_multiline_warning(self):
-        """Test TracWiki multi-line rows produce warning."""
-        tw = "||= H1 =||= H2 =||\n|| col1 \\\n|| col2 ||"
-        result = tracwiki_to_markdown(tw)
-        self.assertTrue(
-            any("multi-line" in w.lower() for w in result.warnings)
-        )
-
-    # Round-trip tests
-
-    def test_table_roundtrip_md_to_tw_to_md(self):
-        """Test Markdown -> TracWiki -> Markdown preserves structure."""
-        original_md = """| A | B |
-| --- | --- |
-| 1 | 2 |"""
-        to_tw = markdown_to_tracwiki(original_md)
-        back_to_md = tracwiki_to_markdown(to_tw)
-        # Should have table structure
-        self.assertIn("| A | B |", back_to_md.text)
-        self.assertIn("| 1 | 2 |", back_to_md.text)
-
-    def test_table_roundtrip_tw_to_md_to_tw(self):
-        """Test TracWiki -> Markdown -> TracWiki preserves structure."""
-        original_tw = "||= H1 =||= H2 =||\n||a||b||"
-        to_md = tracwiki_to_markdown(original_tw)
-        back_to_tw = markdown_to_tracwiki(to_md.text)
-        # Should have TracWiki table structure
-        self.assertIn("||", back_to_tw)
-        # Header content preserved (may have alignment spaces)
-        self.assertIn("H1", back_to_tw)
-        self.assertIn("H2", back_to_tw)
-
-    def test_table_roundtrip_alignment_preserved(self):
-        """Test alignment is preserved in round-trip."""
-        original_md = """| Left | Center | Right |
-| :--- | :---: | ---: |
-| L | C | R |"""
-        to_tw = markdown_to_tracwiki(original_md)
-        back_to_md = tracwiki_to_markdown(to_tw)
-        sep_line = back_to_md.text.split("\n")[1]
-        # Alignment should be preserved
-        self.assertIn(":---", sep_line)
-        self.assertIn(":---:", sep_line)
-        self.assertIn("---:", sep_line)
-
-
-class TestRoundTripConversion(unittest.TestCase):
-    """Test round-trip conversion behavior (lossy and compatible elements)."""
-
-    def test_roundtrip_macros_are_lossless(self):
-        """Macros now survive the round trip byte-for-byte (#63).
-
-        Formerly lossy: the macro travelled as a [MACRO: ...] placeholder
-        and was only approximately rebuilt. Leaving it literal makes the
-        round trip exact. The warning still fires -- the macro is inert in
-        a Markdown renderer even though nothing is lost converting back.
+    def test_macro_in_prose_is_left_literal(self):
+        """A macro in a paragraph comes out byte-for-byte, with no ``!``
+        escape inside the brackets and no ``[MACRO: ...]`` placeholder (#63).
         """
-        original = "Text [[PageOutline]] more"
-        to_md = tracwiki_to_markdown(original)
-        self.assertIn("[[PageOutline]]", to_md.text)
-        self.assertNotIn("[MACRO:", to_md.text)
-        self.assertEqual(markdown_to_tracwiki(to_md.text), original)
-        self.assertGreater(len(to_md.warnings), 0)
-
-    def test_roundtrip_compatible_elements(self):
-        """Test elements that survive round-trip semantically."""
-        # Elements that convert cleanly both ways
-        original_tw = "= H1 =\n\n'''bold''' and ''italic''\n\n * list"
-        to_md = tracwiki_to_markdown(original_tw)
-        to_tw = markdown_to_tracwiki(to_md.text)
-        # Should be semantically equivalent
-        self.assertIn("= H1 =", to_tw)
-        self.assertIn("'''bold'''", to_tw)
-        self.assertIn("''italic''", to_tw)
-
-    def test_roundtrip_tracwiki_to_markdown_to_tracwiki(self):
-        """Test TracWiki -> Markdown -> TracWiki preserves basic formatting."""
-        original = "== Section ==\n\nSome '''bold''' text."
-        to_md = tracwiki_to_markdown(original)
-        to_tw = markdown_to_tracwiki(to_md.text)
-        # Should preserve headings and bold
-        self.assertIn("== Section ==", to_tw)
-        self.assertIn("'''bold'''", to_tw)
+        self.assertEqual(
+            markdown_to_tracwiki("Text [[PageOutline]] more"),
+            "Text [[PageOutline]] more",
+        )
 
 
 class TestCodeBlockLanguageMapping(unittest.TestCase):
@@ -1564,74 +961,9 @@ print("hello")
         result = markdown_to_tracwiki(md)
         self.assertIn("{{{#!python", result)
 
-    def test_tw_to_md_code_block_sh(self):
-        """Test TracWiki sh code block converts to Markdown bash."""
-        tw = """{{{#!sh
-echo "hello"
-}}}"""
-        result = tracwiki_to_markdown(tw)
-        self.assertIn("```bash", result.text)
-        self.assertIn('echo "hello"', result.text)
-
-    def test_tw_to_md_code_block_python_unchanged(self):
-        """Test TracWiki python code block stays python in Markdown."""
-        tw = """{{{#!python
-print("hello")
-}}}"""
-        result = tracwiki_to_markdown(tw)
-        self.assertIn("```python", result.text)
-
     # ==========================================================================
     # Round-trip tests: verify asymmetric mappings work correctly
     # ==========================================================================
-
-    def test_roundtrip_bash_sh_bash(self):
-        """Test bash -> sh -> bash round-trip."""
-        original_md = """```bash
-echo "test"
-```"""
-        to_tw = markdown_to_tracwiki(original_md)
-        # Should be sh in TracWiki
-        self.assertIn("{{{#!sh", to_tw)
-
-        back_to_md = tracwiki_to_markdown(to_tw)
-        # Should be bash in Markdown (canonical form)
-        self.assertIn("```bash", back_to_md.text)
-
-    def test_roundtrip_shell_sh_bash(self):
-        """Test shell -> sh -> bash (normalizes to canonical bash)."""
-        original_md = """```shell
-ls -la
-```"""
-        to_tw = markdown_to_tracwiki(original_md)
-        self.assertIn("{{{#!sh", to_tw)
-
-        back_to_md = tracwiki_to_markdown(to_tw)
-        # Returns canonical form 'bash', not original 'shell'
-        self.assertIn("```bash", back_to_md.text)
-
-    def test_roundtrip_js_javascript_js(self):
-        """Test js -> javascript -> javascript (one-way normalization)."""
-        original_md = """```js
-console.log("x");
-```"""
-        to_tw = markdown_to_tracwiki(original_md)
-        self.assertIn("{{{#!javascript", to_tw)
-
-        back_to_md = tracwiki_to_markdown(to_tw)
-        # javascript is identity, stays as javascript
-        self.assertIn("```javascript", back_to_md.text)
-
-    def test_roundtrip_python_unchanged(self):
-        """Test python stays python through round-trip."""
-        original_md = """```python
-x = 1
-```"""
-        to_tw = markdown_to_tracwiki(original_md)
-        self.assertIn("{{{#!python", to_tw)
-
-        back_to_md = tracwiki_to_markdown(to_tw)
-        self.assertIn("```python", back_to_md.text)
 
 
 class TestAutoConvert(unittest.TestCase):
@@ -1668,27 +1000,6 @@ class TestAutoConvert(unittest.TestCase):
     @patch(
         "trac_mcp_server.detection.capabilities.get_server_capabilities"
     )
-    def test_explicit_markdown_target(self, mock_caps):
-        """target_format='markdown' with tracwiki input converts to markdown."""
-        from trac_mcp_server.converters.common import auto_convert
-
-        mock_config = MagicMock()
-        result = self._run(
-            auto_convert(
-                "= Heading =\n\nParagraph",
-                mock_config,
-                target_format="markdown",
-            )
-        )
-
-        self.assertTrue(result.converted)
-        self.assertEqual(result.target_format, "markdown")
-        self.assertIn("# Heading", result.text)
-        mock_caps.assert_not_called()
-
-    @patch(
-        "trac_mcp_server.detection.capabilities.get_server_capabilities"
-    )
     def test_same_format_passthrough_markdown(self, _mock_caps):
         """target_format='markdown' with markdown input — no conversion."""
         from trac_mcp_server.converters.common import auto_convert
@@ -1718,14 +1029,15 @@ class TestAutoConvert(unittest.TestCase):
 
         mock_caps.side_effect = fake_caps
 
-        # TracWiki input should be converted to markdown
+        # Markdown input already is the target format: passed through.
         result = self._run(
             auto_convert(
-                "= Heading =\n\nText", mock_config, target_format=None
+                "# Heading\n\nText", mock_config, target_format=None
             )
         )
 
         self.assertEqual(result.target_format, "markdown")
+        self.assertFalse(result.converted)
         mock_caps.assert_called_once_with(mock_config)
 
     @patch(
@@ -1956,25 +1268,6 @@ class TestHeadingExplicitAnchor(unittest.TestCase):
         result = markdown_to_tracwiki(source, heading_anchors=True)
         self.assertIn("== Field reference == #field-reference", result)
         self.assertIn("[#field-reference Field reference]", result)
-
-    def test_heading_roundtrip_strips_anchor(self):
-        """``== Heading == #anchor`` round-trips back to ``## Heading``
-        (the explicit anchor is implicit on the Markdown side).
-        """
-        from trac_mcp_server.converters.tracwiki_to_markdown import (
-            tracwiki_to_markdown,
-        )
-
-        markdown_source = "## Wiki task index page schema"
-        tracwiki_form = markdown_to_tracwiki(
-            markdown_source, heading_anchors=True
-        )
-        self.assertEqual(
-            tracwiki_form,
-            "== Wiki task index page schema == #wiki-task-index-page-schema",
-        )
-        roundtripped = tracwiki_to_markdown(tracwiki_form).text.strip()
-        self.assertEqual(roundtripped, "## Wiki task index page schema")
 
     def test_heading_with_no_alphanumerics_omits_anchor(self):
         """Punctuation-only heading text emits NO explicit anchor —
@@ -2236,21 +1529,17 @@ class TestConverterTicketRegressions(unittest.TestCase):
     found and fixed in the same sweep.
     """
 
-    def test_ticket_19_macro_survives_read_edit_write(self):
-        """A macro is not flattened by a tw -> md -> tw cycle.
+    def test_ticket_19_macro_is_left_literal(self):
+        """A macro typed in Markdown is not flattened or escaped.
 
-        This is ticket #19's actual guarantee, restated against the
-        mechanism that carries it since ticket #63. It used to be reached
-        by emitting a [MACRO: Name] placeholder and re-absorbing it here;
-        the macro is now simply left literal on the way out, and the
-        bracket-stashing pass carries it back. The guarantee is what the
-        test pins -- asserting the placeholder spelling would only have
-        restated the implementation.
+        This is ticket #19's actual guarantee, carried since ticket #63 by
+        the bracket-stashing pass: the macro comes out as typed. The
+        guarantee is what the test pins -- asserting a placeholder spelling
+        would only have restated the implementation.
         """
         for macro in ("[[PageOutline]]", "[[TOC(depth=2)]]"):
             with self.subTest(macro):
-                md = tracwiki_to_markdown(macro).text
-                self.assertEqual(markdown_to_tracwiki(md), macro)
+                self.assertEqual(markdown_to_tracwiki(macro), macro)
 
     def test_ticket_19_literal_bracket_syntax_survives(self):
         """[[Page]] typed directly in Markdown source passes through
@@ -2391,17 +1680,6 @@ class TestConverterTicketRegressions(unittest.TestCase):
         )
         self.assertNotIn("wiki:", result)
 
-    def test_ticket_40_server_relative_link_round_trips(self):
-        """The target survives a markdown -> tracwiki -> markdown round
-        trip byte-for-byte, mirroring the existing TracLink round-trip
-        guard (`test_traclink_round_trips_through_both_converters`).
-        """
-        markdown = (
-            "[trac_mcp_server ticket 13](//trac_mcp_server/ticket/13)"
-        )
-        tracwiki = markdown_to_tracwiki(markdown)
-        self.assertEqual(tracwiki_to_markdown(tracwiki).text, markdown)
-
     def test_ticket_44_bare_url_target_not_escaped(self):
         """A CamelCase-shaped path segment inside a bare absolute URL
         (no Markdown link syntax around it) must not be "!"-escaped --
@@ -2520,17 +1798,6 @@ class TestConverterTicketRegressions(unittest.TestCase):
             "See wiki:Rules/trac/RenderVerify for details.",
         )
 
-    def test_ticket_44_row_a_bare_intertrac_round_trips(self):
-        """The bare form survives markdown -> tracwiki -> markdown
-        byte-for-byte, so the read leg can't reintroduce the corruption
-        the write leg just stopped emitting.
-        """
-        markdown = (
-            "See auto_pm:wiki:Rules/trac/RenderVerify for details."
-        )
-        tracwiki = markdown_to_tracwiki(markdown)
-        self.assertEqual(tracwiki_to_markdown(tracwiki).text, markdown)
-
     def test_ticket_44_row_d_non_camelcase_target_unaffected(self):
         """Row D: a bare InterTrac reference whose final segment isn't
         CamelCase-shaped was never escaped, and must stay untouched --
@@ -2596,9 +1863,9 @@ class TestConverterTicketRegressions(unittest.TestCase):
             result,
         )
 
-    def test_ticket_45_table_round_trip_byte_identical(self):
-        """The exact fixture from the ticket round-trips byte-identical
-        through markdown -> tracwiki -> markdown.
+    def test_ticket_45_table_converts_to_exact_tracwiki(self):
+        """The exact fixture from the ticket converts to exactly this
+        table: header, body rows and the code-span row, nothing dropped.
         """
         md = (
             "| Context | Effect |\n"
@@ -2607,8 +1874,13 @@ class TestConverterTicketRegressions(unittest.TestCase):
             "| `{{{#!div}}}`, `||||`, `{{{#!table}}}` | consumed |\n"
             "| table cell | consumed |"
         )
-        tracwiki = markdown_to_tracwiki(md)
-        self.assertEqual(tracwiki_to_markdown(tracwiki).text, md)
+        self.assertEqual(
+            markdown_to_tracwiki(md),
+            "||=Context=||=Effect=||\n"
+            "||plain prose||consumed||\n"
+            "||`{{{#!div}}}`, `||||`, `{{{#!table}}}`||consumed||\n"
+            "||table cell||consumed||",
+        )
 
     def test_ticket_45_heading_slug_unaffected_by_code_span_stash(self):
         """Regression guard: stashing code-span bodies before parsing
@@ -2627,203 +1899,16 @@ class TestConverterTicketRegressions(unittest.TestCase):
         )
 
 
-class TestReadPathConverterTicketRegressions(unittest.TestCase):
-    """Regression tests for tickets against the tracwiki_to_markdown
-    (read-path) converter, kept together since they were found and
-    fixed in the same sweep.
-    """
-
-    def test_ticket_30_br_terminated_line_no_blank_line(self):
-        """A [[BR]]-terminated line followed by the source's own "\\n"
-        must become a single hard-break line, not a blank-line paragraph
-        break -- the exact `auto_pm` #10 symptom this ticket reintroduced
-        via the read path.
-        """
-        tracwiki = (
-            "**Scope:** `substrate:trac`[[BR]]\n"
-            "**Type:** hard-rule[[BR]]\n"
-            "**Status:** active"
-        )
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(
-            result.text,
-            "**Scope:** `substrate:trac`  \n"
-            "**Type:** hard-rule  \n"
-            "**Status:** active",
-        )
-        # No blank line anywhere -- that would be a paragraph break.
-        self.assertNotIn("\n\n", result.text)
-
-    def test_ticket_30_br_without_trailing_newline(self):
-        """[[BR]] with no following source newline still produces a
-        hard break, not a bare (soft-break) "\\n".
-        """
-        result = tracwiki_to_markdown("Line one[[BR]]Line two")
-        self.assertEqual(result.text, "Line one  \nLine two")
-
-    def test_ticket_31_code_block_body_byte_identical(self):
-        """A {{{ }}} code block body that merely resembles TracWiki
-        markup must survive conversion byte-identical -- the fixture
-        from the ticket's own "Test coverage to add" section.
-        """
-        body = (
-            "<Target>\n"
-            "[Label](Target)\n"
-            " * not a bullet\n"
-            "||a||b||\n"
-            "''italics'' and '''bold'''\n"
-            "= heading =\n"
-            "trailing backslash \\"
-        )
-        tracwiki = "{{{\n" + body + "\n}}}"
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, f"```\n{body}\n```")
-
-    def test_ticket_31_code_block_body_uwsgi_log(self):
-        """The exact uWSGI log excerpt from the ticket: bracket-shaped
-        log text must not be reparsed as a TracWiki [url text] link.
-        """
-        body = (
-            "<uWSGI> getting INI configuration from /tmp/trac-fg.ini\n"
-            "*** Starting uWSGI on [Aug 17 08:18:13 2026](Mon) ***\n"
-            'open("--master"): Permission denied [line 288](core/logging.c)'
-        )
-        tracwiki = "{{{\n" + body + "\n}}}"
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, f"```\n{body}\n```")
-
-    def test_ticket_31_code_block_with_language_body_byte_identical(
-        self,
-    ):
-        """Same shielding applies to {{{#!lang ... }}} blocks."""
-        body = "* not a bullet\n''not italic''"
-        tracwiki = "{{{#!text\n" + body + "\n}}}"
-        result = tracwiki_to_markdown(tracwiki)
-        self.assertEqual(result.text, f"```text\n{body}\n```")
-
-    def test_ticket_31_inline_code_span_shielded(self):
-        """Inline `code` spans get the same shielding as fenced blocks."""
-        result = tracwiki_to_markdown(
-            "Config uses `[[BR]]` and `''never italic''` here."
-        )
-        self.assertIn("`[[BR]]`", result.text)
-        self.assertIn("`''never italic''`", result.text)
-
-    def test_ticket_43_br_in_code_span_survives_unbalanced_backtick(
-        self,
-    ):
-        """A well-formed `[[BR]]` code span must survive even when an
-        unrelated, unpaired backtick earlier in the text (e.g. a stray
-        apostrophe-like backtick) throws off the nearest-neighbor pairing
-        that _convert_code_blocks uses to find code spans. Without a
-        backtick-adjacency backstop, that mis-pairing steals one of
-        `[[BR]]`'s own delimiters, leaving the macro's literal backticks
-        in place but the macro itself unshielded and corrupted into a
-        hard break -- the exact `auto_pm` Meta/PageConventions symptom
-        from ticket #43. Minimal case, matching the ticket's own repro.
-        """
-        result = tracwiki_to_markdown(
-            "Note: it`s odd. Then `[[BR]]` appears."
-        )
-        self.assertEqual(
-            result.text, "Note: it`s odd. Then `[[BR]]` appears."
-        )
-
-    def test_ticket_43_br_minimal_case(self):
-        """The ticket's literal minimal-case fixture round-trips."""
-        result = tracwiki_to_markdown("a `[[BR]]` b")
-        self.assertEqual(result.text, "a `[[BR]]` b")
-
-    def test_ticket_43_unknown_macro_in_code_span_survives_unbalanced_backtick(
-        self,
-    ):
-        """The same backstop applies to any `[[...]]` macro, not just
-        `[[BR]]` -- the ticket's remediation section calls this out
-        explicitly.
-        """
-        result = tracwiki_to_markdown(
-            "Note: it`s odd. Then `[[TOC]]` appears."
-        )
-        self.assertEqual(
-            result.text, "Note: it`s odd. Then `[[TOC]]` appears."
-        )
-
-    def test_ticket_43_br_adjacent_to_unrelated_closing_backtick_still_converts(
-        self,
-    ):
-        """The backtick-adjacency backstop must require backticks on
-        *both* sides -- `[[BR]] legitimately follows the closing backtick
-        of a *different*, preceding code span with no space in between
-        (ticket #30's own fixture), and that must still convert to a hard
-        break rather than being mistaken for being wrapped itself.
-        """
-        result = tracwiki_to_markdown("`substrate:trac`[[BR]]Next")
-        self.assertEqual(result.text, "`substrate:trac`  \nNext")
-
-    def test_ticket_46_td_processor_token_in_code_span_survives(self):
-        """A `{{{#!td}}}` token meant as a literal code span example must
-        not be rewritten to pipes before the code-span stash recognizes
-        it -- the read-path counterpart of ticket #45. Its siblings
-        `{{{#!div}}}`/`{{{#!table}}}` already survived this because
-        nothing converts them ahead of the code-span stash; `#!td`/`#!th`
-        needed the same backtick-adjacency backstop _convert_macros uses.
-        """
-        result = tracwiki_to_markdown("Example: `{{{#!td}}}` token.")
-        self.assertEqual(result.text, "Example: `{{{#!td}}}` token.")
-
-    def test_ticket_46_th_processor_token_in_code_span_survives(self):
-        result = tracwiki_to_markdown("Example: `{{{#!th}}}` token.")
-        self.assertEqual(result.text, "Example: `{{{#!th}}}` token.")
-
-    def test_ticket_46_td_with_content_in_code_span_survives(self):
-        result = tracwiki_to_markdown("`{{{#!td some text}}}` example")
-        self.assertEqual(result.text, "`{{{#!td some text}}}` example")
-
-    def test_ticket_46_real_td_processor_cell_still_handled(self):
-        """Backstop must not disable genuine (non-backticked) #!td cells.
-
-        Ticket #46's guarantee is the *distinction* between a real processor
-        cell and one quoted in a code span, and that is what is asserted here.
-        Ticket #63 changed what "handled" means -- a real cell is now emitted
-        verbatim in a fallback fence and warned about, rather than rebuilt as
-        a one-column table that read back as a header cell -- so the old
-        assertion that the source token disappears no longer states the
-        guarantee.
-        """
-        real = tracwiki_to_markdown("{{{#!td\ncontent\n}}}")
-        self.assertIn("content", real.text)
-        self.assertIn(FALLBACK_FENCE_INFO, real.text)
-        self.assertTrue(real.warnings)
-
-        quoted = tracwiki_to_markdown("`{{{#!td}}}`")
-        self.assertEqual(quoted.text, "`{{{#!td}}}`")
-        self.assertNotIn(FALLBACK_FENCE_INFO, quoted.text)
-        self.assertFalse(quoted.warnings)
-
-
 class TestTicket72NestedBlockExtent(unittest.TestCase):
     """A ``{{{ }}}`` block nested inside another (ticket #72).
 
-    The lazy ``.*?`` in the old code-block regexes stopped at the *first*
-    ``}}}``, which is the inner block's, so the outer block's extent was
-    wrong from the start: the Markdown fence closed before the content did
-    and the outer ``}}}`` was left outside it, reading as body text.  The
-    round trip recovered the content but gained a blank line where that
-    stray brace had become its own paragraph, which cost the zero-diff pass
-    criterion the whole-body replacement procedure on
-    ``Rules/trac/DeclareSourceFormat`` depends on.
-
     A nested block is *content*: Trac renders the outer block verbatim, so
     the inner delimiters are literal text and belong inside the fence
-    unchanged.  That is the same rule ``_fallback_processor_blocks`` already
-    applies ("only a block at top level qualifies", ticket #51).
-
-    Both halves are asserted.  The round trip alone would pass a fix that
-    merely papered over the malformed intermediate, so the Markdown is
-    pinned exactly -- that is the only place the misplaced brace is visible.
+    unchanged.  A Markdown fence holding them converts to the outer block
+    with the inner delimiters untouched.
     """
 
-    # (label, tracwiki source, expected Markdown)
+    # (label, expected TracWiki, Markdown source)
     NESTED = [
         (
             "#!lang inside #!lang",
@@ -2847,110 +1932,34 @@ class TestTicket72NestedBlockExtent(unittest.TestCase):
         ),
     ]
 
-    def test_inner_delimiters_stay_inside_the_fence(self):
-        """The malformed intermediate, asserted directly."""
-        for label, src, expected_md in self.NESTED:
+    def test_the_fence_converts_to_the_nested_block(self):
+        for label, expected, md in self.NESTED:
             with self.subTest(label):
-                md = tracwiki_to_markdown(src).text
-                self.assertEqual(md, expected_md)
-
-    def test_nothing_follows_the_closing_fence(self):
-        """The symptom in isolation: a brace outside the code block.
-
-        Stated separately from the exact-Markdown assertion because this is
-        the property that actually broke -- an expected string can be
-        updated to match whatever the converter emits, a structural claim
-        about where the block ends cannot.
-        """
-        for label, src, _ in self.NESTED:
-            with self.subTest(label):
-                md = tracwiki_to_markdown(src).text
-                opener = md.split("\n", 1)[0]
-                fence = "`" * (len(opener) - len(opener.lstrip("`")))
-                self.assertTrue(md.endswith("\n" + fence), md)
-                self.assertEqual(md.count("\n" + fence), 1, md)
-
-    def test_round_trip_is_byte_identical(self):
-        for label, src, _ in self.NESTED:
-            with self.subTest(label):
-                md = tracwiki_to_markdown(src).text
-                self.assertNotIn("\x00", md)
-                self.assertEqual(markdown_to_tracwiki(md), src)
-
-    def test_no_fallback_fires_on_a_nested_block(self):
-        """A nested `#!comment` is quoted source, not a construct (#51)."""
-        for label, src, _ in self.NESTED:
-            with self.subTest(label):
-                result = tracwiki_to_markdown(src)
-                self.assertNotIn(FALLBACK_FENCE_INFO, result.text)
-                self.assertEqual(result.warnings, [])
+                out = markdown_to_tracwiki(md)
+                self.assertNotIn("\x00", out)
+                self.assertEqual(out, expected)
 
     def test_three_levels_deep(self):
-        """Depth is counted, not guessed: only the outermost block converts."""
+        """Depth is counted, not guessed: only the outermost fence converts."""
         src = "{{{\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n}}}"
-        md = tracwiki_to_markdown(src).text
-        self.assertEqual(
-            md, "```\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n```"
-        )
+        md = "```\na\n{{{\nb\n{{{\nc\n}}}\nd\n}}}\ne\n```"
         self.assertEqual(markdown_to_tracwiki(md), src)
 
-    def test_an_indented_closing_brace_closes_its_own_block(self):
-        """The other half of "the extent is wrong from the start".
+    def test_a_quoted_backtick_fence_in_a_nested_body_stays_literal(
+        self,
+    ):
+        """A four-backtick fence whose body holds a quoted three-backtick
+        fence inside a nested ``{{{ }}}`` block (ticket #51's fence
+        collision).
 
-        Trac lets the closing ``}}}`` carry indentation; the old regex
-        demanded a bare ``\\n}}}``, and rather than decline the block it
-        went looking for the next one *anywhere in the document* and
-        swallowed everything up to it.  Measured on master with this very
-        fixture: one fence opened at ``[components]`` and did not close
-        until the second block, taking the prose and the second block's
-        opener into the code with it.
-
-        Found by sweeping the two live stores rather than by reasoning:
-        the stock ``TracReports`` and ``TracInterfaceCustomization`` pages
-        both indent a processor block, and both had ~80-line runs
-        swallowed this way.
-
-        The round trip normalises rather than preserving here -- the
-        block loses its own indent, and gains ticket #53's blank line
-        before the following paragraph -- so this asserts the Markdown,
-        where the swallowing was.
-        """
-        src = (
-            "  {{{#!ini\n"
-            "  [components]\n"
-            "  }}}\n"
-            "Prose between the blocks.\n"
-            "{{{\nsecond\n}}}"
-        )
-        md = tracwiki_to_markdown(src).text
-        self.assertEqual(
-            md,
-            "  ```ini\n"
-            "  [components]\n"
-            "```\n"
-            "Prose between the blocks.\n"
-            "```\nsecond\n```",
-        )
-
-    def test_backticks_in_a_nested_body_still_widen_the_fence(self):
-        """`_fence_for` still sizes the fence against the *whole* body.
-
-        The body it measures is now the outer block's true extent, so a
-        backtick run inside the nested block counts -- the fence collision
-        ticket #51 fixed cannot come back through the wider capture.
-
-        This row used not to round-trip: `markdown_to_tracwiki` rewrote
-        the quoted ```` ``` ```` fence back into a `{{{ }}}` block on the
-        way out, corrupting content the author quoted on purpose (ticket
-        #88, fixed by deleting the helper that did the rewriting -- see
-        test_converter_nested_fence_restore.py for that ticket's own
-        seeds). It round-trips byte-for-byte now.
+        `markdown_to_tracwiki` used to rewrite the quoted ```` ``` ```` fence
+        into a `{{{ }}}` block, corrupting content the author quoted on
+        purpose (ticket #88, fixed by deleting the helper that did the
+        rewriting -- see test_converter_nested_fence_restore.py for that
+        ticket's own seeds). The quoted fence stays literal.
         """
         src = "{{{\nouter\n{{{\n```\ninner\n```\n}}}\n}}}"
-        md = tracwiki_to_markdown(src).text
-        self.assertEqual(
-            md, "````\nouter\n{{{\n```\ninner\n```\n}}}\n````"
-        )
+        md = "````\nouter\n{{{\n```\ninner\n```\n}}}\n````"
         self.assertEqual(markdown_to_tracwiki(md), src)
 
 
@@ -3006,16 +2015,11 @@ class TestBracketedProseNotRewritten(unittest.TestCase):
 
     The reported symptom was ``[auto-pm: state NEEDS_EDIT]`` being rewritten
     as ``[state NEEDS_EDIT](auto-pm:)`` — note the empty URL. The ticket named
-    ``markdown_to_tracwiki``, but the rewrite actually happened in
-    ``tracwiki_to_markdown``'s ``[target label]`` matcher.
+    ``markdown_to_tracwiki``; the rewrite happened in the reverse converter,
+    since removed, so only this direction is pinned here.
     """
 
     SENTINEL = "[auto-pm: state NEEDS_EDIT]"
-
-    def test_sentinel_preserved_tracwiki_to_markdown(self):
-        """The direction that actually carried the bug."""
-        result = tracwiki_to_markdown(self.SENTINEL)
-        self.assertEqual(result.text, self.SENTINEL)
 
     def test_sentinel_preserved_markdown_to_tracwiki(self):
         """The direction the ticket named; already correct, pinned here."""
@@ -3023,90 +2027,55 @@ class TestBracketedProseNotRewritten(unittest.TestCase):
             markdown_to_tracwiki(self.SENTINEL).strip(), self.SENTINEL
         )
 
-    def test_sentinel_survives_full_round_trip(self):
-        """md -> tw -> md leaves the marker byte-identical."""
-        once = markdown_to_tracwiki(self.SENTINEL)
-        twice = tracwiki_to_markdown(once)
-        self.assertEqual(twice.text.strip(), self.SENTINEL)
 
-    def test_generic_colon_prose_preserved(self):
-        """Any '[word: word]' construct, not just auto-pm markers."""
-        for text in ("[note: see below]", "[TODO: fix this]"):
-            with self.subTest(text=text):
-                self.assertEqual(tracwiki_to_markdown(text).text, text)
+class TestFootnoteRejection(unittest.TestCase):
+    """A Markdown footnote pair is refused, not silently destroyed (#63)."""
 
-    def test_real_links_still_convert(self):
-        """Regression guard: valid targets are unaffected."""
-        self.assertEqual(
-            tracwiki_to_markdown(
-                "[https://example.com Link Text]"
-            ).text,
-            "[Link Text](https://example.com)",
-        )
-        self.assertEqual(
-            tracwiki_to_markdown("[wiki:WikiPage Wiki Link]").text,
-            "[Wiki Link](wiki:WikiPage)",
-        )
+    def test_write_leg_rejects_a_destructive_footnote(self):
+        """Unrepresentable *Markdown* fails the call (ticket #63, option c).
 
+        Measured as a "before": the definition line was deleted outright and
+        the reference became a wiki link to a page named after the note text,
+        silently.
 
-class TestOrphanBracketDoesNotSpanLines(unittest.TestCase):
-    """Ticket #14: '[text]' must not consume a '(url)' on a later line.
+        A footnote is not a block: its reference and its definition sit in
+        different places, so wrapping either half alone breaks the pairing.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            markdown_to_tracwiki("Text[^1]\n\n[^1]: note\n")
+        message = str(ctx.exception)
+        self.assertIn("[^1]", message)
+        # The escape hatch must be in the message; a hard failure with no way
+        # forward is worse than the silent loss it replaces.
+        self.assertIn("tracwiki", message)
 
-    The old matcher used ``\\S+`` for the target (which matches ``]`` and
-    ``(``) and ``\\s+`` for the separator (which matches newlines), so a
-    complete link on one line plus an orphan bracket on the next collapsed
-    into a single mangled construct. As with #13, the ticket named
-    ``markdown_to_tracwiki`` but the defect was in ``tracwiki_to_markdown``.
-    """
+    def test_write_leg_footnote_rejection_stays_narrow(self):
+        """The recall gate: only the destructive PAIR may fail the call.
 
-    BLOCK = (
-        "[file1.diff](attachment:file1.diff)\n"
-        "[attachment:file2.diff]\n"
-        "(claude-code:sonnet)\n"
-    )
-
-    def test_each_line_renders_independently(self):
-        """No construct spans a line break."""
-        result = tracwiki_to_markdown(self.BLOCK).text
-        lines = result.strip().splitlines()
-        self.assertEqual(len(lines), 3)
-        self.assertEqual(
-            lines[0], "[file1.diff](attachment:file1.diff)"
-        )
-        self.assertEqual(lines[1], "<attachment:file2.diff>")
-        self.assertEqual(lines[2], "(claude-code:sonnet)")
-
-    def test_no_nested_mush(self):
-        """The reported mangled output must not reappear."""
-        result = tracwiki_to_markdown(self.BLOCK).text
-        self.assertNotIn("[[", result)
-        self.assertNotIn("](file1.diff]", result)
-
-    def test_orphan_bracket_then_parenthetical(self):
-        """Minimal case: orphan '[foo]' then '(bar)' on the next line."""
-        result = tracwiki_to_markdown("[foo]\n(bar)\n").text
-        lines = result.strip().splitlines()
-        self.assertEqual(lines[0], "<foo>")
-        self.assertEqual(lines[1], "(bar)")
-
-    def test_target_cannot_swallow_closing_bracket(self):
-        """A target may not contain ']' — that was the swallow vector."""
-        result = tracwiki_to_markdown("[wiki:A a] [wiki:B b]").text
-        self.assertEqual(result, "[a](wiki:A) [b](wiki:B)")
-
-    def test_single_line_link_still_converts(self):
-        """Regression guard: the ordinary form is untouched."""
-        self.assertEqual(
-            tracwiki_to_markdown("[wiki:Page label]").text,
-            "[label](wiki:Page)",
-        )
-
-    def test_attachment_block_round_trips(self):
-        """tw -> md -> tw returns the orphan bracket unchanged."""
-        as_md = tracwiki_to_markdown(self.BLOCK).text
-        back = markdown_to_tracwiki(as_md)
-        self.assertIn("[attachment:file2.diff]", back)
-        self.assertIn("(claude-code:sonnet)", back)
+        Measured on ticket #63 -- a reference alone and a definition alone
+        both pass through untouched, so neither is destructive and neither
+        may be rejected.  The quoted forms matter most: this check runs
+        before the converter's own code-span stashing, so it has to do its
+        own shielding or it fires on syntax the author quoted rather than
+        wrote.
+        """
+        harmless = [
+            ("reference with no definition", "Text[^1] alone\n"),
+            ("definition with no reference", "[^1]: orphan note\n"),
+            (
+                "both, quoted in code spans",
+                "Use `[^1]` and `[^1]:` here\n",
+            ),
+            (
+                "both, inside a fenced block",
+                "```\nText[^1]\n\n[^1]: note\n```\n",
+            ),
+            ("bracketed caret in prose", "An array like a[^b] maybe\n"),
+            ("ordinary prose", "Just some text.\n"),
+        ]
+        for label, src in harmless:
+            with self.subTest(label):
+                markdown_to_tracwiki(src)  # must not raise
 
 
 if __name__ == "__main__":
