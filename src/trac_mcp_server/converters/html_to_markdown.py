@@ -3,9 +3,10 @@
 ``trac_html_to_markdown`` turns the HTML Trac renders for a wiki page,
 ticket description or comment into Markdown. It is a subclass of
 markdownify's ``MarkdownConverter`` that overrides only what is
-Trac-specific; everything else is markdownify's own mapping. Nothing
-calls it yet (that is #210): it exists with its tests and its golden
-files, and the old TracWiki -> Markdown read leg is untouched.
+Trac-specific; everything else is markdownify's own mapping. It is the
+only TracWiki -> Markdown path: `wiki_file_pull`, `trac-mcp wiki-pull`
+and `trac-convert` call it (#210), and the regex read leg it replaced
+was deleted in #214.
 
 The rules come from #208's measurements of 2,542 real documents:
 
