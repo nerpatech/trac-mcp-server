@@ -2224,12 +2224,18 @@ def test_live_stdin_tracwiki_to_md_renders_through_trac_test(
     test_url = trac_test_url()
     monkeypatch.setenv("TRAC_URL", test_url)
 
+    # --link-map maps the whole instance URL, so an in-page anchor
+    # (Trac renders [#Linkrow x] as "<trac_url>#Linkrow" here, #213)
+    # would come out rewritten unless it is recognised as in-page.
     rc = _main_with_stdin(
-        ["--from", "tracwiki", "--to", "md", "--trac-url", test_url],
+        ["--from", "tracwiki", "--to", "md", "--trac-url", test_url]
+        + ["--link-map", f"{test_url}=https://blog.example"],
         "= Stdin row =\n"
         "\n"
         " * Outer item\n"
         "   * Nested item\n"
+        "\n"
+        "See [#Linkrow x].\n"
         "\n"
         "{{{#!python\n"
         "def f(x):\n"
@@ -2244,6 +2250,7 @@ def test_live_stdin_tracwiki_to_md_renders_through_trac_test(
         r"^- Outer item\n +[*-] Nested item$", out, re.M
     ), out
     assert "```python\ndef f(x):\n    return x + 1\n```" in out
+    assert "[x](#Linkrow)" in out, out
 
 
 def test_classifying_a_fault_does_not_import_the_mcp_tools():

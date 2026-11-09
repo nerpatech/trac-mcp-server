@@ -71,7 +71,7 @@ export:
 
 - A link target (`href`) that starts with `from` has that prefix replaced by `to`. When several rules match, the **longest** `from` wins, whatever the order of the list.
 - The link text is never changed: `[https://trac.example.com/wiki/A](https://blog.example/A)` keeps the original URL as its label.
-- **Image sources** (`src`) are never rewritten (images and attachments are a separate ticket, #215), and neither is an in-page anchor: a target starting with `#` is left alone whatever the rules say.
+- **Image sources** (`src`) are never rewritten (images and attachments are a separate ticket, #215), and neither is an in-page anchor. Trac renders `[#Heading x]` as the document's own URL plus the fragment (`<trac_url>/wiki/<page>#Heading` for a page, `<trac_url>#Heading` for text rendered with no page), so a link whose URL before the `#` is the document's own (compared after percent-decoding, ignoring one trailing `/`) and that has a fragment is written `#Heading` and left alone, as is a bare `#Heading`, with or without rules. A link to the same page with no fragment, or to another page with one, is an ordinary link and is rewritten.
 - `from` must be a non-empty string, `to` a string (it may be empty), and two rules may not share a `from`. A bad entry fails config loading, naming it (`export.link_rewrites[1]`).
 - `TRAC_MCP_LINK_REWRITES` replaces the list whole: whitespace-separated `FROM=TO` pairs, each split at the first `=`. Set to an empty value, it clears the list. It cannot express a prefix that contains whitespace; use the YAML list for that. A pair with no `=` is refused at startup.
 - Precedence is the same as for other settings: environment variable (or `.env`) over YAML over none.

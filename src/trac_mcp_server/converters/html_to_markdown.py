@@ -27,6 +27,7 @@ import copy
 import re
 import string
 import textwrap
+from urllib.parse import unquote
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import (
@@ -461,11 +462,15 @@ class _TracConverter(MarkdownConverter):
         link_map: dict[str, str] | None,
         keep_toc: bool,
         deflist: str,
+        document_url: str | None = None,
     ):
         super().__init__(code_language_callback=self._pre_language)
         self._source = source
         self._link_map = sorted(
             (link_map or {}).items(), key=lambda kv: -len(kv[0])
+        )
+        self._document_url = (
+            unquote(document_url).rstrip("/") if document_url else None
         )
         self._keep_toc = keep_toc
         self._deflist = deflist
@@ -707,8 +712,8 @@ class _TracConverter(MarkdownConverter):
 
         Trac's chrome is removed (link and image attributes, a cell's
         text alignment, the classes of covered tags, ``missing`` links),
-        ``link_map`` is applied to every ``href`` (never to a ``src``)
-        and nothing else changes. A blank line would end a Markdown HTML
+        ``link_map`` is applied to every ``href`` (never to a ``src``), an
+        in-page anchor is written as ``#frag``, and nothing else changes. A blank line would end a Markdown HTML
         block, so none is left in the markup.
         """
         el = copy.copy(el)
@@ -763,16 +768,44 @@ class _TracConverter(MarkdownConverter):
 
     # --- links and images ------------------------------------------------
 
-    def _map_url(self, url):
-        """Apply ``link_map`` to one ``href``, longest prefix first.
+    def _in_page_anchor(self, url: str) -> str | None:
+        """``#frag`` when ``url`` points into this document, else None.
 
-        An in-page anchor (``#...``) is never rewritten, whatever the
-        map says. Images are not mapped at all (#215).
+        Trac renders ``[#Frag x]`` as ``<document URL>#Frag`` (the
+        page's own URL from ``getPageHTML``, the instance root from
+        ``wikiToHtml``), not as a bare ``#Frag``; bare ones come only
+        from macro output. Both are in-page. The URL before the ``#`` is
+        compared with ``document_url`` after unquoting, ignoring one
+        trailing ``/``, so Trac's percent-encoding of a page name still
+        matches. The same document with no fragment is an ordinary link.
         """
-        if url and not url.startswith("#"):
-            for prefix, replacement in self._link_map:
-                if url.startswith(prefix):
-                    return replacement + url[len(prefix) :]
+        base, sep, frag = url.partition("#")
+        if not sep:
+            return None
+        if base == "":
+            return url  # a bare "#frag" (or "#"), whatever the map says
+        if frag and (
+            self._document_url is not None
+            and unquote(base).rstrip("/") == self._document_url
+        ):
+            return f"#{frag}"
+        return None
+
+    def _map_url(self, url):
+        """The target of one ``href``: an in-page anchor as ``#frag``,
+        else ``link_map`` applied, longest prefix first.
+
+        An in-page anchor is never rewritten, whatever the map says.
+        Images are not mapped at all (#215).
+        """
+        if not url:
+            return url
+        anchor = self._in_page_anchor(url)
+        if anchor is not None:
+            return anchor
+        for prefix, replacement in self._link_map:
+            if url.startswith(prefix):
+                return replacement + url[len(prefix) :]
         return url
 
     def convert_a(self, el, text, parent_tags):
@@ -956,6 +989,7 @@ def trac_html_to_markdown(
     link_map: dict[str, str] | None = None,
     keep_toc: bool = False,
     deflist: str = "extra",
+    document_url: str | None = None,
 ) -> ConversionResult:
     """Convert the HTML Trac rendered for a document to Markdown.
 
@@ -966,13 +1000,24 @@ def trac_html_to_markdown(
             it, code blocks carry no language.
         link_map: URL prefix -> replacement prefix, applied to
             ``a[href]`` (also inside raw HTML), longest prefix first.
-            An in-page anchor (``#...``) and ``img[src]`` are never
-            rewritten.
+            An in-page anchor (see ``document_url``) and ``img[src]`` are
+            never rewritten.
         keep_toc: Keep the table of contents a ``[[PageOutline]]`` or
             ``[[TracGuideToc]]`` macro renders; it is dropped otherwise.
         deflist: ``"extra"`` writes a definition list as ``term`` /
             ``:   definition`` (Pandoc, PHP Markdown Extra); ``"bold"``
             writes a bold term followed by the definition paragraph.
+        document_url: The URL Trac gives the document itself (a wiki
+            page's ``<trac_url>/wiki/<page>``; for text rendered with no
+            page, the instance root ``<trac_url>``). A link whose URL
+            before its ``#`` equals it (compared unquoted, ignoring one
+            trailing ``/``) and has a fragment is an in-page anchor:
+            written as ``#frag`` and never passed through ``link_map``,
+            as is a bare ``#frag`` (what macro output gives). Trac
+            renders ``[#Frag x]`` as ``<document URL>#Frag``, so without
+            this only the bare form is recognised. A link to the same
+            document with no fragment, or to another page with one, is an
+            ordinary link.
 
     Returns:
         A ``ConversionResult`` whose warnings name every lossy mapping,
@@ -982,7 +1027,9 @@ def trac_html_to_markdown(
         raise ValueError(
             f"deflist must be 'extra' or 'bold', not {deflist!r}"
         )
-    converter = _TracConverter(source, link_map, keep_toc, deflist)
+    converter = _TracConverter(
+        source, link_map, keep_toc, deflist, document_url
+    )
     text = converter.convert(html)
     return ConversionResult(
         text=text,

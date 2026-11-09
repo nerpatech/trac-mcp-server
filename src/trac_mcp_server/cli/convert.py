@@ -394,6 +394,16 @@ class _TracSession:
         self.explicit_link_map: LinkRewrites | None = None
         self._configured_link_map: LinkRewrites = ()
 
+    def document_url(self, page_name: str | None = None) -> str:
+        """The URL Trac gives the document being converted: the page's
+        own URL for ``--from-wiki PAGE``, the instance root for text
+        rendered with no page (``wikiToHtml``). A link into it with a
+        ``#fragment`` is an in-page anchor (Trac /trac_mcp_server #213).
+        """
+        self.client()
+        base = self.url.rstrip("/")
+        return base if page_name is None else f"{base}/wiki/{page_name}"
+
     def link_map(self) -> dict[str, str]:
         """The link-rewrite map TracWiki -> Markdown applies.
 
@@ -886,6 +896,7 @@ def convert_text(
     link_map: dict[str, str]
     | Callable[[], dict[str, str]]
     | None = None,
+    document_url: str | Callable[[], str | None] | None = None,
 ) -> ConversionResult:
     """Convert text between Markdown and TracWiki.
 
@@ -903,6 +914,11 @@ def convert_text(
         it, called after ``render_html`` so a map that comes from the
         Trac session's config can be read once that session is open.
         Ignored by every other direction.
+    document_url: the URL Trac gives the converted document
+        (``trac_html_to_markdown(document_url=)``), or a callable
+        returning it, called after ``render_html`` like ``link_map``.
+        A link into it with a fragment is written ``#frag`` and never
+        rewritten. Ignored by every other direction.
 
     Returns a ConversionResult (may be a pass-through with
     converted=False when source and target resolve to the same
@@ -949,6 +965,9 @@ def convert_text(
         html,
         text,
         link_map=link_map() if callable(link_map) else link_map,
+        document_url=(
+            document_url() if callable(document_url) else document_url
+        ),
     )
     # The translator reports the format it read (HTML); the caller's
     # input, and what --verbose reports, is TracWiki.
@@ -1184,6 +1203,7 @@ def main(argv: list[str] | None = None) -> int:
                 else session.render_text
             ),
             link_map=session.link_map,
+            document_url=lambda: session.document_url(args.from_wiki),
         )
     except TracConnectionRequired as e:
         sys.stderr.write(f"trac-convert: {e}\n")

@@ -300,6 +300,133 @@ def test_link_map_never_touches_an_in_page_anchor():
     assert "[Other](https://b.example/Other#Heading)" in out
 
 
+# In-page anchors. Real Trac renders ``[#Linkrow x]`` as the document's own
+# URL plus the fragment, not as a bare "#Linkrow": getPageHTML gives
+# "<trac_url>/wiki/<page>#Linkrow", wikiToHtml (no page) "<trac_url>#Linkrow".
+_ROOT = "http://trac.example.org:8000/trac_test"
+_PAGE_URL = f"{_ROOT}/wiki/Scratch/Ticket213Probe30feed0c"
+_BLOG = {f"{_ROOT}/": "https://blog.example/"}
+
+
+def _anchor(href, label="x"):
+    return f'<p><a class="wiki" href="{href}">{label}</a></p>'
+
+
+def test_page_url_plus_fragment_is_an_in_page_anchor():
+    out = md(
+        _anchor(f"{_PAGE_URL}#Linkrow"),
+        link_map=_BLOG,
+        document_url=_PAGE_URL,
+    )
+    assert out == "[x](#Linkrow)"
+
+
+def test_instance_root_plus_fragment_is_an_in_page_anchor():
+    # wikiToHtml has no page context: the document URL is the root.
+    out = md(
+        _anchor(f"{_ROOT}#Linkrow"), link_map=_BLOG, document_url=_ROOT
+    )
+    assert out == "[x](#Linkrow)"
+
+
+def test_in_page_anchor_is_written_relative_with_no_map_at_all():
+    out = md(_anchor(f"{_PAGE_URL}#Linkrow"), document_url=_PAGE_URL)
+    assert out == "[x](#Linkrow)"
+
+
+def test_in_page_anchor_ignores_one_trailing_slash_on_either_side():
+    html = _anchor(f"{_PAGE_URL}/#Linkrow")
+    assert md(html, document_url=_PAGE_URL) == "[x](#Linkrow)"
+    html = _anchor(f"{_PAGE_URL}#Linkrow")
+    assert md(html, document_url=f"{_PAGE_URL}/") == "[x](#Linkrow)"
+
+
+@pytest.mark.parametrize(
+    ("href_name", "document_name"),
+    [
+        ("Scratch/Page%20Two", "Scratch/Page Two"),
+        ("Scratch/Page Two", "Scratch/Page%20Two"),
+        ("Scratch/Caf%C3%A9", "Scratch/Café"),
+        ("Scratch/Café", "Scratch/Caf%C3%A9"),
+    ],
+)
+def test_in_page_anchor_matches_across_percent_encoding(
+    href_name, document_name
+):
+    href = f"{_ROOT}/wiki/{href_name}#Top"
+    out = md(
+        _anchor(href),
+        link_map=_BLOG,
+        document_url=f"{_ROOT}/wiki/{document_name}",
+    )
+    assert out == "[x](#Top)"
+
+
+def test_same_page_without_a_fragment_is_an_ordinary_link():
+    out = md(_anchor(_PAGE_URL), link_map=_BLOG, document_url=_PAGE_URL)
+    assert (
+        out
+        == "[x](https://blog.example/wiki/Scratch/Ticket213Probe30feed0c)"
+    )
+
+
+def test_same_page_with_an_empty_fragment_is_an_ordinary_link():
+    out = md(
+        _anchor(f"{_PAGE_URL}#"), link_map=_BLOG, document_url=_PAGE_URL
+    )
+    assert out.startswith("[x](https://blog.example/wiki/")
+
+
+def test_another_page_with_a_fragment_is_an_ordinary_link():
+    # What [wiki:WikiStart#Top other] renders to, in both calls.
+    href = f"{_ROOT}/wiki/WikiStart#Top"
+    for document_url in (_PAGE_URL, _ROOT):
+        out = md(
+            _anchor(href, "other"),
+            link_map=_BLOG,
+            document_url=document_url,
+        )
+        assert out == "[other](https://blog.example/wiki/WikiStart#Top)"
+
+
+def test_a_page_whose_name_extends_the_documents_is_another_page():
+    href = f"{_PAGE_URL}Two#Top"
+    out = md(_anchor(href), link_map=_BLOG, document_url=_PAGE_URL)
+    assert (
+        out
+        == "[x](https://blog.example/wiki/Scratch/Ticket213Probe30feed0cTwo#Top)"
+    )
+
+
+def test_without_document_url_only_a_bare_anchor_counts():
+    html = (
+        f'<p><a href="{_PAGE_URL}#Linkrow">own</a> '
+        '<a href="#Linkrow">bare</a></p>'
+    )
+    out = md(html, link_map=_BLOG)
+    assert "[own](https://blog.example/wiki/Scratch/" in out
+    assert "[bare](#Linkrow)" in out
+
+
+def test_in_page_anchor_in_passed_through_html_is_relative_too():
+    html = (
+        '<table><tr><td colspan="2">'
+        f'<a href="{_PAGE_URL}#Linkrow">a</a> '
+        f'<a href="{_ROOT}/wiki/WikiStart#Top">b</a>'
+        "</td></tr></table>"
+    )
+    out = md(html, link_map=_BLOG, document_url=_PAGE_URL)
+    assert out.startswith("<table>")
+    assert 'href="#Linkrow"' in out
+    assert 'href="https://blog.example/wiki/WikiStart#Top"' in out
+
+
+def test_an_autolink_to_an_in_page_anchor_keeps_its_text():
+    url = f"{_PAGE_URL}#Linkrow"
+    out = md(_anchor(url, url), document_url=_PAGE_URL)
+    assert out == f"[{url}](#Linkrow)"
+
+
 def test_link_map_leaves_the_link_text_alone():
     # An autolink whose href is rewritten keeps its text: the original
     # URL is the label, the new URL the destination.

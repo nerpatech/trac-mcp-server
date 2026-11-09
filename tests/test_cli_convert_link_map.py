@@ -237,3 +237,58 @@ def test_help_describes_link_map(capsys):
     out = " ".join(capsys.readouterr().out.split())
     assert "--link-map FROM=TO" in out
     assert "TracWiki -> Markdown" in out
+
+
+# --- in-page anchors ------------------------------------------------------
+# Trac renders [#Linkrow x] as the document's own URL plus the fragment:
+# "<trac_url>#Linkrow" from wikiToHtml (text input), "<trac_url>/wiki/<page>
+# #Linkrow" from getPageHTML (--from-wiki).
+
+_ROOT = "https://trac.example.com"
+
+
+def _anchor_html(base):
+    return (
+        f'<p><a href="{base}#Linkrow">here</a> '
+        f'<a href="{_ROOT}/wiki/WikiStart#Top">other</a></p>\n'
+    )
+
+
+@pytest.mark.parametrize("flags", [[], ["--link-map", f"{_ROOT}=/b"]])
+def test_text_input_in_page_anchor_is_relative_and_unmapped(
+    trac, tmp_path, capsys, flags
+):
+    trac.wiki_to_html.return_value = _anchor_html(_ROOT)
+    assert _run_file(tmp_path, *flags) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "[here](#Linkrow)" in out
+    # another page with a fragment is an ordinary link
+    mapped = "/b" if flags else _ROOT
+    assert f"[other]({mapped}/wiki/WikiStart#Top)" in out
+
+
+@pytest.mark.parametrize("flags", [[], ["--link-map", f"{_ROOT}=/b"]])
+def test_from_wiki_in_page_anchor_is_relative_and_unmapped(
+    trac, capsys, flags
+):
+    trac.get_wiki_page_html.return_value = _anchor_html(
+        f"{_ROOT}/wiki/Some/Page"
+    )
+    rc = main(["--from-wiki", "Some/Page", "--to", "md", *flags])
+    assert rc == EXIT_OK
+    out = capsys.readouterr().out
+    assert "[here](#Linkrow)" in out
+    mapped = "/b" if flags else _ROOT
+    assert f"[other]({mapped}/wiki/WikiStart#Top)" in out
+
+
+def test_from_wiki_page_url_is_not_the_text_documents_url(trac, capsys):
+    # The root-plus-fragment form belongs to wikiToHtml; a page's own
+    # HTML links into the page, so the root form there is another link.
+    trac.get_wiki_page_html.return_value = _anchor_html(_ROOT)
+    rc = main(
+        ["--from-wiki", "Some/Page", "--to", "md"]
+        + ["--link-map", f"{_ROOT}=/b"]
+    )
+    assert rc == EXIT_OK
+    assert "[here](/b#Linkrow)" in capsys.readouterr().out

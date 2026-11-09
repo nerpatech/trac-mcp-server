@@ -674,8 +674,18 @@ async def _handle_pull(
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
+            # The page's own URL, as Trac renders a link into it
+            # ("[#Frag x]" is "<this>#Frag"): those are in-page anchors,
+            # written "#Frag" and never rewritten. client.config is the
+            # routed instance's, so the base is that instance's.
+            document_url = (
+                f"{client.config.trac_url.rstrip('/')}/wiki/{page_name}"
+            )
             conversion = trac_html_to_markdown(
-                html, content, link_map=as_dict(link_rewrites)
+                html,
+                content,
+                link_map=as_dict(link_rewrites),
+                document_url=document_url,
             )
             output_content = conversion.text
             converted = conversion.converted

@@ -1751,6 +1751,75 @@ class TestPullLinkRewrites:
         assert "link_rewrites_source" in tool.description
 
 
+class TestPullInPageAnchors:
+    """Trac renders ``[#Frag x]`` as ``<page URL>#Frag``; the pull writes
+    it ``#Frag`` and never rewrites it (Trac #213)."""
+
+    @staticmethod
+    def _client(trac_url, page, html_name):
+        client = _make_client()
+        client.config.trac_url = trac_url
+        client.get_wiki_page.return_value = "src"
+        client.get_wiki_page_info.return_value = {"version": 2}
+        base = trac_url.rstrip("/")
+        client.get_wiki_page_html.return_value = (
+            f'<p><a href="{base}/wiki/{html_name}#Linkrow">h</a> '
+            f'<a href="{base}/wiki/WikiStart#Top">o</a></p>\n'
+        )
+        return client
+
+    async def test_the_page_url_anchor_is_relative_and_unmapped(
+        self, tmp_path
+    ):
+        client = self._client(
+            "http://localhost/trac", "TestPage", "TestPage"
+        )
+        rules = [{"from": "http://localhost/trac/", "to": "https://b/"}]
+        result, text = await _pull(
+            client, tmp_path, link_rewrites=rules
+        )
+        assert "[h](#Linkrow)" in text
+        assert "[o](https://b/wiki/WikiStart#Top)" in text
+
+    async def test_the_document_url_is_the_routed_instances_wiki_url(
+        self, tmp_path
+    ):
+        # A per-instance config: another base, with a trailing slash.
+        seen = {}
+
+        def spy(html, source=None, **kw):
+            seen.update(kw)
+            return trac_html_to_markdown(html, source, **kw)
+
+        client = self._client(
+            "http://other.example/trac_two/", "TestPage", "TestPage"
+        )
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_file.trac_html_to_markdown",
+            spy,
+        ):
+            _, text = await _pull(client, tmp_path)
+        assert seen["document_url"] == (
+            "http://other.example/trac_two/wiki/TestPage"
+        )
+        assert "[h](#Linkrow)" in text
+
+    async def test_a_page_name_with_a_space_matches_trac_encoding(
+        self, tmp_path
+    ):
+        client = self._client(
+            "http://localhost/trac", "x", "Scratch/Page%20Two"
+        )
+        out = tmp_path / "out.md"
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "Scratch/Page Two", "file_path": str(out)},
+            client,
+        )
+        assert not result.isError
+        assert "[h](#Linkrow)" in out.read_text()
+
+
 class TestPushThroughConditionalPut:
     """wiki_file_push where the server has wiki.putPageIfVersion (Trac
     /trac_mcp_server #129): the push's existing conflict handling covers

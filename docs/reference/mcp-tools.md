@@ -1426,7 +1426,7 @@ The version named is the page's current version, re-read after the no-op, so whe
   ```
 
 **Implementation Notes:**
-- Link rewriting touches `href`s only (including those inside raw HTML the translator passes through); image `src`s and `#anchor` targets are never changed, and the link text is kept, so an autolink whose target is rewritten becomes `[original URL](new URL)`
+- Link rewriting touches `href`s only (including those inside raw HTML the translator passes through); image `src`s are never changed, a link into the page itself with a fragment (`<trac_url>/wiki/<page>#Heading`, how Trac renders `[#Heading x]`) is written `#Heading` and never rewritten, and the link text is kept, so an autolink whose target is rewritten becomes `[original URL](new URL)`
 - Markdown by default: Trac's rendered HTML for the page, translated (`wiki.getPageHTML`/`getPageHTMLVersion`), with code-block languages taken from the TracWiki source; use `format: "tracwiki"` to get raw content (no HTML is read)
 - For Markdown, the page's version is read first (`getPageInfo`) and the source and the HTML are fetched at that version, so a concurrent edit cannot mix versions
 - An inline result over the server's `max_inline_bytes` (default 5 MiB) is refused with a `validation_error`
