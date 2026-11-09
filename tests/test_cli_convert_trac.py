@@ -26,6 +26,7 @@ from trac_mcp_server.cli.convert import (
     EXIT_USAGE_ERROR,
     main,
 )
+from trac_mcp_server.converters.front_matter import split_front_matter
 from trac_mcp_server.core.client import TracClient
 
 # ---------------------------------------------------------------------------
@@ -533,7 +534,9 @@ def test_from_wiki_happy_path_prints_converted_markdown_to_stdout(
 
     assert result == EXIT_OK
     out = capsys.readouterr().out
-    assert out.startswith("# Heading")
+    # Ticket #212: an exported page starts with front matter.
+    assert out.startswith('---\ntitle: "Heading"\n')
+    assert split_front_matter(out)[1].startswith("# Heading")
     # The page's own HTML, not a render of its source, read at the
     # version the source was read at.
     mock_instance.get_wiki_page_html.assert_called_once_with(
@@ -815,7 +818,10 @@ def test_from_wiki_output_to_clipboard_writes_converted_text(
 
     assert result == EXIT_OK
     assert len(clipboard_calls) == 1
-    assert clipboard_calls[0].startswith("# Heading")
+    assert clipboard_calls[0].startswith('---\ntitle: "Heading"\n')
+    assert split_front_matter(clipboard_calls[0])[1].startswith(
+        "# Heading"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1641,8 +1647,8 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
     result1 = main(["--from-wiki", "SourcePage", "--to", "md"])
     assert result1 == EXIT_OK
     md_from_leg1 = capsys.readouterr().out
-    # Trac's HTML <h1> comes out as "# X"
-    assert md_from_leg1.lstrip().startswith("# ")
+    # Trac's HTML <h1> comes out as "# X", after the front matter.
+    assert split_front_matter(md_from_leg1)[1].startswith("# ")
     assert "Source Heading" in md_from_leg1
 
     # Edit: append a marker line to the MD.
@@ -1650,13 +1656,16 @@ def test_from_wiki_convert_edit_to_wiki_end_to_end_exercises_conversion(
 
     # Leg 2: convert md → tracwiki + put via --to-wiki, edited MD on stdin.
     monkeypatch.setattr("sys.stdin", io.StringIO(edited_md))
-    result2 = main(["--to-wiki", "DestPage", "--from", "md"])
+    # (--force: the export's front matter names SourcePage, so without
+    # it this conversion is refused, Trac #212.)
+    result2 = main(["--to-wiki", "DestPage", "--from", "md", "--force"])
     assert result2 == EXIT_OK
 
     put_args = mock_instance.put_wiki_page.call_args.args
     assert put_args[0] == "DestPage"
     # convert_with_warnings turns "# X" into "= X ="
     assert put_args[1].startswith("= ")
+    assert "trac_page" not in put_args[1]
     # The edited marker survives the md → tracwiki conversion.
     assert marker.strip() in put_args[1]
     # Default comment is the Phase 22 constant.
@@ -2329,7 +2338,7 @@ def test_from_wiki_md_reads_source_and_html_at_one_pinned_version(
 
     assert result == EXIT_OK
     captured = capsys.readouterr()
-    assert captured.out.startswith("# Heading")
+    assert split_front_matter(captured.out)[1].startswith("# Heading")
     assert captured.err == ""
     mock_instance.get_wiki_page_info.assert_called_once_with("MyPage")
     mock_instance.get_wiki_page.assert_called_once_with("MyPage", 7)
@@ -2357,7 +2366,7 @@ def test_from_wiki_md_without_a_usable_version_reads_unpinned_and_warns(
 
     assert result == EXIT_OK
     captured = capsys.readouterr()
-    assert captured.out.startswith("# Heading")
+    assert split_front_matter(captured.out)[1].startswith("# Heading")
     mock_instance.get_wiki_page.assert_called_once_with("MyPage", None)
     mock_instance.get_wiki_page_html.assert_called_once_with(
         "MyPage", None

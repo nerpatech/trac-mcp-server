@@ -1007,6 +1007,18 @@ class _TracConverter(MarkdownConverter):
         )
 
 
+def _page_title(html: str) -> str | None:
+    """The text of the first ``h1``, with Trac's heading decorations
+    (the anchor link and the icon span) left out; None when there is
+    none or it is empty."""
+    h1 = BeautifulSoup(html, "html.parser").find("h1")
+    if h1 is None:
+        return None
+    for el in h1.select("span.icon, span.wikianchor, a.anchor"):
+        el.decompose()
+    return " ".join(h1.get_text().split()) or None
+
+
 def trac_html_to_markdown(
     html: str,
     source: str | None = None,
@@ -1063,4 +1075,5 @@ def trac_html_to_markdown(
         target_format="markdown",
         converted=True,
         warnings=converter.warnings,
+        title=_page_title(html),
     )

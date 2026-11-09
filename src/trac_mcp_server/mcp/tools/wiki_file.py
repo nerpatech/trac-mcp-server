@@ -23,6 +23,12 @@ from ...converters.common import (
     detect_format_heuristic,
     find_code_block_indentation_loss,
 )
+from ...converters.front_matter import (
+    build_front_matter,
+    exported_from,
+    instance_path,
+    split_front_matter,
+)
 from ...converters.html_to_markdown import trac_html_to_markdown
 from ...converters.markdown_to_tracwiki import (
     describe_list_item_split,
@@ -77,7 +83,9 @@ WIKI_FILE_TOOLS = [
             "inspect with wiki_diff). The page was stored. Content "
             "identical to the stored page stores nothing and returns "
             'an "unchanged" result (structuredContent.action is '
-            '"unchanged"), not an error.'
+            '"unchanged"), not an error. Refuses text exported by '
+            "wiki_file_pull (front matter carrying trac_page) unless "
+            "force=true; edit such a page as TracWiki (wiki_get)."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
@@ -132,6 +140,16 @@ WIKI_FILE_TOOLS = [
                     "default": True,
                     "description": "Strip YAML frontmatter from .md files before pushing",
                 },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Push Markdown whose front matter says it was "
+                        "exported from Trac (carries trac_page). Without "
+                        "it such a push is refused: the Markdown export "
+                        "is one-way."
+                    ),
+                },
             },
             "required": ["page_name"],
         },
@@ -142,7 +160,10 @@ WIKI_FILE_TOOLS = [
             "Pull a Trac wiki page, converted to the requested format. "
             "Markdown is Trac's own rendered HTML for the page "
             "translated to Markdown: a one-way export, not meant to be "
-            'pushed back. format="html" is Trac\'s render as a complete '
+            "pushed back. A Markdown pull starts with YAML front matter "
+            "(title, source, trac_instance, trac_page, trac_version, "
+            "exported), and wiki_file_push refuses that text unless "
+            'force=true. format="html" is Trac\'s render as a complete '
             "minimal HTML document (links absolute, no CSS); "
             'format="tracwiki" returns the '
             "stored source verbatim. Translator warnings come back in "
@@ -279,21 +300,16 @@ WIKI_FILE_TOOLS = [
 ]
 
 
-_FRONTMATTER_RE = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
-
-
 def _strip_yaml_frontmatter(content: str) -> str:
     """Strip YAML frontmatter block from content.
 
-    Matches a block starting with ``---\\n`` at the beginning of the string,
-    ending with the next ``---\\n``.  Returns content with the block removed
-    and leading whitespace stripped.  If no frontmatter is found, returns
-    content unchanged.
+    A block is ``---`` on the first line (an optional BOM before it, LF
+    or CRLF line ends), at least one line, then ``---`` alone on a line
+    (followed by a line end or the end of the text). Returns content with
+    the block removed and leading line breaks stripped. If no frontmatter
+    is found, returns content unchanged.
     """
-    m = _FRONTMATTER_RE.match(content)
-    if m:
-        return content[m.end() :].lstrip("\n")
-    return content
+    return split_front_matter(content)[1]
 
 
 _PUSH_HINT = "trac-mcp wiki-push PAGE FILE"
@@ -335,6 +351,29 @@ async def _handle_push(
     if isinstance(source, types.CallToolResult):
         return source
     content, encoding, name, source_label = source
+
+    # Ticket #212: the Markdown export is one-way, so text whose front
+    # matter says it came from a Trac page is refused before anything
+    # else -- whatever the format or strip_frontmatter says, and with no
+    # Trac call -- unless the caller forces it.
+    exported = exported_from(content)
+    if exported and not args.get("force"):
+        page = exported["trac_page"]
+        instance = exported.get("trac_instance") or "unknown"
+        exported_version = exported.get("trac_version")
+        if exported_version is None:
+            exported_version = "unknown"
+        return build_error_response(
+            "validation_error",
+            f"Refusing to push: this Markdown was exported from Trac "
+            f"page '{page}' (instance {instance}, version "
+            f"{exported_version}); the Markdown export is one-way and "
+            "pushing it back would re-shape the page.",
+            f"Edit the page as TracWiki instead: "
+            f"wiki_get(page_name='{page}'), or `trac-mcp wiki-pull "
+            f"{page} FILE --format tracwiki`. To push this text anyway, "
+            "pass force=true (--force on trac-mcp wiki-push).",
+        )
 
     # Strip frontmatter
     if strip_fm:
@@ -770,7 +809,18 @@ async def _handle_pull(
                 link_map=as_dict(link_rewrites),
                 document_url=document_url,
             )
-            output_content = conversion.text
+            # Ticket #212: the export names its page, which is what the
+            # push refuses it by.
+            output_content = (
+                build_front_matter(
+                    title=conversion.title or page_name,
+                    source=document_url,
+                    trac_instance=instance_path(client.config.trac_url),
+                    trac_page=page_name,
+                    trac_version=pinned,
+                )
+                + conversion.text
+            )
             converted = conversion.converted
             warnings.extend(conversion.warnings)
         elif fmt == "html":

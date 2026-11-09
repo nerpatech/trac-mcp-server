@@ -302,7 +302,9 @@ class TestRealSubstrate:
         with _served(trac) as url:
             rc = _cli(url, "wiki-pull", "P", str(out))
         assert rc == cli.EXIT_OK
-        assert out.read_text().startswith("# T")
+        written = out.read_text()
+        assert written.startswith('---\ntitle: "T"\n')
+        assert "\n---\n\n# T" in written
         captured = capsys.readouterr()
         lines = [
             ln

@@ -232,7 +232,12 @@ class TestInlineText:
     async def test_pull_inline_markdown(self):
         result, _ = await _call("wiki_file_pull", {"page_name": "P"})
         assert result.isError is not True
-        assert result.structuredContent["content"].startswith("# Title")
+        content = result.structuredContent["content"]
+        # Ticket #212: a Markdown pull starts with front matter.
+        assert content.startswith('---\ntitle: "Title"\n')
+        assert 'trac_page: "P"\n' in content
+        assert 'trac_instance: "/trac"\n' in content
+        assert content.split("\n---\n\n", 1)[1].startswith("# Title")
         assert result.structuredContent["format"] == "markdown"
 
 

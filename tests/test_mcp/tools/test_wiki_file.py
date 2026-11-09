@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import mcp.types as types
 import pytest
 
+from trac_mcp_server.converters.front_matter import split_front_matter
 from trac_mcp_server.converters.html_to_markdown import (
     trac_html_to_markdown,
 )
@@ -1476,7 +1477,9 @@ class TestPullThroughTranslator:
         result, written = await _pull(_fixture_client(), tmp_path)
 
         assert not result.isError
-        assert written == expected.text
+        # Ticket #212: front matter, then the translator's output.
+        assert split_front_matter(written)[1] == expected.text
+        assert written.endswith("---\n\n" + expected.text)
         assert result.structuredContent["converted"] is True
 
     async def test_python_block_is_a_fenced_python_block(
@@ -2282,3 +2285,271 @@ class TestPushThroughConditionalPut:
             in text
         )
         assert methods == ["getPageInfo", "putPageIfVersion"]
+
+
+# =============================================================================
+# Front matter on a Markdown pull, and the push refusal (Trac #212)
+# =============================================================================
+
+_FM_HTML = (
+    '<h1 class="section" id="Hello">Hello Page'
+    '<a class="anchor" href="#Hello" title="Link to this section"> '
+    "\u00b6</a></h1>\n<p>\nBody text.\n</p>\n"
+)
+_FM_HTML_NO_H1 = '<h2 id="Sub">Sub</h2>\n<p>\nBody text.\n</p>\n'
+_ISO_Z = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"
+
+
+def _fm_client(html=_FM_HTML, info=None, trac_url="http://h:8000/proj"):
+    client = _make_client()
+    client.config.trac_url = trac_url
+    client.get_wiki_page.return_value = "= Hello Page =\n\nBody text.\n"
+    client.get_wiki_page_html.return_value = html
+    client.get_wiki_page_info.return_value = (
+        {"version": 7} if info is None else info
+    )
+    return client
+
+
+async def _fm_pull(client, tmp_path, **extra):
+    result, text = await _pull(client, tmp_path, **extra)
+    assert not result.isError, result.content
+    return text
+
+
+def _fm_block(text):
+    import yaml
+
+    assert text.startswith("---\n")
+    head, _, rest = text[4:].partition("\n---\n")
+    return yaml.safe_load(head), rest
+
+
+class TestPullFrontMatter:
+    """A Markdown pull starts with front matter naming its page (#212)."""
+
+    async def test_markdown_pull_starts_with_the_front_matter(
+        self, tmp_path
+    ):
+        import re
+
+        text = await _fm_pull(_fm_client(), tmp_path)
+
+        meta, rest = _fm_block(text)
+        assert list(meta) == [
+            "title",
+            "source",
+            "trac_instance",
+            "trac_page",
+            "trac_version",
+            "exported",
+        ]
+        assert meta["title"] == "Hello Page"
+        assert meta["source"] == "http://h:8000/proj/wiki/TestPage"
+        assert meta["trac_instance"] == "/proj"
+        assert meta["trac_page"] == "TestPage"
+        assert meta["trac_version"] == 7
+        assert re.fullmatch(_ISO_Z, meta["exported"])
+        # The raw text has the exported stamp as a quoted string.
+        assert re.search(rf'^exported: "{_ISO_Z}"$', text, re.M)
+        assert rest.startswith("\n# Hello Page")
+
+    async def test_the_markdown_after_the_block_is_the_translator_output(
+        self, tmp_path
+    ):
+        expected = trac_html_to_markdown(
+            _FM_HTML, "= Hello Page =\n\nBody text.\n"
+        )
+
+        text = await _fm_pull(_fm_client(), tmp_path)
+
+        assert text.endswith("---\n\n" + expected.text)
+
+    async def test_title_falls_back_to_the_page_name(self, tmp_path):
+        text = await _fm_pull(_fm_client(html=_FM_HTML_NO_H1), tmp_path)
+
+        meta, _ = _fm_block(text)
+        assert meta["title"] == "TestPage"
+
+    async def test_unpinned_version_is_null(self, tmp_path):
+        client = _fm_client(info={})
+
+        result, text = await _pull(client, tmp_path)
+
+        assert not result.isError
+        assert "\ntrac_version: null\n" in text
+        meta, _ = _fm_block(text)
+        assert meta["trac_version"] is None
+
+    async def test_asked_for_version_is_the_pinned_one(self, tmp_path):
+        client = _fm_client(info={})
+
+        result, text = await _pull(client, tmp_path, version=4)
+
+        assert not result.isError
+        meta, _ = _fm_block(text)
+        assert meta["trac_version"] == 4
+
+    @pytest.mark.parametrize("fmt", ["html", "tracwiki"])
+    async def test_other_formats_have_none(self, tmp_path, fmt):
+        client = _fm_client()
+
+        result, text = await _pull(client, tmp_path, format=fmt)
+
+        assert not result.isError
+        assert "trac_page" not in text
+        assert not text.startswith("---")
+
+    def test_tool_description_says_so(self):
+        pull = next(
+            s.tool
+            for s in WIKI_FILE_SPECS
+            if s.tool.name == "wiki_file_pull"
+        )
+        assert "front matter" in pull.description
+        assert "trac_page" in pull.description
+        assert "force=true" in pull.description
+
+
+_FM_EXPORT = (
+    "---\n"
+    'title: "Hello Page"\n'
+    'source: "http://h:8000/proj/wiki/TestPage"\n'
+    'trac_instance: "/proj"\n'
+    'trac_page: "TestPage"\n'
+    "trac_version: 7\n"
+    'exported: "2026-11-09T12:00:00Z"\n'
+    "---\n\n# Hello Page\n\nBody text.\n"
+)
+
+
+async def _fm_push(content, name="x.md", **extra):
+    client = _make_client()
+    client.get_wiki_page_info.return_value = {"version": 3}
+    client.put_wiki_page.return_value = {
+        "version": 4,
+        "name": "TestPage",
+    }
+    args = {"content": content, "page_name": "TestPage", **extra}
+    if name is not None:
+        args["filename"] = name
+    result = await _registry.call_tool("wiki_file_push", args, client)
+    return client, result
+
+
+class TestPushRefusesExportedMarkdown:
+    """Markdown whose front matter carries trac_page is refused (#212)."""
+
+    async def test_pulled_markdown_is_refused(self):
+        client, result = await _fm_push(_FM_EXPORT)
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (validation_error)" in text
+        assert "'TestPage'" in text
+        assert "instance /proj" in text
+        assert "version 7" in text
+        assert "one-way" in text
+        assert "wiki_get(page_name='TestPage')" in text
+        assert "force=true" in text
+        client.put_wiki_page.assert_not_called()
+        client.get_wiki_page_info.assert_not_called()
+        client.get_wiki_page.assert_not_called()
+
+    async def test_missing_instance_and_version_read_unknown(self):
+        content = '---\ntrac_page: "P"\n---\n\nBody\n'
+
+        client, result = await _fm_push(content)
+
+        assert result.isError
+        text = result.content[0].text
+        assert "instance unknown" in text
+        assert "version unknown" in text
+        client.put_wiki_page.assert_not_called()
+
+    async def test_refused_whatever_the_format(self):
+        client, result = await _fm_push(_FM_EXPORT, format="tracwiki")
+
+        assert result.isError
+        assert "Error (validation_error)" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
+    async def test_refused_without_stripping(self):
+        client, result = await _fm_push(
+            _FM_EXPORT, strip_frontmatter=False
+        )
+
+        assert result.isError
+        assert "Error (validation_error)" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
+    async def test_refused_from_a_server_file_too(self, tmp_path):
+        md = tmp_path / "x.md"
+        md.write_text(_FM_EXPORT)
+        client = _make_client()
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md), "page_name": "TestPage"},
+            client,
+        )
+
+        assert result.isError
+        client.put_wiki_page.assert_not_called()
+
+    async def test_force_pushes_it_without_the_front_matter(self):
+        client, result = await _fm_push(_FM_EXPORT, force=True)
+
+        assert not result.isError, result.content
+        assert result.structuredContent["version"] == 4
+        client.put_wiki_page.assert_called_once()
+        stored = client.put_wiki_page.call_args[0][1]
+        assert "trac_page" not in stored
+        assert not stored.startswith("---")
+        assert "Hello Page" in stored
+
+    async def test_plain_markdown_pushes_as_before(self):
+        client, result = await _fm_push("# Hello\n\nWorld\n")
+
+        assert not result.isError, result.content
+        client.put_wiki_page.assert_called_once()
+
+    async def test_hugo_front_matter_is_stripped_not_refused(self):
+        content = "---\ntitle: Post\ndate: 2026-01-01\n---\n\n# Hello\n\nWorld\n"
+
+        client, result = await _fm_push(content)
+
+        assert not result.isError, result.content
+        stored = client.put_wiki_page.call_args[0][1]
+        assert "date:" not in stored
+        assert "Hello" in stored
+
+    def test_schema_has_force_default_false(self):
+        push = next(
+            s.tool
+            for s in WIKI_FILE_SPECS
+            if s.tool.name == "wiki_file_push"
+        )
+        force = push.inputSchema["properties"]["force"]
+        assert force["type"] == "boolean"
+        assert force["default"] is False
+        assert "trac_page" in force["description"]
+        assert "force=true" in push.description
+
+
+class TestStripYamlFrontmatterForms:
+    """_strip_yaml_frontmatter is split_front_matter's remainder (#212)."""
+
+    def test_crlf(self):
+        assert _strip_yaml_frontmatter(
+            "---\r\nx: 1\r\n---\r\n# T\r\n"
+        ) == ("# T\r\n")
+
+    def test_bom(self):
+        assert (
+            _strip_yaml_frontmatter("\ufeff---\nx: 1\n---\n# T")
+            == "# T"
+        )
+
+    def test_closing_fence_at_end_of_text(self):
+        assert _strip_yaml_frontmatter("---\nx: 1\n---") == ""
