@@ -18,9 +18,9 @@ from .config_loader import (
     discover_config_files,
     load_hierarchical_config,
 )
-from .config_schema import ExportConfig, ServerConfig, build_config
+from .config_schema import ServerConfig, build_config
 from .instances import load_identities
-from .link_rewrites import LinkRewrites
+from .link_rewrites import LinkRewrites, validate_link_rewrites
 
 
 def bootstrap_config(
@@ -118,8 +118,11 @@ def load_local_link_rewrites() -> LinkRewrites | None:
     it finds the files the way every other command does
     (``discover_config_files``), merges them (``load_hierarchical_config``)
     and validates only the ``export`` section, so an unrelated broken
-    section never stops a pull. Neither the environment nor ``.env`` is
-    read.
+    section never stops a pull. ``.env`` is loaded first, as
+    ``bootstrap_config`` does, so a ``${VAR}`` in a rule resolves the
+    same here as for the daemon and ``trac-convert``. The
+    ``TRAC_MCP_LINK_REWRITES`` variable is not read: only the file's key
+    is.
 
     Returns:
         The rules, or ``None`` when no config file has the key (so the
@@ -130,10 +133,15 @@ def load_local_link_rewrites() -> LinkRewrites | None:
         ValueError: a config file cannot be read or parsed, its
             ``export`` section is not a mapping, or a rule is invalid.
     """
+    load_dotenv()
     try:
         raw = load_hierarchical_config()
     except Exception as e:
-        raise ValueError(f"cannot read the config file: {e}") from e
+        # A YAML error spans several lines; the CLI reports one.
+        detail = " ".join(str(e).split())
+        raise ValueError(
+            f"cannot read the config file: {detail}"
+        ) from e
     export = raw.get("export")
     if export is None:
         return None
@@ -145,10 +153,11 @@ def load_local_link_rewrites() -> LinkRewrites | None:
     if export.get("link_rewrites") is None:
         return None
     try:
-        parsed = ExportConfig(link_rewrites=export["link_rewrites"])
+        return validate_link_rewrites(
+            export["link_rewrites"], "export.link_rewrites"
+        )
     except ValueError as e:
         raise ValueError(f"invalid config file: {e}") from e
-    return tuple((r["from"], r["to"]) for r in parsed.link_rewrites)
 
 
 _BOOL_TRUE = frozenset({"true", "1", "yes", "on"})

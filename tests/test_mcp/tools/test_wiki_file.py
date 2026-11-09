@@ -1804,6 +1804,29 @@ class TestPullInPageAnchors:
         )
         assert "[h](#Linkrow)" in text
 
+    async def test_trac_url_host_may_differ_from_the_daemons(
+        self, tmp_path
+    ):
+        # The daemon reaches Trac at a LAN address; Trac builds its
+        # hrefs from its own public base URL. Only the path is compared.
+        client = self._client(
+            "http://10.0.0.5/auto_pm", "TestPage", "TestPage"
+        )
+        client.get_wiki_page_html.return_value = (
+            '<p><a href="https://trac.example/auto_pm/wiki/TestPage'
+            '#Sec">h</a> <a href="https://trac.example/auto_pm/wiki/'
+            'Other#Sec">o</a></p>\n'
+        )
+        rules = [
+            {
+                "from": "https://trac.example/auto_pm/wiki/",
+                "to": "https://b/",
+            }
+        ]
+        _, text = await _pull(client, tmp_path, link_rewrites=rules)
+        assert "[h](#Sec)" in text
+        assert "[o](https://b/Other#Sec)" in text
+
     async def test_a_page_name_with_a_space_matches_trac_encoding(
         self, tmp_path
     ):

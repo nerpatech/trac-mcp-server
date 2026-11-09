@@ -34,11 +34,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from .link_rewrites import (
-    LinkRewrites,
-    parse_env,
-    validate_link_rewrites,
-)
+from .link_rewrites import LinkRewrites, parse_env
 
 if TYPE_CHECKING:
     from .config_schema import ServerConfig
@@ -401,7 +397,9 @@ def load_config(
         insecure: Skip SSL verification (CLI flag).
         debug: Enable debug logging (CLI flag).
         yaml_fallbacks: Dict of values from YAML config file ``trac`` section.
-            Used as fallback when CLI arg and env var are both unset.
+            Used as fallback when CLI arg and env var are both unset. Its
+            ``link_rewrites`` key, when present, is the list of
+            ``{from, to}`` rules ``ExportConfig`` already validated.
 
     Returns:
         Validated Config instance.
@@ -582,14 +580,17 @@ def load_config(
 
     # Ticket #213: the environment replaces the YAML list whole, and a
     # set-but-empty variable clears it (unlike TRAC_ALLOWED_INSTANCES, an
-    # empty map is a meaningful answer: no rewriting). A malformed rule
-    # fails startup naming the variable or the YAML entry.
+    # empty map is a meaningful answer: no rewriting). A malformed env
+    # rule fails startup naming the variable; YAML rules were validated,
+    # naming the entry, by ExportConfig before they reach here.
     link_rewrites_raw = os.getenv("TRAC_MCP_LINK_REWRITES")
     if link_rewrites_raw is not None:
         final_link_rewrites = parse_env(link_rewrites_raw)
     elif "link_rewrites" in fb:
-        final_link_rewrites = validate_link_rewrites(
-            fb["link_rewrites"], "export.link_rewrites"
+        # Already validated by ExportConfig (config_bootstrap hands over
+        # its list); validating again here would give two owners.
+        final_link_rewrites = tuple(
+            (rule["from"], rule["to"]) for rule in fb["link_rewrites"]
         )
     else:
         final_link_rewrites = ()

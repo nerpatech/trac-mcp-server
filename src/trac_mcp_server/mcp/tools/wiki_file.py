@@ -214,7 +214,9 @@ WIKI_FILE_TOOLS = [
                         "first). Replaces the server's configured map "
                         "for this call; [] disables rewriting. Image "
                         "sources and in-page #anchors are never "
-                        "rewritten. Ignored for format=tracwiki."
+                        "rewritten. The schema refuses an empty `from` "
+                        "or an extra key; a duplicate `from` is a "
+                        "validation_error. Ignored for format=tracwiki."
                     ),
                 },
             },

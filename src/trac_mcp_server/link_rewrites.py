@@ -13,6 +13,7 @@ This module imports nothing from the package: config.py, config_schema.py,
 the tool and both CLIs all import it.
 """
 
+import argparse
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -85,6 +86,20 @@ def parse_pair(text: str, where: str) -> dict[str, str]:
             f"{where}: {text!r} is not FROM=TO (no '=' in it)"
         )
     return {"from": source, "to": target}
+
+
+def link_map_arg(value: str) -> str:
+    """argparse ``type=`` of both CLIs' ``--link-map FROM=TO``.
+
+    Checks only that ``value`` has an ``=`` (a missing one is an argparse
+    usage error, exit 2) and returns it unchanged; ``parse_pairs`` splits
+    and validates the collected values once all flags are read.
+    """
+    try:
+        parse_pair(value, "--link-map")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return value
 
 
 def parse_pairs(

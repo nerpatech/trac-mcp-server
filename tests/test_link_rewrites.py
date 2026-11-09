@@ -196,13 +196,14 @@ def test_a_bad_environment_value_fails_startup(trac_env, monkeypatch):
         load_config()
 
 
-def test_a_bad_yaml_fallback_fails_startup_naming_the_entry(trac_env):
-    with pytest.raises(ValueError, match=r"export\.link_rewrites\[1\]"):
-        load_config(
-            yaml_fallbacks={
-                "link_rewrites": [A, {"from": "", "to": "x"}]
-            }
-        )
+def test_load_config_takes_the_validated_yaml_rules_as_they_are(
+    trac_env,
+):
+    # ExportConfig owns YAML validation (and its error label,
+    # export.link_rewrites, is tested through build_config and
+    # bootstrap_config); load_config does not check them a second time.
+    cfg = load_config(yaml_fallbacks={"link_rewrites": [A]})
+    assert cfg.link_rewrites == ((A["from"], A["to"]),)
 
 
 def test_per_instance_configs_carry_the_map(trac_env, monkeypatch):
@@ -335,3 +336,48 @@ def test_local_read_of_a_broken_file_is_a_value_error(
     _write_config(isolated_config, body)
     with pytest.raises(ValueError, match=message):
         load_local_link_rewrites()
+
+
+def test_local_read_error_is_one_line_naming_the_entry(isolated_config):
+    _write_config(
+        isolated_config,
+        "export:\n  link_rewrites:\n    - {from: a, to: b}\n"
+        "    - {from: '', to: c}\n",
+    )
+    with pytest.raises(ValueError) as exc:
+        load_local_link_rewrites()
+    assert str(exc.value) == (
+        "invalid config file: export.link_rewrites[1] 'from' must not "
+        "be empty"
+    )
+
+
+def test_local_read_loads_dotenv_so_interpolation_resolves(
+    isolated_config, monkeypatch
+):
+    """``${VAR}`` in a rule reads the environment, and trac-mcp never
+    loaded .env: ``${LINKREWRITE_BASE}/wiki/`` became ``/wiki/``."""
+    import dotenv
+
+    env_file = isolated_config / "rules.env"
+    env_file.write_text("LINKREWRITE_BASE=https://trac.example\n")
+    # isolated_config disables .env; enable it for this file only. The
+    # real load_dotenv finds .env from the module's directory, so point
+    # it at the tmp file. setenv then delenv records "unset" so the
+    # variable load_dotenv sets is removed at teardown.
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setenv("LINKREWRITE_BASE", "x")
+    monkeypatch.delenv("LINKREWRITE_BASE")
+    monkeypatch.setattr(
+        "trac_mcp_server.config_bootstrap.load_dotenv",
+        lambda: dotenv.load_dotenv(dotenv_path=env_file),
+    )
+    _write_config(
+        isolated_config,
+        "export:\n  link_rewrites:\n"
+        "    - from: ${LINKREWRITE_BASE}/wiki/\n"
+        "      to: https://blog.example/\n",
+    )
+    assert load_local_link_rewrites() == (
+        ("https://trac.example/wiki/", "https://blog.example/"),
+    )

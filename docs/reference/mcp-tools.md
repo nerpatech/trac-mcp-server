@@ -1381,7 +1381,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 | `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` or `tracwiki` |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
-| `link_rewrites` | array of `{from, to}` | No | *(the server's configured map)* | Link-rewrite rules for `format=markdown`: a link target starting with `from` (non-empty string) has that prefix replaced by `to` (string), the longest `from` first. Replaces the configured map for this call; `[]` disables rewriting. Image sources and in-page `#anchors` are never rewritten. A duplicate `from`, an empty `from` or a non-string value is a `validation_error`, returned before Trac is read. Ignored (and not validated) for `format=tracwiki` |
+| `link_rewrites` | array of `{from, to}` | No | *(the server's configured map)* | Link-rewrite rules for `format=markdown`: a link target starting with `from` (non-empty string) has that prefix replaced by `to` (string), the longest `from` first. Replaces the configured map for this call; `[]` disables rewriting. Image sources and in-page `#anchors` are never rewritten. The input schema refuses an empty `from`, a non-string value, a missing key and any extra key in a rule (before the handler runs, as an input validation error); the handler's own `validation_error`, returned before Trac is read, covers a duplicate `from`. For `format=tracwiki` the handler ignores the argument, though the schema still applies |
 
 **Success Response:**
 ```json

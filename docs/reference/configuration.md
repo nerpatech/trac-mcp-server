@@ -71,7 +71,7 @@ export:
 
 - A link target (`href`) that starts with `from` has that prefix replaced by `to`. When several rules match, the **longest** `from` wins, whatever the order of the list.
 - The link text is never changed: `[https://trac.example.com/wiki/A](https://blog.example/A)` keeps the original URL as its label.
-- **Image sources** (`src`) are never rewritten (images and attachments are a separate ticket, #215), and neither is an in-page anchor. Trac renders `[#Heading x]` as the document's own URL plus the fragment (`<trac_url>/wiki/<page>#Heading` for a page, `<trac_url>#Heading` for text rendered with no page), so a link whose URL before the `#` is the document's own (compared after percent-decoding, ignoring one trailing `/`) and that has a fragment is written `#Heading` and left alone, as is a bare `#Heading`, with or without rules. A link to the same page with no fragment, or to another page with one, is an ordinary link and is rewritten.
+- **Image sources** (`src`) are never rewritten (images and attachments are a separate ticket, #215), and neither is an in-page anchor. Trac renders `[#Heading x]` as the document's own URL plus the fragment (`<trac_url>/wiki/<page>#Heading` for a page, `<trac_url>#Heading` for text rendered with no page), so a link whose URL before the `#` is the document's own (two absolute URLs are compared by path only, after percent-decoding and ignoring one trailing `/`, because Trac builds its URLs from its own base URL, which can name another host than the daemon's `TRAC_URL`) and that has a fragment is written `#Heading` and left alone, as is a bare `#Heading`, with or without rules. A link to the same page with no fragment, or to another page with one, is an ordinary link and is rewritten.
 - `from` must be a non-empty string, `to` a string (it may be empty), and two rules may not share a `from`. A bad entry fails config loading, naming it (`export.link_rewrites[1]`).
 - `TRAC_MCP_LINK_REWRITES` replaces the list whole: whitespace-separated `FROM=TO` pairs, each split at the first `=`. Set to an empty value, it clears the list. It cannot express a prefix that contains whitespace; use the YAML list for that. A pair with no `=` is refused at startup.
 - Precedence is the same as for other settings: environment variable (or `.env`) over YAML over none.
@@ -82,7 +82,7 @@ Where each tool reads the map:
 |----------|----------|
 | `wiki_file_pull` (daemon) | its `link_rewrites` argument if given (`[]` = none), else the **daemon's** configured map |
 | `trac-convert` (TracWiki -> Markdown) | `--link-map` if given, else the configured map of the machine it runs on |
-| `trac-mcp wiki-pull` | `--link-map` if given, else the `export.link_rewrites` key of the local `.trac_mcp/config.yaml` (that key only, no environment variable), else nothing is sent and the daemon's map applies |
+| `trac-mcp wiki-pull` | `--link-map` if given, else the `export.link_rewrites` key of the local `.trac_mcp/config.yaml` (that key only, no `TRAC_MCP_LINK_REWRITES`; `.env` is loaded first, so `${VAR}` in a rule resolves as it does for the daemon), else nothing is sent and the daemon's map applies |
 
 ### Environment Variable Interpolation
 

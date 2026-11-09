@@ -398,6 +398,70 @@ def test_a_page_whose_name_extends_the_documents_is_another_page():
     )
 
 
+# Trac builds absolute hrefs from its own base URL, which can differ from the
+# daemon's TRAC_URL (a LAN address against the public name): only the path
+# names the page.
+_LAN = "http://10.0.0.5/auto_pm/wiki/P"
+_PUBLIC_RULE = {
+    "https://trac.example/auto_pm/wiki/": "https://b.example/"
+}
+
+
+def test_in_page_anchor_ignores_scheme_and_host():
+    out = md(
+        _anchor("https://trac.example/auto_pm/wiki/P#Sec"),
+        link_map=_PUBLIC_RULE,
+        document_url=_LAN,
+    )
+    assert out == "[x](#Sec)"
+
+
+def test_a_different_path_on_the_same_host_is_an_ordinary_link():
+    out = md(
+        _anchor("https://trac.example/auto_pm/wiki/Q#Sec"),
+        link_map=_PUBLIC_RULE,
+        document_url=_LAN,
+    )
+    assert out == "[x](https://b.example/Q#Sec)"
+
+
+def test_the_root_form_also_ignores_the_host():
+    out = md(
+        _anchor("https://trac.example/trac_test#Sec"),
+        link_map={"https://trac.example/": "https://b.example/"},
+        document_url="http://10.0.0.5/trac_test",
+    )
+    assert out == "[x](#Sec)"
+
+
+def test_the_path_match_still_unquotes_and_ignores_a_trailing_slash():
+    out = md(
+        _anchor("https://trac.example/auto_pm/wiki/Page%20Two/#Sec"),
+        link_map=_PUBLIC_RULE,
+        document_url="http://10.0.0.5/auto_pm/wiki/Page Two",
+    )
+    assert out == "[x](#Sec)"
+
+
+def test_a_same_path_link_with_a_query_is_another_document():
+    out = md(
+        _anchor("https://trac.example/auto_pm/wiki/P?version=3#Sec"),
+        link_map=_PUBLIC_RULE,
+        document_url=_LAN,
+    )
+    assert out == "[x](https://b.example/P?version=3#Sec)"
+
+
+def test_a_relative_href_is_compared_whole_not_by_path():
+    # Only two absolute URLs are compared by path.
+    out = md(
+        _anchor("/auto_pm/wiki/P#Sec"),
+        link_map={"/auto_pm/": "https://b.example/"},
+        document_url=_LAN,
+    )
+    assert out == "[x](https://b.example/wiki/P#Sec)"
+
+
 def test_without_document_url_only_a_bare_anchor_counts():
     html = (
         f'<p><a href="{_PAGE_URL}#Linkrow">own</a> '

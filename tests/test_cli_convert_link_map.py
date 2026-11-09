@@ -292,3 +292,24 @@ def test_from_wiki_page_url_is_not_the_text_documents_url(trac, capsys):
     )
     assert rc == EXIT_OK
     assert "[here](/b#Linkrow)" in capsys.readouterr().out
+
+
+# --- --check-trac converts nothing ---------------------------------------
+
+
+def test_check_trac_with_link_map_warns_it_has_no_effect(trac, capsys):
+    main(["--check-trac", "--link-map", _RULE])
+    lines = [
+        ln
+        for ln in capsys.readouterr().err.splitlines()
+        if "--link-map" in ln
+    ]
+    assert len(lines) == 1
+    assert lines[0].startswith("warning: --link-map has no effect")
+
+
+def test_check_trac_with_link_map_and_quiet_prints_no_warning(
+    trac, capsys
+):
+    main(["--check-trac", "--link-map", _RULE, "-q"])
+    assert "--link-map" not in capsys.readouterr().err

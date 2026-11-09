@@ -37,8 +37,8 @@ from ..core.client import TracClient, WikiPageStoredReadbackFailed
 from ..link_rewrites import (
     LinkRewrites,
     as_dict,
-    parse_pair,
-    validate_link_rewrites,
+    link_map_arg,
+    parse_pairs,
 )
 
 # ---------------------------------------------------------------------------
@@ -667,14 +667,12 @@ def _check_trac(args) -> int:
     return EXIT_OK
 
 
-def _link_map_arg(value: str) -> tuple[str, str]:
-    """argparse type of ``--link-map``: ``FROM=TO`` split at the first
-    ``=``. A value with no ``=`` is a usage error (exit 2)."""
-    try:
-        rule = parse_pair(value, "--link-map")
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e)) from None
-    return rule["from"], rule["to"]
+#: What ``--link-map`` says when the run is not a TracWiki -> Markdown
+#: conversion (including ``--check-trac``, which converts nothing).
+_LINK_MAP_NO_EFFECT = (
+    "--link-map has no effect: it rewrites the links of a"
+    " TracWiki -> Markdown conversion only"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -762,7 +760,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--link-map",
         dest="link_map",
         action="append",
-        type=_link_map_arg,
+        type=link_map_arg,
         default=None,
         metavar="FROM=TO",
         help=(
@@ -1031,10 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.link_map is not None:
         # An empty FROM or a repeated FROM is a usage error too.
         try:
-            link_map_flag = validate_link_rewrites(
-                [{"from": f, "to": t} for f, t in args.link_map],
-                "--link-map",
-            )
+            link_map_flag = parse_pairs(args.link_map, "--link-map")
         except ValueError as e:
             parser.error(str(e))
 
@@ -1051,6 +1046,8 @@ def main(argv: list[str] | None = None) -> int:
                 " --from-wiki or --to-wiki\n"
             )
             return EXIT_RUNTIME_ERROR
+        if link_map_flag is not None and not args.quiet:
+            sys.stderr.write(f"warning: {_LINK_MAP_NO_EFFECT}\n")
         return _check_trac(args)
 
     # --- --to is required for conversion (not for --check-trac or --to-wiki) ---
@@ -1229,10 +1226,7 @@ def main(argv: list[str] | None = None) -> int:
         and result.source_format == "tracwiki"
         and result.target_format == "markdown"
     ):
-        session.warnings.append(
-            "--link-map has no effect: it rewrites the links of a"
-            " TracWiki -> Markdown conversion only"
-        )
+        session.warnings.append(_LINK_MAP_NO_EFFECT)
 
     if session.warnings:
         result = replace(

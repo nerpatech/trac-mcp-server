@@ -27,7 +27,7 @@ import copy
 import re
 import string
 import textwrap
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import (
@@ -431,6 +431,16 @@ def _escape_line_start(text: str, first_line: bool) -> str:
 # =============================================================================
 
 
+def _absolute_path(url: str) -> str | None:
+    """The unquoted path of an absolute ``http(s)`` URL with no query,
+    without one trailing ``/``; None for any other URL (relative, or
+    carrying a query, which makes it another document)."""
+    parts = urlsplit(url)
+    if not (parts.scheme and parts.netloc) or parts.query:
+        return None
+    return unquote(parts.path).rstrip("/")
+
+
 class _TracConverter(MarkdownConverter):
     class Options(MarkdownConverter.DefaultOptions):
         bs4_options = "lxml"
@@ -469,8 +479,15 @@ class _TracConverter(MarkdownConverter):
         self._link_map = sorted(
             (link_map or {}).items(), key=lambda kv: -len(kv[0])
         )
-        self._document_url = (
-            unquote(document_url).rstrip("/") if document_url else None
+        # (unquoted URL, unquoted path when it is absolute) -- see
+        # _in_page_anchor.
+        self._document = (
+            (
+                unquote(document_url).rstrip("/"),
+                _absolute_path(document_url),
+            )
+            if document_url
+            else None
         )
         self._keep_toc = keep_toc
         self._deflist = deflist
@@ -774,21 +791,29 @@ class _TracConverter(MarkdownConverter):
         Trac renders ``[#Frag x]`` as ``<document URL>#Frag`` (the
         page's own URL from ``getPageHTML``, the instance root from
         ``wikiToHtml``), not as a bare ``#Frag``; bare ones come only
-        from macro output. Both are in-page. The URL before the ``#`` is
-        compared with ``document_url`` after unquoting, ignoring one
-        trailing ``/``, so Trac's percent-encoding of a page name still
-        matches. The same document with no fragment is an ordinary link.
+        from macro output. Both are in-page. When both URLs are absolute
+        only the PATH is compared, unquoted and ignoring one trailing
+        ``/``: Trac builds its absolute URLs from its own base URL, which
+        can name another scheme or host than the daemon's ``TRAC_URL``
+        (a LAN address against the public name), while the path is what
+        names the page. Otherwise the whole URL before the ``#`` is
+        compared, unquoted. A URL with a query is another document. The
+        same document with no fragment is an ordinary link.
         """
         base, sep, frag = url.partition("#")
         if not sep:
             return None
         if base == "":
             return url  # a bare "#frag" (or "#"), whatever the map says
-        if frag and (
-            self._document_url is not None
-            and unquote(base).rstrip("/") == self._document_url
-        ):
-            return f"#{frag}"
+        if frag and self._document is not None:
+            whole, path = self._document
+            base_path = _absolute_path(base)
+            if path is not None and base_path is not None:
+                same = base_path == path
+            else:
+                same = unquote(base).rstrip("/") == whole
+            if same:
+                return f"#{frag}"
         return None
 
     def _map_url(self, url):
@@ -1010,9 +1035,10 @@ def trac_html_to_markdown(
         document_url: The URL Trac gives the document itself (a wiki
             page's ``<trac_url>/wiki/<page>``; for text rendered with no
             page, the instance root ``<trac_url>``). A link whose URL
-            before its ``#`` equals it (compared unquoted, ignoring one
-            trailing ``/``) and has a fragment is an in-page anchor:
-            written as ``#frag`` and never passed through ``link_map``,
+            before its ``#`` names it (two absolute URLs are compared by
+            path only -- Trac's base URL may differ from the caller's --
+            unquoted, ignoring one trailing ``/``) and has a fragment
+            is an in-page anchor: written as ``#frag`` and never passed through ``link_map``,
             as is a bare ``#frag`` (what macro output gives). Trac
             renders ``[#Frag x]`` as ``<document URL>#Frag``, so without
             this only the bare form is recognised. A link to the same

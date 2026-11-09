@@ -30,20 +30,31 @@ def _write_config(root: Path, body: str) -> None:
 
 
 @pytest.fixture
-def sent(monkeypatch):
+def reply():
+    """Override the faked server's answer: set ``reply["result"]``."""
+    return {}
+
+
+@pytest.fixture
+def sent(monkeypatch, reply):
     """Replace ``call_tool``; the list gets each (tool, arguments)."""
     calls: list[tuple[str, dict]] = []
 
     async def _call(url, token, name, arguments):
         calls.append((name, dict(arguments)))
+        if "result" in reply:
+            return reply["result"]
+        structured = {
+            "content": "# P\n",
+            "version": 1,
+            "format": "markdown",
+        }
+        if "link_rewrites" in arguments:
+            structured["link_rewrites_source"] = "call"
         return SimpleNamespace(
             isError=False,
             content=[SimpleNamespace(text="Pulled ...")],
-            structuredContent={
-                "content": "# P\n",
-                "version": 1,
-                "format": "markdown",
-            },
+            structuredContent=structured,
         )
 
     monkeypatch.setattr(cli, "call_tool", _call)
@@ -194,6 +205,7 @@ def test_a_broken_local_config_is_a_clear_usage_error(
     assert rc == cli.EXIT_USAGE_ERROR
     err = capsys.readouterr().err
     assert err.startswith("trac-mcp: wiki-pull: ")
+    assert err.count("\n") == 1  # one line, not pydantic's report
     assert message in err
     assert ".trac_mcp/config.yaml" in err
     assert "Traceback" not in err
@@ -219,6 +231,23 @@ def test_a_link_map_without_an_equals_is_a_usage_error(
     assert exc.value.code == 2
     assert "not FROM=TO" in capsys.readouterr().err
     assert sent == []
+
+
+def test_a_bad_local_rule_error_is_exactly_one_line(
+    isolated_config, sent, tmp_path, capsys
+):
+    _write_config(
+        isolated_config,
+        "export:\n  link_rewrites:\n    - {from: a, to: b}\n"
+        "    - {from: '', to: c}\n",
+    )
+    assert _pull(tmp_path) == cli.EXIT_USAGE_ERROR
+    assert capsys.readouterr().err == (
+        "trac-mcp: wiki-pull: invalid config file: "
+        "export.link_rewrites[1] 'from' must not be empty (the "
+        "export.link_rewrites key of .trac_mcp/config.yaml; pass "
+        "--link-map to override it)\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -298,3 +327,95 @@ def test_through_the_server_a_local_map_beats_the_daemons(
     )
     assert "[Other](https://blog.example/Other)" in text
     assert "daemon.example" not in text
+
+
+# --- an old daemon, and a server that does not confirm ---------------------
+
+
+def _error(text):
+    return SimpleNamespace(
+        isError=True,
+        content=[SimpleNamespace(text=text)],
+        structuredContent=None,
+    )
+
+
+def test_an_old_daemon_refusing_link_rewrites_is_named(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: Additional properties are not allowed "
+        "('link_rewrites' was unexpected)"
+    )
+    rc = _pull(tmp_path, "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "predates link rewriting (Trac /trac_mcp_server #213)" in err
+    assert "remove export.link_rewrites from the local config" in err
+    assert "drop --link-map" in err
+    assert not (tmp_path / "p.md").exists()
+
+
+def test_an_old_daemon_is_named_for_the_local_configs_map_too(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    _write_config(isolated_config, _YAML)
+    reply["result"] = _error(
+        "Input validation error: Additional properties are not allowed "
+        "('link_rewrites' was unexpected)"
+    )
+    assert _pull(tmp_path) == cli.EXIT_TOOL_ERROR
+    assert "predates link rewriting" in capsys.readouterr().err
+
+
+def test_a_current_daemons_error_about_a_rule_is_reported_as_it_is(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Error (validation_error): link_rewrites[1] repeats 'from'"
+    )
+    assert (
+        _pull(tmp_path, "--link-map", "/a/=/b/") == cli.EXIT_TOOL_ERROR
+    )
+    err = capsys.readouterr().err
+    assert "repeats 'from'" in err
+    assert "predates" not in err
+
+
+def test_an_unexpected_property_error_without_a_sent_map_is_plain(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = _error(
+        "Input validation error: Additional properties are not allowed "
+        "('link_rewrites' was unexpected)"
+    )
+    assert _pull(tmp_path) == cli.EXIT_TOOL_ERROR  # nothing was sent
+    assert "predates" not in capsys.readouterr().err
+
+
+def test_a_reply_that_does_not_confirm_the_map_warns(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = SimpleNamespace(
+        isError=False,
+        content=[SimpleNamespace(text="Pulled ...")],
+        structuredContent={"content": "# P\n", "version": 1},
+    )
+    rc = _pull(tmp_path, "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_OK
+    assert (tmp_path / "p.md").read_text() == "# P\n"
+    assert (
+        "trac-mcp: warning: the server did not confirm the link map "
+        "was applied"
+    ) in capsys.readouterr().err
+
+
+def test_a_confirming_reply_and_an_unsent_map_print_no_such_warning(
+    isolated_config, sent, tmp_path, capsys
+):
+    assert _pull(tmp_path, "--link-map", "/a/=/b/") == cli.EXIT_OK
+    assert "did not confirm" not in capsys.readouterr().err
+    assert (
+        _pull(tmp_path) == cli.EXIT_OK
+    )  # nothing sent, nothing to confirm
+    assert "did not confirm" not in capsys.readouterr().err
