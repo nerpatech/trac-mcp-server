@@ -1210,6 +1210,81 @@ class TestPull:
         client.get_wiki_page_html.assert_called_once_with("TestPage", 2)
         client.get_wiki_page_info.assert_called_once_with("TestPage", 2)
 
+    @pytest.mark.parametrize("info", [{}, 0, None, {"version": 0}])
+    async def test_pull_markdown_warns_when_version_cannot_be_read(
+        self, tmp_path, info
+    ):
+        """No usable version from get_wiki_page_info: the pull still
+        works, but the source and HTML reads were not pinned to one
+        version, and the caller is told in ``warnings``."""
+        out_file = tmp_path / "page.md"
+
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
+        client.get_wiki_page_info.return_value = info
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {"page_name": "TestPage", "file_path": str(out_file)},
+            client,
+        )
+
+        assert not result.isError
+        assert "# Hello" in out_file.read_text()
+        warnings = result.structuredContent["warnings"]
+        assert len(warnings) == 1
+        assert "version could not be read" in warnings[0]
+        assert "not pinned" in warnings[0]
+        assert warnings[0] in result.content[0].text
+        client.get_wiki_page.assert_called_once_with("TestPage", None)
+        client.get_wiki_page_html.assert_called_once_with(
+            "TestPage", None
+        )
+
+    async def test_pull_markdown_with_a_version_has_no_pin_warning(
+        self, tmp_path
+    ):
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_html.return_value = (
+            '<h1 id="Hello">Hello</h1>\n'
+        )
+        client.get_wiki_page_info.return_value = {"version": 4}
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "TestPage",
+                "file_path": str(tmp_path / "page.md"),
+            },
+            client,
+        )
+
+        assert result.structuredContent["warnings"] == []
+
+    async def test_pull_tracwiki_with_no_version_has_no_pin_warning(
+        self, tmp_path
+    ):
+        """tracwiki reads no HTML, so there is nothing to pin."""
+        client = _make_client()
+        client.get_wiki_page.return_value = "= Hello ="
+        client.get_wiki_page_info.return_value = {}
+
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": "TestPage",
+                "file_path": str(tmp_path / "page.wiki"),
+                "format": "tracwiki",
+            },
+            client,
+        )
+
+        assert result.structuredContent["warnings"] == []
+
     async def test_pull_nonexistent_page(self, tmp_path):
         """Pull a page that doesn't exist returns not_found error."""
         out_file = tmp_path / "page.md"

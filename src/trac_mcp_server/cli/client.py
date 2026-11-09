@@ -668,6 +668,11 @@ async def _run(
             f"format={sc.get('format')}) to {args.file} ({len(data)} bytes)",
         )
         _say_instance(args.file == "-", result)
+        # The translator's notes on what the Markdown lost or passed
+        # through, and the version-pin warning (Trac /trac_mcp_server
+        # #210): stderr, so a script that captures stdout still sees them.
+        for warning in sc.get("warnings") or []:
+            print(f"trac-mcp: warning: {warning}", file=sys.stderr)
         return EXIT_OK
 
     if cmd == "attach-put":

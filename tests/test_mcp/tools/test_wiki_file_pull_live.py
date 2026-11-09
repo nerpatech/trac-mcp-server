@@ -7,11 +7,13 @@ the real handler and a real client (Rules/testing/RealSubstrateNotMocks).
 
 Style follows ``test_wiki_not_modified_live.py``: a per-run scratch page
 on ``/trac_test`` (the client is built for that instance, never for the
-default ``TRAC_URL``), deleted in a ``finally``.
+default ``TRAC_URL``), deleted in a ``finally``; a failed delete is
+reported only once the body has passed.
 """
 
 import asyncio
 import re
+import sys
 import uuid
 
 import pytest
@@ -44,6 +46,7 @@ def test_pull_markdown_is_trac_rendered_html_translated():
     client = trac_test_client()
     page = f"Scratch/Ticket210PullLive{uuid.uuid4().hex[:8]}"
     client.put_wiki_page(page, _BODY, "seed for the pull row")
+    cleanup_error = None
     try:
         result = asyncio.run(_handle_pull(client, {"page_name": page}))
 
@@ -73,6 +76,16 @@ def test_pull_markdown_is_trac_rendered_html_translated():
         try:
             client.delete_wiki_page(page)
         except Exception as exc:  # noqa: BLE001
-            pytest.fail(
-                f"page {page} left behind on /trac_test: {exc!r}"
+            cleanup_error = exc
+            # Said here too, so a body failure (which propagates past
+            # the check below) still shows what was left behind.
+            print(
+                f"page {page} left behind on /trac_test: {exc!r}",
+                file=sys.stderr,
             )
+    # Reached only when the body passed: a failing body's own assertion
+    # is never replaced by a cleanup failure raised from the ``finally``.
+    if cleanup_error is not None:
+        pytest.fail(
+            f"page {page} left behind on /trac_test: {cleanup_error!r}"
+        )

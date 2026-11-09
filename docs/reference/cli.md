@@ -92,7 +92,7 @@ trac-convert --version
 | `--unknown-macros {preserve,drop}` | -- | **Deprecated, no effect** (Trac renders macros itself); removed in #214. Passing it prints one `warning: --unknown-macros is deprecated and has no effect` line on stderr unless `-q` is set. |
 | `-v, --verbose` | -- | Emit `info:` diagnostics to stderr (mutually exclusive with `-q`) |
 | `-q, --quiet` | -- | Suppress `warning:` lines to stderr (mutually exclusive with `-v`; does NOT suppress `error:` lines) |
-| `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki); to Markdown it translates the page's own rendered HTML, so relative links resolve as Trac resolves them. Mutually exclusive with `FILE` positional and `--from-clipboard`. |
+| `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki); to Markdown it translates the page's own rendered HTML, so relative links resolve as Trac resolves them. The page version is read first and the source and the HTML are both read at it, so a save in between cannot pair one version's source with another's HTML; if the version cannot be read, both reads are the latest and a `warning:` line says they were not pinned. Mutually exclusive with `FILE` positional and `--from-clipboard`. |
 | `--to-wiki PAGE` | -- | Write output to a Trac wiki page (target format is TracWiki). Mutually exclusive with `-o/--output` and `--to-clipboard`. Bypasses the `--to` requirement. |
 | `--wiki-comment MSG` | `Updated via trac-convert` | Change comment recorded on the wiki page when using `--to-wiki`. Ignored without `--to-wiki`. |
 | `--check-trac` | -- | Print resolved Trac config source per field, ping the server, and exit (no conversion performed). |
@@ -110,7 +110,7 @@ trac-convert --version
 | `1` | Runtime error (I/O failure, clipboard unavailable, mutually-exclusive flag conflict) |
 | `2` | Usage error (argparse-emitted: missing required flag, bad choice) |
 | `3` | Conversion error (exception raised inside the converter) |
-| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, `--to-wiki`, and the rendering step of TracWiki -> Markdown. TracWiki -> Markdown with no Trac configured also exits `4`: the message says to set `TRAC_URL`, `TRAC_USERNAME`, `TRAC_PASSWORD` (or `.trac_mcp/config.yaml`) or pass `--trac-url`, and nothing is written to stdout. With `--to-wiki`, nothing was stored. |
+| `4` | Trac error (auth failure, network/timeout, permission denied, page not found, XML-RPC fault, SSL error) — emitted by `--check-trac`, `--from-wiki`, `--to-wiki`, and the rendering step of TracWiki -> Markdown. TracWiki -> Markdown with no Trac configured also exits `4`: the message says to set `TRAC_URL`, `TRAC_USERNAME`, `TRAC_PASSWORD` (or `.trac_mcp/config.yaml`) or pass `--trac-url`, and nothing is written to stdout. When the configuration exists but is invalid (a bad `TRAC_URL`), the message ends with a `  config error: <reason>` line, here and on `--from-wiki`'s "no Trac credentials found" message; when `--from auto` resolved the input to TracWiki, a last line says so and to pass `--from md` if it is Markdown. With `--to-wiki`, nothing was stored. |
 | `5` | `--to-wiki` stored the page, but reading back its new version failed. The message on stderr says the page WAS stored; do not retry the write. |
 
 ### Auto-detection
@@ -183,6 +183,8 @@ The four `ticket-*` commands move ticket bodies. The file is read as UTF-8 and s
 `wiki-push` exits **4**, not 1, when the page was stored but its new version could not be read back afterwards (the server reports `readback_failed`): do not retry the push. Exit 1 means nothing was stored.
 
 When the server reports `possible_overwrite` (the page was updated but reads back as a version other than the one after the version the push was based on, so another write most likely landed just before it and was replaced), `wiki-push` prints a `trac-mcp: warning: possible overwrite ...` line on stderr naming the versions in between, and still exits **0**: the page was stored, and a non-zero code would invite a retry that writes it again. Inspect those versions with the `wiki_diff` tool.
+
+`wiki-pull` prints each warning the server returns for the pull (what the Markdown translation passed through as HTML or dropped, or that the page version could not be read so the reads were not pinned to one version) as a `trac-mcp: warning: ...` line on stderr after writing the file, and still exits **0**.
 
 The server's write-time link gate and notes apply to all three writes, as for the equivalent MCP tools.
 

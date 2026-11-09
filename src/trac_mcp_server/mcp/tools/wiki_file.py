@@ -601,6 +601,16 @@ async def _handle_pull(
                 if isinstance(info, dict) and info
                 else None
             ) or version
+            if pinned is None:
+                # Some Trac instances answer with {} or a non-dict. The
+                # pull still works, but both reads below are "latest":
+                # an edit between them is the race pinning closes.
+                warnings.append(
+                    f"wiki page {page_name}: its version could not be"
+                    " read, so the source and the HTML reads were not"
+                    " pinned to one version; an edit between them would"
+                    " pair one version's source with another's HTML"
+                )
             content = await run_sync(
                 client.get_wiki_page, page_name, pinned
             )
@@ -610,7 +620,7 @@ async def _handle_pull(
             conversion = trac_html_to_markdown(html, content)
             output_content = conversion.text
             converted = conversion.converted
-            warnings = list(conversion.warnings)
+            warnings.extend(conversion.warnings)
         else:
             # tracwiki: the stored source, unchanged; no HTML read.
             content = await run_sync(

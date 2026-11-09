@@ -334,7 +334,24 @@ class TracConnectionRequired(RuntimeError):
 
     Trac's own HTML is what trac-convert translates (Trac
     /trac_mcp_server #210), so this direction cannot run offline.
+
+    ``config_error`` is the text of the ``ValueError`` that
+    ``bootstrap_config`` raised, when there was one: a configuration that
+    exists but is invalid (a bad ``TRAC_URL``) is not the same as none,
+    and ``str(exc)`` carries it on a ``  config error:`` line.
     """
+
+    def __init__(
+        self,
+        message: str = _TRAC_REQUIRED_MESSAGE,
+        config_error: str | None = None,
+    ) -> None:
+        self.config_error = config_error
+        super().__init__(
+            message
+            if config_error is None
+            else f"{message}\n  config error: {config_error}"
+        )
 
 
 class TracRenderError(RuntimeError):
@@ -358,6 +375,12 @@ class _TracSession:
         self._args = args
         self._client: TracClient | None = None
         self.url: str = ""
+        #: The page version ``--from-wiki`` pinned its reads to, or None
+        #: when none was pinned (see ``_fetch_wiki_page``).
+        self.page_version: int | None = None
+        #: Warnings the session itself raised, for ``main`` to print with
+        #: the converter's.
+        self.warnings: list[str] = []
 
     def client(self) -> TracClient:
         """Return the client, opening it on the first call.
@@ -372,21 +395,30 @@ class _TracSession:
                 raise TracRenderError("")
             try:
                 config, _ = bootstrap_config(overrides)
-            except ValueError:
+            except ValueError as e:
                 raise TracConnectionRequired(
-                    _TRAC_REQUIRED_MESSAGE
+                    config_error=str(e)
                 ) from None
             self.url = config.trac_url
             self._client = TracClient(config)
         return self._client
 
-    def _render(self, call: Callable[[TracClient], str]) -> str:
+    def _render(
+        self,
+        call: Callable[[TracClient], str],
+        page_name: str | None = None,
+    ) -> str:
         client = self.client()
         try:
             return call(client)
         except Exception as e:
             raise TracRenderError(
-                _classify_trac_error(e, self.url, action="wiki render")
+                _classify_trac_error(
+                    e,
+                    self.url,
+                    page_name=page_name,
+                    action="wiki render",
+                )
             ) from e
 
     def render_text(self, text: str) -> str:
@@ -399,15 +431,31 @@ class _TracSession:
         ``--from-wiki``: the page renders with its own context, so
         relative links resolve; the text passed in is the page's source,
         which ``convert_text`` hands the translator for its code-block
-        languages.
+        languages. The HTML is read at ``page_version`` (pinned by
+        ``_fetch_wiki_page``), so it is the version that source is.
         """
         return lambda _text: self._render(
-            lambda client: client.get_wiki_page_html(page_name)
+            lambda client: client.get_wiki_page_html(
+                page_name, self.page_version
+            ),
+            page_name=page_name,
         )
 
 
+def _usable_version(info) -> int | None:
+    """The page version in a ``get_wiki_page_info`` result, or None."""
+    version = info.get("version") if isinstance(info, dict) else None
+    if isinstance(version, int) and not isinstance(version, bool):
+        return version if version > 0 else None
+    return None
+
+
 def _fetch_wiki_page(
-    page_name: str, args, session: _TracSession | None = None
+    page_name: str,
+    args,
+    session: _TracSession | None = None,
+    *,
+    pin_version: bool = False,
 ) -> tuple[str | None, int]:
     """Fetch a TracWiki page's raw source via TracClient.
 
@@ -417,18 +465,27 @@ def _fetch_wiki_page(
     shared Trac session, so the HTML read that follows (--from-wiki to
     Markdown) reuses this client; one is made when omitted.
 
+    ``pin_version`` (--from-wiki to Markdown, which reads the page's HTML
+    too): the page version is read first and the source is fetched at it,
+    and ``session.page_version`` makes the HTML read use it, so a save
+    between the two reads cannot pair one version's source with the next
+    one's HTML. When the version cannot be read, both reads are the
+    unpinned latest and ``session.warnings`` says so.
+
     Returns (text, EXIT_OK) on success or (None, EXIT_TRAC) on any
     failure. Never prints the password.
     """
     session = session or _TracSession(args)
     try:
         client = session.client()
-    except TracConnectionRequired:
+    except TracConnectionRequired as e:
         sys.stderr.write(
             "trac-convert: no Trac credentials found.\n"
             "  Set env vars TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD, or\n"
             "  create .trac_mcp/config.yaml (see docs/reference/cli.md).\n"
         )
+        if e.config_error is not None:
+            sys.stderr.write(f"  config error: {e.config_error}\n")
         return None, EXIT_TRAC
     except TracRenderError:
         return (
@@ -437,7 +494,20 @@ def _fetch_wiki_page(
         )  # password-file diagnostic already written
 
     try:
-        text = client.get_wiki_page(page_name)
+        if pin_version:
+            session.page_version = _usable_version(
+                client.get_wiki_page_info(page_name)
+            )
+            if session.page_version is None:
+                session.warnings.append(
+                    f"wiki page {page_name}: its version could not be"
+                    " read, so the source and the HTML reads were not"
+                    " pinned to one version; a save between them would"
+                    " pair one version's source with another's HTML"
+                )
+            text = client.get_wiki_page(page_name, session.page_version)
+        else:
+            text = client.get_wiki_page(page_name)
     except Exception as e:
         msg = _classify_trac_error(
             e, session.url, page_name=page_name, action="wiki fetch"
@@ -967,7 +1037,16 @@ def main(argv: list[str] | None = None) -> int:
     # else touches Trac.
     session = _TracSession(args)
     if args.from_wiki is not None:
-        text, fetch_rc = _fetch_wiki_page(args.from_wiki, args, session)
+        # To Markdown the page's HTML is read too, so both reads are
+        # pinned to one version; --to tracwiki / --to-wiki read no HTML.
+        text, fetch_rc = _fetch_wiki_page(
+            args.from_wiki,
+            args,
+            session,
+            pin_version=(
+                args.to_wiki is None and args.target_format == "md"
+            ),
+        )
         if text is None:
             return fetch_rc
         # --from-wiki authoritatively knows the source is TracWiki;
@@ -1027,6 +1106,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     except TracConnectionRequired as e:
         sys.stderr.write(f"trac-convert: {e}\n")
+        if args.source_format == "auto":
+            # Only an undecided --from reaches here as "auto" (--from-wiki
+            # sets tracwiki): the text may be Markdown that detection
+            # could not tell from TracWiki, e.g. a bare line of prose.
+            sys.stderr.write(
+                "  the input was auto-detected as TracWiki; if it is"
+                " Markdown, pass --from md\n"
+            )
         return EXIT_TRAC
     except TracRenderError as e:
         if str(e):
@@ -1035,6 +1122,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         sys.stderr.write(f"trac-convert: conversion failed: {e}\n")
         return EXIT_CONVERSION_ERROR
+
+    if session.warnings:
+        result = replace(
+            result, warnings=[*session.warnings, *result.warnings]
+        )
 
     # --- write output ---
     if args.to_wiki is not None:
