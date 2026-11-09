@@ -594,12 +594,27 @@ async def _handle_push(
     )
 
 
-def _html_document(page_name: str, fragment: str) -> str:
-    """Wrap Trac's rendered fragment as a complete minimal document.
+# getPageHTML answers a whole ``<html><body>...</body></html>`` itself
+# (seen on a live instance, and in every wiki capture of the #208 set);
+# wikiToHtml and older Tracs answer a bare fragment.
+_TRAC_HTML_WRAPPER = re.compile(
+    r"\s*<html\s*>\s*<body\s*>(?P<inner>.*)</body\s*>\s*</html\s*>\s*",
+    re.IGNORECASE | re.DOTALL,
+)
 
-    No CSS, and the fragment is verbatim (Trac renders its links
-    absolute); only the page name, which is text, is escaped.
+
+def _html_document(page_name: str, fragment: str) -> str:
+    """Wrap Trac's rendered HTML as a complete minimal document.
+
+    Trac's own ``<html><body>`` wrapper, when present, is removed first
+    so the document has exactly one of each; the inner HTML is never
+    parsed or altered (Trac renders its links absolute), and a response
+    with no such wrapper is used as it is. No CSS; only the page name,
+    which is text, is escaped.
     """
+    wrapped = _TRAC_HTML_WRAPPER.fullmatch(fragment)
+    if wrapped is not None:
+        fragment = wrapped.group("inner")
     return (
         "<!doctype html>\n"
         "<html>\n"

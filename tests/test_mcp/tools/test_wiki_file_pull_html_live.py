@@ -57,7 +57,12 @@ def test_pull_html_is_a_document_around_trac_render():
         assert '<meta charset="utf-8">' in content
         assert f"<title>{page}</title>" in content
         assert content.endswith("</body></html>\n")
-        assert "<h1" in content
+        # Trac's getPageHTML wraps its render in <html><body>; the
+        # document must have exactly one of each, the heading inside.
+        assert content.count("<html") == 1, content
+        assert content.count("<body") == 1, content
+        assert content.index("<body>") < content.index("<h1")
+        assert content.index("<h1") < content.index("</body>")
         assert "Html row" in content
         assert 'href="http' in content, content
     finally:

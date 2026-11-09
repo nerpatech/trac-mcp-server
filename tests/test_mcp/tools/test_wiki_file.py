@@ -1795,6 +1795,89 @@ class TestPullHtml:
         assert sc["converted"] is True
         assert sc["warnings"] == []
 
+    async def test_trac_own_html_body_wrapper_is_unwrapped(
+        self, tmp_path
+    ):
+        """Real getPageHTML answers ``<html><body>...</body></html>``
+        itself (found on stage); the document has one of each."""
+        inner = (
+            '<h1 class="section" id="Stagecheck">Stage check</h1>\n'
+            "<p>\nA link to "
+            '<a class="wiki" '
+            'href="http://trac.example.org/trac_test/wiki/WikiStart">'
+            "the start page</a> and <em>italic</em> text.\n</p>\n"
+        )
+        client = _html_client()
+        client.get_wiki_page_html.return_value = (
+            "<html><body>" + inner + "</body></html>"
+        )
+        result, text = await _pull(client, tmp_path, format="html")
+
+        assert not result.isError, result.content
+        assert text == (
+            "<!doctype html>\n<html>\n<head>\n"
+            '<meta charset="utf-8">\n<title>TestPage</title>\n'
+            "</head>\n<body>\n" + inner + "</body></html>\n"
+        )
+        assert text.count("<html") == 1
+        assert text.count("<body") == 1
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            "  \n<HTML><BODY>{inner}</BODY></HTML>\n  ",
+            "<html>\n<body>\n{inner}</body>\n</html>",
+            "<Html >\t<Body>{inner}</Body>\r\n</Html>\n",
+        ],
+    )
+    async def test_the_wrapper_is_matched_ignoring_case_and_whitespace(
+        self, tmp_path, wrapped
+    ):
+        inner = "<p>\ninner <b>kept</b>\n</p>\n"
+        client = _html_client()
+        client.get_wiki_page_html.return_value = wrapped.format(
+            inner=inner
+        )
+        _, text = await _pull(client, tmp_path, format="html")
+
+        assert text.lower().count("<html") == 1
+        assert text.lower().count("<body") == 1
+        body = text.split("<body>\n", 1)[1]
+        assert body.endswith("</body></html>\n")
+        assert "inner <b>kept</b>" in body
+        assert text.count("</body>") == 1
+
+    async def test_a_bare_fragment_passes_through(self, tmp_path):
+        # Trac's wikiToHtml (ticket text) and older Tracs: no wrapper.
+        result, text = await _pull(
+            _html_client(), tmp_path, format="html"
+        )
+        assert text.count("<body") == 1
+        assert "<body>\n" + _HTML_FRAGMENT + "</body></html>\n" in text
+
+    @pytest.mark.parametrize(
+        "slug",
+        ["stock_TracCgi", "stock_WikiFormatting", "stock_TracLinks"],
+    )
+    async def test_a_real_getpagehtml_capture_is_unwrapped(
+        self, tmp_path, slug
+    ):
+        raw = (_FIXTURES / f"{slug}.html").read_text(encoding="utf-8")
+        assert raw.startswith("<html><body>")
+        assert raw.rstrip().endswith("</body></html>")
+        inner = raw.rstrip()[
+            len("<html><body>") : -len("</body></html>")
+        ]
+        client = _html_client()
+        client.get_wiki_page_html.return_value = raw
+        result, text = await _pull(client, tmp_path, format="html")
+
+        assert not result.isError, result.content
+        assert text.count("<html") == 1
+        assert text.count("<body") == 1
+        assert text.endswith(inner + "</body></html>\n")
+        assert "<body>\n" + inner in text
+
     async def test_the_title_is_the_escaped_page_name(self, tmp_path):
         client = _html_client()
         out = tmp_path / "out.html"
