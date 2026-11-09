@@ -18,8 +18,8 @@ its ``<li>`` and the next item in the same list):
   inside, after the ``<pre>``. The same after a table's ``{{{#!div}}}`` (G),
   and as code, then ``p1 [[BR]][[BR]]``, then ``p2`` (H).
 * A plain continuation line is inside but joins the item text (the break is
-  lost); a ``{{{#!div}}}`` around the paragraph is inside but reads back as a
-  code fence. Both were rejected.
+  lost); a ``{{{#!div}}}`` around the paragraph is inside but reads as a code
+  fence in Markdown. Both were rejected.
 * Escape hazard: ``Done![[BR]][[BR]]`` renders ``Done[[BR]]<br />`` (the
   ``!`` escapes the first macro); ``Done! [[BR]][[BR]]`` renders correctly,
   so the separator always carries its leading space (as ``linebreak()``
@@ -29,16 +29,12 @@ its ``<li>`` and the next item in the same list):
 paragraph's last line ends ``" [[BR]][[BR]]"`` and the next paragraph sits
 on a continuation line at the item's continuation indent. A text run after
 a code or table child gets no blank line before it. Unchanged: a paragraph
-after a nested list (a Trac limit, #112; the #125 advisory), a #63 fallback
-fence, and any other non-paragraph block. (A blockquote child was unchanged
+after a nested list (a Trac limit, #112; the #125 advisory), and any other
+non-paragraph block. (A blockquote child was unchanged
 here and moved to a citation inside the item on #145.)
 Review fixes: a paragraph with a passed-through TracWiki line (`{{{`,
 `}}}`, `||`, `=`, `----`) is never joined, and no run after a nested list
 loses its blank line.
-
-**Read leg.** A table released from a list item's ``{{{#!div}}}`` and
-followed by item text gets a blank line between them, so a GFM reader does
-not take the text for one more table row (spec example 202).
 
 The unchanged rows were computed on ``master`` (28d5ccb) and hard-coded.
 """
@@ -51,14 +47,6 @@ from trac_mcp_server.converters import find_list_item_splits
 from trac_mcp_server.converters.markdown_to_tracwiki import (
     markdown_to_tracwiki,
 )
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    tracwiki_to_markdown,
-)
-
-
-def _md(wiki):
-    return tracwiki_to_markdown(wiki).text
-
 
 # -- Write leg: paragraph after a paragraph ---------------------------------
 
@@ -247,7 +235,7 @@ def test_table_row_after_a_code_child_keeps_the_blank_line():
 
 def test_text_after_code_after_a_nested_list_keeps_the_blank_line():
     """Trac attaches `tail` to the NESTED item when it follows the block
-    with no blank line (measured), and the read leg cannot undo that. Once a
+    with no blank line (measured). Once a
     nested list has appeared in the item, every later run keeps `master`'s
     output."""
     md = "- a\n  - b\n\n  ```\n  c\n  ```\n\n  tail\n- d\n"
@@ -314,146 +302,6 @@ def test_code_then_blockquote_is_adjacent():
 def test_tight_item_is_unchanged():
     assert markdown_to_tracwiki("- a\n- b\n") == " * a\n * b"
     assert markdown_to_tracwiki("- a\n  b\n- c\n") == " * a\n   b\n * c"
-
-
-# -- Read leg: blank line after a released table ----------------------------
-
-DIV_TAIL_WIKI = (
-    " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
-    "   tail\n * b"
-)
-DIV_TAIL_MD = (
-    " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n\n   tail\n - b"
-)
-
-
-def test_table_released_from_a_div_then_item_text_gets_a_blank_line():
-    """Without it a GFM reader takes `tail` for one more table row."""
-    assert _md(DIV_TAIL_WIKI) == DIV_TAIL_MD
-
-
-def test_released_table_followed_by_the_next_item_gets_no_blank_line():
-    wiki = (
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n * b"
-    )
-    assert _md(wiki) == (
-        " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n - b"
-    )
-
-
-def test_released_table_at_the_end_gets_no_blank_line():
-    wiki = " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}"
-    assert _md(wiki) == (
-        " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |"
-    )
-
-
-def test_released_table_followed_by_a_fence_gets_no_blank_line():
-    """The blank line is for plain item text only: a fence opener starts
-    its own block, and GFM ends a table at it."""
-    wiki = (
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
-        "   {{{\n   c\n   }}}\n * b"
-    )
-    assert _md(wiki) == (
-        " - a\n   | x | y |\n   |---|---|\n   | 1 | 2 |\n"
-        "   ```\n   c\n   ```\n - b"
-    )
-
-
-# -- Read leg: text after a block in the LAST item (F3) ---------------------
-
-
-@pytest.mark.parametrize(
-    "wiki",
-    [
-        " * a\n   {{{\n   c\n   }}}\n   tail",
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\nafter",
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n   tail",
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
-        "   tail\n\nafter",
-    ],
-)
-def test_item_text_after_a_block_is_item_text_without_a_following_item(
-    wiki,
-):
-    """Not a `tracwiki-unconverted` fence: the line sits at the item's
-    continuation indent, right after the block's closing `}}}`."""
-    result = tracwiki_to_markdown(wiki)
-    assert "tracwiki-unconverted" not in result.text, result.text
-    assert result.warnings == []
-
-
-def test_text_after_a_blank_line_following_a_block_is_a_quote():
-    """Not item text: Trac ends the list at the blank line, so `more` is a
-    blockquote and ` * b` a new list (#183). This row was in the list above
-    (no fence) until then; it is carried through the fallback fence now."""
-    wiki = " * a\n   {{{\n   c\n   }}}\n   tail\n\n   more\n * b"
-    assert tracwiki_to_markdown(wiki).text == (
-        " - a\n   ```\n   c\n   ```\n   tail\n\n"
-        "```tracwiki-unconverted\n   more\n```\n\n - b"
-    )
-
-
-# -- TracWiki -> Markdown -> TracWiki byte stability -------------------------
-
-STABLE = {
-    "C plain": " * a [[BR]][[BR]]\n   para\n * d",
-    "C ordered": " 1. a [[BR]][[BR]]\n    para\n 2. d",
-    "C nested": " * a\n   * b [[BR]][[BR]]\n     para\n * c",
-    "C three": " * a [[BR]][[BR]]\n   one [[BR]][[BR]]\n   two\n * b",
-    "C last item": " * a [[BR]][[BR]]\n   para\n\nafter",
-    "D plain": " * a\n   {{{\n   code\n   }}}\n   tail\n * b",
-    "D ordered": " 1. a\n    {{{\n    code\n    }}}\n    tail\n 2. b",
-    "D nested": (
-        " * a\n   * b\n     {{{\n     code\n     }}}\n     tail\n * c"
-    ),
-    "G plain": DIV_TAIL_WIKI,
-    "G ordered": (
-        " 1. a\n    {{{#!div\n    ||=x=||=y=||\n    ||1||2||\n    }}}\n"
-        "    tail\n 2. b"
-    ),
-    "G nested": (
-        " * a\n   * b\n     {{{#!div\n     ||=x=||=y=||\n     ||1||2||\n"
-        "     }}}\n     tail\n * c"
-    ),
-    "last item code": " * a\n   {{{\n   c\n   }}}\n   tail",
-    "last item code then paragraph": (
-        " * a\n   {{{\n   c\n   }}}\n   tail\n\nafter"
-    ),
-    "last item code ordered": " 1. a\n    {{{\n    c\n    }}}\n    tail",
-    "last item code nested": (
-        " * a\n   * b\n     {{{\n     c\n     }}}\n     tail"
-    ),
-    "last item code, blank line in the block": (
-        " * a\n   {{{\n   c\n\n   d\n   }}}\n   tail"
-    ),
-    "last item table": (
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
-        "   tail"
-    ),
-    "last item table then paragraph": (
-        " * a\n   {{{#!div\n   ||=x=||=y=||\n   ||1||2||\n   }}}\n"
-        "   tail\n\nafter"
-    ),
-    "H plain": (
-        " * a\n   {{{\n   c\n   }}}\n   p1 [[BR]][[BR]]\n   p2\n * b"
-    ),
-    "H ordered": (
-        " 1. a\n    {{{\n    c\n    }}}\n    p1 [[BR]][[BR]]\n    p2\n"
-        " 2. b"
-    ),
-    "H nested": (
-        " * a\n   * b\n     {{{\n     c\n     }}}\n"
-        "     p1 [[BR]][[BR]]\n     p2\n * c"
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(STABLE))
-def test_tracwiki_markdown_tracwiki_is_byte_stable(name):
-    wiki = STABLE[name]
-    assert markdown_to_tracwiki(_md(wiki)) == wiki
 
 
 # -- Live: the real renderer on /trac_test ----------------------------------

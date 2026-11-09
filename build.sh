@@ -41,7 +41,6 @@ HIDDEN_IMPORTS=(
     # converters/ subpackage
     trac_mcp_server.converters
     trac_mcp_server.converters.common
-    trac_mcp_server.converters.tracwiki_to_markdown
     trac_mcp_server.converters.markdown_to_tracwiki
     trac_mcp_server.converters.html_to_markdown
 

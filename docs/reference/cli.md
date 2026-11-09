@@ -90,7 +90,6 @@ trac-convert --version
 | `--to-clipboard` | -- | Write output to system clipboard instead of stdout/file. Same Linux tool requirement as `--from-clipboard`. |
 | `--heading-anchors {on,off}` | `on` | md→tracwiki only: emit explicit `#slug` anchors on TracWiki headings (silently ignored in tw→md direction) |
 | `--link-map FROM=TO` | -- | TracWiki -> Markdown only (`--from-wiki` and file / stdin / clipboard input): rewrite link targets that start with `FROM` to start with `TO`, longest `FROM` first, split at the first `=`. Repeatable. **Replaces** the configured map (`export.link_rewrites`, `TRAC_MCP_LINK_REWRITES`; see [Configuration](configuration.md#link-rewrites-export)) rather than adding to it. Image sources and in-page `#anchors` are never rewritten, and the link text is kept. In any other direction it prints one `warning: --link-map has no effect ...` line (suppressed by `-q`). A value with no `=`, an empty `FROM`, or a repeated `FROM` is a usage error (exit `2`). |
-| `--unknown-macros {preserve,drop}` | -- | **Deprecated, no effect** (Trac renders macros itself); removed in #214. Passing it prints one `warning: --unknown-macros is deprecated and has no effect` line on stderr unless `-q` is set. |
 | `-v, --verbose` | -- | Emit `info:` diagnostics to stderr (mutually exclusive with `-q`) |
 | `-q, --quiet` | -- | Suppress `warning:` lines to stderr (mutually exclusive with `-v`; does NOT suppress `error:` lines) |
 | `--from-wiki PAGE` | -- | Fetch input from a Trac wiki page (source format is TracWiki); to Markdown it translates the page's own rendered HTML, so relative links resolve as Trac resolves them. The page version is read first and the source and the HTML are both read at it, so a save in between cannot pair one version's source with another's HTML; if the version cannot be read, both reads are the latest and a `warning:` line says they were not pinned. Mutually exclusive with `FILE` positional and `--from-clipboard`. |
@@ -133,10 +132,11 @@ trac-convert --from-wiki MyPage --to md -o my-page.md
 # Push a Markdown file back to Trac
 trac-convert --from-file notes.md --to-wiki MyPage --wiki-comment "Edited via CLI"
 
-# Round-trip: fetch, edit locally, then push back
-trac-convert --from-wiki MyPage --to md -o my-page.md
-# (edit my-page.md)
-trac-convert --from-file my-page.md --to-wiki MyPage
+# Edit a page as TracWiki, not Markdown (the Markdown export is one-way):
+# fetch the source, edit it locally, then push it back
+trac-convert --from-wiki MyPage --to tracwiki -o my-page.tw
+# (edit my-page.tw)
+trac-convert --from tracwiki --from-file my-page.tw --to-wiki MyPage
 ```
 
 On failure, `trac-convert` exits with code `4` and writes a classified error message (page-not-found, permission-denied, timeout, SSL, connection, generic) to stderr; a failed render of TracWiki -> Markdown is reported the same way, with the action `wiki render`. See [Configuration](configuration.md) for the full auth and config precedence rules.

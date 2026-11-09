@@ -32,11 +32,6 @@ bytes ``master`` (8702a5c) produced: a quote that is the item's first child
 adjacent block to the innermost nested item, #112/#125), a quote after a
 run with a passed-through TracWiki line (#143 review F1), and a top-level
 blockquote.
-
-**Read leg.** Plain item text straight after a citation line is a lazy
-continuation of the quote to CommonMark, so it gets a blank line before it
-(not before the next item, a fence, or at the end): the Markdown then means
-what Trac renders, and the write leg puts it back with no blank line.
 """
 
 import re
@@ -47,14 +42,6 @@ from trac_mcp_server.converters import find_list_item_splits
 from trac_mcp_server.converters.markdown_to_tracwiki import (
     markdown_to_tracwiki,
 )
-from trac_mcp_server.converters.tracwiki_to_markdown import (
-    tracwiki_to_markdown,
-)
-
-
-def _md(wiki):
-    return tracwiki_to_markdown(wiki).text
-
 
 # -- Write leg: the three reported cases ------------------------------------
 
@@ -339,16 +326,10 @@ def test_quote_in_a_nested_item_in_a_quote_after_text_is_a_citation():
             " * a\n   > q\n\n   a. not\n * b",
         ),
         # F5, master 8702a5c bytes: a run that already holds a blank line
-        # (the list has ended there; unmeasured), here raw HTML and a #63
-        # fallback fence
+        # (the list has ended there; unmeasured), here raw HTML
         (
             "- a\n\n  <div>x</div>\n\n  > q\n- b\n",
             " * a\n\n   <div>x</div>\n\n     q\n * b",
-        ),
-        (
-            "- a\n\n  ```tracwiki-unconverted\n  plain words\n  ```\n\n"
-            "  > q\n- b\n",
-            " * a\n\n   plain words\n\n     q\n * b",
         ),
     ],
 )
@@ -384,147 +365,23 @@ def test_nested_quote_list_quote_renders_each_quote_once(monkeypatch):
     assert len(calls) == levels - 1
 
 
-# -- Read leg ----------------------------------------------------------------
+# -- Text after a citation -------------------------------------------------
 
 
-def test_citation_then_item_text_gets_a_blank_line():
-    """Without it CommonMark takes `tail` for a lazy continuation of the
-    quote, though Trac renders it after the blockquote."""
-    assert _md(" * a\n   > q\n   tail\n * d") == (
-        " - a\n   > q\n\n   tail\n - d"
-    )
+def test_text_after_a_citation_is_written_at_the_item_text_column():
+    md = " - a\n   > q\n\n   d\n - e"
+    assert markdown_to_tracwiki(md) == " * a\n   > q\n   d\n * e"
 
 
-def test_ordered_citation_then_item_text_gets_a_blank_line():
-    assert _md(" 1. a\n    > q\n    tail\n 2. d") == (
-        " 1. a\n    > q\n\n    tail\n 2. d"
-    )
+# -- A table in the quote --------------------------------------------------
 
 
-def test_citation_then_item_text_in_the_last_item():
-    assert _md(" * a\n   > q\n   tail") == " - a\n   > q\n\n   tail"
-
-
-def test_text_between_the_marker_and_text_columns_is_reindented():
-    """Measured on /trac_test: ` * a` / `   > q` / `  d` renders `d`
-    INSIDE the <li> (after the blockquote). At column 2 it would sit below
-    the Markdown item's content column and leave the list, so it gets the
-    blank line and the text column (3)."""
-    assert (
-        _md(" * a\n   > q\n  d\n * e") == " - a\n   > q\n\n   d\n - e"
-    )
-    assert _md(" 1. a\n    > q\n   d\n 2. e") == (
-        " 1. a\n    > q\n\n    d\n 2. e"
-    )
-    assert _md(" * a\n   * b\n     > q\n    d\n * e") == (
-        " - a\n   - b\n     > q\n\n     d\n - e"
-    )
-
-
-def test_text_between_the_marker_and_text_columns_round_trips():
-    wiki = " * a\n   > q\n  d\n * e"
-    assert markdown_to_tracwiki(_md(wiki)) == " * a\n   > q\n   d\n * e"
-
-
-def test_text_past_the_bound_after_a_citation_leaves_the_list():
-    """` * a` / `   > q` / `       deeper` renders OUTSIDE the list, as 2
-    blockquotes after the item's citation (Trac ends the list past marker
-    + 2). Measured on /trac_test on 2026-11-07: the source and the round
-    trip below render the same structure (ul > li a + citation q; 2
-    blockquotes; a new ul). Ticket #175 pins that reading: the line goes
-    through the `tracwiki-unconverted` fallback, set off by blank lines."""
-    wiki = " * a\n   > q\n       deeper\n * b"
-    read = " - a\n   > q\n\n```tracwiki-unconverted\n       deeper\n```\n\n - b"
-    assert _md(wiki) == read
-    assert markdown_to_tracwiki(read) == (
-        " * a\n   > q\n\n       deeper\n\n * b"
-    )
-
-    wiki = " * a\n   > q\n    d\n * e"
-    read = " - a\n   > q\n\n```tracwiki-unconverted\n    d\n```\n\n - e"
-    assert _md(wiki) == read
-    assert markdown_to_tracwiki(read) == " * a\n   > q\n\n    d\n\n * e"
-
-
-def test_citation_followed_by_the_next_item_gets_no_blank_line():
-    assert _md(" * a\n   > q\n * d") == " - a\n   > q\n - d"
-
-
-def test_citation_at_the_end_gets_no_blank_line():
-    assert _md(" * a\n   > q") == " - a\n   > q"
-
-
-def test_citation_followed_by_a_fence_gets_no_blank_line():
-    wiki = " * a\n   > q\n   {{{\n   c\n   }}}\n * d"
-    assert _md(wiki) == " - a\n   > q\n   ```\n   c\n   ```\n - d"
-
-
-def test_multi_line_citation_then_text_gets_one_blank_line():
-    assert _md(" * a\n   > p1\n   >\n   > p2\n   tail\n * d") == (
-        " - a\n   > p1\n   >\n   > p2\n\n   tail\n - d"
-    )
-
-
-def test_citation_then_a_nested_item_gets_no_blank_line():
-    assert _md(" * a\n   > q\n   * sub\n * d") == (
-        " - a\n   > q\n   - sub\n - d"
-    )
-
-
-def test_item_text_then_citation_gets_no_blank_line():
-    """The quote interrupts the paragraph in CommonMark by itself."""
-    assert _md(" * a\n   b\n   > q\n * d") == (
-        " - a\n   b\n   > q\n - d"
-    )
-
-
-# -- TracWiki -> Markdown -> TracWiki byte stability -------------------------
-
-STABLE = {
-    "plain": " * a\n   > q\n * d",
-    "multi-line": " * a\n   > q\n   > r\n * d",
-    "multi-paragraph": " * a\n   > p1\n   >\n   > p2\n * d",
-    "table": " * a\n   > ||=x=||\n   > ||1||\n * d",
-    "code": " * a\n   > {{{\n   > code\n   > }}}\n * d",
-    "list": " * a\n   >  * l1\n * d",
-    "nested quote": " * a\n   > > x\n * d",
-    "nested item": " * a\n   * e\n     > nq\n * d",
-    "ordered": " 1. g\n    > oq\n 2. d",
-    "quote then tail": " * a\n   > q\n   tail\n * d",
-    "quote then tail, last item": " * a\n   > q\n   tail",
-    "quote then code": " * a\n   > q\n   {{{\n   c\n   }}}\n * d",
-    "code then quote": " * a\n   {{{\n   c\n   }}}\n   > q\n * d",
-    "quote then nested list": " * a\n   > q\n   * sub\n * d",
-    "text then quote": " * a\n   b\n   > q\n * d",
-    "quote, then two paragraphs": (
-        " * a\n   > q\n   t1 [[BR]][[BR]]\n   t2\n * d"
-    ),
-}
-
-
-@pytest.mark.parametrize("name", list(STABLE))
-def test_tracwiki_markdown_tracwiki_is_byte_stable(name):
-    wiki = STABLE[name]
-    assert markdown_to_tracwiki(_md(wiki)) == wiki
-
-
-# -- Markdown -> TracWiki -> Markdown: a table in the quote ------------------
-
-
-def test_table_in_the_quote_survives_the_round_trip_as_cells():
-    """The write leg turns the quoted GFM table into `||` rows. The read
-    leg does not convert a blockquoted `||` row back into a GFM table (a
-    `> ||` line is not a table row to `_convert_tables`), so the second
-    Markdown differs from the first -- but it is stable from there, and
-    the TracWiki it writes is the same. KNOWN LIMITATION, pinned as it is;
-    not part of #145."""
+def test_table_in_the_quote_is_written_as_cells():
+    """The write leg turns the quoted GFM table into `||` rows."""
     first = markdown_to_tracwiki(
         "- a\n  > | x |\n  > |---|\n  > | 1 |\n- d\n"
     )
     assert first == " * a\n   > ||=x=||\n   > ||1||\n * d"
-    second = _md(first)
-    assert second == " - a\n   > ||=x=||\n   > ||1||\n - d"
-    assert markdown_to_tracwiki(second) == first
 
 
 # -- Live: the real renderer on /trac_test ----------------------------------

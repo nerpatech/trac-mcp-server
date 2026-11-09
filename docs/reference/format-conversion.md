@@ -82,7 +82,8 @@ macros, nested lists, tables and links come out as Trac itself reads them.
 - The result is a one-way export for reading. It is not meant to be pushed
   back: a Markdown file pulled this way is Trac's rendering, not the source,
   and its front matter makes the guarded push paths refuse it (see below). Pull
-  `format="tracwiki"` for source that round-trips.
+  `format="tracwiki"` for the source itself, which you can edit and push
+  back.
 - Warnings the translator raises (a dropped table of contents, a table
   passed through as HTML, a list style Markdown cannot express) are listed
   in the text block of the `wiki_file_pull` result and in
@@ -148,10 +149,12 @@ content verbatim as TracWiki and do not check front matter (they never
 convert, so they cannot re-shape a page; Markdown written there is stored
 as literal text).
 
-`tracwiki_to_markdown` (the old regex converter) is no longer called by
-either; it is removed in #214. The description of its behaviour in the
-"Markup Conversion Examples" below applies to the Markdown -> TracWiki
-direction only.
+There is no offline TracWiki -> Markdown conversion: the old regex
+converter, `tracwiki_to_markdown`, is removed (Trac /trac_mcp_server #214).
+`auto_convert` raises `ValueError` ("TracWiki -> Markdown needs Trac's
+rendered HTML: use trac_html_to_markdown") for a TracWiki source with a
+Markdown target, rather than passing the text through. The "Markup
+Conversion Examples" below describe the Markdown -> TracWiki direction.
 
 ## ConversionResult Structure
 
@@ -266,25 +269,16 @@ TracWiki:  [wiki:WikiPage Wiki Link]
 
 Markdown:  [Wiki Link](wiki:WikiPage)
 TracWiki:  [wiki:WikiPage Wiki Link]
-
-TracWiki:  [[WikiPage]]
-Markdown:  [WikiPage](wiki:WikiPage)
-
-TracWiki:  [[WikiPage|Wiki Link]]
-Markdown:  [Wiki Link](wiki:WikiPage)
 ```
 
-> **Note:** Double-bracket `[[WikiPage]]` / `[[WikiPage|Label]]` links only
-> ever appear on the TracWiki-to-Markdown side; `markdown_to_tracwiki`
-> always emits the single-bracket `[wiki:WikiPage ...]` form shown above, so
-> a `wiki_get` -> edit -> `wiki_update` round-trip normalizes double-bracket
-> links to single-bracket ones rather than preserving the original syntax.
+> **Note:** Double-bracket `[[WikiPage]]` / `[[WikiPage|Label]]` written in
+> the Markdown source is TracWiki macro/link syntax and passes through
+> unchanged; `markdown_to_tracwiki`'s own link output is always the
+> single-bracket `[wiki:WikiPage ...]` form shown above.
 
-> **Note:** Link targets that already carry a TracLink resolver prefix -- `wiki:`, `ticket:`, `milestone:`, `source:`, `attachment:`, `changeset:`, and the rest of Trac's built-in resolvers -- are emitted verbatim, not prefixed a second time. This is the form `tracwiki_to_markdown` produces, so a `wiki_get` -> edit -> `wiki_update` round-trip that leaves existing links untouched preserves them exactly. Targets without a prefix (`WikiPage`, `Planning/Phases/Phase01`) get `wiki:` added.
+> **Note:** Link targets that already carry a TracLink resolver prefix -- `wiki:`, `ticket:`, `milestone:`, `source:`, `attachment:`, `changeset:`, and the rest of Trac's built-in resolvers -- are emitted verbatim, not prefixed a second time. Targets without a prefix (`WikiPage`, `Planning/Phases/Phase01`) get `wiki:` added.
 
-> **Note:** Non-URL-shaped "links" (URL portion contains a `:` that is not a known TracLink resolver, e.g. sentinel tokens like `[auto-pm: state NEEDS_CODE]` or `[label](foo:bar)`) are emitted verbatim as Markdown rather than wrapped as TracWiki wiki links. This preserves machine-readable state markers through round-trip conversion.
-
-> **Note:** The same rule applies in the TracWiki -> Markdown direction. A `[target label]` construct is only rewritten as a Markdown link when `target` is a real link target -- a known TracLink resolver, a URL scheme, or a name with no `:` at all. Bracketed prose such as `[auto-pm: state NEEDS_EDIT]` or `[note: see below]` stays literal instead of becoming `[state NEEDS_EDIT](auto-pm:)` with an empty URL. A construct also never spans a line break, so an orphan `[text]` cannot absorb a `(...)` parenthetical from a following line.
+> **Note:** Non-URL-shaped "links" (URL portion contains a `:` that is not a known TracLink resolver, e.g. sentinel tokens like `[auto-pm: state NEEDS_CODE]` or `[label](foo:bar)`) are emitted verbatim as Markdown rather than wrapped as TracWiki wiki links. This keeps machine-readable state markers intact.
 
 **Images:**
 ```
@@ -305,21 +299,19 @@ TracWiki:   * Item 1
 
 **Macros:**
 ```
-Markdown:  [MACRO: PageOutline]
+Markdown:  [[PageOutline]]
 TracWiki:  [[PageOutline]]
 
-Markdown:  [MACRO: TOC(depth=2)]
+Markdown:  [[TOC(depth=2)]]
 TracWiki:  [[TOC(depth=2)]]
 
 Markdown:  [[SomePage]]
 TracWiki:  [[SomePage]]
 ```
 
-> **Note:** `[MACRO: Name(args)]` -- the placeholder `tracwiki_to_markdown`
-> emits for a macro it couldn't otherwise represent in Markdown -- converts
-> back to `[[Name(args)]]`, so a `wiki_get` -> edit -> `wiki_update` round
-> trip no longer permanently flattens the macro (ticket #19). `[[...]]`
-> syntax typed directly in the Markdown source passes through unchanged too.
+> **Note:** `[[...]]` syntax typed directly in the Markdown source passes
+> through unchanged (ticket #19), so a macro keeps working in the TracWiki
+> that is stored.
 
 **CamelCase words:**
 ```

@@ -576,7 +576,7 @@ def test_clipboard_write_error_returns_1(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Phase 16: --heading-anchors and --unknown-macros CLI flags
+# Phase 16: --heading-anchors CLI flag
 # ---------------------------------------------------------------------------
 
 
@@ -619,72 +619,23 @@ def test_heading_anchors_ignored_on_tw_to_md(monkeypatch, fake_trac):
     assert exit_code == 0
 
 
-def test_unknown_macros_is_deprecated_and_defaults_to_none():
-    """--unknown-macros has no effect since Trac renders macros itself
-    (Trac #210); it defaults to None so that passing it is detectable."""
-    parser = build_parser()
-    assert parser.parse_args(["--to", "md"]).unknown_macros is None
-    assert (
-        parser.parse_args(
-            ["--to", "md", "--unknown-macros", "drop"]
-        ).unknown_macros
-        == "drop"
-    )
-
-
-@pytest.mark.parametrize("value", ["preserve", "drop"])
-def test_unknown_macros_warns_once_and_changes_nothing(
-    value, monkeypatch, capsys, fake_trac
-):
-    """The flag prints one deprecation warning and has no effect: the
-    output is the same with and without it."""
-    fake_trac.wiki_to_html.return_value = "<p>\n[[PageOutline]]\n</p>\n"
-    monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
-    assert main(["--from", "tracwiki", "--to", "md"]) == 0
-    baseline = capsys.readouterr()
-    assert "--unknown-macros" not in baseline.err
-
-    monkeypatch.setattr("sys.stdin", io.StringIO("[[PageOutline]]"))
-    exit_code = main(
-        ["--from", "tracwiki", "--to", "md", "--unknown-macros", value]
-    )
-    assert exit_code == 0
-    captured = capsys.readouterr()
-    assert captured.out == baseline.out
-    assert (
-        captured.err.count(
-            "warning: --unknown-macros is deprecated and has no effect\n"
-        )
-        == 1
-    )
-
-
-def test_unknown_macros_warning_is_silenced_by_quiet(
-    monkeypatch, capsys
-):
-    monkeypatch.setattr("sys.stdin", io.StringIO("# H"))
-    exit_code = main(
-        [
-            "--from",
-            "md",
-            "--to",
-            "tracwiki",
-            "--unknown-macros",
-            "drop",
-            "-q",
-        ]
-    )
-    assert exit_code == 0
-    assert "--unknown-macros" not in capsys.readouterr().err
+def test_the_removed_unknown_macros_flag_is_a_usage_error(capsys):
+    """--unknown-macros was removed with the TracWiki -> Markdown converter
+    (#214): argparse rejects it with exit 2, naming the flag."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--to", "md", "--unknown-macros", "drop"])
+    assert excinfo.value.code == 2
+    assert "--unknown-macros" in capsys.readouterr().err
 
 
 def test_help_lists_new_flags(capsys):
-    """--help output includes both new flags."""
+    """--help output includes the --heading-anchors flag and no longer
+    lists --unknown-macros."""
     with pytest.raises(SystemExit):
         main(["--help"])
     out = capsys.readouterr().out
     assert "--heading-anchors" in out
-    assert "--unknown-macros" in out
+    assert "--unknown-macros" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -720,6 +671,27 @@ def test_convert_text_exception_returns_exit_3_with_stderr_message(
     assert exit_code == EXIT_CONVERSION_ERROR
     err = capsys.readouterr().err
     assert "trac-convert: conversion failed: bad input" in err
+
+
+_LEGACY_FENCE_MD = "# T\n\n```tracwiki-unconverted\n= x =\n```\n"
+
+
+def test_legacy_export_fence_is_refused_with_one_stderr_line(
+    monkeypatch, capsys
+):
+    """``--to tracwiki`` on Markdown holding a ``tracwiki-unconverted``
+    fence exits non-zero with one message line and no traceback (#214)."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(_LEGACY_FENCE_MD))
+    exit_code = main(["--from", "md", "--to", "tracwiki"])
+    assert exit_code == EXIT_CONVERSION_ERROR
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("trac-convert: conversion failed: ")
+    assert "tracwiki-unconverted" in lines[0]
+    assert "--format tracwiki" in lines[0]
+    assert "Traceback" not in captured.err
 
 
 def test_convert_text_exception_does_not_leak_traceback(

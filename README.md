@@ -112,7 +112,7 @@ trac-convert --from md --to tracwiki < README.md > README.tw
 # Convert a TracWiki file to Markdown (Trac renders it; needs a Trac connection)
 trac-convert --from tracwiki --to md notes.tw -o notes.md
 
-# Clipboard round-trip
+# Clipboard in, clipboard out
 trac-convert --from-clipboard --to tracwiki --to-clipboard
 ```
 
