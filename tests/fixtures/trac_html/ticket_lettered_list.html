@@ -1,0 +1,70 @@
+<h2 class="section" id="Fallbackcontractimplemented1of8constructsround-trippedbefore8of8now">Fallback contract implemented — 1 of 8 constructs round-tripped before, 8 of 8 now</h2>
+<p>
+Operator ruled <strong>unwrap</strong> on the open question, so all four decisions are settled and the contract is built. GitHub PR 63 off <code>master</code>, branch <code>fix-63-lossy-fallback-contract</code>, three commits. <strong>Not merged and not deployed</strong> — see the end.
+</p>
+<h3 class="section" id="Theheadlinemeasured">The headline, measured</h3>
+<p>
+The eight shapes pinned before any change, through <code>tw -&gt; md -&gt; tw</code>:
+</p>
+<table class="wiki">
+<tr><th>measure</th><th>before</th><th>after
+</th></tr><tr><td>round-trips byte-for-byte</td><td><strong>1 of 8</strong></td><td><strong>8 of 8</strong>
+</td></tr><tr><td>warnings on a broken construct</td><td>0 or a stale one</td><td><strong>exactly 1, naming what it did</strong>
+</td></tr><tr><td>controls (plain table, code block, <code>{{{#!markdown}}}</code>, backticked token)</td><td>clean</td><td><strong>unchanged, 0 warnings</strong>
+</td></tr></table>
+<p>
+The one that round-tripped before was <code>{{{#!comment}}}</code>, and comment 12's finding is why that was the <strong>worst</strong> of the eight rather than the best: byte-identical and semantically inverted. It is now carried verbatim and warned.
+</p>
+<h3 class="section" id="Whatlanded">What landed</h3>
+<ol><li><strong>The pin, before touching anything.</strong> Three classes with different jobs — 11 constructs that must keep round-tripping (the recall gate), 2 that normalise, 8 characterised as broken. Watched failing on four seeded defects per <a class="ext-link" href="https://trac.example.org/auto_pm/intertrac/wiki%3ARules/testing/SeededDefectFirst" title="wiki:Rules/testing/SeededDefectFirst in Automated Project Manager"><span class="icon">​</span>auto_pm:wiki:Rules/testing/SeededDefectFirst</a>.
+</li><li><strong>The fallback and the unwrap.</strong> Read leg emits the original source verbatim in a <code>tracwiki-unconverted</code> fence; write leg unwraps it. Three defects surfaced while building it, each caught by a test that already existed rather than by inspection: the fallback runs before the converter's own shielding and needed its own, adjacent fallback blocks ran their fences together into a malformed run, and the table warnings still described the reconstruction that had been removed.
+</li><li><strong>The deletion.</strong> <code>_convert_processor_cells</code>, 39 lines.
+</li></ol><h3 class="section" id="OnechoiceImadethatyoudidnotruleon">One choice I made that you did not rule on</h3>
+<p>
+The fence tag is <strong><code>tracwiki-unconverted</code></strong>, not a bare <code>tracwiki</code>. The tag is what the write leg unwraps on, so a collision with a code sample someone wrote while documenting TracWiki inside a Markdown file would <strong>inject live markup where a code block was meant</strong> — the exact class of corruption this ticket removes. Say the word if you want it spelled differently.
+</p>
+<h3 class="section" id="Thenear-missbecauseitistheticketsowntrapfiring">The near-miss, because it is the ticket's own trap firing</h3>
+<p>
+Making <code>_convert_processor_cells</code> a no-op left <strong>1537 tests passing</strong> — which reads as <em>"unreachable, safe to delete."</em> Measured directly instead of inferred from the green suite, it was neither unreachable nor safe:
+</p>
+<table class="wiki">
+<tr><th>source</th><th>after conversion
+</th></tr><tr><td>a plain code block whose body is a <code>#!td</code> processor cell</td><td>a fenced block whose body is <code>||a||</code> — <strong>the quoted source rewritten</strong>
+</td></tr></table>
+<p>
+It ran before the code-block stashing, so a processor cell nested inside a plain code block was rewritten too. The <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/31" title="#31: defect: tracwiki_to_markdown rewrites the contents of {{{ }}} code blocks as ... (closed: fixed)">#31</a> / <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/51" title="#51: defect: tracwiki_to_markdown: nested {{{ }}} block leaks the internal CODE ... (closed: fixed)">#51</a> family, and <strong>nothing in the suite covered it</strong>. This ticket's acceptance section warns that <em>"tests still pass"</em> is satisfied by deleting the code under test; here it was equally satisfied by <strong>not</strong> deleting it. The test was written and watched failing first, so the deletion is a bug fix and not only a simplification.
+</p>
+<h3 class="section" id="Thehonestaccountingastheacceptancesectionrequires">The honest accounting, as the acceptance section requires</h3>
+<table class="wiki">
+<tr><th>measure</th><th>result
+</th></tr><tr><td>code lines</td><td><strong>+171</strong>, not a reduction
+</td></tr><tr><td>constructs lossy → lossless</td><td><strong>8</strong>
+</td></tr><tr><td>silent corruptions fixed</td><td><strong>1</strong> (code-block content rewritten)
+</td></tr><tr><td>semantic inversions fixed</td><td><strong>1</strong> (<code>{{{#!comment}}}</code>)
+</td></tr><tr><td>retained-capability list</td><td><strong>green</strong>; store goldens byte-identical
+</td></tr><tr><td><code>ci.sh</code></td><td>1538 passed, 10 skipped, lint clean, both binaries built
+</td></tr></table>
+<p>
+<strong>The line count went up.</strong> Comment 3, comment 6 and comment 7 each predicted the <em>"large chunks"</em> premise would not hold, and it did not; you have already ruled that the drop need not match the expectation, so this is recorded rather than argued.
+</p>
+<h3 class="section" id="DeliberatelynotinthisPR">Deliberately not in this PR</h3>
+<ul><li><strong>Definition lists</strong>, the fifth broken construct. Its detector is far too broad to hand a fallback to — measured, <code>Use std::vector here.</code> <strong>already</strong> converts to <code>**Use std**: vector here.</code>, so wrapping on that signal would put ordinary prose inside a code fence. That over-broad detector is a live pre-existing defect and wants its own ticket; I have not filed it yet.
+</li><li><strong><a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/68" title="#68: enhancement: The warning suite catches only visible conversion damage — silent ... (closed: fixed)">#68</a>'s write-leg loss check</strong> — separate ticket, separate PR, still the write half of the contract.
+</li><li><strong>A second pre-existing weakness</strong> found while deleting: a <code>#!lang</code> block nested directly inside another <code>#!lang</code> block produces malformed intermediate Markdown and gains a blank line before the outer close. Measured on <code>master</code> for every nested block, so it predates this. On <code>master</code> that shape was <strong>corrupted</strong> instead, so this is strictly better, but it is not clean.
+</li></ul><h3 class="section" id="OnedecisionIneedbeforestep5">One decision I need before step 5</h3>
+<p>
+<strong>The write-leg fallback has no obvious wrapping unit, and I did not want to invent one.</strong> The read leg's unit is self-evident — the block construct. A Markdown footnote is not a block: the reference <code>[^1]</code> and its definition <code>[^1]: note</code> sit in <strong>different places</strong> in the document, and wrapping either alone breaks the pairing. Measured, the converter does not parse footnotes at all — only the <code>table</code> plugin is enabled, so the definition line is consumed as a link reference definition and <code>Text[^1]</code> is stored as <code>Text[wiki:note ^1]</code>, a fabricated link to a page named <code>note</code>.
+</p>
+<p>
+Three options, none obviously right:
+</p>
+<ol class="loweralpha"><li>wrap the <strong>whole document</strong> in <code>{{{#!markdown}}}</code> when any unrepresentable construct is present — safe, drastic;
+</li><li>wrap the <strong>enclosing block</strong> of each half separately and accept the broken pairing;
+</li><li><strong>fail the call</strong> for this narrow class only, which is comment 1's original write-leg proposal surviving in exactly the place it fits.
+</li></ol><p>
+<strong>I lean (c)</strong>, narrowly scoped: it is the one construct class where wrapping genuinely cannot preserve meaning, and the author's escape hatch is real — declare <code>format="tracwiki"</code> and nothing converts.
+</p>
+<h3 class="section" id="Mergeanddeploy">Merge and deploy?</h3>
+<p>
+Same question as slice (b). PR 63 is up and unmerged; deploying restarts both shared units every project connects to, so it wants to be a deliberate call rather than a tail-end step.
+</p>

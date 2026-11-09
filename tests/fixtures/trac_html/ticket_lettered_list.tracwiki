@@ -1,0 +1,57 @@
+== Fallback contract implemented — 1 of 8 constructs round-tripped before, 8 of 8 now ==
+Operator ruled '''unwrap''' on the open question, so all four decisions are settled and the contract is built. !GitHub PR 63 off `master`, branch `fix-63-lossy-fallback-contract`, three commits. '''Not merged and not deployed''' — see the end.
+
+=== The headline, measured ===
+The eight shapes pinned before any change, through `tw -> md -> tw`:
+
+||=measure=||=before=||=after=||
+||round-trips byte-for-byte||'''1 of 8'''||'''8 of 8'''||
+||warnings on a broken construct||0 or a stale one||'''exactly 1, naming what it did'''||
+||controls (plain table, code block, `{{{#!markdown}}}`, backticked token)||clean||'''unchanged, 0 warnings'''||
+
+The one that round-tripped before was `{{{#!comment}}}`, and comment 12's finding is why that was the '''worst''' of the eight rather than the best: byte-identical and semantically inverted. It is now carried verbatim and warned.
+
+=== What landed ===
+ 1. '''The pin, before touching anything.''' Three classes with different jobs — 11 constructs that must keep round-tripping (the recall gate), 2 that normalise, 8 characterised as broken. Watched failing on four seeded defects per auto_pm:wiki:Rules/testing/SeededDefectFirst.
+ 2. '''The fallback and the unwrap.''' Read leg emits the original source verbatim in a `tracwiki-unconverted` fence; write leg unwraps it. Three defects surfaced while building it, each caught by a test that already existed rather than by inspection: the fallback runs before the converter's own shielding and needed its own, adjacent fallback blocks ran their fences together into a malformed run, and the table warnings still described the reconstruction that had been removed.
+ 3. '''The deletion.''' `_convert_processor_cells`, 39 lines.
+
+=== One choice I made that you did not rule on ===
+The fence tag is '''`tracwiki-unconverted`''', not a bare `tracwiki`. The tag is what the write leg unwraps on, so a collision with a code sample someone wrote while documenting !TracWiki inside a Markdown file would '''inject live markup where a code block was meant''' — the exact class of corruption this ticket removes. Say the word if you want it spelled differently.
+
+=== The near-miss, because it is the ticket's own trap firing ===
+Making `_convert_processor_cells` a no-op left '''1537 tests passing''' — which reads as ''"unreachable, safe to delete."'' Measured directly instead of inferred from the green suite, it was neither unreachable nor safe:
+
+||=source=||=after conversion=||
+||a plain code block whose body is a `#!td` processor cell||a fenced block whose body is `||a||` — '''the quoted source rewritten'''||
+
+It ran before the code-block stashing, so a processor cell nested inside a plain code block was rewritten too. The #31 / #51 family, and '''nothing in the suite covered it'''. This ticket's acceptance section warns that ''"tests still pass"'' is satisfied by deleting the code under test; here it was equally satisfied by '''not''' deleting it. The test was written and watched failing first, so the deletion is a bug fix and not only a simplification.
+
+=== The honest accounting, as the acceptance section requires ===
+||=measure=||=result=||
+||code lines||'''+171''', not a reduction||
+||constructs lossy → lossless||'''8'''||
+||silent corruptions fixed||'''1''' (code-block content rewritten)||
+||semantic inversions fixed||'''1''' (`{{{#!comment}}}`)||
+||retained-capability list||'''green'''; store goldens byte-identical||
+||`ci.sh`||1538 passed, 10 skipped, lint clean, both binaries built||
+
+'''The line count went up.''' Comment 3, comment 6 and comment 7 each predicted the ''"large chunks"'' premise would not hold, and it did not; you have already ruled that the drop need not match the expectation, so this is recorded rather than argued.
+
+=== Deliberately not in this PR ===
+ * '''Definition lists''', the fifth broken construct. Its detector is far too broad to hand a fallback to — measured, `Use std::vector here.` '''already''' converts to `**Use std**: vector here.`, so wrapping on that signal would put ordinary prose inside a code fence. That over-broad detector is a live pre-existing defect and wants its own ticket; I have not filed it yet.
+ * '''#68's write-leg loss check''' — separate ticket, separate PR, still the write half of the contract.
+ * '''A second pre-existing weakness''' found while deleting: a `#!lang` block nested directly inside another `#!lang` block produces malformed intermediate Markdown and gains a blank line before the outer close. Measured on `master` for every nested block, so it predates this. On `master` that shape was '''corrupted''' instead, so this is strictly better, but it is not clean.
+
+=== One decision I need before step 5 ===
+'''The write-leg fallback has no obvious wrapping unit, and I did not want to invent one.''' The read leg's unit is self-evident — the block construct. A Markdown footnote is not a block: the reference `[^1]` and its definition `[^1]: note` sit in '''different places''' in the document, and wrapping either alone breaks the pairing. Measured, the converter does not parse footnotes at all — only the `table` plugin is enabled, so the definition line is consumed as a link reference definition and `Text[^1]` is stored as `Text[wiki:note ^1]`, a fabricated link to a page named `note`.
+
+Three options, none obviously right:
+ a. wrap the '''whole document''' in `{{{#!markdown}}}` when any unrepresentable construct is present — safe, drastic;
+ b. wrap the '''enclosing block''' of each half separately and accept the broken pairing;
+ c. '''fail the call''' for this narrow class only, which is comment 1's original write-leg proposal surviving in exactly the place it fits.
+
+'''I lean (c)''', narrowly scoped: it is the one construct class where wrapping genuinely cannot preserve meaning, and the author's escape hatch is real — declare `format="tracwiki"` and nothing converts.
+
+=== Merge and deploy? ===
+Same question as slice (b). PR 63 is up and unmerged; deploying restarts both shared units every project connects to, so it wants to be a deliberate call rather than a tail-end step.

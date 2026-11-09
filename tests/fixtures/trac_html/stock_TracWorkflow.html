@@ -1,0 +1,250 @@
+<html><body><h1 class="section" id="TheTracTicketWorkflowSystem">The Trac Ticket Workflow System</h1>
+<p>
+</p><div class="wiki-toc"><h4 class="section">Contents</h4>
+    <ol>
+      <li>
+        <a href="#TheDefaultTicketWorkflow">The Default Ticket Workflow</a>
+      </li>
+      <li>
+        <a href="#AdditionalTicketWorkflows">Additional Ticket Workflows</a>
+      </li>
+      <li>
+        <a href="#BasicTicketWorkflowCustomization">Basic Ticket Workflow Customization</a>
+        <ol>
+          <li>
+            <a href="#TicketCreateAction">Ticket Create Action</a>
+          </li>
+          <li>
+            <a href="#TicketResetAction">Ticket Reset Action</a>
+          </li>
+        </ol>
+      </li>
+      <li>
+        <a href="#WorkflowVisualization">Workflow Visualization</a>
+      </li>
+      <li>
+        <a href="#Example:AddingoptionalTestingwithWorkflow">Example: Adding optional Testing with Workflow</a>
+      </li>
+      <li>
+        <a href="#Example:Addsimpleoptionalgenericreviewstate">Example: Add simple optional generic review state</a>
+      </li>
+      <li>
+        <a href="#AdvancedTicketWorkflowCustomization">Advanced Ticket Workflow Customization</a>
+      </li>
+      <li>
+        <a href="#AddingWorkflowStatestoMilestoneProgressBars">Adding Workflow States to Milestone Progress Bars</a>
+      </li>
+      <li>
+        <a href="#Ideasfornextsteps">Ideas for next steps</a>
+      </li>
+    </ol>
+</div><p>
+</p><div class="wiki-toc"><h4>Table of Contents</h4><ul><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">Index</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">Installation</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">Customization</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">Plugins</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade">Upgrading</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">Configuration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">Administration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">Backup</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracLogging">Logging</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">Permissions</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">The Wiki</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">Wiki Formatting</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTimeline">Timeline</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBrowser">Repository Browser</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">Revision Log</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracChangeset">Changesets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets">Tickets</a></li><li class="active"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">Workflow</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRoadmap">Roadmap</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">Ticket Queries</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBatchModify">Batch Modify</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">Reports</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRss">RSS Support</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">Notification</a></li></ul></div><p>
+</p>
+<p>
+The Trac ticket system provides a configurable workflow on how tickets are treated.
+</p>
+<h2 class="section" id="TheDefaultTicketWorkflow">The Default Ticket Workflow</h2>
+<p>
+When a new environment is created, a default workflow is configured in your <code>trac.ini</code>. This workflow is the basic workflow, as specified in <a class="ext-link" href="https://trac.edgewall.org/intertrac/source%3Abranches/1.4-stable/trac/ticket/workflows/basic-workflow.ini" title="source:branches/1.4-stable/trac/ticket/workflows/basic-workflow.ini in The Trac Project"><span class="icon">​</span>basic-workflow.ini</a>:
+</p>
+<div class="trac-workflow-graph trac-noscript" id="trac-workflow-graph-090dabd0fcc0" style="display:inline-block;width:700px;height:300px"></div><noscript><div class="system-message">Enable JavaScript to display the workflow graph.</div></noscript><h2 class="section" id="AdditionalTicketWorkflows">Additional Ticket Workflows</h2>
+<p>
+There are example workflows provided in the Trac source tree, see <a class="ext-link" href="https://trac.edgewall.org/intertrac/source%3Abranches/1.4-stable/contrib/workflow" title="source:branches/1.4-stable/contrib/workflow in The Trac Project"><span class="icon">​</span>contrib/workflow</a> for <code>.ini</code> config sections. One of those may be a good match for what you want. They can be pasted into the <code>[ticket-workflow]</code> section of your <code>trac.ini</code> file. However, if you have existing tickets then there may be issues if those tickets have states that are not in the new workflow.
+</p>
+<p>
+Here are some <a class="ext-link" href="https://trac.edgewall.org/intertrac/WorkFlow/Examples" title="WorkFlow/Examples in The Trac Project"><span class="icon">​</span>diagrams</a> of the above examples.
+</p>
+<h2 class="section" id="BasicTicketWorkflowCustomization">Basic Ticket Workflow Customization</h2>
+<p>
+<strong>Note</strong>: Ticket "statuses" or "states" are not separately defined. The states a ticket can be in are automatically generated by the transitions defined in a workflow. Therefore, creating a new ticket state simply requires defining a state transition in the workflow that starts or ends with that state.
+</p>
+<p>
+In the <code>[ticket-workflow]</code> section of <code>trac.ini</code>, each entry is an action that may be taken on a ticket.
+For example, consider the <code>accept</code> action from <code>simple-workflow.ini</code>:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">accept</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,accepted -&gt; accepted</span>
+<span class="na">accept.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">accept.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner_to_self</span>
+</pre></div></div><p>
+The first line in this example defines the <code>accept</code> action, along with the states the action is valid in (<code>new</code> and <code>accepted</code>), and the new state of the ticket when the action is taken (<code>accepted</code>).
+</p>
+<p>
+The <code>accept.permissions</code> line specifies the permissions the user must have to use this action. <a class="ext-link" href="https://trac.edgewall.org/intertrac/ExtraPermissionsProvider" title="ExtraPermissionsProvider in The Trac Project"><span class="icon">​</span>ExtraPermissionsProvider</a> can define new permissions to be used here.
+</p>
+<p>
+The <code>accept.operations</code> line specifies changes that will be made to the ticket in addition to the status change when the action is taken. In this case, when a user clicks on <code>accept</code>, the ticket owner field is updated to the logged in user. Multiple operations may be specified in a comma separated list.
+</p>
+<p>
+The available operations are:
+</p>
+<ul><li><strong>del_owner</strong> -- Clears the owner field.
+</li><li><strong>set_owner</strong> -- Sets the owner to the selected or entered owner. Defaults to the current user. When <code>[ticket] restrict_owner = true</code>, the select will be populated with users that have <code>TICKET_MODIFY</code> permission and an authenticated session.
+<ul><li><em>actionname</em><code>.set_owner</code> may optionally specify a comma delimited list of users that will be used to populate the select, or a single user. Groups and permissions may also be included in the list <em>(Since 1.1.3)</em>. When groups or permissions are specified the select is populated with all members of the group or all users that possess the permission.
+</li></ul></li><li><strong>set_owner_to_self</strong> -- Sets the owner to the logged in user.
+</li><li><strong>may_set_owner</strong> -- Sets the owner to the selected or entered owner. Defaults to the existing owner. <em>(Since 1.1.2)</em>.
+</li><li><strong>del_resolution</strong> -- Clears the resolution field.
+</li><li><strong>set_resolution</strong> -- Sets the resolution to the selected value.
+<ul><li><em>actionname</em><code>.set_resolution</code> may optionally be set to a comma delimited list or a single value. The resolution(s) specified in this attribute must be defined in the database. Example:
+<div class="wiki-code"><div class="code"><pre><span class="na">resolve_new</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new -&gt; closed</span>
+<span class="na">resolve_new.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">resolve</span>
+<span class="na">resolve_new.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_resolution</span>
+<span class="na">resolve_new.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">resolve_new.set_resolution</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">invalid,wontfix</span>
+</pre></div></div></li></ul></li><li><strong>leave_status</strong> -- Displays "leave as &lt;current status&gt;" and makes no change to the ticket.
+</li><li><strong>reset_workflow</strong> -- Resets the status of tickets that are in states no longer defined.
+</li></ul><p>
+<strong>Note:</strong> Specifying conflicting operations, such as <code>set_owner</code> and <code>del_owner</code>, has unspecified results.
+</p>
+<p>
+The example that follows demonstrates the <code>.label</code> attribute. The action here is <code>resolve_accepted</code>, but it will be presented to the user as <code>resolve</code>.
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">resolve_accepted</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">accepted -&gt; closed</span>
+<span class="na">resolve_accepted.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">resolve</span>
+<span class="na">resolve_accepted.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">resolve_accepted.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_resolution</span>
+</pre></div></div><p>
+The <code>.label</code> attribute is new in Trac 1.1.3 and is functionally the same as the <code>.name</code> attribute, which is now deprecated. If neither <code>.label</code> or <code>.name</code> is specified, the action will be presented to the user as <em>resolve accepted</em>, the underscores having been replaced by whitespace (<em>Since 1.1.3</em>).
+</p>
+<p>
+For actions that should be available in all states, <code>*</code> may be used in place of the state. The obvious example is the <code>leave</code> action:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">leave</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">* -&gt; *</span>
+<span class="na">leave.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">leave_status</span>
+<span class="na">leave.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+</pre></div></div><p>
+The transition to <code>*</code> (<code>-&gt; *</code>) means the workflow operation determines the next status. The only configurable ticket workflow operation that determines the next status is <code>leave_status</code>. However, another workflow controller can operate on an action with new status <code>*</code> and determine the next status.
+</p>
+<p>
+This also shows the use of the <code>.default</code> attribute. This value is expected to be an integer, and the order in which the actions are displayed is determined by this value. The action with the highest <code>.default</code> value is listed first, and is selected by default. The rest of the actions are listed in order of decreasing <code>.default</code> values.
+If not specified for an action, <code>.default</code> is 0. The value may be negative.
+</p>
+<p>
+There is one hard-coded constraint to the workflow: tickets are expected to have a <code>closed</code> state. The default reports/queries treat any state other than <code>closed</code> as an open state.
+</p>
+<h3 class="section" id="TicketCreateAction">Ticket Create Action</h3>
+<p>
+The ticket create actions are specified by a transition from the special <code>&lt;none&gt;</code> state. At least one create action must be available to the user in order for tickets to be created. The create actions defined in the default workflow are:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">create</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&lt;none&gt; -&gt; new</span>
+<span class="na">create.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+
+<span class="na">create_and_assign</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&lt;none&gt; -&gt; assigned</span>
+<span class="na">create_and_assign.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">assign</span>
+<span class="na">create_and_assign.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">create_and_assign.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">may_set_owner</span>
+</pre></div></div><h3 class="section" id="TicketResetAction">Ticket Reset Action</h3>
+<p>
+The special <code>_reset</code> action is added by default for tickets that are in states that are no longer defined. This allows tickets to be individually "repaired" after the workflow is changed, although it's recommended that the administrator perform the action by batch modifying the affected tickets. By default the <code>_reset</code> action is available to users with the <code>TICKET_ADMIN</code> permission and reset tickets are put in the <em>new</em> state. The default <code>_reset</code> action is equivalent to the following <code>[ticket-workflow]</code> action definition:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">_reset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">-&gt; new</span>
+<span class="na">_reset.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reset</span>
+<span class="na">_reset.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reset_workflow</span>
+<span class="na">_reset.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_ADMIN</span>
+<span class="na">_reset.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">0</span>
+</pre></div></div><p>
+Since <a class="ext-link" href="https://trac.edgewall.org/intertrac/milestone%3A1.0.3" title="milestone:1.0.3 in The Trac Project"><span class="icon">​</span>milestone:1.0.3</a> the <code>_reset</code> action can be customized by redefining the implicit action. For example, to allow anyone with <code>TICKET_MODIFY</code> to perform the <code>_reset</code> action, the workflow action would need to be defined:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">_reset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">-&gt; new</span>
+<span class="na">_reset.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reset</span>
+<span class="na">_reset.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reset_workflow</span>
+<span class="na">_reset.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">_reset.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">0</span>
+</pre></div></div><h2 class="section" id="WorkflowVisualization">Workflow Visualization</h2>
+<p>
+Workflows can be visualized by rendering them on the wiki using the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/WikiMacros#Workflow-macro">Workflow macro</a>.
+</p>
+<p>
+Workflows can also be visualized using the <code>contrib/workflow/workflow_parser.py</code> script. The script outputs <code>.dot</code> files that <a class="ext-link" href="https://www.graphviz.org"><span class="icon">​</span>GraphViz</a> understands. The script can be used as follows (your install path may be different):
+</p>
+<div class="wiki-code"><div class="code"><pre>$<span class="w"> </span><span class="nb">cd</span><span class="w"> </span>/var/local/trac_devel/contrib/workflow/
+$<span class="w"> </span>./showworkflow<span class="w"> </span>/srv/trac/PlannerSuite/conf/trac.ini
+</pre></div></div><p>
+The script outputs <code>trac.pdf</code> in the same directory as the <code>trac.ini</code> file.
+</p>
+<h2 class="section" id="Example:AddingoptionalTestingwithWorkflow">Example: Adding optional Testing with Workflow</h2>
+<p>
+The following adds a <code>testing</code> action. When the ticket has status <code>new</code>, <code>accepted</code> or <code>needs_work</code>, you can choose to submit it for testing. When it's in the testing status the user gets the option to reject it and send it back to <code>needs_work</code>, or pass the testing and send it along to <code>closed</code>. If they accept it, then it is automatically marked as <code>closed</code> and the resolution is set to <code>fixed</code>. Since all the old workflow remains, a ticket can skip this entire section.
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">testing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,accepted,needs_work,assigned,reopened -&gt; testing</span>
+<span class="na">testing.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Submit to reporter for testing</span>
+<span class="na">testing.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+
+<span class="na">reject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">testing -&gt; needs_work</span>
+<span class="na">reject.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Failed testing, return to developer</span>
+
+<span class="na">pass</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">testing -&gt; closed</span>
+<span class="na">pass.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">Passes Testing</span>
+<span class="na">pass.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_resolution</span>
+<span class="na">pass.set_resolution</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">fixed</span>
+</pre></div></div><h2 class="section" id="Example:Addsimpleoptionalgenericreviewstate">Example: Add simple optional generic review state</h2>
+<p>
+Sometimes Trac is used in situations where "testing" can mean different things to different people so you may want to create an optional workflow state that is between the default workflow's <code>assigned</code> and <code>closed</code> states, but does not impose implementation-specific details. The only new state you need to add for this is a <code>reviewing</code> state. A ticket may then be "submitted for review" from any state that it can be reassigned. If a review passes, you can re-use the <code>resolve</code> action to close the ticket, and if it fails you can re-use the <code>reassign</code> action to push it back into the normal workflow.
+</p>
+<p>
+The new <code>reviewing</code> state along with its associated <code>review</code> action looks like this:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">review</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,assigned,reopened -&gt; reviewing</span>
+<span class="na">review.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner</span>
+<span class="na">review.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+</pre></div></div><p>
+To integrate this with the default workflow, you also need to add the <code>reviewing</code> state to the <code>accept</code> and <code>resolve</code> actions:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">accept</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,reviewing -&gt; assigned</span>
+<span class="k">[…]</span>
+<span class="na">resolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,assigned,reopened,reviewing -&gt; closed</span>
+</pre></div></div><p>
+Optionally, you can also add a new action that allows you to change the ticket's owner without moving the ticket out of the <code>reviewing</code> state. This enables you to reassign review work without pushing the ticket back to the <code>new</code> status:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="na">reassign_reviewing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reviewing -&gt; *</span>
+<span class="na">reassign_reviewing.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reassign review</span>
+<span class="na">reassign_reviewing.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner, leave_status</span>
+<span class="na">reassign_reviewing.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+</pre></div></div><p>
+The full <code>[ticket-workflow]</code> configuration will be:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="k">[ticket-workflow]</span>
+<span class="na">create</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&lt;none&gt; -&gt; new</span>
+<span class="na">create.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+<span class="na">create_and_assign</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">&lt;none&gt; -&gt; assigned</span>
+<span class="na">create_and_assign.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">assign</span>
+<span class="na">create_and_assign.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">create_and_assign.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">may_set_owner</span>
+<span class="na">accept</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,reviewing -&gt; assigned</span>
+<span class="na">accept.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner_to_self</span>
+<span class="na">accept.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">leave</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">* -&gt; *</span>
+<span class="na">leave.default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">1</span>
+<span class="na">leave.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">leave_status</span>
+<span class="na">reassign</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,assigned,accepted,reopened -&gt; assigned</span>
+<span class="na">reassign.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner</span>
+<span class="na">reassign.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">reopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">closed -&gt; reopened</span>
+<span class="na">reopen.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">del_resolution</span>
+<span class="na">reopen.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_CREATE</span>
+<span class="na">resolve</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,assigned,reopened,reviewing -&gt; closed</span>
+<span class="na">resolve.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_resolution</span>
+<span class="na">resolve.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">review</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">new,assigned,reopened -&gt; reviewing</span>
+<span class="na">review.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner</span>
+<span class="na">review.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+<span class="na">reassign_reviewing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reviewing -&gt; *</span>
+<span class="na">reassign_reviewing.operations</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">set_owner, leave_status</span>
+<span class="na">reassign_reviewing.label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">reassign review</span>
+<span class="na">reassign_reviewing.permissions</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s">TICKET_MODIFY</span>
+</pre></div></div><h2 class="section" id="AdvancedTicketWorkflowCustomization">Advanced Ticket Workflow Customization</h2>
+<p>
+If the customizations above do not meet your needs, you can extend the workflow with plugins. Plugins can provide additional operations for the workflow, like code review, or implement side-effects for an action, such as triggering a build, that may not be merely simple state changes. Look at <a class="ext-link" href="https://trac.edgewall.org/intertrac/source%3Abranches/1.4-stable/sample-plugins/workflow" title="source:branches/1.4-stable/sample-plugins/workflow in The Trac Project"><span class="icon">​</span>sample-plugins/workflow</a> for a few examples to get started.
+</p>
+<p>
+But if even that is not enough, you can disable the ConfigurableTicketWorkflow component and create a plugin that completely replaces it. See also the <a class="ext-link" href="https://trac-hacks.org/wiki/AdvancedTicketWorkflowPlugin"><span class="icon">​</span>AdvancedTicketWorkflowPlugin</a>, which provides additional operations.
+</p>
+<h2 class="section" id="AddingWorkflowStatestoMilestoneProgressBars">Adding Workflow States to Milestone Progress Bars</h2>
+<p>
+If you add additional states to your workflow, you may want to customize your milestone progress bars as well. See the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracIni#milestone-groups-section">[milestone-groups]</a> section.
+</p>
+<h2 class="section" id="Ideasfornextsteps">Ideas for next steps</h2>
+<p>
+Enhancement ideas for the workflow system should be filed as enhancement tickets against the <a class="ext-link" href="https://trac.edgewall.org/intertrac/query%3A%3Fstatus%3Dassigned%26status%3Dnew%26status%3Dreopened%26keywords%3D~workflow%26component%3Dticket%2Bsystem" title="query:?status=assigned&amp;status=new&amp;status=reopened&amp;keywords=~workflow&amp;component=ticket+system in The Trac Project"><span class="icon">​</span>ticket system</a> component. You can also document ideas on the <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracIdeas/TracWorkflow" title="TracIdeas/TracWorkflow in The Trac Project"><span class="icon">​</span>TracIdeas/TracWorkflow</a> page.
+</p>
+</body></html>

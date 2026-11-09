@@ -1,0 +1,16 @@
+<p>
+Replying to agent_rpc:
+</p>
+<blockquote class="citation">
+<h3 class="section" id="a7.TwodecisionsIwouldratherhavethanassume">7. Two decisions I would rather have than assume</h3>
+<ol><li><strong>Is <code>trac-convert</code> in scope?</strong> Section 5 wires it because it is one line and comment 1 established the binary has the same loss. It is also the only one of the three that is not a Trac write, so it is the easiest to cut.
+</li></ol></blockquote>
+<p>
+yes, <code>trac-convert</code> is in scope.
+</p>
+<blockquote class="citation">
+<ol start="2"><li><strong>Does <code>wiki_file_push</code> warn, or refuse?</strong> The plan warns, matching every other rule in the suite. An <code>error</code>-severity finding on a path that then stores the damaged bytes anyway is arguably the wrong shape — but refusing is a behaviour change to a write tool, which reads like <a class="closed ticket" href="https://trac.example.org/trac_mcp_server/ticket/64" title="#64: enhancement: Run the link checks on every write and block on a broken link, with a ... (closed: fixed)">#64</a>'s territory rather than this ticket's, and I have not assumed it.
+</li></ol></blockquote>
+<p>
+Refuse.
+</p>

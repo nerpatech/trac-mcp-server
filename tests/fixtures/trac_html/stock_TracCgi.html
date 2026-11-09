@@ -1,0 +1,107 @@
+<html><body><h1 class="section" id="InstallingTracasCGI">Installing Trac as CGI</h1>
+<p>
+</p><div class="wiki-toc"><h4>Table of Contents</h4><ul><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracGuide">Index</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">Installation</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracInterfaceCustomization">Customization</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPlugins">Plugins</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracUpgrade">Upgrading</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracIni">Configuration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracAdmin">Administration</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBackup">Backup</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracLogging">Logging</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracPermissions">Permissions</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWiki">The Wiki</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/WikiFormatting">Wiki Formatting</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTimeline">Timeline</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBrowser">Repository Browser</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRevisionLog">Revision Log</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracChangeset">Changesets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracTickets">Tickets</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracWorkflow">Workflow</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRoadmap">Roadmap</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">Ticket Queries</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracBatchModify">Batch Modify</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracReports">Reports</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracRss">RSS Support</a></li><li class="False"><a class="False" href="https://trac.example.org/trac_mcp_server/wiki/TracNotification">Notification</a></li></ul></div><p>
+</p><div class="wiki-toc">
+<ol>
+  <li>
+    <a href="#InstallingTracasCGI">Installing Trac as CGI</a>
+    <ol>
+      <li>
+        <a href="#Apacheweb-serverconfiguration">Apache web-server configuration</a>
+        <ol>
+          <li>
+            <a href="#PythonEggCache">Python Egg Cache</a>
+          </li>
+          <li>
+            <a href="#UsingWSGI">Using WSGI</a>
+          </li>
+        </ol>
+      </li>
+      <li>
+        <a href="#MappingStaticResources">Mapping Static Resources</a>
+      </li>
+      <li>
+        <a href="#AddingAuthentication">Adding Authentication</a>
+      </li>
+    </ol>
+  </li>
+</ol>
+</div><p>
+</p>
+<div class="important"><blockquote>
+<p>
+<em>Please note that using Trac via CGI is the slowest deployment method available. It is slower than <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracModWSGI">mod_wsgi</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracModPython">mod_python</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracFastCgi">FastCGI</a> and even <a class="ext-link" href="https://trac.edgewall.org/intertrac/TracOnWindowsIisAjp" title="TracOnWindowsIisAjp in The Trac Project"><span class="icon">​</span>IIS/AJP</a> on Windows.</em>
+</p>
+</blockquote>
+</div><p>
+CGI script is the entry point that the web-server calls when a web-request to an application is made. The <code>trac.cgi</code> script can be created using the <code>trac-admin &lt;env&gt; deploy &lt;dir&gt;</code> command which automatically substitutes the required paths, see <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#cgi-bin">TracInstall#cgi-bin</a>. Make sure the script is executable by your web server.
+</p>
+<h2 class="section" id="Apacheweb-serverconfiguration">Apache web-server configuration</h2>
+<p>
+In <a class="ext-link" href="https://httpd.apache.org/"><span class="icon">​</span>Apache</a> there are two ways to run Trac as CGI:
+</p>
+<ol><li>Use a <code>ScriptAlias</code> directive that maps a URL to the <code>trac.cgi</code> script (recommended)
+</li><li>Copy the <code>trac.cgi</code> file into the directory for CGI executables used by your web server, commonly named <code>cgi-bin</code>. You can also create a symbolic link, but in that case make sure that the <code>FollowSymLinks</code> option is enabled for the <code>cgi-bin</code> directory.
+</li></ol><p>
+To make Trac available at <code>http://yourhost.example.org/trac</code> add <code>ScriptAlias</code> directive to your Apache configuration file, changing <code>trac.cgi</code> path to match your installation:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="nb">ScriptAlias</span><span class="w"> </span><span class="sx">/trac</span><span class="w"> </span><span class="sx">/path/to/www/trac/cgi-bin/trac.cgi</span>
+</pre></div></div><p>
+<strong>Note</strong>: this directive requires that the <code>mod_alias</code> module is enabled.
+</p>
+<p>
+If you're using Trac with a single project you need to set its location using the <code>TRAC_ENV</code> environment variable:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="nt">&lt;Location</span><span class="w"> </span><span class="s">&quot;/trac&quot;</span><span class="nt">&gt;</span>
+<span class="w">  </span><span class="nb">SetEnv</span><span class="w"> </span>TRAC_ENV<span class="w"> </span><span class="s2">&quot;/path/to/projectenv&quot;</span>
+<span class="nt">&lt;/Location&gt;</span>
+</pre></div></div><p>
+Or to use multiple projects you can specify their common parent directory using the <code>TRAC_ENV_PARENT_DIR</code> variable:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="nt">&lt;Location</span><span class="w"> </span><span class="s">&quot;/trac&quot;</span><span class="nt">&gt;</span>
+<span class="w">  </span><span class="nb">SetEnv</span><span class="w"> </span>TRAC_ENV_PARENT_DIR<span class="w"> </span><span class="s2">&quot;/path/to/project/parent/dir&quot;</span>
+<span class="nt">&lt;/Location&gt;</span>
+</pre></div></div><p>
+<strong>Note</strong>: the <code>SetEnv</code> directive requires that the <code>mod_env</code> module is enabled.
+</p>
+<p>
+An alternative to <code>SetEnv</code> is editing <code>TRAC_ENV</code> or <code>TRAC_ENV_PARENT_DIR</code> in <code>trac.cgi</code>:
+</p>
+<div class="wiki-code"><div class="code"><pre>    <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">&#39;TRAC_ENV&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;/path/to/projectenv&quot;</span>
+</pre></div></div><div class="wiki-code"><div class="code"><pre>    <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="s1">&#39;TRAC_ENV_PARENT_DIR&#39;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;/path/to/parent/dir&quot;</span>
+</pre></div></div><p>
+If you are using the <a class="ext-link" href="https://httpd.apache.org/docs/suexec.html"><span class="icon">​</span>Apache suEXEC</a> feature please see <a class="ext-link" href="https://trac.edgewall.org/intertrac/ApacheSuexec" title="ApacheSuexec in The Trac Project"><span class="icon">​</span>ApacheSuexec</a>.
+</p>
+<p>
+On some systems, you <em>may</em> need to edit the shebang line in the <code>trac.cgi</code> file to point to your real Python installation path. On Windows, configure the execution of a <code>.cgi</code> file: Explorer -&gt; Tools -&gt; Folder Options -&gt; File Types -&gt; CGI.
+</p>
+<h3 class="section" id="PythonEggCache">Python Egg Cache</h3>
+<p>
+The <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#egg-cache">egg-cache</a> can be configured using an <code>os.environ</code> statement in <code>trac.cgi</code>, as shown above.
+To do the same from the Apache configuration, use the <code>SetEnv</code> directive:
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="nb">SetEnv</span><span class="w"> </span>PYTHON_EGG_CACHE<span class="w"> </span><span class="sx">/path/to/dir</span>
+</pre></div></div><p>
+Put this directive next to where you set the path to the <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracEnvironment">Trac environment</a>, i.e. in the same <code>&lt;Location&gt;</code> block.
+</p>
+<div class="wiki-code"><div class="code"><pre><span class="w"> </span><span class="nt">&lt;Location</span><span class="w"> </span><span class="s">/trac</span><span class="nt">&gt;</span>
+<span class="w">   </span><span class="nb">SetEnv</span><span class="w"> </span>TRAC_ENV<span class="w"> </span><span class="sx">/path/to/projenv</span>
+<span class="w">   </span><span class="nb">SetEnv</span><span class="w"> </span>PYTHON_EGG_CACHE<span class="w"> </span><span class="sx">/path/to/dir</span>
+<span class="w"> </span><span class="nt">&lt;/Location&gt;</span>
+</pre></div></div><h3 class="section" id="UsingWSGI">Using WSGI</h3>
+<p>
+You can run a <a class="ext-link" href="http://henry.precheur.org/python/how_to_serve_cgi"><span class="icon">​</span>WSGI handler</a> <a class="ext-link" href="https://thejimmyg.github.io/pythonweb/projects/webmodules/doc/0.5.3/html_multipage/lib/example-webserver-web-wsgi-simple-cgi.html"><span class="icon">​</span>under CGI</a>.  You can <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracModWSGI#Thetrac.wsgiscript">write your own application function</a>, or use the deployed trac.wsgi's application.
+</p>
+<h2 class="section" id="MappingStaticResources">Mapping Static Resources</h2>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#MappingStaticResources">TracInstall#MappingStaticResources</a>.
+</p>
+<h2 class="section" id="AddingAuthentication">Adding Authentication</h2>
+<p>
+See <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall#ConfiguringAuthentication">TracInstall#ConfiguringAuthentication</a>.
+</p>
+<hr />
+<p>
+See also:  <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracInstall">TracInstall</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracModWSGI">TracModWSGI</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracFastCgi">TracFastCgi</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracModPython">TracModPython</a>
+</p>
+</body></html>

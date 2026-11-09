@@ -1,0 +1,37 @@
+<html><body><h1 class="section" id="UsingSearch">Using Search</h1>
+<p>
+Trac has built-in search functionality to search for occurrences of keywords and substrings in wiki pages, tickets and changeset properties, such as author, revision and log messages.
+</p>
+<p>
+In addition to the <a class="search" href="https://trac.example.org/trac_mcp_server/search">Search module</a>, you will also find a small search field above the navigation bar. It provides convenient access to the search module from all pages.
+</p>
+<p>
+The search results show the most recent modifications ranked first.
+</p>
+<h2 class="section" id="Quicksearches">Quick searches</h2>
+<p>
+For quick access to project resources, the quick-search field at the top of every page can be used to enter a <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLink</a>, which will take you directly to the resource identified by that link:
+</p>
+<ul><li>[42] -- Opens change set 42
+</li><li>#42 -- Opens ticket number 42
+</li><li>{1} -- Opens report 1
+</li><li>/trunk -- Opens the browser for the <code>trunk</code> directory in the default repository
+</li><li>/repos1/trunk -- Opens the browser for the <code>trunk</code> directory in the <code>repos1</code> repository
+</li></ul><p>
+To disable the Quickjump feature for a keyword start the query with an exclamation mark (<code>!</code>): use <code>!TracGuide</code> to search for occurrences of the literal word TracGuide.
+</p>
+<h2 class="section" id="SearchTracLinks">Search <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLinks</a></h2>
+<p>
+From the Wiki, it is possible to link to a specific search using <code>search:</code> links:
+</p>
+<ul><li><code>search:?q=crash</code> will search for the string "crash"
+</li><li><code>search:?q=trac+link&amp;wiki=on</code> will search for "trac" and "link" in wiki pages only
+</li></ul><h2 class="section" id="SearchFilters">Search Filters</h2>
+<p>
+On the search page, pressing the modifier key while selecting a search filter will unselect all other search filters.
+</p>
+<hr />
+<p>
+See also: <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracLinks">TracLinks</a>, <a class="wiki" href="https://trac.example.org/trac_mcp_server/wiki/TracQuery">TracQuery</a>
+</p>
+</body></html>

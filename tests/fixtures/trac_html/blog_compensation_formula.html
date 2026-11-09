@@ -1,0 +1,21 @@
+<html><body><h1 class="section" id="Thehumiditythatwasalwaysexactlyzero">The humidity that was always exactly zero</h1>
+<p>
+<a class="closed ticket" href="https://trac.example.org/bcs/ticket/17" title="#17: task: develop BME280 sensor support (closed: fixed)">#17</a> | b-node 4.0.0 (<code>main/sensor_bme280.c</code>) | 2026-08-12 <br />
+Angle: a transcription of Bosch's nested BME280 humidity expression kept every number and every paren balanced and still moved one <code>&gt;&gt; 14</code>, so the clamp floored it to 0.0%.
+</p>
+<ul><li>Reference: one nested C expression per channel; the humidity one ends <code>... * ((int32_t)dig_H2) + 8192) &gt;&gt; 14))</code> inside <code>termA * (termB &gt;&gt; 14)</code>.
+</li><li>Transcription kept the shape (one expression, same nesting, <code>h-&gt;digH6</code> for <code>dig_H6</code>, <code>int32_t const</code> locals for Bosch's mutable <code>v_x1_u32r</code>), compiled, and diffed identical by eye.
+</li><li>Defect: the <code>&gt;&gt; 14</code> closed over the whole statement instead of <code>termB</code> alone; C's <code>*</code> binds tighter than <code>&gt;&gt;</code>, so it parsed as <code>(termA * termB) &gt;&gt; 14</code>, a different value whenever <code>termB</code> is not a multiple of 2<sup>14, which is always.
+</sup></li><li>Not visible by reading: both versions are pristine C with balanced parens; a script counting paren depth is what confirmed it.
+</li><li>Symptom on node-b: humidity a boring 0.0%, because the formula's own clamp (<code>v = v &lt; 0 ? 0 : v</code>) floored the malformed intermediate; no crash, no sentinel.
+</li><li>Temperature (~24 C) and pressure (~832 hPa) were right from the first boot, which made it look like a config or wiring problem isolated to one channel.
+</li><li>Wrong hypothesis, kept: that BME280 humidity was another case of the DHT22's stuck ~1.0% RH (<a class="closed ticket" href="https://trac.example.org/bcs/ticket/15" title="#15: defect: b8266: DHT22 humidity reads ~1.0% and does not respond to breath at ... (closed: fixed)">#15</a>); the BME280 had been added partly to cross-check that bug, and its own 0.0% was a second, unrelated bug in the same session.
+</li><li>Unrelated confirmed: temperature and pressure share every line downstream of the I2C read except the compensation math.
+</li><li>What caught it: breathing on the sensor; MQTT held at 0.0% through a direct breath test, so a calibration offset (which would still move, just wrong) was out and something was structurally clamping.
+</li><li>From there to <code>bme280CompensateH()</code> and the five-line Python depth-counter took a few minutes.
+</li><li>Fix: split into named terms at the points the reference itself groups: <code>termA = (((adcH &lt;&lt; 14) - ((int32_t)h-&gt;digH4 &lt;&lt; 20) - ((int32_t)h-&gt;digH5 * v)) + 16384) &gt;&gt; 15;</code> <code>termB = ((((((v * (int32_t)h-&gt;digH6) &gt;&gt; 10) * (((v * (int32_t)h-&gt;digH3) &gt;&gt; 11) + 32768)) &gt;&gt; 10) + 2097152) * (int32_t)h-&gt;digH2 + 8192) &gt;&gt; 14;</code> <code>v = termA * termB;</code>.
+</li><li>Two lines and a comment, and <code>termB</code>'s <code>&gt;&gt; 14</code> can no longer re-associate with anything; keeping the reference's one-line nesting looked most faithful and was the riskiest.
+</li><li>Pure integer math with no I2C calls, so a host test with Bosch's datasheet worked examples would have caught it without hardware; it shipped without one.
+</li><li>Resolved (checked 2026-10-12): no host test exists for <code>bme280CompensateT/P/H()</code>; <code>test/</code> has none, and <code>git log -S bme280CompensateH</code> shows only <code>4f0a610</code> (4.0.0).
+</li><li>Sibling piece, the same session's wire-level check: <a class="wiki" href="https://trac.example.org/bcs/wiki/b-node/blog/scope-verification-vs-plausible-mqtt">scope-verification-vs-plausible-mqtt</a>.
+</li></ul></body></html>
