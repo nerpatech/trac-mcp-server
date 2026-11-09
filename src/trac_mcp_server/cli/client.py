@@ -572,8 +572,9 @@ def _link_rewrites_to_send(
     ``--link-map`` on the command line, else ``export.link_rewrites``
     from this machine's ``.trac_mcp/config.yaml`` -- only that key, and
     the environment is not read -- else nothing, and the server's own map
-    applies. A TracWiki pull converts nothing, so it sends none (the
-    server would ignore it, and a broken local config should not stop it).
+    applies. A TracWiki or HTML pull rewrites no links (HTML is Trac's own
+    render, #211), so it sends none (the server would ignore it, and a
+    broken local config should not stop it).
     """
     from ..link_rewrites import as_entries, parse_pairs
 
@@ -581,7 +582,7 @@ def _link_rewrites_to_send(
         if args.link_map:
             print(
                 "trac-mcp: warning: --link-map has no effect with "
-                "--format tracwiki",
+                f"--format {args.format}",
                 file=sys.stderr,
             )
         return None
@@ -907,9 +908,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", help="Local output file ('-' for stdout)")
     p.add_argument(
         "--format",
-        choices=["markdown", "tracwiki"],
+        choices=["markdown", "html", "tracwiki"],
         default="markdown",
-        help="Output format (default: markdown)",
+        help=(
+            "Output format (default: markdown; html is Trac's render "
+            "as a complete minimal HTML document)"
+        ),
     )
     p.add_argument(
         "--page-version",
@@ -927,7 +931,8 @@ def build_parser() -> argparse.ArgumentParser:
             "has that prefix replaced by TO (longest FROM first; "
             "images and #anchors are never rewritten). Repeatable. "
             "Replaces export.link_rewrites of .trac_mcp/config.yaml, "
-            "which is sent when this is not given. Markdown only."
+            "which is sent when this is not given. Markdown only (no "
+            "effect with html or tracwiki)."
         ),
     )
 

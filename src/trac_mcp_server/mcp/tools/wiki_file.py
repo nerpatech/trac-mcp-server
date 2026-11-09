@@ -11,6 +11,7 @@ filesystem -- see ``file_io`` (ticket #111).
 import logging
 import re
 import xmlrpc.client
+from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
@@ -141,7 +142,9 @@ WIKI_FILE_TOOLS = [
             "Pull a Trac wiki page, converted to the requested format. "
             "Markdown is Trac's own rendered HTML for the page "
             "translated to Markdown: a one-way export, not meant to be "
-            'pushed back. format="tracwiki" returns the '
+            'pushed back. format="html" is Trac\'s render as a complete '
+            "minimal HTML document (links absolute, no CSS); "
+            'format="tracwiki" returns the '
             "stored source verbatim. Translator warnings come back in "
             "structuredContent.warnings (always a list). "
             "link_rewrites ({from, to} URL-prefix rules, longest prefix "
@@ -180,7 +183,7 @@ WIKI_FILE_TOOLS = [
                 },
                 "format": {
                     "type": "string",
-                    "enum": ["markdown", "tracwiki"],
+                    "enum": ["markdown", "html", "tracwiki"],
                     "default": "markdown",
                     "description": "Output format for the local file",
                 },
@@ -216,7 +219,8 @@ WIKI_FILE_TOOLS = [
                         "sources and in-page #anchors are never "
                         "rewritten. The schema refuses an empty `from` "
                         "or an extra key; a duplicate `from` is a "
-                        "validation_error. Ignored for format=tracwiki."
+                        "validation_error. Ignored for format=html and "
+                        "format=tracwiki."
                     ),
                 },
             },
@@ -590,6 +594,25 @@ async def _handle_push(
     )
 
 
+def _html_document(page_name: str, fragment: str) -> str:
+    """Wrap Trac's rendered fragment as a complete minimal document.
+
+    No CSS, and the fragment is verbatim (Trac renders its links
+    absolute); only the page name, which is text, is escaped.
+    """
+    return (
+        "<!doctype html>\n"
+        "<html>\n"
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        f"<title>{html_escape(page_name)}</title>\n"
+        "</head>\n"
+        "<body>\n"
+        f"{fragment}"
+        "</body></html>\n"
+    )
+
+
 async def _handle_pull(
     client: TracClient, args: dict[str, Any]
 ) -> types.CallToolResult:
@@ -597,7 +620,8 @@ async def _handle_pull(
 
     Fetches a wiki page from Trac and returns it as TracWiki source or,
     for Markdown, as Trac's own rendered HTML translated to Markdown
-    (Trac /trac_mcp_server #210). The text is returned inline or, where
+    (Trac /trac_mcp_server #210), or, for html, as that render in a
+    minimal document (#211). The text is returned inline or, where
     file_access is ``local``, written to a server-side file.
     """
     page_name = args.get("page_name")
@@ -624,7 +648,8 @@ async def _handle_pull(
         )
 
     # Ticket #213: the map is chosen before any Trac read, so a bad rule
-    # costs no round trip. tracwiki does no conversion: nothing to map.
+    # costs no round trip. tracwiki and html do no link translation:
+    # nothing to map.
     link_rewrites: tuple[tuple[str, str], ...] = ()
     link_rewrites_source = "none"
     if fmt == "markdown":
@@ -648,10 +673,12 @@ async def _handle_pull(
     converted = False
     warnings: list[str] = []
     try:
-        if fmt == "markdown":
+        if fmt in ("markdown", "html"):
             # Read the version first and fetch the source and the HTML
             # *at that version*: without it, an edit landing between the
             # two reads would pair the HTML with another version's source.
+            # (html reads no source, but is pinned the same way, so the
+            # version reported is the one the HTML is of.)
             info = await run_sync(
                 client.get_wiki_page_info, page_name, version
             )
@@ -664,34 +691,51 @@ async def _handle_pull(
                 # Some Trac instances answer with {} or a non-dict. The
                 # pull still works, but both reads below are "latest":
                 # an edit between them is the race pinning closes.
-                warnings.append(
-                    f"wiki page {page_name}: its version could not be"
-                    " read, so the source and the HTML reads were not"
-                    " pinned to one version; an edit between them would"
-                    " pair one version's source with another's HTML"
+                if fmt == "markdown":
+                    warnings.append(
+                        f"wiki page {page_name}: its version could not"
+                        " be read, so the source and the HTML reads were"
+                        " not pinned to one version; an edit between"
+                        " them would pair one version's source with"
+                        " another's HTML"
+                    )
+                else:
+                    warnings.append(
+                        f"wiki page {page_name}: its version could not"
+                        " be read, so the HTML read was not pinned to a"
+                        " version and the version reported may not be"
+                        " the one the HTML is of"
+                    )
+            if fmt == "markdown":
+                content = await run_sync(
+                    client.get_wiki_page, page_name, pinned
                 )
-            content = await run_sync(
-                client.get_wiki_page, page_name, pinned
-            )
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
-            # The page's own URL, as Trac renders a link into it
-            # ("[#Frag x]" is "<this>#Frag"): those are in-page anchors,
-            # written "#Frag" and never rewritten. client.config is the
-            # routed instance's, so the base is that instance's.
-            document_url = (
-                f"{client.config.trac_url.rstrip('/')}/wiki/{page_name}"
-            )
-            conversion = trac_html_to_markdown(
-                html,
-                content,
-                link_map=as_dict(link_rewrites),
-                document_url=document_url,
-            )
-            output_content = conversion.text
-            converted = conversion.converted
-            warnings.extend(conversion.warnings)
+            if fmt == "html":
+                # Trac's own render, unchanged, in a minimal document.
+                output_content = _html_document(page_name, html)
+                converted = True
+            else:
+                # The page's own URL, as Trac renders a link into it
+                # ("[#Frag x]" is "<this>#Frag"): those are in-page
+                # anchors, written "#Frag" and never rewritten.
+                # client.config is the routed instance's, so the base is
+                # that instance's.
+                document_url = (
+                    f"{client.config.trac_url.rstrip('/')}"
+                    f"/wiki/{page_name}"
+                )
+                conversion = trac_html_to_markdown(
+                    html,
+                    content,
+                    link_map=as_dict(link_rewrites),
+                    document_url=document_url,
+                )
+                output_content = conversion.text
+                converted = conversion.converted
+                warnings.extend(conversion.warnings)
         else:
             # tracwiki: the stored source, unchanged; no HTML read.
             content = await run_sync(
