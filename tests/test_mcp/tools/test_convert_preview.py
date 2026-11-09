@@ -113,6 +113,22 @@ class TestConvertPreviewHandler(unittest.TestCase):
         self.assertNotIn("unknown_tool", payload)
         self.assertIn("tracwiki", payload)
 
+    def test_legacy_export_fence_is_a_validation_error(self):
+        """A ``tracwiki-unconverted`` fence is refused (#214), reported
+        as a validation error and not as "unknown_tool"."""
+        client = _mock_client("<p>x</p>")
+        result = self._run(
+            client, {"content": "```tracwiki-unconverted\n= x =\n```\n"}
+        )
+        self.assertTrue(result.isError)
+        payload = json.dumps(
+            [c.text for c in result.content if hasattr(c, "text")]
+        )
+        self.assertIn("validation_error", payload)
+        self.assertNotIn("unknown_tool", payload)
+        self.assertIn("tracwiki-unconverted", payload)
+        client.wiki_to_html.assert_not_called()
+
     def test_representable_content_still_converts(self):
         """Recall gate for the check above -- ordinary content is unaffected."""
         client = _mock_client("<p>x</p>")

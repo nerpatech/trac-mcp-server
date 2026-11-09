@@ -29,6 +29,13 @@ _SLUG_WS_RE = re.compile(r"\s+")
 # never has the CamelCase pass below stuff a `!` inside the brackets.
 _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
 
+# Info string of the fence the removed TracWiki -> Markdown converter wrote
+# around source it could not convert (#214 deleted that converter). Markdown
+# pulled from Trac before #210 still carries it. Converting it would write
+# `{{{#!tracwiki-unconverted`, a processor Trac does not have: an error box
+# on the page and no warning, so `block_code` refuses it instead.
+_LEGACY_EXPORT_FENCE_INFO = "tracwiki-unconverted"
+
 # Sentinel used by `_stash_bracket_syntax`/`_restore_bracket_syntax`.
 _PLACEHOLDER_RE = re.compile(r"\x00WK(\d+)\x00")
 
@@ -739,6 +746,15 @@ class TracWikiRenderer(mistune.BaseRenderer):
         children's combined text before using it, so the extra newline
         here never leaks into their output.
         """
+        if info and info.strip() == _LEGACY_EXPORT_FENCE_INFO:
+            raise ValueError(
+                "markdown_to_tracwiki: a "
+                f"{_LEGACY_EXPORT_FENCE_INFO} fence is the round-trip "
+                "protocol of the TracWiki -> Markdown converter removed in "
+                "#214, so this Markdown was exported from Trac before #210; "
+                "edit the page as TracWiki instead (wiki_get, or "
+                "`trac-mcp wiki-pull PAGE FILE --format tracwiki`)."
+            )
         code = code.rstrip("\n")
         if info:
             # Map Markdown language to TracWiki processor directive

@@ -673,6 +673,27 @@ def test_convert_text_exception_returns_exit_3_with_stderr_message(
     assert "trac-convert: conversion failed: bad input" in err
 
 
+_LEGACY_FENCE_MD = "# T\n\n```tracwiki-unconverted\n= x =\n```\n"
+
+
+def test_legacy_export_fence_is_refused_with_one_stderr_line(
+    monkeypatch, capsys
+):
+    """``--to tracwiki`` on Markdown holding a ``tracwiki-unconverted``
+    fence exits non-zero with one message line and no traceback (#214)."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(_LEGACY_FENCE_MD))
+    exit_code = main(["--from", "md", "--to", "tracwiki"])
+    assert exit_code == EXIT_CONVERSION_ERROR
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("trac-convert: conversion failed: ")
+    assert "tracwiki-unconverted" in lines[0]
+    assert "--format tracwiki" in lines[0]
+    assert "Traceback" not in captured.err
+
+
 def test_convert_text_exception_does_not_leak_traceback(
     monkeypatch, capsys
 ):

@@ -537,6 +537,35 @@ class TestErrorPaths:
         assert result.isError is True
         assert "validation_error" in result.content[0].text
 
+    async def test_push_legacy_export_fence_is_a_validation_error(
+        self, tmp_path
+    ):
+        """Markdown exported before #210 carries a ``tracwiki-unconverted``
+        fence. The write leg refuses it (#214): the push is a
+        validation_error and nothing is written to Trac."""
+        md_file = tmp_path / "page.md"
+        md_file.write_text(
+            "# Title\n\n```tracwiki-unconverted\n= x =\n```\n"
+        )
+        client = _make_client()
+        client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+            1, "Page does not exist"
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"file_path": str(md_file), "page_name": "TestPage"},
+            client,
+        )
+
+        assert isinstance(result, types.CallToolResult)
+        assert result.isError is True
+        text = result.content[0].text
+        assert "validation_error" in text
+        assert "unknown_tool" not in text
+        assert "tracwiki-unconverted" in text
+        client.put_wiki_page.assert_not_called()
+
     async def test_pull_nonexistent_wiki_page(self, tmp_path):
         """Pull non-existent wiki page returns not_found error."""
         out_file = tmp_path / "page.md"

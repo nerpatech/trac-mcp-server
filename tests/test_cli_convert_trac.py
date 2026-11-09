@@ -902,6 +902,33 @@ def test_to_wiki_happy_path_writes_converted_tracwiki_via_put_wiki_page(
     assert capsys.readouterr().out == ""
 
 
+def test_to_wiki_legacy_export_fence_is_refused_and_nothing_written(
+    monkeypatch, capsys
+):
+    """--to-wiki on Markdown holding a ``tracwiki-unconverted`` fence is a
+    one-line refusal (#214) and put_wiki_page is never called."""
+    _mock_valid_env(monkeypatch)
+    mock_instance = _mock_tracclient(put_wiki_page_return=_PUT_OK)
+    monkeypatch.setattr(
+        "trac_mcp_server.cli.convert.TracClient",
+        lambda _: mock_instance,
+    )
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO("# T\n\n```tracwiki-unconverted\n= x =\n```\n"),
+    )
+
+    result = main(["--to-wiki", "MyPage", "--from", "md"])
+
+    assert result != EXIT_OK
+    captured = capsys.readouterr()
+    lines = captured.err.splitlines()
+    assert len(lines) == 1
+    assert "tracwiki-unconverted" in lines[0]
+    assert "Traceback" not in captured.err
+    assert mock_instance.put_wiki_page.called is False
+
+
 def test_to_wiki_from_tracwiki_is_passthrough(monkeypatch):
     """--to-wiki with tracwiki input passes content verbatim (source==target)."""
     raw = "= Existing =\n\nAs-is"

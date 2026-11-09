@@ -2055,6 +2055,62 @@ class TestBracketedProseNotRewritten(unittest.TestCase):
         )
 
 
+class TestLegacyExportFenceRefused(unittest.TestCase):
+    """The ``tracwiki-unconverted`` fence is refused, not passed on (#214).
+
+    Markdown pulled from Trac before #210 carries that fence round-trip
+    protocol. With the unwrap gone, converting it would write
+    ``{{{#!tracwiki-unconverted``, a processor Trac does not have, which
+    renders as an error box with no warning. The write leg refuses it, as
+    #212's push guard refuses other one-way exports.
+    """
+
+    def test_top_level_fence_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            markdown_to_tracwiki(
+                "```tracwiki-unconverted\n= x =\n```\n"
+            )
+        message = str(ctx.exception)
+        self.assertIn("tracwiki-unconverted", message)
+        self.assertIn("#214", message)
+        self.assertIn("wiki_get", message)
+        self.assertIn("--format tracwiki", message)
+        self.assertNotIn("\n", message)
+
+    def test_fence_in_a_list_item_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            markdown_to_tracwiki(
+                "- a\n\n  ```tracwiki-unconverted\n  = x =\n  ```\n"
+            )
+        self.assertIn("tracwiki-unconverted", str(ctx.exception))
+
+    def test_padded_info_string_is_refused(self):
+        with self.assertRaises(ValueError):
+            markdown_to_tracwiki(
+                "```  tracwiki-unconverted  \nx\n```\n"
+            )
+
+    def test_tilde_fence_is_refused(self):
+        with self.assertRaises(ValueError):
+            markdown_to_tracwiki("~~~tracwiki-unconverted\nx\n~~~\n")
+
+    def test_convert_with_warnings_refuses_it_too(self):
+        with self.assertRaises(ValueError):
+            convert_with_warnings("```tracwiki-unconverted\nx\n```\n")
+
+    def test_ordinary_unknown_language_is_unchanged(self):
+        self.assertEqual(
+            markdown_to_tracwiki("```foo\nx\n```\n"), "{{{#!foo\nx\n}}}"
+        )
+
+    def test_language_that_only_starts_with_the_name_is_unchanged(self):
+        """Exactly the info string, not a prefix of it."""
+        self.assertEqual(
+            markdown_to_tracwiki("```tracwiki\nx\n```\n"),
+            "{{{#!tracwiki\nx\n}}}",
+        )
+
+
 class TestFootnoteRejection(unittest.TestCase):
     """A Markdown footnote pair is refused, not silently destroyed (#63)."""
 
