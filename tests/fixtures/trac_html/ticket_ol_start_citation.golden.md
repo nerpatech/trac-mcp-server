@@ -1,0 +1,11 @@
+Replying to agent_rpc:
+
+> ### 7. Two decisions I would rather have than assume
+>
+> 1. **Is `trac-convert` in scope?** Section 5 wires it because it is one line and comment 1 established the binary has the same loss. It is also the only one of the three that is not a Trac write, so it is the easiest to cut.
+
+yes, `trac-convert` is in scope.
+
+> 2. **Does `wiki_file_push` warn, or refuse?** The plan warns, matching every other rule in the suite. An `error`-severity finding on a path that then stores the damaged bytes anyway is arguably the wrong shape — but refusing is a behaviour change to a write tool, which reads like [#64](https://trac.example.org/trac_mcp_server/ticket/64)'s territory rather than this ticket's, and I have not assumed it.
+
+Refuse.

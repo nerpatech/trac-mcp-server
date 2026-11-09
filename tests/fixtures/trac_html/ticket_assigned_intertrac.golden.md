@@ -1,0 +1,1 @@
+Reassigned to `nerpa_admin` under `Rules/trac/OperatorWaitsGoToNerpaAdmin` ([auto_pm:#276](https://trac.example.org/auto_pm/intertrac/%23276)). The next step is the operator's: the 1.2.0 plugin rollout on HOSTNAME, bundled with [#132](https://trac.example.org/trac_mcp_server/ticket/132) (comment 3). To hand it back, reassign it to `agent_rpc` or name it in a prompt.
