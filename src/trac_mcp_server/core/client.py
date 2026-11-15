@@ -677,8 +677,10 @@ class TracClient:
         """Read ``items`` in ``system.multicall`` batches, falling back
         to ``fetch_singly``; ``{item: value}`` for each that loaded.
 
-        The one batch-then-fallback loop behind ``get_tickets`` and the
-        wiki search's page fetch (Trac /trac_mcp_server #172).
+        The one batch-then-fallback loop behind ``get_tickets``,
+        ``get_milestones`` (``milestone_list``, Trac /trac_mcp_server
+        #231) and the wiki search's page fetch (Trac /trac_mcp_server
+        #172).
 
         - ``calls_for(item)`` is the multicall entries
           (``{"methodName", "params"}``) that read one item; the count

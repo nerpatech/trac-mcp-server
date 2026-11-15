@@ -484,6 +484,190 @@ class TestMilestoneListFilters(unittest.TestCase):
             "failed to load 1 milestone(s): Release_7.2", text
         )
 
+    def test_status_all_keeps_a_failed_milestone_in_the_list(self):
+        """status=all: a milestone that fails to load is still listed.
+
+        `milestones` is the same with and without details, the header
+        counts it, its line says it failed, and it stays in `failed`
+        and out of `details`.
+        """
+        plain = self.call({"prefix": "Release_7"})
+        result = self.call({"prefix": "Release_7", "details": True})
+
+        self.assertEqual(
+            result.structuredContent["milestones"],
+            plain.structuredContent["milestones"],
+        )
+        self.assertEqual(
+            result.structuredContent["milestones"],
+            ["Release_7.0", "Release_7.1", "Release_7.2"],
+        )
+        self.assertEqual(
+            result.structuredContent["failed"], ["Release_7.2"]
+        )
+        self.assertEqual(
+            [d["name"] for d in result.structuredContent["details"]],
+            ["Release_7.0", "Release_7.1"],
+        )
+        text = result.content[0].text
+        self.assertTrue(
+            text.startswith(
+                "3 milestone(s) starting with 'Release_7':\n"
+            )
+        )
+        lines = text.split("\n")
+        self.assertEqual(
+            [line.split(" | ")[0] for line in lines[1:4]],
+            ["Release_7.0", "Release_7.1", "Release_7.2"],
+        )
+        self.assertEqual(lines[3], "Release_7.2 | (failed to load)")
+        self.assertIn(
+            "failed to load 1 milestone(s): Release_7.2", text
+        )
+        self.assertIn("listed above without dates", text)
+        self.assertIn("milestone_get", text)
+        self.assertNotIn("not counted", text)
+
+    def test_status_open_leaves_a_failed_milestone_out(self):
+        result = self.call({"prefix": "Release_7", "status": "open"})
+
+        self.assertEqual(
+            result.structuredContent["milestones"], ["Release_7.1"]
+        )
+        self.assertEqual(
+            result.structuredContent["failed"], ["Release_7.2"]
+        )
+        text = result.content[0].text
+        self.assertIn("1 milestone(s) (open) starting with", text)
+        self.assertNotIn("Release_7.2 |", text)
+        self.assertIn(
+            "failed to load 1 milestone(s): Release_7.2", text
+        )
+        self.assertIn("not counted", text)
+
+    def test_status_completed_leaves_a_failed_milestone_out(self):
+        result = self.call(
+            {"prefix": "Release_7", "status": "completed"}
+        )
+
+        self.assertEqual(
+            result.structuredContent["milestones"], ["Release_7.0"]
+        )
+        self.assertEqual(
+            result.structuredContent["failed"], ["Release_7.2"]
+        )
+        text = result.content[0].text
+        self.assertIn("1 milestone(s) (completed) starting with", text)
+        self.assertNotIn("Release_7.2 |", text)
+        self.assertIn("not counted", text)
+
+    def test_empty_string_completed_counts_as_open(self):
+        """An empty raw `completed` is unset: open, shown `(Not set)`."""
+        data = {
+            "Release_7.1": {
+                "name": "Release_7.1",
+                "due": "",
+                "completed": "",
+                "description": "",
+            }
+        }
+        self.client.get_milestones.side_effect = lambda names: {
+            n: data[n] for n in names if n in data
+        }
+
+        open_result = self.call(
+            {"prefix": "Release_7.1", "status": "open"}
+        )
+        done_result = self.call(
+            {"prefix": "Release_7.1", "status": "completed"}
+        )
+
+        self.assertEqual(
+            open_result.structuredContent["details"],
+            [{"name": "Release_7.1", "due": None, "completed": None}],
+        )
+        self.assertIn(
+            "Release_7.1 | due: (Not set) | completed: (Not set)",
+            open_result.content[0].text,
+        )
+        self.assertEqual(
+            done_result.structuredContent["milestones"], []
+        )
+
+    def test_none_completed_counts_as_open(self):
+        data = {
+            "Release_7.1": {
+                "name": "Release_7.1",
+                "due": None,
+                "completed": None,
+            }
+        }
+        self.client.get_milestones.side_effect = lambda names: {
+            n: data[n] for n in names if n in data
+        }
+
+        result = self.call({"prefix": "Release_7.1", "status": "open"})
+
+        self.assertEqual(
+            result.structuredContent["details"],
+            [{"name": "Release_7.1", "due": None, "completed": None}],
+        )
+
+    def test_prefix_matching_nothing_with_details_has_the_filtered_shape(
+        self,
+    ):
+        result = self.call({"prefix": "Nope", "details": True})
+
+        self.assertEqual(
+            result.structuredContent,
+            {"milestones": [], "details": [], "failed": []},
+        )
+        self.assertEqual(
+            result.content[0].text,
+            "0 milestone(s) starting with 'Nope': none",
+        )
+
+    def test_prefix_matching_nothing_with_status_has_the_filtered_shape(
+        self,
+    ):
+        result = self.call({"prefix": "Nope", "status": "completed"})
+
+        self.assertEqual(
+            result.structuredContent,
+            {"milestones": [], "details": [], "failed": []},
+        )
+        self.assertEqual(
+            result.content[0].text,
+            "0 milestone(s) (completed) starting with 'Nope': none",
+        )
+
+    def test_no_milestones_at_all_with_details_has_the_filtered_shape(
+        self,
+    ):
+        self.client.get_all_milestones.return_value = []
+
+        result = self.call({"details": True})
+
+        self.assertEqual(
+            result.structuredContent,
+            {"milestones": [], "details": [], "failed": []},
+        )
+        self.assertEqual(result.content[0].text, "0 milestone(s): none")
+        self.client.get_milestones.assert_not_called()
+
+    def test_nothing_matched_without_details_keeps_the_old_texts(self):
+        result = self.call({"prefix": "Nope"})
+        self.assertEqual(
+            result.content[0].text,
+            "No milestones found starting with 'Nope'.",
+        )
+        self.assertEqual(result.structuredContent, {"milestones": []})
+
+        self.client.get_all_milestones.return_value = []
+        result = self.call({})
+        self.assertEqual(result.content[0].text, "No milestones found.")
+        self.assertEqual(result.structuredContent, {"milestones": []})
+
     def test_status_open_keeps_milestones_without_completion_date(self):
         result = self.call({"status": "open"})
 
