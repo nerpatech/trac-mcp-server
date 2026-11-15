@@ -13,12 +13,12 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
   "content": [
     {
       "type": "text",
-      "text": "Found 3 tickets (showing 3):\n- #42: Fix login issue (status: new, owner: alice)"
+      "text": "Found 3 tickets (showing 3):\n- #42: Fix login issue (status: new, owner: alice, milestone: v2.0) - https://trac.example.com/ticket/42"
     }
   ],
   "structuredContent": {
     "tickets": [
-      {"id": 42, "summary": "Fix login issue", "status": "new", "owner": "alice"}
+      {"id": 42, "summary": "Fix login issue", "status": "new", "owner": "alice", "milestone": "v2.0", "url": "https://trac.example.com/ticket/42"}
     ],
     "total": 3,
     "showing": 3

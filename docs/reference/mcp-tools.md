@@ -173,7 +173,7 @@ gate off the text line reads
 
 ## ticket_search
 
-**Description:** Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries.
+**Description:** Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summary, status, owner, milestone and web URL.
 
 **Parameters:**
 
@@ -186,7 +186,7 @@ gate off the text line reads
 ```json
 {
   "type": "text",
-  "text": "Found 25 tickets (showing 10):\n- #42: Fix login timeout issue (status: new, owner: alice)\n- #38: Add user export feature (status: accepted, owner: bob)\n...\n\nUse max_results to see more."
+  "text": "Found 25 tickets (showing 10):\n- #42: Fix login timeout issue (status: new, owner: alice, milestone: v2.0) - https://trac.example.com/ticket/42\n- #38: Add user export feature (status: accepted, owner: bob, milestone: ) - https://trac.example.com/ticket/38\n...\n\nUse max_results to see more."
 }
 ```
 
