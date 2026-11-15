@@ -3310,7 +3310,12 @@ class TestHandleTicketSearch:
                 args[0],
                 "20260101T00:00:00",
                 "20260101T00:00:00",
-                {"summary": None, "status": None, "owner": None},
+                {
+                    "summary": None,
+                    "status": None,
+                    "owner": None,
+                    "milestone": None,
+                },
             ]
 
         with (
@@ -3330,12 +3335,61 @@ class TestHandleTicketSearch:
             assert "None" not in text
             # The shape, not just the token: labels kept, slots empty.
             assert (
-                "- #10:  (status: , owner: ) - "
+                "- #10:  (status: , owner: , milestone: ) - "
                 "https://trac.example.com/ticket/10"
             ) in text.splitlines()
             ticket = result.structuredContent["tickets"][0]
-            for name in ("summary", "status", "owner"):
+            for name in ("summary", "status", "owner", "milestone"):
                 assert ticket[name] == "", name
+
+    def test_search_lists_the_milestone_of_each_ticket(self):
+        """Each line and each structured ticket carries the milestone, so
+        a search over several milestones (milestone^=v2.) shows which
+        ticket belongs to which without one ticket_get per ticket."""
+        client = _spec_client()
+        milestones = {10: "v2.0", 11: "v2.1", 12: ""}
+
+        async def _fake_run_sync_limited(func, *args, **kwargs):
+            return [
+                args[0],
+                "20260101T00:00:00",
+                "20260101T00:00:00",
+                {
+                    "summary": f"Ticket {args[0]}",
+                    "status": "new",
+                    "owner": "alice",
+                    "milestone": milestones[args[0]],
+                },
+            ]
+
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync"
+            ) as mock_run_sync,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_read.run_sync_limited",
+                side_effect=_fake_run_sync_limited,
+            ),
+        ):
+            mock_run_sync.return_value = [10, 11, 12]
+
+            result = self._run(
+                _handle_search(client, {"query": "milestone^=v2."})
+            )
+
+            lines = result.content[0].text.splitlines()
+            assert (
+                "- #10: Ticket 10 (status: new, owner: alice, "
+                "milestone: v2.0) - https://trac.example.com/ticket/10"
+            ) in lines
+            assert (
+                "- #12: Ticket 12 (status: new, owner: alice, "
+                "milestone: ) - https://trac.example.com/ticket/12"
+            ) in lines
+            assert [
+                t["milestone"]
+                for t in result.structuredContent["tickets"]
+            ] == ["v2.0", "v2.1", ""]
 
     def test_search_xmlrpc_fault(self):
         """XML-RPC fault during search produces structured error."""

@@ -31,7 +31,7 @@ DEFAULT_MAX_COMMENTS = 50
 TICKET_READ_TOOLS = [
     types.Tool(
         name="ticket_search",
-        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries and their web URLs.",
+        description="Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries, status, owner, milestone and their web URLs.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -206,6 +206,7 @@ async def _handle_search(
                 "summary": attrs.get("summary") or "",
                 "status": attrs.get("status") or "",
                 "owner": attrs.get("owner") or "",
+                "milestone": attrs.get("milestone") or "",
                 "url": _ticket_url(client, tid),
             }
         except Exception:
@@ -222,7 +223,7 @@ async def _handle_search(
         if item is None:
             continue
         results.append(
-            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}) - {item['url']}"
+            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}, milestone: {item.get('milestone', '')}) - {item['url']}"
         )
         tickets_json.append(item)
 
