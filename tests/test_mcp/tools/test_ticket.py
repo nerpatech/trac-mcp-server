@@ -3028,6 +3028,7 @@ class TestHandleTicketSearch:
                 "summary": "Bug A",
                 "status": "new",
                 "owner": "alice",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/1",
             },
             {
@@ -3035,6 +3036,7 @@ class TestHandleTicketSearch:
                 "summary": "Bug B",
                 "status": "assigned",
                 "owner": "bob",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/2",
             },
             {
@@ -3042,6 +3044,7 @@ class TestHandleTicketSearch:
                 "summary": "Bug C",
                 "status": "new",
                 "owner": "charlie",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/3",
             },
         ]
@@ -3086,6 +3089,7 @@ class TestHandleTicketSearch:
                 "summary": "T10",
                 "status": "closed",
                 "owner": "x",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/10",
             },
             {
@@ -3093,6 +3097,7 @@ class TestHandleTicketSearch:
                 "summary": "T20",
                 "status": "closed",
                 "owner": "x",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/20",
             },
             {
@@ -3100,6 +3105,7 @@ class TestHandleTicketSearch:
                 "summary": "T30",
                 "status": "closed",
                 "owner": "x",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/30",
             },
             {
@@ -3107,6 +3113,7 @@ class TestHandleTicketSearch:
                 "summary": "T40",
                 "status": "closed",
                 "owner": "x",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/40",
             },
             {
@@ -3114,6 +3121,7 @@ class TestHandleTicketSearch:
                 "summary": "T50",
                 "status": "closed",
                 "owner": "x",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/50",
             },
         ]
@@ -3178,6 +3186,7 @@ class TestHandleTicketSearch:
                 "summary": "Feature request",
                 "status": "new",
                 "owner": "dev1",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/7",
             },
             {
@@ -3185,6 +3194,7 @@ class TestHandleTicketSearch:
                 "summary": "Enhancement",
                 "status": "accepted",
                 "owner": "dev2",
+                "milestone": "",
                 "url": "https://trac.example.com/ticket/8",
             },
         ]
@@ -3381,6 +3391,10 @@ class TestHandleTicketSearch:
             assert (
                 "- #10: Ticket 10 (status: new, owner: alice, "
                 "milestone: v2.0) - https://trac.example.com/ticket/10"
+            ) in lines
+            assert (
+                "- #11: Ticket 11 (status: new, owner: alice, "
+                "milestone: v2.1) - https://trac.example.com/ticket/11"
             ) in lines
             assert (
                 "- #12: Ticket 12 (status: new, owner: alice, "

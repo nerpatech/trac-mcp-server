@@ -173,7 +173,7 @@ gate off the text line reads
 
 ## ticket_search
 
-**Description:** Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summary, status, owner, milestone and web URL.
+**Description:** Search tickets with filtering by status, owner, and keywords. Returns ticket IDs with summaries, status, owner, milestone and their web URLs.
 
 **Parameters:**
 

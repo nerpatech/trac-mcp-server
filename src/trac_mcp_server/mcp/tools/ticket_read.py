@@ -223,7 +223,7 @@ async def _handle_search(
         if item is None:
             continue
         results.append(
-            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}, milestone: {item.get('milestone', '')}) - {item['url']}"
+            f"- #{item['id']}: {item['summary']} (status: {item['status']}, owner: {item['owner']}, milestone: {item['milestone']}) - {item['url']}"
         )
         tickets_json.append(item)
 

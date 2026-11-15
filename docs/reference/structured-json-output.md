@@ -13,7 +13,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
   "content": [
     {
       "type": "text",
-      "text": "Found 3 tickets (showing 3):\n- #42: Fix login issue (status: new, owner: alice, milestone: v2.0) - https://trac.example.com/ticket/42"
+      "text": "Found 3 tickets (showing 1):\n- #42: Fix login issue (status: new, owner: alice, milestone: v2.0) - https://trac.example.com/ticket/42\n\nUse max_results to see more."
     }
   ],
   "structuredContent": {
@@ -21,7 +21,8 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
       {"id": 42, "summary": "Fix login issue", "status": "new", "owner": "alice", "milestone": "v2.0", "url": "https://trac.example.com/ticket/42"}
     ],
     "total": 3,
-    "showing": 3
+    "showing": 1,
+    "failed_ids": []
   }
 }
 ```
@@ -43,7 +44,7 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 | Tool | Structured JSON Fields |
 |------|----------------------|
 | `get_server_time` | `server_time`, `unix_timestamp`, `timezone` |
-| `ticket_search` | `tickets[]`, `total`, `showing` |
+| `ticket_search` | `tickets[]` (each: `id`, `summary`, `status`, `owner`, `milestone`, `url`), `total`, `showing`, `failed_ids` |
 | `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified`, `_ts`, `comments_included`, and (unless `include_comments=false`) `comments[]` (each: `number`, `author`, `timestamp`, `body`), `comment_count`, `comments_shown`, `comments_truncated`, optional `omitted_comment_numbers`, optional `comments_error` |
 | `ticket_fields` | `fields[]` (each: `name`, `type`, `label`, `custom`, optional `options`) |
 | `ticket_actions` | `actions[]` (each: `name`, `label`, optional `hints`, `input_fields`) |
