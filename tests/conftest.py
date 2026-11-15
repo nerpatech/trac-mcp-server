@@ -71,6 +71,46 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_live)
 
 
+def pytest_collection_finish(session):
+    """Probe /trac_test once collection is final; stop the run if it
+    is wrong.
+
+    Under --run-live, with at least one live item selected and Trac
+    credentials in the environment, ``probe_trac_test`` asks /trac_test
+    one XML-RPC question. A non-None answer ends the run here with that
+    one line and exit code 2 ("not run", the third state beside pass
+    and fail; ``ci-live.sh --daemon`` exits 2 for the same). Without
+    this a wrong /trac_test origin (a 308 to another port, say) cost 47
+    failures and 18 errors and no line naming the cause, because the
+    session sweep fixture swallows the error (Trac /trac_mcp_server
+    #224).
+
+    This runs at collection FINISH, on ``session.items``, not in
+    ``pytest_collection_modifyitems``: the mark plugin applies -k, -m
+    and --deselect in its own modifyitems hook, which can run after
+    conftest's, so a probe there would fire for a live row the command
+    line has already excluded. No live item left, or no credentials,
+    means no probe, and the rows' own handling of missing credentials
+    stands.
+
+    The probe stops the whole session, offline and default-instance
+    rows included, by design: the live run is only a pass when all of
+    it runs, and a run that silently dropped the rows it could not
+    reach would read as one.
+    """
+    if not session.config.getoption("--run-live"):
+        return
+    if not any("live" in item.keywords for item in session.items):
+        return
+    from tests.live_helpers import live_credentials_set, probe_trac_test
+
+    if not live_credentials_set():
+        return
+    problem = probe_trac_test()
+    if problem is not None:
+        pytest.exit(problem, returncode=2)
+
+
 @pytest.fixture
 def mock_config():
     """Create a mock Config instance for testing."""
@@ -257,11 +297,9 @@ def _sweep_stale_live_leftovers(request):
     """
     if not request.config.getoption("--run-live"):
         return
-    if not (
-        os.environ.get("TRAC_URL")
-        and os.environ.get("TRAC_USERNAME")
-        and os.environ.get("TRAC_PASSWORD")
-    ):
+    from tests.live_helpers import live_credentials_set
+
+    if not live_credentials_set():
         return
     reporter = request.config.pluginmanager.get_plugin(
         "terminalreporter"
