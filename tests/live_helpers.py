@@ -40,10 +40,10 @@ import re
 import xmlrpc.client
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from html import unescape
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
+from lxml import html as lxml_html
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
@@ -180,17 +180,18 @@ class _PinnedTestRegistry(InstanceRegistry):
 def _form_input_value(html: str, name: str) -> str:
     """The ``value`` of the ``<input name="NAME">`` tag in ``html``.
 
-    Attribute order varies between Trac versions, so the tag is found by
-    its ``name`` and the ``value`` is then read out of that tag alone.
+    Parsed with lxml, not a regex: a regex on ``name=``/``value=`` also
+    matches inside ``data-name=``/``data-value=`` and cuts a value at
+    the other quote character (#207 review). lxml decodes entities.
     Raises ``AssertionError`` naming the field when there is no such
     tag or it has no value: the form changed, and a POST built without
     it would only come back as a bare 400.
     """
-    for tag in re.findall(r"<input\b[^>]*>", html):
-        if re.search(rf"""\bname=["']{re.escape(name)}["']""", tag):
-            value = re.search(r"""\bvalue=["']([^"']*)["']""", tag)
-            if value:
-                return unescape(value.group(1))
+    tree = lxml_html.fromstring(html)
+    for node in tree.xpath("//input[@name=$n]", n=name):
+        value = node.get("value")
+        if value is not None:
+            return value
     raise AssertionError(
         f"the ticket page has no <input name={name!r}> with a value"
     )
@@ -220,9 +221,12 @@ def post_description_reply(ticket_id: int, text: str) -> int:
          303 whose ``Location`` ends ``#comment:N``.
 
     ``live_write_guard`` only patches the XML-RPC call, so it cannot see
-    this POST: the helper refuses a base URL that is not ``/trac_test``
-    itself, before sending anything. Fails loudly (``AssertionError``)
-    on any other answer.
+    this POST. The ``is_trac_test_url`` check below is the same
+    PATH-only test that guard applies, kept as a belt-and-braces refusal
+    before anything is sent; ``trac_test_url()`` already guarantees the
+    path, and neither checks the host. Fails loudly (``AssertionError``)
+    on any other answer. Messages name the URL with its userinfo
+    stripped: ``TRAC_TEST_URL`` may carry ``user:password@``.
     """
     config = trac_test_config()
     base = config.trac_url.rstrip("/")
@@ -232,12 +236,13 @@ def post_description_reply(ticket_id: int, text: str) -> int:
             f"{TEST_INSTANCE}"
         )
     url = f"{base}/ticket/{ticket_id}"
+    shown = strip_userinfo(url)
     with requests.Session() as session:
         session.auth = (config.username, config.password)
         session.verify = not config.insecure
         page = session.get(url, timeout=30)
         assert page.status_code == 200, (
-            f"GET {url} answered {page.status_code}"
+            f"GET {shown} answered {page.status_code}"
         )
         token = _form_input_value(page.text, "__FORM_TOKEN")
         fields = {
@@ -260,7 +265,7 @@ def post_description_reply(ticket_id: int, text: str) -> int:
     location = response.headers.get("Location", "")
     match = re.search(r"#comment:(\d+)$", location)
     assert response.status_code == 303 and match, (
-        f"POST {url} answered {response.status_code}, Location "
+        f"POST {shown} answered {response.status_code}, Location "
         f"{location!r}: expected 303 to #comment:N"
     )
     return int(match.group(1))
