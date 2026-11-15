@@ -16,9 +16,13 @@ one fixed way; the hook is tested with fake config and items.
 
 import dataclasses
 import http.server
+import os
 import socket
+import subprocess
+import sys
 import threading
 import xmlrpc.client
+from pathlib import Path
 
 import pytest
 
@@ -32,7 +36,8 @@ PASSWORD = "s3cret-pw"
 def _serve(status, headers=(), body=b""):
     """A running server that answers every POST the same way.
 
-    Returns ``(server, seen)``; ``seen`` collects the request bodies.
+    Returns the running server, with ``.seen`` attached: the list of
+    request bodies it received.
     """
     seen = []
 
@@ -142,13 +147,29 @@ def test_redirect_location_userinfo_is_stripped(serve, env):
     assert "http://127.0.0.1:1/trac_test/x" in line
 
 
-def test_unauthorized(serve, env):
-    server = serve(401)
-    env(f"{_origin(server)}/trac_test")
+@pytest.mark.parametrize("code", [401, 403])
+def test_unauthorized_advises_the_credentials(serve, env, code):
+    server = serve(code)
+    url = f"{_origin(server)}/trac_test"
+    env(url)
     line = probe_trac_test()
     assert line is not None
-    assert "401" in line
-    assert "TRAC_TEST_URL" in line
+    assert url in line
+    assert f"answered HTTP {code}" in line
+    assert "check TRAC_USERNAME/TRAC_PASSWORD" in line
+    assert "XML_RPC" in line
+    assert "TRAC_TEST_URL" not in line
+    assert PASSWORD not in line
+
+
+@pytest.mark.parametrize("code", [404, 500])
+def test_other_status_keeps_the_url_advice(serve, env, code):
+    server = serve(code)
+    env(f"{_origin(server)}/trac_test")
+    line = probe_trac_test()
+    assert f"answered HTTP {code}" in line
+    assert "set TRAC_TEST_URL in .env" in line
+    assert "it is set" in line
 
 
 def test_html_page_is_not_an_xmlrpc_reply(serve, env):
@@ -178,13 +199,48 @@ def test_valid_reply_is_none(serve, env):
     assert probe_trac_test() is None
 
 
-def test_xmlrpc_fault_still_counts_as_a_server(serve, env):
+def test_xmlrpc_fault_is_a_failure_with_credentials_advice(serve, env):
     body = xmlrpc.client.dumps(
-        xmlrpc.client.Fault(1, "no such method"), methodresponse=True
+        xmlrpc.client.Fault(403, "XML_RPC privileges are required"),
+        methodresponse=True,
+    )
+    server = serve(200, [("Content-Type", "text/xml")], body.encode())
+    url = f"{_origin(server)}/trac_test"
+    env(url)
+    line = probe_trac_test()
+    assert line is not None
+    assert "\n" not in line
+    assert url in line
+    assert (
+        "answered XML-RPC fault 403: XML_RPC privileges are required"
+        in line
+    )
+    assert "check TRAC_USERNAME/TRAC_PASSWORD" in line
+
+
+def test_fault_string_is_truncated_to_one_line(serve, env):
+    body = xmlrpc.client.dumps(
+        xmlrpc.client.Fault(1, "x" * 50 + "\n" + "y" * 500),
+        methodresponse=True,
     )
     server = serve(200, [("Content-Type", "text/xml")], body.encode())
     env(f"{_origin(server)}/trac_test")
-    assert probe_trac_test() is None
+    line = probe_trac_test()
+    assert "\n" not in line
+    assert "y" * 60 in line
+    assert "y" * 121 not in line
+
+
+def test_tls_failure_advises_the_certificate(serve, env):
+    # an https URL on a plain-http port: the handshake fails for real
+    server = serve(200)
+    port = server.server_address[1]
+    env(f"https://127.0.0.1:{port}/trac_test")
+    line = probe_trac_test()
+    assert line is not None
+    assert "SSLError" in line
+    assert "check the certificate or set TRAC_INSECURE" in line
+    assert f"https://127.0.0.1:{port}/trac_test" in line
 
 
 def test_closed_port_is_unreachable(env):
@@ -220,6 +276,24 @@ def test_malformed_test_url_names_variable_not_value(env):
     assert "127.0.0.1:9/trac_test" not in line
 
 
+def test_userinfo_without_a_host_is_malformed_and_never_echoed(env):
+    env("http://u:pw@:8080/trac_test")
+    line = probe_trac_test()
+    assert line is not None
+    assert "TRAC_TEST_URL" in line
+    assert "pw" not in line
+    assert "u:" not in line
+
+
+def test_location_with_userinfo_and_no_host_is_stripped(serve, env):
+    server = serve(308, [("Location", "http://who:pw@/trac_test")])
+    env(f"{_origin(server)}/trac_test")
+    line = probe_trac_test()
+    assert "308" in line
+    assert "pw" not in line
+    assert "who" not in line
+
+
 def test_unset_test_url_says_derived(serve, env, monkeypatch):
     server = serve(
         308,
@@ -234,7 +308,7 @@ def test_unset_test_url_says_derived(serve, env, monkeypatch):
 
 
 def test_set_test_url_says_set(serve, env):
-    server = serve(401)
+    server = serve(500)
     env(f"{_origin(server)}/trac_test")
     line = probe_trac_test()
     assert "it is set" in line
@@ -267,7 +341,7 @@ def test_allowlist_refusal_is_one_line(serve, env, monkeypatch):
     assert "\n" not in line
     assert "allowlist" in line
     assert url in line
-    assert "TRAC_TEST_URL" in line
+    assert "the client's allowed instances exclude it" in line
     assert server.seen == []  # refused before anything was sent
 
 
@@ -279,6 +353,12 @@ def test_allowlist_refusal_is_one_line(serve, env, monkeypatch):
         ("http://host/x", "http://host/x"),
         ("http://u:p@[::1]:8080/x?q=1", "http://[::1]:8080/x?q=1"),
         ("http://u:p@[::1]/x", "http://[::1]/x"),
+        ("http://u:pw@:8080/trac_test", "http://:8080/trac_test"),
+        ("http://who:pw@/trac_test", "http:///trac_test"),
+        ("http://a@b@host/x", "http://host/x"),
+        ("//u:pw@host/x", "//host/x"),
+        ("/trac_test/x", "/trac_test/x"),
+        ("http://[bad:pw@x/", "(unparseable URL)"),
     ],
 )
 def test_strip_userinfo(url, expected):
@@ -286,7 +366,22 @@ def test_strip_userinfo(url, expected):
 
 
 # ---------------------------------------------------------------------
-# The conftest hook
+# live_credentials_set
+# ---------------------------------------------------------------------
+
+
+def test_live_credentials_set(env, monkeypatch):
+    assert live_helpers.live_credentials_set() is True
+    for var in ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD"):
+        monkeypatch.setenv(var, "")
+        assert live_helpers.live_credentials_set() is False
+        monkeypatch.delenv(var)
+        assert live_helpers.live_credentials_set() is False
+        monkeypatch.setenv(var, "x")
+
+
+# ---------------------------------------------------------------------
+# The conftest hook (fake config and items)
 # ---------------------------------------------------------------------
 
 
@@ -306,6 +401,12 @@ class _Item:
 
     def add_marker(self, marker):
         self.markers.append(marker)
+
+
+class _Session:
+    def __init__(self, run_live, items):
+        self.config = _Config(run_live)
+        self.items = items
 
 
 @pytest.fixture
@@ -331,27 +432,27 @@ def creds(monkeypatch):
     monkeypatch.setenv("TRAC_PASSWORD", PASSWORD)
 
 
-def test_hook_exits_2_with_the_line(probe, creds):
+def test_finish_exits_2_with_the_line(probe, creds):
     probe.answer["line"] = "live suite not run: X answered 308"
     with pytest.raises(pytest.exit.Exception) as caught:
-        conftest_module.pytest_collection_modifyitems(
-            _Config(True), [_Item(True), _Item(False)]
+        conftest_module.pytest_collection_finish(
+            _Session(True, [_Item(True), _Item(False)])
         )
     assert caught.value.returncode == 2
     assert caught.value.msg == "live suite not run: X answered 308"
 
 
-def test_hook_continues_when_probe_is_clean(probe, creds):
-    items = [_Item(True), _Item(False)]
-    conftest_module.pytest_collection_modifyitems(_Config(True), items)
+def test_finish_continues_when_probe_is_clean(probe, creds):
+    conftest_module.pytest_collection_finish(
+        _Session(True, [_Item(True), _Item(False)])
+    )
     assert probe.calls == [1]
-    assert all(item.markers == [] for item in items)
 
 
-def test_hook_does_not_probe_without_a_live_item(probe, creds):
+def test_finish_does_not_probe_without_a_live_item(probe, creds):
     probe.answer["line"] = "would exit"
-    conftest_module.pytest_collection_modifyitems(
-        _Config(True), [_Item(False)]
+    conftest_module.pytest_collection_finish(
+        _Session(True, [_Item(False)])
     )
     assert probe.calls == []
 
@@ -359,19 +460,36 @@ def test_hook_does_not_probe_without_a_live_item(probe, creds):
 @pytest.mark.parametrize(
     "missing", ["TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD"]
 )
-def test_hook_does_not_probe_without_credentials(
+def test_finish_does_not_probe_without_credentials(
     probe, creds, monkeypatch, missing
 ):
     probe.answer["line"] = "would exit"
     monkeypatch.delenv(missing)
-    conftest_module.pytest_collection_modifyitems(
-        _Config(True), [_Item(True)]
+    conftest_module.pytest_collection_finish(
+        _Session(True, [_Item(True)])
     )
     assert probe.calls == []
 
 
-def test_hook_does_not_probe_without_run_live(probe, creds):
+def test_finish_does_not_probe_without_run_live(probe, creds):
     probe.answer["line"] = "would exit"
+    conftest_module.pytest_collection_finish(
+        _Session(False, [_Item(True)])
+    )
+    assert probe.calls == []
+
+
+def test_modifyitems_never_probes(probe, creds):
+    probe.answer["line"] = "would exit"
+    live, other = _Item(True), _Item(False)
+    conftest_module.pytest_collection_modifyitems(
+        _Config(True), [live, other]
+    )
+    assert probe.calls == []
+    assert live.markers == [] and other.markers == []
+
+
+def test_modifyitems_skips_live_items_without_run_live(probe, creds):
     live, other = _Item(True), _Item(False)
     conftest_module.pytest_collection_modifyitems(
         _Config(False), [live, other]
@@ -379,3 +497,85 @@ def test_hook_does_not_probe_without_run_live(probe, creds):
     assert probe.calls == []
     assert len(live.markers) == 1  # skipped, as before
     assert other.markers == []
+
+
+# ---------------------------------------------------------------------
+# The hook under real pytest: -k / -m are honoured (Trac #224 review)
+# ---------------------------------------------------------------------
+
+REPO = Path(__file__).resolve().parent.parent
+LIVE_FILE = "tests/test_detection.py"
+LIVE_ROW = "test_live_scrape_project_index"
+OFFLINE_ROW = "test_strip_userinfo"
+
+
+def _live_run(*args):
+    """``pytest --run-live --collect-only`` in a subprocess whose Trac
+    is a closed local port.
+
+    The probe fires at collection finish, so --collect-only reaches it
+    without running a row. Every TRAC_* variable is dropped and
+    PYTHON_DOTENV_DISABLED is set: conftest calls ``load_dotenv()``
+    under --run-live and this checkout may sit inside one that has a
+    real .env, whose Trac the probe would then ask.
+    """
+    port = _closed_port()
+    env = {
+        k: v for k, v in os.environ.items() if not k.startswith("TRAC_")
+    }
+    env.update(
+        PYTHONPATH=str(REPO / "src"),
+        PYTHON_DOTENV_DISABLED="1",
+        TRAC_URL=f"http://127.0.0.1:{port}/x",
+        TRAC_USERNAME="agent",
+        TRAC_PASSWORD="dummy-pw",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--run-live",
+            "--collect-only",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            *args,
+        ],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result, port, result.stdout + result.stderr
+
+
+def test_k_excluding_every_live_row_does_not_probe():
+    result, _port, out = _live_run(
+        "-k", OFFLINE_ROW, "tests/test_live_probe.py", LIVE_FILE
+    )
+    assert result.returncode == 0, out
+    assert "live suite not run" not in out
+    assert OFFLINE_ROW in out
+    assert LIVE_ROW not in out
+
+
+def test_m_not_live_does_not_probe():
+    result, _port, out = _live_run(
+        "-m", "not live", "tests/test_live_probe.py", LIVE_FILE
+    )
+    assert result.returncode == 0, out
+    assert "live suite not run" not in out
+
+
+def test_k_selecting_a_live_row_probes_and_exits_2():
+    result, port, out = _live_run(
+        "-k", LIVE_ROW, "tests/test_live_probe.py", LIVE_FILE
+    )
+    assert result.returncode == 2, out
+    assert "live suite not run" in out
+    # the probe asked the env's Trac, not one a .env named
+    assert f"http://127.0.0.1:{port}/trac_test" in out
+    assert "unreachable" in out
+    assert "dummy-pw" not in out

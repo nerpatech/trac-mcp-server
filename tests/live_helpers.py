@@ -10,10 +10,11 @@ Four things live here so the rows and conftest share one copy:
     itself carries.
   * the origin probe (``probe_trac_test``): one XML-RPC question put to
     ``trac_test_url()`` before a live run, answering ``None`` when an
-    XML-RPC server is there and otherwise one line naming the URL, what
-    it answered and ``TRAC_TEST_URL``. conftest ends the run with that
-    line (exit code 2, "not run") instead of letting dozens of rows
-    fail on a wrong origin (Trac /trac_mcp_server #224).
+    XML-RPC reply comes back and otherwise one line naming the URL, what
+    it answered and what to check (``TRAC_TEST_URL``, the credentials,
+    the certificate or the allowlist, by cause). conftest ends the run
+    with that line (exit code 2, "not run") instead of letting dozens of
+    rows fail on a wrong origin (Trac /trac_mcp_server #224).
   * the runtime write guard (``live_write_guard``): while it is
     installed, a TracClient XML-RPC WRITE whose client is not on
     ``/trac_test`` is recorded and refused before any byte is sent.
@@ -35,7 +36,7 @@ import os
 import xmlrpc.client
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
 
@@ -51,6 +52,22 @@ TEST_INSTANCE = "/trac_test"
 # ---------------------------------------------------------------------
 # The /trac_test URL and client
 # ---------------------------------------------------------------------
+
+
+def _trac_test_url_override() -> str:
+    """``TRAC_TEST_URL`` stripped; ``""`` when unset or blank."""
+    return os.environ.get("TRAC_TEST_URL", "").strip()
+
+
+def live_credentials_set() -> bool:
+    """Whether ``TRAC_URL``, ``TRAC_USERNAME`` and ``TRAC_PASSWORD`` are
+    all set and non-empty in the environment: the condition under which
+    a live run has a Trac to talk to (the sweep and the probe both gate
+    on it)."""
+    return all(
+        os.environ.get(var)
+        for var in ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD")
+    )
 
 
 def trac_test_url() -> str:
@@ -70,7 +87,7 @@ def trac_test_url() -> str:
     the defect, never the value: it can carry userinfo, and conftest's
     sweep logs the exception.
     """
-    override = os.environ.get("TRAC_TEST_URL", "").strip()
+    override = _trac_test_url_override()
     if override:
         url = override.rstrip("/")
         parsed = urlparse(url)
@@ -156,20 +173,29 @@ class _PinnedTestRegistry(InstanceRegistry):
 
 
 def strip_userinfo(url: str) -> str:
-    """``url`` without any ``user[:password]@`` (netloc rebuilt from the
-    hostname and port; an IPv6 host keeps its brackets)."""
-    parsed = urlparse(url)
-    host = parsed.hostname
-    if host is None:
-        return url
-    if ":" in host:
-        host = f"[{host}]"
+    """``url`` without any ``user[:password]@``.
+
+    Everything up to and including the last ``@`` of the netloc is
+    dropped, whatever the URL parser makes of the host (``http://u:pw@
+    :8080/x`` has no hostname, and a hostname-based rebuild would hand
+    the password back). A URL with no ``@`` in its netloc is returned
+    unchanged; one the parser rejects is replaced by a placeholder, so
+    nothing it held can leak.
+    """
     try:
-        port = parsed.port
+        parts = urlsplit(url)
     except ValueError:
-        port = None
-    netloc = f"{host}:{port}" if port is not None else host
-    return urlunparse(parsed._replace(netloc=netloc))
+        return "(unparseable URL)"
+    if "@" not in parts.netloc:
+        return url
+    netloc = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=netloc))
+
+
+_CREDENTIALS_ADVICE = (
+    "check TRAC_USERNAME/TRAC_PASSWORD (the account needs XML_RPC on "
+    "/trac_test)"
+)
 
 
 def probe_trac_test() -> str | None:
@@ -179,49 +205,65 @@ def probe_trac_test() -> str | None:
     URL through the client's own session (its auth, TLS setting and
     scope), without following a redirect: a 308 to another origin is the
     defect this exists to name, and a followed hop would drop the
-    credentials and answer 401 instead. Any XML-RPC reply, a Fault
-    included, means an XML-RPC server is there (a fault is its answer,
-    not a wrong origin). Anything else returns one line shaped
-    ``live suite not run: /trac_test at <url> <answer>; set
-    TRAC_TEST_URL ...``. The URL is printed without userinfo and the
-    password never appears; a malformed ``TRAC_TEST_URL`` is described by
-    ``trac_test_url()``'s message, which never carries the value.
+    credentials and answer 401 instead. Only a well-formed XML-RPC
+    result is a pass. A fault is not: ``system.getAPIVersion`` needs
+    nothing beyond ``XML_RPC``, so a healthy Trac never faults on it and
+    a fault means the rows would fail one by one.
+
+    Anything else returns one line shaped ``live suite not run:
+    /trac_test at <url> <answer>; <advice>``, the advice following the
+    cause: ``TRAC_TEST_URL`` for a wrong origin (redirect, unreachable,
+    not XML-RPC, other status), the credentials for 401/403 or a fault,
+    the certificate for a TLS failure, the allowlist for a scope refusal.
+    The URL is printed without userinfo and the password never appears;
+    a malformed ``TRAC_TEST_URL`` is described by ``trac_test_url()``'s
+    message, which never carries the value.
     """
     set_by = (
         "set"
-        if os.environ.get("TRAC_TEST_URL", "").strip()
+        if _trac_test_url_override()
         else "unset, derived from TRAC_URL"
     )
-    advice = (
+    url_advice = (
         "set TRAC_TEST_URL in .env to /trac_test's own origin "
         f"(it is {set_by})"
     )
     try:
         url = trac_test_url()
     except ValueError as exc:
-        return f"live suite not run: {exc}; {advice}"
+        return f"live suite not run: {exc}; {url_advice}"
     where = f"/trac_test at {strip_userinfo(url)}"
 
-    def line(answer: str) -> str:
+    def line(answer: str, advice: str = url_advice) -> str:
         return f"live suite not run: {where} {answer}; {advice}"
 
     client = trac_test_client()
     try:
+        # The probe builds its own POST: ``_rpc_call`` follows redirects
+        # and raises on status, and the probe needs the raw first answer.
         response = client._get_session().post(
             client.rpc_url,
             data=xmlrpc.client.dumps(
                 (), methodname="system.getAPIVersion"
             ),
             headers={"Content-Type": "text/xml"},
-            timeout=(10, 30),
+            timeout=(10, client.config.rpc_timeout),
             allow_redirects=False,
+        )
+    except requests.exceptions.SSLError as exc:
+        return line(
+            f"failed TLS ({type(exc).__name__})",
+            "check the certificate or set TRAC_INSECURE",
         )
     except requests.RequestException as exc:
         return line(f"is unreachable ({type(exc).__name__})")
     except DestinationOutOfScope:
         # Not a RequestException: the session refused the request unsent
         # because the client's allowlist excludes /trac_test.
-        return line("is outside the client's destination allowlist")
+        return line(
+            "is outside the client's destination allowlist",
+            "the client's allowed instances exclude it",
+        )
     finally:
         client.close()
     code = response.status_code
@@ -231,12 +273,18 @@ def probe_trac_test() -> str | None:
             strip_userinfo(location) if location else "(no Location)"
         )
         return line(f"answered {code} redirect to {target}")
+    if code in (401, 403):
+        return line(f"answered HTTP {code}", _CREDENTIALS_ADVICE)
     if code != 200:
         return line(f"answered HTTP {code}")
     try:
         xmlrpc.client.loads(response.content)
-    except xmlrpc.client.Fault:
-        return None
+    except xmlrpc.client.Fault as fault:
+        text = " ".join(str(fault.faultString).split())[:120]
+        return line(
+            f"answered XML-RPC fault {fault.faultCode}: {text}",
+            _CREDENTIALS_ADVICE,
+        )
     except Exception:
         # ExpatError, ResponseError and ValueError all mean the body is
         # not an XML-RPC reply.
