@@ -60,6 +60,14 @@ class TestMilestoneToolRegistration(unittest.TestCase):
         # Should have no required parameters
         self.assertEqual(list_tool.inputSchema["type"], "object")
         self.assertEqual(list_tool.inputSchema["required"], [])
+        self.assertEqual(
+            set(list_tool.inputSchema["properties"]),
+            {"prefix", "details", "status"},
+        )
+        self.assertEqual(
+            list_tool.inputSchema["properties"]["status"]["enum"],
+            ["all", "open", "completed"],
+        )
 
     def test_milestone_get_schema(self):
         """Test milestone_get has correct schema."""
@@ -377,6 +385,142 @@ class TestMilestoneToolDispatch(unittest.TestCase):
         self.assertIsNotNone(result.structuredContent)
         self.assertIn("fields", result.structuredContent)
         self.assertEqual(len(result.structuredContent["fields"]), 3)
+
+
+class TestMilestoneListFilters(unittest.TestCase):
+    """milestone_list with prefix, details and status."""
+
+    NAMES = ["Release_7.0", "Release_7.1", "Release_7.2", "Release_8.0"]
+    DATA = {
+        "Release_7.0": {
+            "name": "Release_7.0",
+            "due": "20240101T00:00:00",
+            "completed": "20240105T10:00:00",
+            "description": "",
+        },
+        "Release_7.1": {
+            "name": "Release_7.1",
+            "due": 0,
+            "completed": 0,
+            "description": "",
+        },
+        # Release_7.2 does not load (absent from get_milestones)
+        "Release_8.0": {
+            "name": "Release_8.0",
+            "due": "20261231T00:00:00",
+            "completed": 0,
+            "description": "",
+        },
+    }
+
+    def setUp(self):
+        _init_registry()
+        patcher = patch("trac_mcp_server.mcp.server.get_instances")
+        self.mock_get_instances = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.client = MagicMock()
+        self.client.get_all_milestones.return_value = list(self.NAMES)
+        self.client.get_milestones.side_effect = lambda names: {
+            n: self.DATA[n] for n in names if n in self.DATA
+        }
+        self.mock_get_instances.return_value.get_client.return_value = (
+            self.client
+        )
+
+    def tearDown(self):
+        _clear_registry()
+
+    def call(self, args):
+        return asyncio.run(handle_call_tool("milestone_list", args))
+
+    def test_no_arguments_lists_names_without_reading_details(self):
+        result = self.call({})
+
+        self.assertEqual(
+            result.structuredContent, {"milestones": self.NAMES}
+        )
+        self.client.get_milestones.assert_not_called()
+
+    def test_prefix_keeps_only_matching_names(self):
+        result = self.call({"prefix": "Release_7"})
+
+        self.assertEqual(
+            result.structuredContent["milestones"],
+            ["Release_7.0", "Release_7.1", "Release_7.2"],
+        )
+        self.assertNotIn("Release_8.0", result.content[0].text)
+
+    def test_prefix_is_case_sensitive(self):
+        result = self.call({"prefix": "release_7"})
+
+        self.assertEqual(result.structuredContent, {"milestones": []})
+        self.assertIn("No milestones found", result.content[0].text)
+
+    def test_details_reads_the_listed_milestones_in_one_batch(self):
+        result = self.call({"prefix": "Release_7", "details": True})
+
+        self.client.get_milestones.assert_called_once_with(
+            ["Release_7.0", "Release_7.1", "Release_7.2"]
+        )
+        self.assertEqual(
+            result.structuredContent["details"],
+            [
+                {
+                    "name": "Release_7.0",
+                    "due": "20240101T00:00:00",
+                    "completed": "20240105T10:00:00",
+                },
+                {"name": "Release_7.1", "due": None, "completed": None},
+            ],
+        )
+        self.assertEqual(
+            result.structuredContent["failed"], ["Release_7.2"]
+        )
+        text = result.content[0].text
+        self.assertIn(
+            "Release_7.1 | due: (Not set) | completed: (Not set)", text
+        )
+        self.assertIn(
+            "failed to load 1 milestone(s): Release_7.2", text
+        )
+
+    def test_status_open_keeps_milestones_without_completion_date(self):
+        result = self.call({"status": "open"})
+
+        self.assertEqual(
+            result.structuredContent["milestones"],
+            ["Release_7.1", "Release_8.0"],
+        )
+        self.assertIn("2 milestone(s) (open):", result.content[0].text)
+
+    def test_status_completed_keeps_milestones_with_completion_date(
+        self,
+    ):
+        result = self.call(
+            {"prefix": "Release_7", "status": "completed"}
+        )
+
+        self.assertEqual(
+            result.structuredContent["milestones"], ["Release_7.0"]
+        )
+
+    def test_status_without_match_says_none(self):
+        result = self.call(
+            {"prefix": "Release_8", "status": "completed"}
+        )
+
+        self.assertEqual(result.structuredContent["milestones"], [])
+        self.assertIn(
+            "0 milestone(s) (completed) starting with 'Release_8': none",
+            result.content[0].text,
+        )
+
+    def test_invalid_status_is_a_validation_error(self):
+        result = self.call({"status": "closed"})
+
+        self.assertTrue(result.isError)
+        self.assertIn("validation_error", result.content[0].text)
+        self.client.get_all_milestones.assert_not_called()
 
 
 class TestMilestoneToolErrors(unittest.TestCase):
