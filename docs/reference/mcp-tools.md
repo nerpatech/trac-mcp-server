@@ -1513,15 +1513,17 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 ## milestone_list
 
-**Description:** List all milestone names. Returns array of milestone names. Requires TICKET_VIEW permission.
+**Description:** List milestone names, optionally only those starting with a prefix. With `details` or `status`, also the due and completion date of each listed milestone, read in `system.multicall` batches of 50 (one `ticket.milestone.get` each, one at a time if the server has no `system.multicall`) instead of one `milestone_get` call per milestone. Requires MILESTONE_VIEW permission.
 
 **Parameters:**
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| *(none)* | - | - | - | No parameters required |
+| `prefix` | string | No | - | Only milestones whose name starts with this text (case-sensitive) |
+| `details` | boolean | No | `false` | Also return the due and completion date of each listed milestone |
+| `status` | string | No | `all` | `open` (no completion date), `completed` (with one) or `all`; anything but `all` implies `details` |
 
-**Success Response:**
+**Success Response (names only):**
 ```json
 {
   "type": "text",
@@ -1529,7 +1531,19 @@ The version named is the page's current version, re-read after the no-op, so whe
 }
 ```
 
-**Example Call:**
+Structured content: `{"milestones": ["v1.0", "v1.1", "v2.0", "Future"]}`.
+
+**Success Response (`prefix: "v"`, `status: "open"`):**
+```json
+{
+  "type": "text",
+  "text": "2 milestone(s) (open) starting with 'v':\nv1.1 | due: 20250630T22:00:00 | completed: (Not set)\nv2.0 | due: (Not set) | completed: (Not set)"
+}
+```
+
+Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1", "due": "20250630T22:00:00", "completed": null}, {"name": "v2.0", "due": null, "completed": null}], "failed": []}`. A milestone that could not be read is listed in `failed`, named in a warning and absent from `details`. With `status` `all` it stays in `milestones` and in the count, and its text line reads `<name> | (failed to load)`; with `open` or `completed` it cannot be classified, so it is left out of `milestones`, the count and the lines, and the warning says it is not counted. A prefix that matches nothing, with `details` or `status`, answers `0 milestone(s) (completed) starting with 'X': none` and `{"milestones": [], "details": [], "failed": []}`; without them it answers `No milestones found starting with 'X'.` (or `No milestones found.`) and `{"milestones": []}`.
+
+**Example Calls:**
 ```json
 {
   "name": "milestone_list",
@@ -1537,11 +1551,21 @@ The version named is the page's current version, re-read after the no-op, so whe
 }
 ```
 
+```json
+{
+  "name": "milestone_list",
+  "arguments": {
+    "prefix": "v",
+    "status": "open"
+  }
+}
+```
+
 ---
 
 ## milestone_get
 
-**Description:** Get milestone details by name. Returns name, due date, completion date, and description. Requires TICKET_VIEW permission.
+**Description:** Get milestone details by name. Returns name, due date, completion date, and description. Requires MILESTONE_VIEW permission.
 
 **Parameters:**
 

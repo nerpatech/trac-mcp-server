@@ -29,7 +29,14 @@ _NO_RECHECK_TOOL = None
 MILESTONE_TOOLS = [
     types.Tool(
         name="milestone_list",
-        description="List all milestone names. Returns array of milestone names (e.g., ['v1.0', 'v2.0', 'Future']). Requires TICKET_VIEW permission.",
+        description=(
+            "List milestone names (e.g., ['v1.0', 'v2.0', 'Future']). "
+            "Optionally only names starting with a prefix, and with "
+            "details=true or status=open/completed also the due and "
+            "completion date of each listed milestone, read in one "
+            "batch instead of one milestone_get per milestone. "
+            "Requires MILESTONE_VIEW permission."
+        ),
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -38,13 +45,29 @@ MILESTONE_TOOLS = [
         ),
         inputSchema={
             "type": "object",
-            "properties": {},
+            "properties": {
+                "prefix": {
+                    "type": "string",
+                    "description": "Only milestones whose name starts with this text (case-sensitive), e.g. 'v2.' or 'Release_7'",
+                },
+                "details": {
+                    "type": "boolean",
+                    "description": "Also return the due and completion date of each listed milestone (default: false)",
+                    "default": False,
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["all", "open", "completed"],
+                    "description": "Only milestones without a completion date (open) or with one (completed). Implies details=true. Default: all",
+                    "default": "all",
+                },
+            },
             "required": [],
         },
     ),
     types.Tool(
         name="milestone_get",
-        description="Get milestone details by name. Returns name, due date, completion date, and description as stored: TracWiki, byte-for-byte. Requires TICKET_VIEW permission.",
+        description="Get milestone details by name. Returns name, due date, completion date, and description as stored: TracWiki, byte-for-byte. Requires MILESTONE_VIEW permission.",
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
             destructiveHint=False,
@@ -165,24 +188,113 @@ async def _handle_list(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
     """Handle milestone_list."""
-    milestones = await run_sync(client.get_all_milestones)
+    prefix = args.get("prefix") or ""
+    status = args.get("status") or "all"
+    if status not in ("all", "open", "completed"):
+        return build_error_response(
+            "validation_error",
+            f"status must be all, open or completed, not {status!r}",
+            "Use status=all, status=open or status=completed.",
+        )
+    details = bool(args.get("details")) or status != "all"
 
-    if not milestones:
+    milestones = await run_sync(client.get_all_milestones)
+    if prefix:
+        milestones = [m for m in milestones if m.startswith(prefix)]
+
+    if not milestones and not details:
+        text = (
+            f"No milestones found starting with {prefix!r}."
+            if prefix
+            else "No milestones found."
+        )
         return types.CallToolResult(
-            content=[
-                types.TextContent(
-                    type="text", text="No milestones found."
-                )
-            ],
+            content=[types.TextContent(type="text", text=text)],
             structuredContent={"milestones": []},
         )
 
-    # Return newline-separated milestone names
+    if not details:
+        # Return newline-separated milestone names
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text", text="\n".join(milestones)
+                )
+            ],
+            structuredContent={"milestones": milestones},
+        )
+
+    loaded = (
+        await run_sync(client.get_milestones, milestones)
+        if milestones
+        else {}
+    )
+    rows: list[dict[str, Any]] = []
+    failed: list[str] = []
+    # (name, line) in name order; a failed milestone keeps its place
+    # only under status=all, where nothing needs its dates to classify it.
+    listed: list[tuple[str, str]] = []
+    for name in milestones:
+        data = loaded.get(name)
+        if not isinstance(data, dict):
+            failed.append(name)
+            if status == "all":
+                listed.append((name, f"{name} | (failed to load)"))
+            continue
+        # Open vs completed is decided on the raw value: a formatted
+        # empty string is not "(Not set)" but is not a date either.
+        is_open = data.get("completed") in _UNSET_RAW
+        if status == "open" and not is_open:
+            continue
+        if status == "completed" and is_open:
+            continue
+        due = (
+            None
+            if data.get("due") in _UNSET_RAW
+            else _format_date(data.get("due"))
+        )
+        completed = (
+            None if is_open else _format_date(data.get("completed"))
+        )
+        row = {"name": name, "due": due, "completed": completed}
+        rows.append(row)
+        listed.append(
+            (
+                name,
+                f"{name} | due: {due or _NOT_SET}"
+                f" | completed: {completed or _NOT_SET}",
+            )
+        )
+
+    lines = [line for _, line in listed]
+    header = f"{len(listed)} milestone(s)"
+    if status != "all":
+        header += f" ({status})"
+    if prefix:
+        header += f" starting with {prefix!r}"
+    text = (
+        header + ":" + ("\n" + "\n".join(lines) if lines else " none")
+    )
+    if failed:
+        if status == "all":
+            consequence = (
+                "They are listed above without dates; use "
+                "milestone_get for them."
+            )
+        else:
+            consequence = "They are not counted above; use milestone_get for them."
+        text += (
+            f"\n\nWarning: failed to load {len(failed)} milestone(s): "
+            f"{', '.join(failed)}. {consequence}"
+        )
+
     return types.CallToolResult(
-        content=[
-            types.TextContent(type="text", text="\n".join(milestones))
-        ],
-        structuredContent={"milestones": milestones},
+        content=[types.TextContent(type="text", text=text)],
+        structuredContent={
+            "milestones": [name for name, _ in listed],
+            "details": rows,
+            "failed": failed,
+        },
     )
 
 
@@ -429,6 +541,13 @@ def _parse_date(date_str: str) -> xmlrpc.client.DateTime:
     )
 
 
+# What _format_date returns for a date that is not set.
+_NOT_SET = "(Not set)"
+
+# Raw `due` / `completed` values Trac uses for "no date".
+_UNSET_RAW = (0, None, "")
+
+
 def _format_date(date_value: Any) -> str:
     """Format date value for display.
 
@@ -440,7 +559,7 @@ def _format_date(date_value: Any) -> str:
     """
     match date_value:
         case 0 | None:
-            return "(Not set)"
+            return _NOT_SET
         case xmlrpc.client.DateTime() as dt_val:
             return dt_val.value
         case int() | float() as ts:

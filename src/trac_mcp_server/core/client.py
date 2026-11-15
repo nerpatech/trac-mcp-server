@@ -273,6 +273,10 @@ WIKI_FETCH_BATCH_PAGES = 50
 # ``get_tickets`` (Trac /trac_mcp_server #158).
 TICKET_FETCH_BATCH = 50
 
+# Milestones read per ``system.multicall`` (one ``ticket.milestone.get``
+# each) in ``get_milestones``.
+MILESTONE_FETCH_BATCH = 50
+
 # Per-prefix BM25 indexes the wiki search keeps (least recently used
 # first out): each holds every section in its scope, and a caller can
 # make up prefixes without end.
@@ -673,8 +677,10 @@ class TracClient:
         """Read ``items`` in ``system.multicall`` batches, falling back
         to ``fetch_singly``; ``{item: value}`` for each that loaded.
 
-        The one batch-then-fallback loop behind ``get_tickets`` and the
-        wiki search's page fetch (Trac /trac_mcp_server #172).
+        The one batch-then-fallback loop behind ``get_tickets``,
+        ``get_milestones`` (``milestone_list``, Trac /trac_mcp_server
+        #231) and the wiki search's page fetch (Trac /trac_mcp_server
+        #172).
 
         - ``calls_for(item)`` is the multicall entries
           (``{"methodName", "params"}``) that read one item; the count
@@ -2214,6 +2220,40 @@ class TracClient:
         """
         result = self._rpc_request("ticket.milestone", "get", name)
         return result
+
+    def get_milestones(self, names: list[str]) -> dict[str, Any]:
+        """Get several milestones, batched through ``system.multicall``.
+
+        Returns ``{name: <ticket.milestone.get result>}`` -- the value
+        ``get_milestone`` returns -- for each name that loaded; a name
+        that failed is absent.
+
+        - Names are de-duplicated, order kept. An empty list makes no RPC.
+        - Names go in batches of ``MILESTONE_FETCH_BATCH``, one
+          ``ticket.milestone.get`` each; the batching and fallback rules
+          are those of ``_batched_multicall``.
+        """
+        return self._batched_multicall(
+            list(dict.fromkeys(names)),
+            MILESTONE_FETCH_BATCH,
+            lambda name: [
+                {"methodName": "ticket.milestone.get", "params": [name]}
+            ],
+            lambda name, values: values[0],
+            self._fetch_milestones_singly,
+        )
+
+    def _fetch_milestones_singly(
+        self, names: list[str]
+    ) -> dict[str, Any]:
+        """``get_milestone`` per name, skipping any that fail."""
+        out: dict[str, Any] = {}
+        for name in names:
+            try:
+                out[name] = self.get_milestone(name)
+            except Exception:
+                continue
+        return out
 
     def create_milestone(
         self, name: str, attributes: dict[str, Any]
