@@ -61,9 +61,31 @@ def pytest_configure(config):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip live tests unless --run-live is passed."""
+    """Skip live tests unless --run-live is passed; probe /trac_test
+    when they are to run.
+
+    Under --run-live, with at least one live item selected and Trac
+    credentials in the environment, ``probe_trac_test`` asks /trac_test
+    one XML-RPC question. A non-None answer ends the run here with that
+    one line and exit code 2 ("not run", the third state beside pass
+    and fail; ``ci-live.sh --daemon`` exits 2 for the same). Without
+    this a wrong /trac_test origin (a 308 to another port, say) cost 47
+    failures and 18 errors and no line naming the cause, because the
+    session sweep fixture swallows the error (Trac /trac_mcp_server
+    #224). No live item selected, or no credentials, is left as it was:
+    no probe, and the rows' own handling of missing credentials stands.
+    """
     if config.getoption("--run-live"):
         # --run-live given: do not skip live tests
+        if any("live" in item.keywords for item in items) and all(
+            os.environ.get(var)
+            for var in ("TRAC_URL", "TRAC_USERNAME", "TRAC_PASSWORD")
+        ):
+            from tests.live_helpers import probe_trac_test
+
+            problem = probe_trac_test()
+            if problem is not None:
+                pytest.exit(problem, returncode=2)
         return
     skip_live = pytest.mark.skip(reason="need --run-live option to run")
     for item in items:

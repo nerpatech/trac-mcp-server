@@ -1,6 +1,6 @@
 """Helpers for the live (``--run-live``) rows. Trac /trac_mcp_server #173.
 
-Three things live here so the rows and conftest share one copy:
+Four things live here so the rows and conftest share one copy:
 
   * ``trac_test_url()`` / ``trac_test_client()`` /
     ``trac_test_registry()``: the destructive-test instance. It is
@@ -8,6 +8,12 @@ Three things live here so the rows and conftest share one copy:
     Trac /trac_mcp_server #203), else ``/trac_test`` on the host and
     port ``TRAC_URL`` names, whatever project or sub-path ``TRAC_URL``
     itself carries.
+  * the origin probe (``probe_trac_test``): one XML-RPC question put to
+    ``trac_test_url()`` before a live run, answering ``None`` when an
+    XML-RPC server is there and otherwise one line naming the URL, what
+    it answered and ``TRAC_TEST_URL``. conftest ends the run with that
+    line (exit code 2, "not run") instead of letting dozens of rows
+    fail on a wrong origin (Trac /trac_mcp_server #224).
   * the runtime write guard (``live_write_guard``): while it is
     installed, a TracClient XML-RPC WRITE whose client is not on
     ``/trac_test`` is recorded and refused before any byte is sent.
@@ -29,7 +35,9 @@ import os
 import xmlrpc.client
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
+
+import requests
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
@@ -139,6 +147,100 @@ class _PinnedTestRegistry(InstanceRegistry):
         with self._lock:
             # The reload built a fresh dict; no loader state is shared.
             self._declared[self._pinned.name] = self._pinned
+
+
+# ---------------------------------------------------------------------
+# The origin probe
+# ---------------------------------------------------------------------
+
+
+def strip_userinfo(url: str) -> str:
+    """``url`` without any ``user[:password]@`` (netloc rebuilt from the
+    hostname and port; an IPv6 host keeps its brackets)."""
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if host is None:
+        return url
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def probe_trac_test() -> str | None:
+    """Ask ``/trac_test`` one XML-RPC question; ``None`` when answered.
+
+    POSTs ``system.getAPIVersion`` to the ``trac_test_client()``'s RPC
+    URL through the client's own session (its auth, TLS setting and
+    scope), without following a redirect: a 308 to another origin is the
+    defect this exists to name, and a followed hop would drop the
+    credentials and answer 401 instead. Any XML-RPC reply, a Fault
+    included, means an XML-RPC server is there (a fault is its answer,
+    not a wrong origin). Anything else returns one line shaped
+    ``live suite not run: /trac_test at <url> <answer>; set
+    TRAC_TEST_URL ...``. The URL is printed without userinfo and the
+    password never appears; a malformed ``TRAC_TEST_URL`` is described by
+    ``trac_test_url()``'s message, which never carries the value.
+    """
+    set_by = (
+        "set"
+        if os.environ.get("TRAC_TEST_URL", "").strip()
+        else "unset, derived from TRAC_URL"
+    )
+    advice = (
+        "set TRAC_TEST_URL in .env to /trac_test's own origin "
+        f"(it is {set_by})"
+    )
+    try:
+        url = trac_test_url()
+    except ValueError as exc:
+        return f"live suite not run: {exc}; {advice}"
+    where = f"/trac_test at {strip_userinfo(url)}"
+
+    def line(answer: str) -> str:
+        return f"live suite not run: {where} {answer}; {advice}"
+
+    client = trac_test_client()
+    try:
+        response = client._get_session().post(
+            client.rpc_url,
+            data=xmlrpc.client.dumps(
+                (), methodname="system.getAPIVersion"
+            ),
+            headers={"Content-Type": "text/xml"},
+            timeout=(10, 30),
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        return line(f"is unreachable ({type(exc).__name__})")
+    finally:
+        client.close()
+    code = response.status_code
+    if 300 <= code < 400:
+        location = response.headers.get("Location")
+        target = (
+            strip_userinfo(location) if location else "(no Location)"
+        )
+        return line(f"answered {code} redirect to {target}")
+    if code != 200:
+        return line(f"answered HTTP {code}")
+    try:
+        xmlrpc.client.loads(response.content)
+    except xmlrpc.client.Fault:
+        return None
+    except Exception:
+        # ExpatError, ResponseError and ValueError all mean the body is
+        # not an XML-RPC reply.
+        content_type = response.headers.get("Content-Type") or "none"
+        return line(
+            "answered 200 but not an XML-RPC reply "
+            f"(Content-Type: {content_type})"
+        )
+    return None
 
 
 # ---------------------------------------------------------------------
