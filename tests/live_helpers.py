@@ -41,6 +41,7 @@ import requests
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
+from trac_mcp_server.core.scope import DestinationOutOfScope
 from trac_mcp_server.instances import InstanceRegistry, InstanceSpec
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,10 @@ def probe_trac_test() -> str | None:
         )
     except requests.RequestException as exc:
         return line(f"is unreachable ({type(exc).__name__})")
+    except DestinationOutOfScope:
+        # Not a RequestException: the session refused the request unsent
+        # because the client's allowlist excludes /trac_test.
+        return line("is outside the client's destination allowlist")
     finally:
         client.close()
     code = response.status_code

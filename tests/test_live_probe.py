@@ -14,6 +14,7 @@ The probe is tested against real local HTTP servers, each answering
 one fixed way; the hook is tested with fake config and items.
 """
 
+import dataclasses
 import http.server
 import socket
 import threading
@@ -238,6 +239,36 @@ def test_set_test_url_says_set(serve, env):
     line = probe_trac_test()
     assert "it is set" in line
     assert "unset" not in line
+
+
+def test_allowlist_refusal_is_one_line(serve, env, monkeypatch):
+    """A client whose allowlist excludes /trac_test refuses the probe
+    request unsent (``DestinationOutOfScope``, not a RequestException).
+
+    ``trac_test_config()`` sets no allowlist today, so the real session
+    refusal is reached by handing the probe a config that has one.
+    """
+    server = serve(401)
+    url = f"{_origin(server)}/trac_test"
+    env(url)
+    real = live_helpers.trac_test_config()
+    monkeypatch.setattr(
+        live_helpers,
+        "trac_test_config",
+        lambda: dataclasses.replace(
+            real,
+            allowed_instances=frozenset(
+                {"http://127.0.0.1:1/elsewhere"}
+            ),
+        ),
+    )
+    line = probe_trac_test()
+    assert line is not None
+    assert "\n" not in line
+    assert "allowlist" in line
+    assert url in line
+    assert "TRAC_TEST_URL" in line
+    assert server.seen == []  # refused before anything was sent
 
 
 @pytest.mark.parametrize(
