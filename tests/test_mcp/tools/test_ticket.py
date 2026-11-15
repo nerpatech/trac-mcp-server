@@ -1329,6 +1329,30 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertIn("> Threaded five.", posted[0])
             self.assertNotIn("Flat two.", posted[0])
 
+    def test_update_reply_to_quotes_a_reply_to_the_description(self):
+        """Trac #207. A web-UI reply to the DESCRIPTION is stored with
+        oldvalue "description.2": comment 2. reply_to=2 must find it
+        (it answered not_found) and the link names it by 2."""
+        changelog = [
+            (1700000000, "alice", "comment", "1", "Flat one.", 1),
+            (
+                1700000100,
+                "bob",
+                "comment",
+                "description.2",
+                "About the description.",
+                1,
+            ),
+            (1700000200, "carol", "comment", "3", "Flat three.", 1),
+        ]
+        for reply_to in (2, "2", "description.2"):
+            result, posted = self._reply_to_run(changelog, reply_to)
+            self.assertFalse(result.isError, reply_to)
+            self.assertEqual(len(posted), 1)
+            self.assertIn("Replying to [comment:2 bob]:", posted[0])
+            self.assertIn("> About the description.", posted[0])
+            self.assertNotIn("Flat one.", posted[0])
+
     def test_update_reply_to_quote_keeps_leading_whitespace(self):
         """Trac #160. Leading whitespace is TracWiki markup: the quoted
         list items keep their indent, as Trac's own Reply does. Trailing
@@ -2836,6 +2860,11 @@ class TestCommentCnum(unittest.TestCase):
     def test_threaded_row_is_none(self):
         self.assertIsNone(_comment_cnum(self._row("2.5")))
 
+    def test_description_reply_row_is_none(self):
+        """Trac #207. "description.5" is a web-UI reply, so -- like
+        "2.5" -- never this tool's own flat ticket.update write."""
+        self.assertIsNone(_comment_cnum(self._row("description.5")))
+
     def test_none_oldvalue_is_none(self):
         # An attachment pseudo-row: str(None) is "None", still not a
         # number, but the parser is what says so.
@@ -4098,6 +4127,24 @@ class TestHandleTicketGet:
             "4",
             "5",
         ]
+
+    def test_get_description_reply_reports_its_own_number(self):
+        """Trac #207. oldvalue "description.5" is comment 5, a reply to
+        the description: it used to list as ``number: None``. in_reply_to
+        is "description", and the heading says so in words."""
+        result = self._get_comments(
+            [
+                self._comment("1", "alice", "Flat."),
+                self._comment("description.5", "bob", "On the text."),
+            ]
+        )
+        flat, reply = result.structuredContent["comments"]
+        assert flat["number"] == "1"
+        assert reply["number"] == "5"
+        assert reply["in_reply_to"] == "description"
+        text = result.content[0].text
+        assert "### comment:5 (reply to the description) -- bob" in text
+        assert "number unavailable" not in text
 
     def test_get_omitted_notice_is_plain_but_heading_keeps_reply_to(
         self,
