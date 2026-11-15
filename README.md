@@ -226,7 +226,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 ### Milestones (5)
 | Tool | Description |
 |------|-------------|
-| `milestone_list` | List all milestones |
+| `milestone_list` | List milestones, optionally by name prefix, open or completed, with due and completion dates |
 | `milestone_get` | Get milestone details |
 | `milestone_create` | Create new milestones |
 | `milestone_update` | Update existing milestones |
