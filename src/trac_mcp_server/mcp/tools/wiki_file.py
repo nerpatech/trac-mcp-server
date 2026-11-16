@@ -23,6 +23,11 @@ from ...converters.common import (
     detect_format_heuristic,
     find_code_block_indentation_loss,
 )
+from ...converters.flavors import (
+    DEFAULT_FLAVOR,
+    FLAVOR_SCHEMA,
+    flavor_problem,
+)
 from ...converters.front_matter import (
     build_front_matter,
     exported_from,
@@ -136,6 +141,7 @@ WIKI_FILE_TOOLS = [
                     "default": "auto",
                     "description": "Source format override. Default auto-detects from extension then content",
                 },
+                "flavor": FLAVOR_SCHEMA,
                 "target_cap": TARGET_CAP_SCHEMA,
                 "strip_frontmatter": {
                     "type": "boolean",
@@ -359,6 +365,13 @@ async def _handle_push(
     fmt = args.get("format", "auto")
     strip_fm = args.get("strip_frontmatter", True)
 
+    # Ticket #216: a Markdown flavour profile. It implies a Markdown
+    # source, so it cannot go with format="tracwiki" (stored as given).
+    flavor = args.get("flavor", DEFAULT_FLAVOR)
+    problem = flavor_problem(flavor, fmt)
+    if problem is not None:
+        return build_error_response("validation_error", *problem)
+
     source = await read_text_input(args, _PUSH_HINT)
     if isinstance(source, types.CallToolResult):
         return source
@@ -392,7 +405,11 @@ async def _handle_push(
         content = _strip_yaml_frontmatter(content)
 
     # Detect format
-    if fmt == "auto" and name is None:
+    if fmt == "auto" and flavor != DEFAULT_FLAVOR:
+        # A flavour names a Markdown profile: inline text included, which
+        # is otherwise TracWiki, there is nothing to detect (#216).
+        source_format = "markdown"
+    elif fmt == "auto" and name is None:
         # Inline text with no filename has nothing to go on but its own
         # content, and a content re-detect is what #62/#69 removed from
         # every inline write: a Markdown document quoting TracWiki (or the
@@ -430,6 +447,7 @@ async def _handle_push(
                 client.config,
                 target_format="tracwiki",
                 source_format="markdown",
+                flavor=flavor,
             )
         except ValueError as e:
             # See convert_preview for why this is caught rather than left to
@@ -444,6 +462,13 @@ async def _handle_push(
         converted = conversion.converted
         warnings.extend(conversion.warnings)
 
+        # The checks below read the Markdown that was converted: for a
+        # flavour that is its normalised text, or a rebuilt code fence
+        # would be invisible to them and a quoted one would not be (#216).
+        checked = content
+        if flavor != DEFAULT_FLAVOR and conversion.normalised_source:
+            checked = conversion.normalised_source
+
         # Refuse rather than warn (ticket #68, operator decision).
         # A TracWiki `{{{ }}}` block in a Markdown-detected file has
         # its body indentation eaten by paragraph handling, storing
@@ -457,7 +482,7 @@ async def _handle_push(
         # because they have a filename to go on, and removed the
         # Markdown path from every inline tool), so nothing else is
         # watching it.
-        losses = find_code_block_indentation_loss(content, wiki_content)
+        losses = find_code_block_indentation_loss(checked, wiki_content)
         if losses:
             return build_error_response(
                 "validation_error",
@@ -477,11 +502,13 @@ async def _handle_push(
         # `preview-checks: allow list_item_split` opts out here as it
         # does in `build_warnings` (#58).
         if "list_item_split" not in _allowed_codes(
-            content, wiki_content
+            checked, wiki_content
         ):
             warnings.extend(
                 describe_list_item_split(split)
-                for split in find_list_item_splits(content)
+                for split in find_list_item_splits(
+                    checked, flavor=flavor
+                )
             )
     else:
         # Already TracWiki — pass through

@@ -13,6 +13,15 @@ from .common import (
     markdown_to_tracwiki_lang,
     trac_continuation_bound,
 )
+from .flavors import (
+    DEFAULT_FLAVOR,
+    apply_flavor,
+    flavor_plugins,
+    has_gemini_code_marker,
+    inline_math_markup,
+    protect_syntax,
+    restore_syntax,
+)
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
 # (lowercase, whitespace runs → single dash, drop everything that isn't
@@ -191,6 +200,23 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
+
+
+def _stash_for_flavor(
+    markdown_text: str, flavor: str
+) -> tuple[str, list[str]]:
+    """`_stash_bracket_syntax`, with the flavour's own syntax (ChatGPT's
+    math) kept out of its reach: protected first, put back after, so the
+    parser's flavour rules see it whole (#216). For the default flavour
+    this is `_stash_bracket_syntax`."""
+    protected, saved = protect_syntax(markdown_text, flavor)
+    stashed, placeholders = _stash_bracket_syntax(protected)
+    if saved:
+        # A stashed span holds the math as written; the text proper gets
+        # an inline formula hidden as one more placeholder (#216).
+        placeholders = [restore_syntax(p, saved) for p in placeholders]
+        stashed = restore_syntax(stashed, saved, hide=placeholders)
+    return stashed, placeholders
 
 
 def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
@@ -591,6 +617,22 @@ class TracWikiRenderer(mistune.BaseRenderer):
     def codespan(self, text: str) -> str:
         """Render inline code."""
         return f"`{text}`"
+
+    def inline_math(self, text: str) -> str:
+        """Render inline math from a flavour's math rule (#216).
+
+        Trac on this host has no math processor, so a formula is a code
+        span, or `{{{ }}}` when it holds a backtick (a code span cannot).
+        """
+        return inline_math_markup(text)
+
+    def block_math(self, text: str) -> str:
+        """Render display math from a flavour's math rule (#216).
+
+        `{{{#!latex}}}`: no math processor is installed, and Trac accepts
+        `latex` as a highlighting language, so the formula shows as source.
+        """
+        return f"{{{{{{#!latex\n{text}\n}}}}}}\n\n"
 
     def linebreak(self) -> str:
         """Render line break.
@@ -1486,22 +1528,11 @@ def _reject_unrepresentable_footnotes(markdown_text: str) -> None:
     )
 
 
-def markdown_to_tracwiki(
-    markdown_text: str, *, heading_anchors: bool = False
+def _render_markdown(
+    markdown_text: str, *, heading_anchors: bool, flavor: str
 ) -> str:
-    """
-    Convert Markdown text to TracWiki format.
-
-    Args:
-        markdown_text: Markdown formatted text
-        heading_anchors: When True, each heading includes an explicit
-            ``#slug`` anchor for Markdown cross-reference compatibility.
-            Default is False: Trac auto-generates anchors and explicit slugs
-            can be misread as ticket references (e.g. ``#4-non-goals`` → #4).
-
-    Returns:
-        TracWiki formatted text
-    """
+    """Convert Markdown that has already been through the flavour's
+    pre-normalisers (`apply_flavor`)."""
     # Stash code spans / [[...]] / single-bracket link
     # spans before mistune ever sees a "`" or a "[" (see
     # _stash_bracket_syntax for why this can't happen inside text()).
@@ -1509,14 +1540,17 @@ def markdown_to_tracwiki(
     # placeholder table to resolve a sentinel before slugifying.
     _reject_unrepresentable_footnotes(markdown_text)
 
-    stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
+    stashed_text, placeholders = _stash_for_flavor(
+        markdown_text, flavor
+    )
 
     # Create renderer and parser with table plugin enabled
     renderer = TracWikiRenderer(
         heading_anchors=heading_anchors, placeholders=placeholders
     )
     markdown = mistune.create_markdown(
-        renderer=renderer, plugins=_MISTUNE_PLUGINS
+        renderer=renderer,
+        plugins=[*_MISTUNE_PLUGINS, *flavor_plugins(flavor)],
     )
 
     # Parse and render
@@ -1539,8 +1573,48 @@ def markdown_to_tracwiki(
     return result
 
 
+def markdown_to_tracwiki(
+    markdown_text: str,
+    *,
+    heading_anchors: bool = False,
+    flavor: str = DEFAULT_FLAVOR,
+) -> str:
+    """
+    Convert Markdown text to TracWiki format.
+
+    Args:
+        markdown_text: Markdown formatted text
+        heading_anchors: When True, each heading includes an explicit
+            ``#slug`` anchor for Markdown cross-reference compatibility.
+            Default is False: Trac auto-generates anchors and explicit slugs
+            can be misread as ticket references (e.g. ``#4-non-goals`` → #4).
+        flavor: The Markdown flavour profile of the source
+            (``converters.flavors.FLAVORS``). The default, ``commonmark``,
+            changes nothing; ``chatgpt`` and ``gemini`` normalise pasted
+            bot output first (Trac /trac_mcp_server #216). Raises
+            ValueError for an unknown name.
+
+    Returns:
+        TracWiki formatted text
+    """
+    markdown_text, _ = apply_flavor(markdown_text, flavor)
+    return _render_markdown(
+        markdown_text, heading_anchors=heading_anchors, flavor=flavor
+    )
+
+
+_GEMINI_HINT = (
+    'Line "Use code with caution." looks like text copied from a Gemini '
+    'page; convert with flavor "gemini" (--flavor gemini) to rebuild its '
+    "code blocks."
+)
+
+
 def convert_with_warnings(
-    markdown_text: str, *, heading_anchors: bool = False
+    markdown_text: str,
+    *,
+    heading_anchors: bool = False,
+    flavor: str = DEFAULT_FLAVOR,
 ) -> ConversionResult:
     """
     Convert Markdown to TracWiki and detect unsupported features.
@@ -1550,11 +1624,16 @@ def convert_with_warnings(
         heading_anchors: Forwarded to :func:`markdown_to_tracwiki`.  When
             True, headings include an explicit ``#slug`` anchor for
             Markdown cross-reference compatibility.  Default is False.
+        flavor: Forwarded to :func:`markdown_to_tracwiki`. The flavour's
+            own notes (what its pre-normalisers rebuilt) come first in
+            ``warnings``; under the default, text copied from a Gemini page
+            gets a hint to use ``gemini``, and is never switched
+            automatically.
 
     Returns:
         ConversionResult with TracWiki text and any warnings
     """
-    warnings = []
+    markdown_text, warnings = apply_flavor(markdown_text, flavor)
 
     # Tables are now fully supported via mistune table plugin
 
@@ -1570,9 +1649,16 @@ def convert_with_warnings(
             "TOC macro detected - use [[PageOutline]] in TracWiki instead."
         )
 
+    # Ticket #216: that shape is corrupted silently by the default (a
+    # `# comment` becomes a heading, `__name__` becomes bold).
+    if flavor == DEFAULT_FLAVOR and has_gemini_code_marker(
+        markdown_text
+    ):
+        warnings.append(_GEMINI_HINT)
+
     # Convert the markdown
-    tracwiki = markdown_to_tracwiki(
-        markdown_text, heading_anchors=heading_anchors
+    tracwiki = _render_markdown(
+        markdown_text, heading_anchors=heading_anchors, flavor=flavor
     )
 
     return ConversionResult(
@@ -1581,6 +1667,9 @@ def convert_with_warnings(
         target_format="tracwiki",
         converted=True,
         warnings=warnings,
+        normalised_source=(
+            markdown_text if flavor != DEFAULT_FLAVOR else None
+        ),
     )
 
 
@@ -1611,7 +1700,9 @@ def _token_text(token: dict[str, Any]) -> str:
     return "".join(_token_text(c) for c in token.get("children", []))
 
 
-def find_list_item_splits(markdown_text: str) -> list[dict]:
+def find_list_item_splits(
+    markdown_text: str, *, flavor: str = DEFAULT_FLAVOR
+) -> list[dict]:
     """List items whose content continues after a nested list (#125).
 
     Trac cannot continue a list item below a blank line once a nested list
@@ -1644,10 +1735,15 @@ def find_list_item_splits(markdown_text: str) -> list[dict]:
     ``{"item": <first line of the item's leading text, restored and
     truncated to 60 chars>, "block": <label>, "depth": <0 for a
     top-level item, 1 for an item of a nested list, ...>}``.
+
+    ``markdown_text`` is the text that was converted, so for a flavour it
+    is the output of `apply_flavor`, not the raw paste (#216); ``flavor``
+    only adds that flavour's parser rules, as the converter has them.
     """
-    stashed, placeholders = _stash_bracket_syntax(markdown_text)
+    stashed, placeholders = _stash_for_flavor(markdown_text, flavor)
     parse = mistune.create_markdown(
-        renderer=None, plugins=_MISTUNE_PLUGINS
+        renderer=None,
+        plugins=[*_MISTUNE_PLUGINS, *flavor_plugins(flavor)],
     )
     tokens = parse(stashed)
     findings: list[dict] = []

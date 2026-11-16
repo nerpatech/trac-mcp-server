@@ -270,6 +270,12 @@ class ConversionResult:
         title: The page title (the text of the first ``h1``) of a
             conversion from Trac's HTML; None when there is none or the
             conversion does not read one
+        normalised_source: For a Markdown -> TracWiki conversion under a
+            Markdown flavour profile (#216), the source after the
+            flavour's pre-normalisers: the Markdown that was converted,
+            which the Markdown-source checks must read. None for the
+            default flavour (the source is converted as given) and for
+            every other conversion
     """
 
     text: str
@@ -278,6 +284,7 @@ class ConversionResult:
     converted: bool = False
     warnings: list[str] = field(default_factory=list)
     title: str | None = None
+    normalised_source: str | None = None
 
     # Backward compatibility: tracwiki property returns text
     @property
@@ -385,6 +392,92 @@ def blank_code_fences(text: str) -> str:
     return "".join(out)
 
 
+def indent_columns(line: str) -> int:
+    """Width of a line's leading whitespace in columns, a tab going to
+    the next multiple of 4 (CommonMark's rule)."""
+    cols = 0
+    for ch in line:
+        if ch == " ":
+            cols += 1
+        elif ch == "\t":
+            cols += 4 - cols % 4
+        else:
+            break
+    return cols
+
+
+_LIST_ITEM_AT_COLUMN_ZERO_RE = re.compile(r"^([-*+]|\d+[.)])\s")
+
+
+def blank_fenced_code(text: str) -> str:
+    """Return ``text`` with fenced code replaced by spaces, character for
+    character (same length, same line breaks).
+
+    One scanner for both fence characters, in one pass, as CommonMark has
+    it: a fence opens on a line of 3 or more backticks or tildes (up to 3
+    columns of indent; a backtick fence's info string holds no backtick)
+    and closes only with the SAME character, at least as many, and nothing
+    else on the line. An unclosed fence runs to the end. Inside a fence of
+    one character a line of the other is plain code, which a backtick-first
+    pass followed by a tilde pass gets wrong.
+
+    A fence inside a list item may be indented further (the item's
+    content is), so a line under an unindented list item is not held to 3
+    columns, and its closer is not either. A TracWiki `{{{ }}}` block is
+    blanked too, with `blank_code_fences`' depth rule.
+
+    ``blank_code_fences`` is unchanged: the preview checks and
+    ``wiki_conventions`` read TracWiki with it and are measured on its
+    looser rule (any ``` line closes). This is the Markdown scanner the
+    flavour pre-normalisers use (Trac /trac_mcp_server #216).
+    """
+    out: list[str] = []
+    fence: tuple[str, int, bool] | None = None
+    tw_depth = 0
+    in_list = False
+    for line in text.split("\n"):
+        blanked = " " * len(line)
+        stripped = line.strip()
+        cols = indent_columns(line)
+        if fence is not None:
+            char, length, loose = fence
+            body = line.lstrip()
+            run = len(body) - len(body.lstrip(char))
+            if (
+                run >= length
+                and not body[run:].strip()
+                and (cols < 4 or loose)
+            ):
+                fence = None
+            out.append(blanked)
+            continue
+        if tw_depth:
+            tw_depth += stripped.count("{{{") - stripped.count("}}}")
+            tw_depth = max(tw_depth, 0)
+            out.append(blanked)
+            continue
+        if stripped and (cols < 4 or in_list):
+            if stripped[0] in "`~":
+                char = stripped[0]
+                run = len(stripped) - len(stripped.lstrip(char))
+                if run >= 3 and not (
+                    char == "`" and "`" in stripped[run:]
+                ):
+                    fence = (char, run, in_list)
+                    out.append(blanked)
+                    continue
+            if stripped.startswith("{{{"):
+                tw_depth = max(
+                    stripped.count("{{{") - stripped.count("}}}"), 0
+                )
+                out.append(blanked)
+                continue
+        if stripped and cols == 0:
+            in_list = bool(_LIST_ITEM_AT_COLUMN_ZERO_RE.match(line))
+        out.append(line)
+    return "\n".join(out)
+
+
 #: An inline code span: a run of backticks, a body, and a matching run.
 #: Deliberately NOT DOTALL -- a span is confined to one line here. A
 #: stray unmatched backtick is common in prose, and letting a span run
@@ -395,8 +488,14 @@ _INLINE_CODE_SPAN_RE = re.compile(
     r"(?P<ticks>`+)(?:(?!(?P=ticks)).)+(?P=ticks)"
 )
 
+#: The same, but a span may run over a line break as CommonMark's may --
+#: not over a blank line, which ends the paragraph and so the span.
+_MULTILINE_CODE_SPAN_RE = re.compile(
+    r"(?P<ticks>`+)(?:(?!(?P=ticks))(?:[^\n]|\n(?![ \t]*\n)))+(?P=ticks)"
+)
 
-def blank_inline_code_spans(text: str) -> str:
+
+def blank_inline_code_spans(text: str, multiline: bool = False) -> str:
     """Return ``text`` with inline code spans replaced by spaces,
     character for character, so the result has the SAME LENGTH as the
     input -- the companion to :func:`blank_code_fences` for the other
@@ -415,6 +514,12 @@ def blank_inline_code_spans(text: str) -> str:
 
     Newlines are preserved along with length, so any line-oriented
     logic downstream still sees the same shape.
+
+    ``multiline`` lets a span run over a line break (never over a blank
+    line). The default stays one line, which is what the preview checks
+    were measured with (see the note on ``_INLINE_CODE_SPAN_RE``); the
+    flavour pre-normalisers (#216) pass True, since a span they miss is
+    text they rewrite.
     """
 
     def _blank(match: re.Match[str]) -> str:
@@ -422,7 +527,10 @@ def blank_inline_code_spans(text: str) -> str:
             "\n" if ch == "\n" else " " for ch in match.group(0)
         )
 
-    return _INLINE_CODE_SPAN_RE.sub(_blank, text)
+    pattern = (
+        _MULTILINE_CODE_SPAN_RE if multiline else _INLINE_CODE_SPAN_RE
+    )
+    return pattern.sub(_blank, text)
 
 
 def detect_format_heuristic(text: str) -> str:
@@ -477,6 +585,7 @@ async def auto_convert(
     config,
     target_format: str | None = None,
     source_format: str | None = None,
+    flavor: str = "commonmark",
 ) -> ConversionResult:
     """Automatically convert text based on server capabilities and source format.
 
@@ -499,6 +608,9 @@ async def auto_convert(
             knows the source format (e.g. from a file extension), since the
             heuristic can be fooled by content that contains examples of the
             *other* format inside code blocks or prose.
+        flavor: The Markdown flavour profile of a Markdown source
+            (``converters.flavors.FLAVORS``), forwarded to
+            ``markdown_to_tracwiki``. Ignored for a TracWiki source.
 
     Returns:
         ConversionResult with converted text and metadata
@@ -543,7 +655,7 @@ async def auto_convert(
             warnings=[],
         )
     elif source_format == "markdown" and target_format == "tracwiki":
-        return markdown_to_tracwiki(text)
+        return markdown_to_tracwiki(text, flavor=flavor)
     elif source_format == "tracwiki" and target_format == "markdown":
         raise ValueError(
             "TracWiki -> Markdown needs Trac's rendered HTML: use"

@@ -42,6 +42,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .. import __version__
+from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS
 from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
@@ -816,6 +817,35 @@ def _refuses_force(text: str) -> bool:
     )
 
 
+def _refuses_flavor(text: str) -> bool:
+    """Whether an error result is the input schema refusing the ``flavor``
+    argument, as a server that predates #216 does (its strict schema
+    allows no extra property: ``('flavor' was unexpected)``). The quoted
+    name is matched, not the bare word: an unrelated error that mentions
+    a flavour is not this."""
+    lowered = text.lower()
+    return "'flavor'" in lowered and (
+        "additional properties" in lowered or "unexpected" in lowered
+    )
+
+
+def _check_flavor_args(args: argparse.Namespace) -> None:
+    """The usage rule of ``wiki-push --flavor`` (Trac /trac_mcp_server
+    #216): a flavour is a Markdown profile, so it cannot go with a
+    TracWiki source, which is stored unconverted."""
+    if (
+        args.command == "wiki-push"
+        and args.flavor != DEFAULT_FLAVOR
+        and args.format == "tracwiki"
+    ):
+        raise CliError(
+            f"--flavor {args.flavor} is a Markdown flavour profile and "
+            "--format tracwiki is stored unconverted, so it has nothing "
+            "to apply to: drop --flavor, or use --format markdown",
+            EXIT_USAGE_ERROR,
+        )
+
+
 def _check_assets_args(args: argparse.Namespace) -> None:
     """The usage rules of ``wiki-pull --assets`` (Trac /trac_mcp_server
     #215), checked before anything is fetched."""
@@ -1013,12 +1043,32 @@ async def _run(
             arguments["target_cap"] = args.target_cap
         if args.force:
             arguments["force"] = True
+        if args.flavor != DEFAULT_FLAVOR:
+            # A flavour implies a Markdown source: --format left at auto
+            # is sent as markdown, so inline-detected TracWiki cannot
+            # win over it (#216).
+            arguments["flavor"] = args.flavor
+            if args.format == "auto":
+                arguments["format"] = "markdown"
         result = await call_tool(
             url,
             token,
             "wiki_file_push",
             _with_instance(args, arguments),
         )
+        if (
+            result.isError
+            and args.flavor != DEFAULT_FLAVOR
+            and _refuses_flavor(_result_text(result))
+        ):
+            raise CliError(
+                "the server does not know --flavor: it predates Markdown "
+                "flavour profiles (Trac /trac_mcp_server #216), so "
+                "nothing was written. Deploy it, or push without "
+                "--flavor (convert first with `trac-convert --flavor "
+                f"{args.flavor} --from md --to tracwiki`)",
+                EXIT_TOOL_ERROR,
+            )
         if (
             result.isError
             and args.force
@@ -1294,6 +1344,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Source format (default: auto, from extension then content)",
     )
+    p.add_argument(
+        "--flavor",
+        choices=FLAVORS,
+        default=DEFAULT_FLAVOR,
+        help=(
+            "Markdown flavour of the source: chatgpt converts ChatGPT's "
+            "\\( \\) and \\[ \\] math, favicon citation residue and "
+            "utm_* URL parameters; gemini rebuilds a copied Gemini "
+            "page's code blocks, bullet characters and [N] (url) "
+            "citations. Implies a Markdown source (--format auto is sent "
+            "as markdown; --format tracwiki is a usage error). Sent only "
+            "when not the default. Default: commonmark (no change)."
+        ),
+    )
     p.add_argument("--comment", help="Change comment")
     p.add_argument(
         "--keep-frontmatter",
@@ -1525,6 +1589,7 @@ def main(
     args = build_parser().parse_args(argv)
     try:
         _check_assets_args(args)
+        _check_flavor_args(args)
         if args.command == "detect-format":
             return _detect_format(args)
         url, token, where = resolve_endpoint(

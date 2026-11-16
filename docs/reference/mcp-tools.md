@@ -1287,6 +1287,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 | `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
+| `flavor` | string | No | `"commonmark"` | One of `commonmark`, `chatgpt`, `gemini`. Markdown flavour of the source: `chatgpt` converts ChatGPT's `\( \)` and `\[ \]` math (code spans and `{{{#!latex}}}` blocks), favicon citation residue and `utm_*` URL parameters; `gemini` rebuilds a copied Gemini page's code blocks (from the 'Use code with caution' marker), its bullet characters and `[N] (url)` citations; a flavour other than the default `commonmark` makes the source Markdown, so it conflicts with `format` `tracwiki`. With `format` `auto` a non-default flavour converts as Markdown even for inline content with no `filename`. See [Flavour profiles](format-conversion.md#flavour-profiles) |
 | `strip_frontmatter` | boolean | No | `true` | Strip YAML frontmatter from .md files before pushing |
 | `force` | boolean | No | `false` | Push Markdown whose front matter says it was exported from Trac (carries `trac_page`). Without it such a push is refused: the Markdown export is one-way |
 
@@ -1827,6 +1828,7 @@ Trac's `wiki.wikiToHtml` has no page or ticket context, so a bare `attachment:FI
 |------|------|----------|---------|-------------|
 | `content` | string | **Yes** | - | Candidate content to preview |
 | `format` | string | No | `markdown` | Format of `content`: `markdown` or `tracwiki`. `tracwiki` skips conversion and renders the input as-is |
+| `flavor` | string | No | `"commonmark"` | One of `commonmark`, `chatgpt`, `gemini`. Markdown flavour of the source: `chatgpt` converts ChatGPT's `\( \)` and `\[ \]` math (code spans and `{{{#!latex}}}` blocks), favicon citation residue and `utm_*` URL parameters; `gemini` rebuilds a copied Gemini page's code blocks (from the 'Use code with caution' marker), its bullet characters and `[N] (url)` citations; a flavour other than the default `commonmark` makes the source Markdown, so it conflicts with `format` `tracwiki`. The Markdown-source checks (`list_item_split`, `tracwiki_markup_in_markdown`, ...) read the flavour-normalised text, and the flavour's own notes come back as `conversion_warning`s. See [Flavour profiles](format-conversion.md#flavour-profiles) |
 | `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
 | `target_cap` | integer | No | `50` | Maximum cross-instance targets to probe (minimum: 1, maximum: 500). The cap keeps the FIRST N in document order; anything beyond it is reported as `target_check_capped` rather than checked |
 | `include_html` | boolean | No | `true` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut). Warnings are always computed from the full render |

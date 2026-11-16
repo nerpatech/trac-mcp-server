@@ -425,7 +425,9 @@ def _check_code_block_indentation_loss(
     ]
 
 
-def _check_list_item_split(markdown_source: str) -> list[dict]:
+def _check_list_item_split(
+    markdown_source: str, flavor: str = "commonmark"
+) -> list[dict]:
     """A list item that continues after its nested list (ticket #125).
 
     Trac cannot continue a list item once a nested list has started: it
@@ -442,6 +444,9 @@ def _check_list_item_split(markdown_source: str) -> list[dict]:
 
     Detection lives in `converters.markdown_to_tracwiki` so the write
     path (`wiki_file_push`) reaches it too, as for #68.
+
+    ``flavor`` is the Markdown flavour profile (#216) the source was
+    converted with, so the detector parses with the converter's rules.
     """
     return [
         _warning(
@@ -450,7 +455,9 @@ def _check_list_item_split(markdown_source: str) -> list[dict]:
             describe_list_item_split(split),
             split,
         )
-        for split in find_list_item_splits(markdown_source)
+        for split in find_list_item_splits(
+            markdown_source, flavor=flavor
+        )
     ]
 
 
@@ -1913,11 +1920,14 @@ def build_warnings(
     own_prefix: str | None = None,
     known_comment_numbers: frozenset[int] | None = None,
     attachment_names: frozenset[str] | None = None,
+    flavor: str = "commonmark",
 ) -> list[dict]:
     """Run every warning rule and return the combined list.
 
     Args:
-        markdown_source: The caller's original Markdown input, or None
+        markdown_source: The caller's original Markdown input (for a
+            Markdown flavour profile, #216: its normalised text, the
+            Markdown that was converted), or None
             when there is no Markdown source to check against -- the
             verify path (ticket #55) checks a live render, which has no
             corresponding Markdown candidate. The two rules keyed off
@@ -2004,7 +2014,7 @@ def build_warnings(
                 markdown_source, tracwiki
             )
         )
-        warnings.extend(_check_list_item_split(markdown_source))
+        warnings.extend(_check_list_item_split(markdown_source, flavor))
     warnings.extend(
         _check_missing_local_target(facts, tracwiki, attachment_names)
     )
