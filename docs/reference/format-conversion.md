@@ -73,7 +73,7 @@ over a line break).
 
 | Input | Output |
 |-------|--------|
-| a line that is exactly a language name (`html`, `bash`, `python`, ...), the code, then a line `Use code with caution.` | a fenced block in that language, the code byte for byte; the marker line is dropped and one `gemini: rebuilt N code block(s) ...` warning is added. The marker takes the nearest language line above it, both start at column 0 and the label is outside code, and a fence line (` ``` ` or `~~~`) between them means no block is rebuilt. `html` is fenced as `text/html`, because the `html` processor would render the markup instead of showing it. Without the closing marker nothing changes |
+| a line that is exactly a language name (`html`, `bash`, `python`, ...), the code, then a line `Use code with caution.` | a fenced block in that language, the code byte for byte; the marker line is dropped and one `gemini: rebuilt N code block(s) ...` warning is added. The marker takes the nearest language line above it that has code between them (a language word directly above the marker is code), both start at column 0 and the label is outside code, and a fence line (` ``` ` or `~~~`) between them means no block is rebuilt. `html` is fenced as `text/html`, because the `html` processor would render the markup instead of showing it. Without the closing marker nothing changes |
 | a line starting with `•` | a `- ` list item |
 | `[N] (https://...)` | the link `[N](https://...)` |
 

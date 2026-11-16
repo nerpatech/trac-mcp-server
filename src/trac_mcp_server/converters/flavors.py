@@ -18,10 +18,16 @@ byte (Trac /trac_mcp_server #216).
 """
 
 import re
+import string
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import unquote
 
-from .common import blank_code_fences, blank_inline_code_spans
+from .common import (
+    blank_fenced_code,
+    blank_inline_code_spans,
+    indent_columns,
+)
 
 FLAVORS: tuple[str, ...] = ("commonmark", "chatgpt", "gemini")
 DEFAULT_FLAVOR = "commonmark"
@@ -89,41 +95,6 @@ def flavor_problem(flavor: object, fmt: str) -> tuple[str, str] | None:
 _LIST_ITEM_RE = re.compile(r"^\s*([-*+]|\d+[.)])\s")
 
 
-def _indent_columns(line: str) -> int:
-    """Width of a line's leading whitespace, a tab going to the next
-    multiple of 4."""
-    cols = 0
-    for ch in line:
-        if ch == " ":
-            cols += 1
-        elif ch == "\t":
-            cols += 4 - cols % 4
-        else:
-            break
-    return cols
-
-
-def _blank_tilde_fences(text: str) -> str:
-    """``text`` with `~~~` fenced blocks replaced by spaces, same length
-    (`blank_code_fences` knows the backtick form)."""
-    out: list[str] = []
-    fence_len = 0
-    for line in text.split("\n"):
-        stripped = line.lstrip()
-        run = len(stripped) - len(stripped.lstrip("~"))
-        if not fence_len:
-            if run >= 3 and _indent_columns(line) < 4:
-                fence_len = run
-                out.append(" " * len(line))
-            else:
-                out.append(line)
-        else:
-            if run >= fence_len and not stripped.lstrip("~").strip():
-                fence_len = 0
-            out.append(" " * len(line))
-    return "\n".join(out)
-
-
 def _blank_indented_code(text: str) -> str:
     """``text`` with indented code blocks replaced by spaces, same length.
 
@@ -142,7 +113,7 @@ def _blank_indented_code(text: str) -> str:
             out.append(line)
             after_blank, after_code = True, False
             continue
-        cols = _indent_columns(line)
+        cols = indent_columns(line)
         if cols >= 4 and (after_blank or after_code) and not in_list:
             out.append(" " * len(line))
             after_code = True
@@ -162,12 +133,12 @@ def _code_mask(text: str) -> str:
 
     Code is a fenced block (backtick or tilde), an indented code block, or
     an inline code span, which may be multi-backtick or run over a line
-    break. Built on `common.blank_code_fences` and
-    `common.blank_inline_code_spans`; the blocks are blanked first, so a
-    backtick inside one is not read as a span delimiter.
+    break. Built on `common.blank_fenced_code` (one scanner for both fence
+    characters) and `common.blank_inline_code_spans`; the blocks are
+    blanked first, so a backtick inside one is not read as a span
+    delimiter.
     """
-    blanked = blank_code_fences(text)
-    blanked = _blank_tilde_fences(blanked)
+    blanked = blank_fenced_code(text)
     blanked = _blank_indented_code(blanked)
     blanked = blank_inline_code_spans(blanked, multiline=True)
     return "".join(
@@ -218,7 +189,7 @@ _LABEL_MAX_CHARS = 60
 
 
 def _favicon_citation(m: re.Match[str]) -> str:
-    domain = m.group("domain")
+    domain = unquote(m.group("domain"))
     if "://" not in domain:
         domain = "https://" + domain
     raw = m.group("label")
@@ -244,37 +215,55 @@ def _chatgpt_citations(text: str) -> tuple[str, list[str]]:
     return _sub_outside_code(_FAVICON_RE, _favicon_citation, text), []
 
 
-# Neither a backtick nor a code filler belongs to a URL: it ends at code.
-_URL_RE = re.compile(
-    r"(?:https?|ftps?)://[^\s<>\[\]`\x01]+", re.IGNORECASE
+_URL_START_RE = re.compile(r"(?:https?|ftps?)://", re.IGNORECASE)
+# A bare URL or autolink is ASCII URL characters only: no whitespace,
+# backtick, `<>"`, brackets or non-ASCII text glued to it. (`\\` is there
+# for the `\&` ChatGPT writes.)
+_BARE_URL_CHARS = frozenset(
+    string.ascii_letters + string.digits + "-._~:/?#@!$&'()*+,;=%\\"
 )
 _URL_TRAIL = ".,;:!?'\"*"
 
 
-def _split_url_tail(url: str) -> tuple[str, str]:
-    """(url, tail) where the tail is trailing punctuation, or a ``)`` with
-    no ``(`` in the URL to close, that belongs to the sentence."""
-    end = len(url)
-    while end:
-        ch = url[end - 1]
-        if ch in _URL_TRAIL or (
-            ch == ")" and url[:end].count(")") > url[:end].count("(")
-        ):
-            end -= 1
-        else:
+def _url_end(mask: str, start: int, link_target: bool) -> int:
+    """Where the URL that starts at ``start`` of the code mask ends.
+
+    A Markdown link target ends at its closing ``)``: balanced
+    parentheses inside it are part of it, and whitespace (a title
+    follows), a backtick or code ends it too. A bare URL or autolink is
+    ASCII URL characters only; an unbalanced ``)`` ends it, and so does
+    trailing punctuation, which belongs to the sentence. Text after the
+    URL is never part of it."""
+    depth = 0
+    i = start
+    while i < len(mask):
+        ch = mask[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif link_target:
+            if ch.isspace() or ch in "`\x01":
+                break
+        elif ch not in _BARE_URL_CHARS:
             break
-    return url[:end], url[end:]
+        i += 1
+    if not link_target:
+        while i > start and mask[i - 1] in _URL_TRAIL:
+            i -= 1
+    return i
 
 
 _QUERY_SEP_RE = re.compile(r"(\\?&)")
 
 
-def _drop_utm(m: re.Match[str]) -> str:
-    url, tail = _split_url_tail(m.group(0))
+def _drop_utm(url: str) -> str:
     base, hash_, fragment = url.partition("#")
     path, question, query = base.partition("?")
     if not question:
-        return m.group(0)
+        return url
     parts = _QUERY_SEP_RE.split(query)
     # parts: param, sep, param, sep, ... ; a param is kept with the
     # separator that came before it, the first kept one without.
@@ -288,16 +277,35 @@ def _drop_utm(m: re.Match[str]) -> str:
             continue
         kept.append((sep, param))
     if not changed:
-        return m.group(0)
+        return url
     new_query = ""
     for n, (sep, param) in enumerate(kept):
         new_query += (sep if n else "") + param
     rebuilt = path + ("?" + new_query if new_query else "")
-    return rebuilt + hash_ + fragment + tail
+    return rebuilt + hash_ + fragment
 
 
 def _chatgpt_utm(text: str) -> tuple[str, list[str]]:
-    return _sub_outside_code(_URL_RE, _drop_utm, text), []
+    mask = _code_mask(text)
+    out: list[str] = []
+    last = 0
+    consumed = 0
+    for m in _URL_START_RE.finditer(mask):
+        start = m.start()
+        if start < consumed:
+            continue
+        end = _url_end(
+            mask, start, mask[max(start - 2, 0) : start] == "]("
+        )
+        consumed = max(end, m.end())
+        url = text[start:end]
+        new = _drop_utm(url)
+        if new != url:
+            out.append(text[last:start])
+            out.append(new)
+            last = end
+    out.append(text[last:])
+    return "".join(out), []
 
 
 # -- chatgpt math: mistune rules ----------------------------------------------
@@ -353,14 +361,28 @@ def _math_text(raw: str, doubled: bool) -> str:
     return raw.strip()
 
 
+def inline_math_markup(text: str) -> str:
+    """TracWiki for inline math: a code span, or `{{{ }}}` when the
+    formula holds a backtick (a code span cannot)."""
+    if "`" in text:
+        return f"{{{{{{{text}}}}}}}"
+    return f"`{text}`"
+
+
+def _inline_math_of(m: re.Match[str]) -> str:
+    """The formula of an inline math match, as `_parse_inline_math` reads
+    it ("" when it is empty)."""
+    if m.group("cgm_d") is not None:
+        return _math_text(
+            m.group("cgm_text"), len(m.group("cgm_d")) == 2
+        )
+    return _math_text(m.group("cgm_btext"), len(m.group("cgm_bd")) == 2)
+
+
 def _parse_inline_math(
     inline: Any, m: re.Match[str], state: Any
 ) -> int | None:
-    if m.group("cgm_d") is not None:
-        raw, doubled = m.group("cgm_text"), len(m.group("cgm_d")) == 2
-    else:
-        raw, doubled = m.group("cgm_btext"), len(m.group("cgm_bd")) == 2
-    text = _math_text(raw, doubled)
+    text = _inline_math_of(m)
     if not text:
         return None
     state.append_token({"type": "inline_math", "raw": text})
@@ -399,46 +421,60 @@ def chatgpt_math(md: Any) -> None:
 # Math is protected from the converter's bracket stash (a `[word:x]` span
 # there is a TracLink and would be cut out of a formula like `\[f:A\]`
 # before the math rule runs): `protect_syntax` swaps each math span for a
-# sentinel, the stash runs, and `restore_syntax` puts the text back for
-# mistune's own math rules.
+# sentinel and the stash runs. A display paragraph is then put back as
+# written, for mistune's block rule. An inline formula is NOT: like a code
+# span it is hidden from the parser (a `|` in it must not split a table
+# cell) and rendered when the output is restored, so `restore_syntax` hands
+# it to the stash's placeholder list.
 _MATH_BLOCK_RE = re.compile(_BLOCK_MATH, re.MULTILINE)
 _MATH_INLINE_RE = re.compile(_INLINE_MATH)
 _MATH_SENTINEL_RE = re.compile(r"\x00MT(\d+)\x00")
 
+# What was swapped out: (the text as written, its rendering for an inline
+# formula or None for a display paragraph).
+Protected = tuple[str, str | None]
 
-def _protect_math(text: str) -> tuple[str, list[str]]:
+
+def _protect_math(text: str) -> tuple[str, list[Protected]]:
     mask = _code_mask(text)
-    spans: list[tuple[int, int]] = []
+    spans: list[tuple[int, int, str | None]] = []
     for m in _MATH_BLOCK_RE.finditer(mask):
         if "\x01" not in m.group(0) and _starts_a_paragraph(
             text, m.start()
         ):
-            spans.append((m.start(), m.end()))
+            spans.append((m.start(), m.end(), None))
     inline_mask = list(mask)
-    for start, end in spans:
+    for start, end, _ in spans:
         inline_mask[start:end] = "\x01" * (end - start)
     for m in _MATH_INLINE_RE.finditer("".join(inline_mask)):
-        if "\x01" not in m.group(0):
-            spans.append((m.start(), m.end()))
-    spans.sort()
+        if "\x01" in m.group(0):
+            continue
+        formula = _inline_math_of(m)
+        if formula:
+            spans.append(
+                (m.start(), m.end(), inline_math_markup(formula))
+            )
+    spans.sort(key=lambda span: span[0])
     out: list[str] = []
-    saved: list[str] = []
+    saved: list[Protected] = []
     last = 0
-    for start, end in spans:
+    for start, end, rendered in spans:
         out.append(text[last:start])
         out.append(f"\x00MT{len(saved)}\x00")
-        saved.append(text[start:end])
+        saved.append((text[start:end], rendered))
         last = end
     out.append(text[last:])
     return "".join(out), saved
 
 
-_PROTECTORS: dict[str, Callable[[str], tuple[str, list[str]]]] = {
+_PROTECTORS: dict[str, Callable[[str], tuple[str, list[Protected]]]] = {
     "chatgpt": _protect_math,
 }
 
 
-def protect_syntax(text: str, flavor: str) -> tuple[str, list[str]]:
+def protect_syntax(
+    text: str, flavor: str
+) -> tuple[str, list[Protected]]:
     """Swap the flavour's own syntax for sentinels before the converter's
     bracket stash, so that stash cannot cut it up; ``(text, [])`` for a
     flavour with none. Undo with `restore_syntax`."""
@@ -447,11 +483,26 @@ def protect_syntax(text: str, flavor: str) -> tuple[str, list[str]]:
     return protect(text) if protect else (text, [])
 
 
-def restore_syntax(text: str, saved: list[str]) -> str:
-    """Put back what `protect_syntax` swapped out."""
+def restore_syntax(
+    text: str,
+    saved: list[Protected],
+    hide: list[str] | None = None,
+) -> str:
+    """Put back what `protect_syntax` swapped out: everything as written,
+    except that with ``hide`` (the stash's placeholder list) an inline
+    formula is appended there, rendered, and replaced by that
+    placeholder's sentinel."""
     if not saved:
         return text
-    return _MATH_SENTINEL_RE.sub(lambda m: saved[int(m.group(1))], text)
+
+    def put_back(m: re.Match[str]) -> str:
+        original, rendered = saved[int(m.group(1))]
+        if hide is None or rendered is None:
+            return original
+        hide.append(rendered)
+        return f"\x00WK{len(hide) - 1}\x00"
+
+    return _MATH_SENTINEL_RE.sub(put_back, text)
 
 
 # -- gemini -------------------------------------------------------------------
@@ -485,12 +536,14 @@ def _gemini_code_blocks(text: str) -> tuple[str, list[str]]:
     """Rebuild fenced blocks from `<language>` ... `Use code with
     caution.` runs.
 
-    Each marker takes the NEAREST language line above it, and only when no
-    fence line lies between them (so the code of a rebuilt block never
-    holds one, and a plain fence always closes it). The label and the
-    marker start at column 0; the label must be outside code. A label is
-    used by one marker only, and the scan back stops at the previous
-    marker, so the whole pass is linear.
+    Each marker takes the NEAREST language line above it that has code
+    between it and the marker (a language word directly above the marker
+    is code, so it is skipped), and only when no fence line lies between
+    them (so the code of a rebuilt block never holds one, and a plain
+    fence always closes it). The label and the marker start at column 0;
+    the label must be outside code. A label is used by one marker only,
+    and the scan back stops at the previous marker, so the whole pass is
+    linear. No block is ever empty.
     """
     lines = text.split("\n")
     masked = _code_mask(text).split("\n")
@@ -502,6 +555,7 @@ def _gemini_code_blocks(text: str) -> tuple[str, list[str]]:
         if line.rstrip() != GEMINI_CODE_MARKER:
             continue
         label = None
+        has_code = False
         for k in range(marker - 1, floor - 1, -1):
             above = lines[k]
             if _is_fence_line(above):
@@ -510,9 +564,14 @@ def _gemini_code_blocks(text: str) -> tuple[str, list[str]]:
                 above == above.lstrip()
                 and above.rstrip().lower() in _GEMINI_LANGUAGES
                 and masked[k] == above
+                and has_code
             ):
                 label = k
                 break
+            # Anything else is code, a language word included when it
+            # sits directly above the marker: the block needs a line.
+            if above.strip():
+                has_code = True
         floor = marker + 1
         if label is None:
             continue
@@ -589,9 +648,12 @@ def flavor_plugins(flavor: str) -> list[Callable[[Any], None]]:
 
 
 def has_gemini_code_marker(text: str) -> bool:
-    """Whether a line outside code is exactly `Use code with caution.`"""
+    """Whether a line outside code is exactly `Use code with caution.`,
+    at column 0 as the rebuild reads it."""
+    if GEMINI_CODE_MARKER not in text:
+        return False
     masked = _code_mask(text).split("\n")
     return any(
-        line.strip() == GEMINI_CODE_MARKER and masked[i] == line
+        line.rstrip() == GEMINI_CODE_MARKER and masked[i] == line
         for i, line in enumerate(text.split("\n"))
     )

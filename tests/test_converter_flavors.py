@@ -910,6 +910,12 @@ ADVERSARIAL = {
         "gemini",
         "para\n\n" + "    \u2022 x\n" * 10000,
     ),
+    "20000 URL starts": ("chatgpt", "https://" * 20000),
+    "5000 alternating fences": ("gemini", "~~~\n```\n" * 5000),
+    "5000 URLs with utm": (
+        "chatgpt",
+        "https://a.com/?utm_source=x&b=1 " * 5000,
+    ),
     "many backtick runs": (
         "chatgpt",
         "".join("`" * (i % 40 + 1) + "a " for i in range(20000)),
@@ -988,3 +994,273 @@ def test_the_default_result_is_otherwise_unchanged():
     assert result.target_format == "tracwiki"
     assert result.converted is True
     assert result.title is None
+
+
+# -- second review fixes (Trac /trac_mcp_server #216) --------------------------
+
+# 1. A URL ends where the URL ends; text after it is never touched.
+
+URL_BOUNDS = [
+    (
+        "ideographic stop after a link",
+        "See [a](https://a.com/?utm_source=chatgpt.com)\u3002\u4e0b\u4e00\u4e2a",
+        "See [a](https://a.com/)\u3002\u4e0b\u4e00\u4e2a",
+    ),
+    (
+        "text glued after a link",
+        "See [a](https://a.com/?utm_source=chatgpt.com)abc",
+        "See [a](https://a.com/)abc",
+    ),
+    (
+        "text glued after a parenthesised bare URL",
+        "(https://a.com/x?id=1&utm_source=chatgpt.com)and more",
+        "(https://a.com/x?id=1)and more",
+    ),
+    (
+        "non-ASCII after a bare URL",
+        "https://a.com/?utm_source=x\u3002\u4e0b",
+        "https://a.com/\u3002\u4e0b",
+    ),
+    (
+        "balanced parentheses in a link target",
+        "[w](https://en.wikipedia.org/wiki/A_(b)?utm_source=x)tail",
+        "[w](https://en.wikipedia.org/wiki/A_(b))tail",
+    ),
+    (
+        "balanced parentheses in a bare URL",
+        "https://en.wikipedia.org/wiki/A_(b)?utm_source=x end",
+        "https://en.wikipedia.org/wiki/A_(b) end",
+    ),
+    (
+        "a quote ends a bare URL",
+        '"https://a.com/?utm_source=x"tail',
+        '"https://a.com/"tail',
+    ),
+    (
+        "a link title is kept",
+        '[a](https://a.com/?utm_source=x "t")',
+        '[a](https://a.com/ "t")',
+    ),
+    (
+        "an angle autolink",
+        "<https://a.com/?utm_source=x>tail",
+        "<https://a.com/>tail",
+    ),
+    (
+        "a link target that is not followed by text",
+        "[a](https://a.com/p?x=1&utm_source=z)",
+        "[a](https://a.com/p?x=1)",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [row[1:] for row in URL_BOUNDS],
+    ids=[row[0] for row in URL_BOUNDS],
+)
+def test_a_url_ends_where_the_url_ends(source, expected):
+    assert _norm(source, "chatgpt")[0] == expected
+
+
+# 2. Inline math stays hidden from the table splitter, like a code span.
+
+
+@pytest.mark.parametrize(
+    ("cell", "rendered"),
+    [
+        ("\\(|x|\\)", "`|x|`"),
+        ("\\\\(|x|\\\\)", "`|x|`"),
+        ("\\\\(a`b|c\\\\)", "{{{a`b|c}}}"),
+        ("\\[|y|\\]", "`|y|`"),
+    ],
+    ids=["single", "doubled", "backtick", "brackets"],
+)
+def test_a_pipe_in_math_does_not_split_a_table_cell(cell, rendered):
+    source = f"| a | b |\n|---|---|\n| {cell} | 2 |\n"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        f"||=a=||=b=||\n||{rendered}||2||"
+    )
+
+
+def test_the_code_span_equivalent_of_the_pipe_row():
+    source = "| a | b |\n|---|---|\n| `|x|` | 2 |\n"
+    assert markdown_to_tracwiki(source) == "||=a=||=b=||\n||`|x|`||2||"
+
+
+def test_display_math_is_still_a_block_beside_a_table():
+    source = "| a |\n|---|\n| \\(|x|\\) |\n\n\\[ |y| \\]\n"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "||=a=||\n||`|x|`||\n\n{{{#!latex\n|y|\n}}}"
+    )
+
+
+def test_math_in_a_heading_and_emphasis_still_renders():
+    assert markdown_to_tracwiki("# H \\(x\\)\n", flavor="chatgpt") == (
+        "= H `x` ="
+    )
+    assert markdown_to_tracwiki(
+        "**\\(x\\)** end", flavor="chatgpt"
+    ) == ("'''`x`''' end")
+
+
+# 3. An empty label is skipped: the marker's block needs code.
+
+
+def test_a_label_directly_above_the_marker_is_code_not_the_label():
+    source = "bash\npip install foo\npython\nUse code with caution.\n"
+    assert _norm(source, "gemini") == (
+        "```bash\npip install foo\npython\n```\n",
+        [REBUILT_ONE],
+    )
+    assert markdown_to_tracwiki(source, flavor="gemini") == (
+        "{{{#!sh\npip install foo\npython\n}}}"
+    )
+
+
+def test_a_label_with_only_blank_lines_above_the_marker_is_skipped():
+    source = "python\nx = 1\npython\n\nUse code with caution.\n"
+    assert _norm(source, "gemini") == (
+        "```python\nx = 1\npython\n\n```\n",
+        [REBUILT_ONE],
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "python\nUse code with caution.\n",
+        "python\n\nUse code with caution.\n",
+        "bash\n  \nUse code with caution.\n",
+    ],
+    ids=["adjacent", "blank between", "whitespace between"],
+)
+def test_no_code_no_block(source):
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_the_warning_counts_only_rebuilt_blocks():
+    source = (
+        "python\nUse code with caution.\n"
+        "bash\nls\nUse code with caution.\n"
+    )
+    text, warnings = _norm(source, "gemini")
+    assert warnings == [REBUILT_ONE]
+    assert "```python\n```" not in text
+    assert "{{{#!python\n}}}" not in markdown_to_tracwiki(
+        source, flavor="gemini"
+    )
+
+
+# 4. One fence scanner for both fence characters.
+
+
+def test_a_backtick_line_inside_a_tilde_fence_does_not_open_a_fence():
+    source = "~~~\n```\n~~~\n\n\u2022 real bullet\n"
+    assert (
+        _norm(source, "gemini")[0] == "~~~\n```\n~~~\n\n- real bullet\n"
+    )
+    assert markdown_to_tracwiki(source, flavor="gemini").endswith(
+        "\n\n * real bullet"
+    )
+
+
+def test_a_tilde_line_inside_a_backtick_fence_does_not_open_a_fence():
+    source = "```\n~~~\n```\n\n\u2022 real bullet\n"
+    assert (
+        _norm(source, "gemini")[0] == "```\n~~~\n```\n\n- real bullet\n"
+    )
+
+
+def test_a_fence_closes_only_with_its_own_character_and_length():
+    source = "````\n```\n\u2022 x\n~~~~\n````\n\n\u2022 y\n"
+    assert _norm(source, "gemini")[0] == (
+        "````\n```\n\u2022 x\n~~~~\n````\n\n- y\n"
+    )
+
+
+def test_an_unclosed_fence_runs_to_the_end():
+    source = "```\n\u2022 x\n\n\u2022 y\n"
+    assert _norm(source, "gemini")[0] == source
+
+
+def test_a_fence_nested_in_a_list_at_any_indent_is_code():
+    source = (
+        "- a\n    - b\n\n      ```\n      https://a.b/?utm_source=x\n"
+        "      ```\n\n- https://a.b/?utm_source=y\n"
+    )
+    assert _norm(source, "chatgpt")[0] == (
+        "- a\n    - b\n\n      ```\n      https://a.b/?utm_source=x\n"
+        "      ```\n\n- https://a.b/\n"
+    )
+
+
+def test_the_fence_scanner_is_one_implementation_in_common():
+    from trac_mcp_server.converters import common, flavors
+
+    assert not hasattr(flavors, "_blank_tilde_fences")
+    text = "a\n~~~\n```\n~~~\nb\n```\n~~~\n```\nc"
+    blanked = common.blank_fenced_code(text)
+    assert len(blanked) == len(text)
+    assert blanked == "a\n   \n   \n   \nb\n   \n   \n   \nc"
+
+
+def test_blank_code_fences_keeps_its_behaviour_for_other_callers():
+    from trac_mcp_server.converters.common import blank_code_fences
+
+    assert blank_code_fences("a\n```x\nb\n```y\nc") == (
+        "a\n    \n \n    \nc"
+    )
+
+
+# 5. The hint and the rebuild read the marker the same way.
+
+
+def test_an_indented_marker_gives_no_hint():
+    assert (
+        convert_with_warnings(
+            "text\n  Use code with caution.\n"
+        ).warnings
+        == []
+    )
+    assert (
+        convert_with_warnings(
+            "text\n\tUse code with caution.\n"
+        ).warnings
+        == []
+    )
+
+
+def test_a_marker_at_column_zero_with_trailing_space_still_hints():
+    source = "text\nUse code with caution. \n"
+    assert convert_with_warnings(source).warnings == [GEMINI_HINT]
+
+
+# 6. A percent-encoded favicon domain is decoded.
+
+
+def test_a_percent_encoded_favicon_domain_is_decoded():
+    favicon = (
+        "[image](https://www.google.com/s2/favicons"
+        "?domain=https%3A%2F%2Fexample.com\\&sz=32)"
+    )
+    assert _norm(f"{favicon}\n\nexample.com+1\n", "chatgpt")[0] == (
+        "[example.com](https://example.com)\n"
+    )
+    assert _norm(favicon, "chatgpt")[0] == "<https://example.com>"
+
+
+# 8. The hint builds no mask when the marker is absent.
+
+
+def test_the_default_conversion_builds_no_code_mask_without_the_marker(
+    monkeypatch,
+):
+    from trac_mcp_server.converters import flavors
+
+    def boom(text):
+        raise AssertionError("the mask was built")
+
+    monkeypatch.setattr(flavors, "_code_mask", boom)
+    assert convert_with_warnings("plain `text`\n").warnings == []
+    assert not flavors.has_gemini_code_marker("plain\n")

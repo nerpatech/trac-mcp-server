@@ -392,6 +392,92 @@ def blank_code_fences(text: str) -> str:
     return "".join(out)
 
 
+def indent_columns(line: str) -> int:
+    """Width of a line's leading whitespace in columns, a tab going to
+    the next multiple of 4 (CommonMark's rule)."""
+    cols = 0
+    for ch in line:
+        if ch == " ":
+            cols += 1
+        elif ch == "\t":
+            cols += 4 - cols % 4
+        else:
+            break
+    return cols
+
+
+_LIST_ITEM_AT_COLUMN_ZERO_RE = re.compile(r"^([-*+]|\d+[.)])\s")
+
+
+def blank_fenced_code(text: str) -> str:
+    """Return ``text`` with fenced code replaced by spaces, character for
+    character (same length, same line breaks).
+
+    One scanner for both fence characters, in one pass, as CommonMark has
+    it: a fence opens on a line of 3 or more backticks or tildes (up to 3
+    columns of indent; a backtick fence's info string holds no backtick)
+    and closes only with the SAME character, at least as many, and nothing
+    else on the line. An unclosed fence runs to the end. Inside a fence of
+    one character a line of the other is plain code, which a backtick-first
+    pass followed by a tilde pass gets wrong.
+
+    A fence inside a list item may be indented further (the item's
+    content is), so a line under an unindented list item is not held to 3
+    columns, and its closer is not either. A TracWiki `{{{ }}}` block is
+    blanked too, with `blank_code_fences`' depth rule.
+
+    ``blank_code_fences`` is unchanged: the preview checks and
+    ``wiki_conventions`` read TracWiki with it and are measured on its
+    looser rule (any ``` line closes). This is the Markdown scanner the
+    flavour pre-normalisers use (Trac /trac_mcp_server #216).
+    """
+    out: list[str] = []
+    fence: tuple[str, int, bool] | None = None
+    tw_depth = 0
+    in_list = False
+    for line in text.split("\n"):
+        blanked = " " * len(line)
+        stripped = line.strip()
+        cols = indent_columns(line)
+        if fence is not None:
+            char, length, loose = fence
+            body = line.lstrip()
+            run = len(body) - len(body.lstrip(char))
+            if (
+                run >= length
+                and not body[run:].strip()
+                and (cols < 4 or loose)
+            ):
+                fence = None
+            out.append(blanked)
+            continue
+        if tw_depth:
+            tw_depth += stripped.count("{{{") - stripped.count("}}}")
+            tw_depth = max(tw_depth, 0)
+            out.append(blanked)
+            continue
+        if stripped and (cols < 4 or in_list):
+            if stripped[0] in "`~":
+                char = stripped[0]
+                run = len(stripped) - len(stripped.lstrip(char))
+                if run >= 3 and not (
+                    char == "`" and "`" in stripped[run:]
+                ):
+                    fence = (char, run, in_list)
+                    out.append(blanked)
+                    continue
+            if stripped.startswith("{{{"):
+                tw_depth = max(
+                    stripped.count("{{{") - stripped.count("}}}"), 0
+                )
+                out.append(blanked)
+                continue
+        if stripped and cols == 0:
+            in_list = bool(_LIST_ITEM_AT_COLUMN_ZERO_RE.match(line))
+        out.append(line)
+    return "\n".join(out)
+
+
 #: An inline code span: a run of backticks, a body, and a matching run.
 #: Deliberately NOT DOTALL -- a span is confined to one line here. A
 #: stray unmatched backtick is common in prose, and letting a span run

@@ -18,6 +18,7 @@ from .flavors import (
     apply_flavor,
     flavor_plugins,
     has_gemini_code_marker,
+    inline_math_markup,
     protect_syntax,
     restore_syntax,
 )
@@ -211,8 +212,10 @@ def _stash_for_flavor(
     protected, saved = protect_syntax(markdown_text, flavor)
     stashed, placeholders = _stash_bracket_syntax(protected)
     if saved:
-        stashed = restore_syntax(stashed, saved)
+        # A stashed span holds the math as written; the text proper gets
+        # an inline formula hidden as one more placeholder (#216).
         placeholders = [restore_syntax(p, saved) for p in placeholders]
+        stashed = restore_syntax(stashed, saved, hide=placeholders)
     return stashed, placeholders
 
 
@@ -621,9 +624,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
         Trac on this host has no math processor, so a formula is a code
         span, or `{{{ }}}` when it holds a backtick (a code span cannot).
         """
-        if "`" in text:
-            return f"{{{{{{{text}}}}}}}"
-        return f"`{text}`"
+        return inline_math_markup(text)
 
     def block_math(self, text: str) -> str:
         """Render display math from a flavour's math rule (#216).
