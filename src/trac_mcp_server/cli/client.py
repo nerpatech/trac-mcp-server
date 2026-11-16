@@ -40,9 +40,11 @@ from pathlib import Path
 from typing import Any
 
 from .. import __version__
+from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
 from ..link_rewrites import link_map_arg
+from . import assets as export_assets
 
 EXIT_OK = 0
 EXIT_TOOL_ERROR = 1  # the server answered with an error result
@@ -804,6 +806,108 @@ def _refuses_force(text: str) -> bool:
     )
 
 
+def _check_assets_args(args: argparse.Namespace) -> None:
+    """The usage rules of ``wiki-pull --assets`` (Trac /trac_mcp_server
+    #215), checked before anything is fetched."""
+    if args.command != "wiki-pull":
+        return
+    if args.assets is None:
+        if args.assets_url is not None:
+            raise CliError(
+                "--assets-url needs --assets", EXIT_USAGE_ERROR
+            )
+        return
+    if args.format == "tracwiki":
+        raise CliError(
+            "--assets works with --format markdown or html, not "
+            "tracwiki: a TracWiki page names its attachments, not their "
+            "URLs",
+            EXIT_USAGE_ERROR,
+        )
+    if Path(args.assets).exists() and not Path(args.assets).is_dir():
+        raise CliError(
+            f"--assets: not a directory: {args.assets}",
+            EXIT_USAGE_ERROR,
+        )
+
+
+def _pulled_instance(sc: dict, text: str) -> str:
+    """The instance a pull came from: the result's own ``instance``,
+    else the ``trac_instance`` of a Markdown export's front matter."""
+    instance = sc.get("instance")
+    if not isinstance(instance, str) or not instance:
+        exported = exported_from(text) or {}
+        instance = exported.get("trac_instance")
+    if not isinstance(instance, str) or not instance:
+        raise CliError(
+            "--assets: the server did not say which Trac instance the "
+            "page came from (no instance in the result, no "
+            "trac_instance in the front matter), so its attachment URLs "
+            "cannot be recognised; nothing was written",
+            EXIT_TOOL_ERROR,
+        )
+    return instance
+
+
+async def _fetch_attachment(
+    args: argparse.Namespace,
+    url: str,
+    token: str | None,
+    ref: export_assets.AttachmentRef,
+) -> bytes | None:
+    """The bytes of one attachment through the server's attachment tools,
+    None when the server says it is not found; any other error result is
+    a CliError (a transport failure propagates as itself)."""
+    if ref.realm == "ticket":
+        tool = "ticket_attachment_get"
+        arguments: dict[str, Any] = {
+            "ticket_id": int(ref.parent),
+            "filename": ref.filename,
+        }
+    else:
+        tool = "wiki_attachment_get"
+        arguments = {"page_name": ref.parent, "filename": ref.filename}
+    result = await call_tool(
+        url, token, tool, _with_instance(args, arguments)
+    )
+    if result.isError:
+        text = _result_text(result)
+        if text.lstrip().startswith("Error (not_found)"):
+            return None
+        raise CliError(
+            f"--assets: cannot fetch attachment '{ref.filename}' of "
+            f"{ref.describe()}: {text.strip().splitlines()[0]}; nothing "
+            "was written",
+            EXIT_TOOL_ERROR,
+        )
+    return base64.b64decode(_payload(result, "content_base64"))
+
+
+async def _localise_assets(
+    args: argparse.Namespace,
+    url: str,
+    token: str | None,
+    sc: dict,
+    text: str,
+) -> tuple[str, export_assets.AssetPlan]:
+    """Fetch the attachments ``text`` references (all of them, into
+    memory) and plan the rewrite. Nothing is written here: a failed fetch
+    leaves the disk as it was."""
+    instance = _pulled_instance(sc, text)
+    fetched: dict[export_assets.AttachmentRef, bytes | None] = {}
+    for ref in export_assets.find_refs(text, instance):
+        fetched[ref] = await _fetch_attachment(args, url, token, ref)
+    plan = export_assets.plan_assets(
+        text,
+        instance,
+        fetched,
+        args.assets,
+        None if args.file == "-" else args.file,
+        args.assets_url,
+    )
+    return plan.text, plan
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -951,7 +1055,26 @@ async def _run(
                 "link map was applied",
                 file=sys.stderr,
             )
-        data = _payload(result, "content").encode("utf-8")
+        text = _payload(result, "content")
+        plan = None
+        if args.assets is not None:
+            # Everything is fetched before anything is written: a failed
+            # fetch leaves neither assets nor the output file.
+            text, plan = await _localise_assets(
+                args, url, token, sc, text
+            )
+        data = text.encode("utf-8")
+        unchanged = 0
+        if plan is not None:
+            try:
+                _, unchanged = export_assets.write_assets(
+                    plan, args.assets
+                )
+            except OSError as e:
+                raise CliError(
+                    f"cannot write the attachments to {args.assets}: {e}",
+                    EXIT_USAGE_ERROR,
+                ) from None
         _write_bytes(args.file, data)
         _say(
             args.file == "-",
@@ -964,6 +1087,13 @@ async def _run(
         # #210): stderr, so a script that captures stdout still sees them.
         for warning in sc.get("warnings") or []:
             print(f"trac-mcp: warning: {warning}", file=sys.stderr)
+        if plan is not None:
+            for warning in plan.warnings:
+                print(f"trac-mcp: warning: {warning}", file=sys.stderr)
+            print(
+                f"trac-mcp: {export_assets.summary(plan, args.assets, unchanged)}",
+                file=sys.stderr,
+            )
         return EXIT_OK
 
     if cmd == "attach-put":
@@ -1154,6 +1284,25 @@ def build_parser() -> argparse.ArgumentParser:
             "(no effect with tracwiki)."
         ),
     )
+    p.add_argument(
+        "--assets",
+        metavar="DIR",
+        help=(
+            "Download the Trac attachments the page references (markdown "
+            "or html) into DIR and point their links at the local files. "
+            "An attachment that does not exist keeps its links, with a "
+            "warning."
+        ),
+    )
+    p.add_argument(
+        "--assets-url",
+        metavar="PREFIX",
+        help=(
+            "With --assets: link the saved files as PREFIX/<name> (the URL "
+            "they are served from) instead of by their relative path from "
+            "FILE."
+        ),
+    )
 
     for name, helptext in (
         ("attach-put", "Upload a local file as an attachment"),
@@ -1307,6 +1456,7 @@ def main(
 ) -> int:
     args = build_parser().parse_args(argv)
     try:
+        _check_assets_args(args)
         if args.command == "detect-format":
             return _detect_format(args)
         url, token, where = resolve_endpoint(
