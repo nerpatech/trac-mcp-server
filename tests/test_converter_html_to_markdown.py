@@ -7,6 +7,8 @@ One group per override on small inline HTML; the fixture-wide checks
 
 import pytest
 from bs4 import BeautifulSoup
+from lxml import html as lxml_html
+from markdown_it import MarkdownIt
 
 from trac_mcp_server.converters.html_to_markdown import (
     trac_html_to_markdown,
@@ -943,7 +945,7 @@ def test_table_code_is_compared_on_its_td_cells_only():
         ('<h1 class="foo">Title</h1>', '<h1 class="foo">Title</h1>'),
         (
             '<ul><li style="color:red">red</li></ul>',
-            '<li style="color:red">red</li>',
+            '<ul><li style="color:red">red</li></ul>',
         ),
         (
             '<p>a <code class="foo">x y</code> b</p>',
@@ -1137,3 +1139,329 @@ def test_img_title_is_the_markdown_title():
 def test_img_title_quotes_and_backslashes_are_escaped():
     out = md('<p><img src="/a.png" alt="a" title=\'say "hi" \\\'/></p>')
     assert out == '![a](/a.png "say \\"hi\\" \\\\")'
+
+
+# --- pass-through is not Markdown (Trac /trac_mcp_server #218) -------------
+#
+# The oracle is a real CommonMark renderer, as in
+# ``test_html_to_markdown_fixtures.py``: whatever the converter writes,
+# rendering it must not make markup the Trac HTML did not have.
+
+_MADE_BY_MARKDOWN = (
+    "em",
+    "strong",
+    "a",
+    "s",
+    "del",
+    "h1",
+    "ul",
+    "code",
+)
+
+
+def _render(markdown):
+    return MarkdownIt("commonmark").enable("table").render(markdown)
+
+
+def _tree(markup):
+    return lxml_html.fragment_fromstring(markup, create_parent="div")
+
+
+def _counts(markup):
+    root = _tree(markup)
+    return {t: len(root.findall(f".//{t}")) for t in _MADE_BY_MARKDOWN}
+
+
+def _visible(markup):
+    return " ".join(_tree(markup).text_content().split())
+
+
+_SPAN = '<span style="color:red">{}</span>'
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        "b *c* _d_ [e] `f`",
+        "**x** and __y__",
+        "[l](u) and [m]",
+        "~~s~~ gone",
+        "a \\ b \\* c \\",
+        "<code>*k*</code> and `j`",
+        "a &amp; b &lt; c &lt;i&gt;not a tag&lt;/i&gt;",
+        "snake_case_name and _lead_ and trail_",
+        "a *\\_x\\_* [\\]]",
+    ],
+)
+def test_passed_through_span_text_is_not_read_as_markdown(inner):
+    html = "<p>a " + _SPAN.format(inner) + " z</p>"
+    out = md(html)
+    rendered = _render(out)
+    assert _counts(rendered) == _counts(html), out
+    assert _visible(rendered) == _visible(html), out
+
+
+def test_passed_through_span_keeps_the_markup_and_escapes_the_text():
+    out = md(
+        '<p>a <span style="color:red">b *c* _d_ [e] `f`</span></p>'
+    )
+    assert out == (
+        'a <span style="color:red">b \\*c\\* \\_d\\_ \\[e\\] '
+        "\\`f\\`</span>"
+    )
+
+
+def test_passed_through_span_attributes_are_never_escaped():
+    out = md(
+        '<p><span style="color:red" title="*a* _b_ [c] `d`">x</span></p>'
+    )
+    assert (
+        out
+        == '<span style="color:red" title="*a* _b_ [c] `d`">x</span>'
+    )
+
+
+def test_passed_through_span_amp_and_lt_render_as_themselves():
+    html = '<p><span style="color:red">a &amp; b &lt; c</span></p>'
+    out = md(html)
+    assert "\\&" not in out and "\\<" not in out
+    root = _tree(_render(out))
+    assert root.text_content().strip() == "a & b < c"
+
+
+def test_passed_through_span_in_a_table_cell():
+    html = (
+        "<table><tr><th>h</th></tr>"
+        '<tr><td><span style="color:red">b *c* _d_ `e` [f]</span></td>'
+        "</tr></table>"
+    )
+    out = md(html)
+    rendered = _render(out)
+    assert "<table>" in rendered, out
+    assert _counts(rendered) == _counts(html), out
+    assert _visible(rendered) == "h b *c* _d_ `e` [f]"
+
+
+def test_passed_through_span_in_a_heading():
+    html = '<h2>T <span style="color:red">b *c* _d_ `e` [f]</span></h2>'
+    out = md(html)
+    rendered = _render(out)
+    assert "<h2>" in rendered, out
+    assert _counts(rendered) == _counts(html), out
+    assert _visible(rendered) == "T b *c* _d_ `e` [f]"
+
+
+@pytest.mark.parametrize("line", ["# h", "- i", "> q", "1. n", "---"])
+def test_passed_through_span_line_starts_are_escaped(line):
+    html = f'<p>a <span style="color:red">x\n{line}\ny</span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert _counts(rendered) == _counts(html), out
+    assert "<blockquote>" not in rendered and "<hr" not in rendered, out
+    assert "<ol>" not in rendered and "<h" not in rendered.replace(
+        "<hr", ""
+    ), out
+    assert _visible(rendered) == _visible(html), out
+
+
+def test_block_passed_through_in_a_heading_is_escaped_too():
+    html = '<h2>T <div class="x">b *c* _d_</div></h2>'
+    out = md(html)
+    assert "\\*c\\*" in out and "\\_d\\_" in out
+
+
+def test_block_pass_through_is_an_html_block_unchanged():
+    # Markdown inside an HTML block is not parsed (it starts at a tag
+    # and runs to a blank line), so nothing is escaped there.
+    out = md('<div class="important"><p>note *x* _y_</p></div>')
+    assert out == '<div class="important"><p>note *x* _y_</p></div>'
+
+
+def test_passed_through_table_text_is_not_escaped():
+    out = md('<table><tr><td colspan="2">a *b* _c_</td></tr></table>')
+    assert (
+        out == '<table><tr><td colspan="2">a *b* _c_</td></tr></table>'
+    )
+
+
+def test_covered_list_is_byte_identical():
+    assert md("<ul><li>a *b*</li><li>c</li></ul>") == "- a \\*b\\*\n- c"
+
+
+# A list with an uncovered item goes through whole, as a table does,
+# or the item would end the list.
+
+_LI = '<li style="color:red">b</li>'
+
+
+@pytest.mark.parametrize("tag", ["ul", "ol"])
+def test_list_with_an_uncovered_item_stays_one_list(tag):
+    html = f"<{tag}><li>a</li>{_LI}<li>c</li></{tag}>"
+    r = conv(html)
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    assert len(root.findall(f".//{tag}")) == 1, r.text
+    items = root.findall(f".//{tag}/li")
+    assert len(items) == 3, r.text
+    assert [i.get("style") for i in items] == [None, "color:red", None]
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+def test_list_with_an_uncovered_item_is_the_html_of_the_list():
+    r = conv(f"<ul><li>a</li>{_LI}<li>c</li></ul>")
+    assert r.text == f"<ul><li>a</li>{_LI}<li>c</li></ul>"
+
+
+def test_nested_list_with_an_uncovered_item_passes_through_alone():
+    html = f"<ul><li>a<ul><li>x</li>{_LI}</ul></li><li>c</li></ul>"
+    r = conv(html)
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    outer = root.findall("./ul")
+    assert len(outer) == 1, r.text
+    assert len(outer[0].findall("./li")) == 2, r.text
+    inner = outer[0].findall("./li/ul")
+    assert len(inner) == 1
+    assert [li.get("style") for li in inner[0].findall("./li")] == [
+        None,
+        "color:red",
+    ]
+    assert r.text.startswith("- a\n"), r.text
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+# --- review fixes (Trac /trac_mcp_server #218) -----------------------------
+#
+# A newline inside an inline pass-through starts a new Markdown line,
+# which can open an HTML block (backslashes then show) or a block.
+
+
+def test_inline_pass_through_newlines_become_spaces():
+    html = '<p><span style="color:red">\n*a* b\n</span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "\\" not in _visible(rendered), out
+    assert _counts(rendered) == _counts(html), out
+    assert _visible(rendered) == "*a* b", out
+    assert "\n" not in out, out
+
+
+def test_inline_pass_through_indented_block_starts_stay_text():
+    html = '<p><span style="color:red">a\n  # h\n  - l</span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "<h1>" not in rendered and "<ul>" not in rendered, out
+    assert "\\" not in _visible(rendered), out
+    assert _visible(rendered) == "a # h - l", out
+
+
+def test_inline_pass_through_with_a_block_child_shows_no_backslash():
+    html = '<p>x <span style="c">a\n<div>*b*</div></span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "\\" not in _visible(rendered), out
+    assert "<em>" not in rendered, out
+
+
+def test_inline_pass_through_leaves_pre_text_newlines_alone():
+    out = md('<p>a <span style="c">x\n<pre>x\ny</pre></span></p>')
+    assert out == 'a <span style="c">x <pre>x\ny</pre></span>', out
+
+
+def test_inline_pass_through_has_no_line_start_escapes_of_its_own():
+    assert md('<p>a <span style="c">x\n# y\n- z</span></p>') == (
+        'a <span style="c">x # y - z</span>'
+    )
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<details><summary>x *y*</summary>z_ </details>",
+        '<p><iframe src="x">t *u*</iframe></p>',
+    ],
+)
+def test_html_block_start_tags_pass_through_as_blocks(html):
+    out = md(html)
+    assert "\\" not in out, out
+    assert "\\" not in _visible(_render(out)), out
+
+
+def test_details_renders_as_before_the_escaping_change():
+    out = md("<details><summary>x *y*</summary>z_ </details>")
+    assert _render(out) == (
+        "<details><summary>x *y*</summary>z_ </details>"
+    )
+
+
+def test_iframe_renders_as_before_the_escaping_change():
+    out = md('<p><iframe src="x">t *u*</iframe></p>')
+    assert _render(out) == '<iframe src="x">t *u*</iframe>'
+
+
+def test_uncovered_list_warns_for_the_list_and_its_item_once():
+    r = conv('<ul style="x"><li style="y">a</li><li>b</li></ul>')
+    assert sorted(r.warnings) == [
+        "li[style] is not covered; passed through as HTML",
+        "ul[style] is not covered; passed through as HTML",
+    ]
+
+
+def test_covered_list_with_an_uncovered_item_warns_once():
+    r = conv(f"<ul><li>a</li>{_LI}</ul>")
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+def test_nested_pass_through_list_keeps_the_outer_list_tight():
+    html = (
+        '<ul><li>a<ul><li style="color:red">b</li><li>c</li></ul></li>'
+        "<li>d</li></ul>"
+    )
+    r = conv(html)
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    assert "<p>" not in rendered, r.text
+    outer = root.findall("./ul")
+    assert len(outer) == 1, r.text
+    items = outer[0].findall("./li")
+    assert len(items) == 2, r.text
+    assert items[1].text_content().strip() == "d", r.text
+    inner = items[0].findall("./ul")
+    assert len(inner) == 1, r.text
+    assert [li.get("style") for li in inner[0].findall("./li")] == [
+        "color:red",
+        None,
+    ]
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+def test_nested_pass_through_list_is_placed_like_a_covered_one():
+    r = conv(
+        '<ul><li>a<ul><li style="color:red">b</li></ul></li>'
+        "<li>d</li></ul>"
+    )
+    assert r.text == (
+        '- a\n  <ul><li style="color:red">b</li></ul>\n- d'
+    )
+
+
+def test_deflist_with_an_uncovered_item_passes_through_whole():
+    r = conv('<dl><dt>a</dt><dd style="c">b *x*</dd></dl>')
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    assert len(root.findall(".//dl")) == 1, r.text
+    dds = root.findall(".//dl/dd")
+    assert [d.get("style") for d in dds] == ["c"], r.text
+    assert dds[0].text_content() == "b *x*", r.text
+    assert "\\" not in _visible(rendered), r.text
+    assert r.warnings == [
+        "dd[style] is not covered; passed through as HTML"
+    ]

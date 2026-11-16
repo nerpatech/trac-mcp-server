@@ -244,6 +244,88 @@ _BLOCK_TAGS = frozenset(
         "ul",
     }
 )
+#: The element names that start a CommonMark HTML block that a line can
+#: open (types 1 and 6). Text after such a tag is raw HTML, not Markdown,
+#: so a pass-through of one is wrapped in blank lines and never escaped,
+#: the same as for ``_BLOCK_TAGS`` (kept apart: it also decides where a
+#: text node starts a line).
+_HTML_BLOCK_START_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "base",
+        "basefont",
+        "blockquote",
+        "body",
+        "caption",
+        "center",
+        "col",
+        "colgroup",
+        "dd",
+        "details",
+        "dialog",
+        "dir",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "frame",
+        "frameset",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hr",
+        "html",
+        "iframe",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "menu",
+        "menuitem",
+        "nav",
+        "noframes",
+        "ol",
+        "optgroup",
+        "option",
+        "p",
+        "param",
+        "pre",
+        "script",
+        "search",
+        "section",
+        "style",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "textarea",
+        "tfoot",
+        "th",
+        "thead",
+        "title",
+        "tr",
+        "track",
+        "ul",
+    }
+)
+#: Elements whose text keeps its newlines when HTML is read.
+_PREFORMATTED_TAGS = frozenset(
+    {"pre", "textarea", "listing", "xmp", "plaintext"}
+)
+#: The item tags of each list container: an uncovered one passes the
+#: whole container through.
+_ITEM_TAGS = {"ul": ["li"], "ol": ["li"], "dl": ["dt", "dd"]}
 #: Parents in which a text node at the start sits at the start of a line.
 _LINE_START_PARENTS = frozenset(
     {
@@ -427,6 +509,47 @@ def _escape_line_start(text: str, first_line: bool) -> str:
     return "\n".join(lines)
 
 
+def _escape_text(text: str, serialised: bool = False) -> str:
+    """Backslash-escape what could change the Markdown structure.
+
+    ``serialised``: the text is a text node of HTML markup, which is
+    written with ``<`` and ``&`` as entities. CommonMark decodes those,
+    and a backslash before an entity would show it literally, so they
+    are not escaped here.
+    """
+    if not text:
+        return ""
+    out = []
+    for i, ch in enumerate(text):
+        before = text[i - 1] if i else ""
+        after = text[i + 1] if i + 1 < len(text) else ""
+        if ch == "\\":
+            bad = not after or after in _PUNCTUATION or after in "\r\n"
+            out.append("\\\\" if bad else ch)
+        elif ch in "*`":
+            out.append("\\" + ch)
+        elif ch == "_":
+            inside = before.isalnum() and after.isalnum()
+            out.append(ch if inside else "\\_")
+        elif (
+            ch == "<"
+            and not serialised
+            and re.match(r"[A-Za-z/!?]", after)
+        ):
+            out.append("\\<")
+        elif (
+            ch == "&"
+            and not serialised
+            and re.match(r"#?\w+;", text[i + 1 :])
+        ):
+            out.append("\\&")
+        elif ch in "[]~":  # `~` because `del` is written `~~`
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 # =============================================================================
 # The converter
 # =============================================================================
@@ -603,6 +726,22 @@ class _TracConverter(MarkdownConverter):
             if reason:
                 self._warn(f"{reason}; passed through as HTML")
                 return "\n\n" + self._html_of(node) + "\n\n"
+        elif (
+            name in _ITEM_TAGS
+            and not self._uncovered(node)
+            and any(
+                self._uncovered(item)
+                for item in node.find_all(
+                    _ITEM_TAGS[name], recursive=False
+                )
+            )
+        ):
+            # An HTML item between Markdown items ends the list, so the
+            # whole list is HTML, as a table that cannot be a pipe table
+            # is. _passthrough warns for the item (once). A container
+            # that is itself uncovered takes the branch below, which
+            # warns for it, and _passthrough warns for its items.
+            return self._passthrough(node, parent_tags)
         elif name not in ("[document]", "html", "body"):
             desc = self._uncovered(node)
             if desc:
@@ -699,13 +838,28 @@ class _TracConverter(MarkdownConverter):
                 self._warn(
                     f"{desc} is not covered; passed through as HTML"
                 )
-        markup = self._html_of(el)
-        if el.name in _BLOCK_TAGS and "_inline" not in parent_tags:
-            return f"\n\n{markup}\n\n"
-        return markup
+        if (
+            el.name in _BLOCK_TAGS or el.name in _HTML_BLOCK_START_TAGS
+        ) and "_inline" not in parent_tags:
+            if el.name in ("ul", "ol") and "li" in parent_tags:
+                # Placed as a covered nested list is (convert_list): one
+                # newline, indented under its item by convert_li. A blank
+                # line would make the outer list loose. An HTML block of
+                # this kind can interrupt the item's paragraph.
+                return f"\n{self._html_of(el)}"
+            return f"\n\n{self._html_of(el)}\n\n"
+        # Not an HTML block: the markup sits inside a Markdown line, and
+        # CommonMark parses the text between inline tags as Markdown.
+        return self._html_of(el, escape_text=True)
 
-    def _html_of(self, el: Tag) -> str:
+    def _html_of(self, el: Tag, escape_text: bool = False) -> str:
         """The element as clean HTML, with no blank line in it.
+
+        ``escape_text``: the markup will be read inside Markdown inline
+        content, so the newlines of its text nodes become spaces (a new
+        line could open a block; HTML shows both alike, except in a
+        ``pre`` and the like) and the text is Markdown-escaped
+        (``_escape_text``); attributes never are.
 
         Trac's chrome is removed (link and image attributes, a cell's
         text alignment, the classes of covered tags, ``missing`` links),
@@ -746,7 +900,34 @@ class _TracConverter(MarkdownConverter):
                 code["class"] = f"language-{lang}"
             code.append(NavigableString(text))
             pre.append(code)
+        if escape_text:
+            self._escape_text_nodes(el)
         return _without_blank_lines(str(el))
+
+    @staticmethod
+    def _escape_text_nodes(el: Tag) -> None:
+        """Make every text node under ``el`` inline Markdown-safe.
+
+        Newlines (``\\r\\n``, ``\\r``, ``\\n``) become one space each, so
+        the span stays on its opening tag's line: it never forms an HTML
+        block and no line inside it starts a block. Text inside ``pre``
+        and the other preformatted elements keeps its newlines. Then the
+        text is escaped. Code tags are included: a raw ``<code>`` is not
+        a Markdown code span, so its text is still parsed as Markdown.
+        Comments and the like are not text.
+        """
+        for node in list(el.find_all(string=True)):
+            if type(node) is not NavigableString:
+                continue
+            text = str(node)
+            if not any(
+                parent.name in _PREFORMATTED_TAGS
+                for parent in node.parents
+            ):
+                text = re.sub(r"\r\n|\r|\n", " ", text)
+            node.replace_with(
+                NavigableString(_escape_text(text, serialised=True))
+            )
 
     @staticmethod
     def _strip_chrome_classes(tag: Tag) -> None:
@@ -886,33 +1067,7 @@ class _TracConverter(MarkdownConverter):
 
     def escape(self, text, parent_tags):
         """Escape only what could change the Markdown structure."""
-        if not text:
-            return ""
-        out = []
-        for i, ch in enumerate(text):
-            before = text[i - 1] if i else ""
-            after = text[i + 1] if i + 1 < len(text) else ""
-            if ch == "\\":
-                bad = (
-                    not after
-                    or after in _PUNCTUATION
-                    or after in "\r\n"
-                )
-                out.append("\\\\" if bad else ch)
-            elif ch in "*`":
-                out.append("\\" + ch)
-            elif ch == "_":
-                inside = before.isalnum() and after.isalnum()
-                out.append(ch if inside else "\\_")
-            elif ch == "<" and re.match(r"[A-Za-z/!?]", after):
-                out.append("\\<")
-            elif ch == "&" and re.match(r"#?\w+;", text[i + 1 :]):
-                out.append("\\&")
-            elif ch in "[]~":  # `~` because `del` is written `~~`
-                out.append("\\" + ch)
-            else:
-                out.append(ch)
-        return "".join(out)
+        return _escape_text(text)
 
     def process_text(self, el, parent_tags=None):
         text = super().process_text(el, parent_tags)
