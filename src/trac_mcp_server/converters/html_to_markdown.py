@@ -244,6 +244,88 @@ _BLOCK_TAGS = frozenset(
         "ul",
     }
 )
+#: The element names that start a CommonMark HTML block that a line can
+#: open (types 1 and 6). Text after such a tag is raw HTML, not Markdown,
+#: so a pass-through of one is wrapped in blank lines and never escaped,
+#: the same as for ``_BLOCK_TAGS`` (kept apart: it also decides where a
+#: text node starts a line).
+_HTML_BLOCK_START_TAGS = frozenset(
+    {
+        "address",
+        "article",
+        "aside",
+        "base",
+        "basefont",
+        "blockquote",
+        "body",
+        "caption",
+        "center",
+        "col",
+        "colgroup",
+        "dd",
+        "details",
+        "dialog",
+        "dir",
+        "div",
+        "dl",
+        "dt",
+        "fieldset",
+        "figcaption",
+        "figure",
+        "footer",
+        "form",
+        "frame",
+        "frameset",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "head",
+        "header",
+        "hr",
+        "html",
+        "iframe",
+        "legend",
+        "li",
+        "link",
+        "main",
+        "menu",
+        "menuitem",
+        "nav",
+        "noframes",
+        "ol",
+        "optgroup",
+        "option",
+        "p",
+        "param",
+        "pre",
+        "script",
+        "search",
+        "section",
+        "style",
+        "summary",
+        "table",
+        "tbody",
+        "td",
+        "textarea",
+        "tfoot",
+        "th",
+        "thead",
+        "title",
+        "tr",
+        "track",
+        "ul",
+    }
+)
+#: Elements whose text keeps its newlines when HTML is read.
+_PREFORMATTED_TAGS = frozenset(
+    {"pre", "textarea", "listing", "xmp", "plaintext"}
+)
+#: The item tags of each list container: an uncovered one passes the
+#: whole container through.
+_ITEM_TAGS = {"ul": ["li"], "ol": ["li"], "dl": ["dt", "dd"]}
 #: Parents in which a text node at the start sits at the start of a line.
 _LINE_START_PARENTS = frozenset(
     {
@@ -414,22 +496,12 @@ _LINE_START_ESCAPES = (
 )
 
 
-def _escape_line_start(
-    text: str, first_line: bool, serialised: bool = False
-) -> str:
-    """Backslash-escape what would start a block at a line start.
-
-    ``serialised``: the text is going into HTML markup, where ``>`` is
-    written ``&gt;`` (never a blockquote marker, and a backslash before
-    the entity would show it literally), so ``>`` is left alone.
-    """
+def _escape_line_start(text: str, first_line: bool) -> str:
     lines = text.split("\n")
     for n, line in enumerate(lines):
         if n == 0 and not first_line:
             continue
         for pattern, repl in _LINE_START_ESCAPES:
-            if serialised and pattern.pattern == "^>":
-                continue
             line, hits = pattern.subn(repl, line, count=1)
             if hits:
                 break
@@ -654,13 +726,21 @@ class _TracConverter(MarkdownConverter):
             if reason:
                 self._warn(f"{reason}; passed through as HTML")
                 return "\n\n" + self._html_of(node) + "\n\n"
-        elif name in ("ul", "ol") and any(
-            self._uncovered(li)
-            for li in node.find_all("li", recursive=False)
+        elif (
+            name in _ITEM_TAGS
+            and not self._uncovered(node)
+            and any(
+                self._uncovered(item)
+                for item in node.find_all(
+                    _ITEM_TAGS[name], recursive=False
+                )
+            )
         ):
             # An HTML item between Markdown items ends the list, so the
             # whole list is HTML, as a table that cannot be a pipe table
-            # is. _passthrough warns for the item (once).
+            # is. _passthrough warns for the item (once). A container
+            # that is itself uncovered takes the branch below, which
+            # warns for it, and _passthrough warns for its items.
             return self._passthrough(node, parent_tags)
         elif name not in ("[document]", "html", "body"):
             desc = self._uncovered(node)
@@ -758,7 +838,15 @@ class _TracConverter(MarkdownConverter):
                 self._warn(
                     f"{desc} is not covered; passed through as HTML"
                 )
-        if el.name in _BLOCK_TAGS and "_inline" not in parent_tags:
+        if (
+            el.name in _BLOCK_TAGS or el.name in _HTML_BLOCK_START_TAGS
+        ) and "_inline" not in parent_tags:
+            if el.name in ("ul", "ol") and "li" in parent_tags:
+                # Placed as a covered nested list is (convert_list): one
+                # newline, indented under its item by convert_li. A blank
+                # line would make the outer list loose. An HTML block of
+                # this kind can interrupt the item's paragraph.
+                return f"\n{self._html_of(el)}"
             return f"\n\n{self._html_of(el)}\n\n"
         # Not an HTML block: the markup sits inside a Markdown line, and
         # CommonMark parses the text between inline tags as Markdown.
@@ -768,8 +856,10 @@ class _TracConverter(MarkdownConverter):
         """The element as clean HTML, with no blank line in it.
 
         ``escape_text``: the markup will be read inside Markdown inline
-        content, so its text nodes are Markdown-escaped (``_escape_text``,
-        ``_escape_line_start``); attributes never are.
+        content, so the newlines of its text nodes become spaces (a new
+        line could open a block; HTML shows both alike, except in a
+        ``pre`` and the like) and the text is Markdown-escaped
+        (``_escape_text``); attributes never are.
 
         Trac's chrome is removed (link and image attributes, a cell's
         text alignment, the classes of covered tags, ``missing`` links),
@@ -816,21 +906,28 @@ class _TracConverter(MarkdownConverter):
 
     @staticmethod
     def _escape_text_nodes(el: Tag) -> None:
-        """Markdown-escape every text node under ``el``, in place.
+        """Make every text node under ``el`` inline Markdown-safe.
 
-        Code tags are included: a raw ``<code>`` is not a Markdown code
-        span, so its text is still parsed as Markdown. Comments and the
-        like are not text.
+        Newlines (``\\r\\n``, ``\\r``, ``\\n``) become one space each, so
+        the span stays on its opening tag's line: it never forms an HTML
+        block and no line inside it starts a block. Text inside ``pre``
+        and the other preformatted elements keeps its newlines. Then the
+        text is escaped. Code tags are included: a raw ``<code>`` is not
+        a Markdown code span, so its text is still parsed as Markdown.
+        Comments and the like are not text.
         """
         for node in list(el.find_all(string=True)):
             if type(node) is not NavigableString:
                 continue
-            text = _escape_line_start(
-                _escape_text(str(node), serialised=True),
-                first_line=False,
-                serialised=True,
+            text = str(node)
+            if not any(
+                parent.name in _PREFORMATTED_TAGS
+                for parent in node.parents
+            ):
+                text = re.sub(r"\r\n|\r|\n", " ", text)
+            node.replace_with(
+                NavigableString(_escape_text(text, serialised=True))
             )
-            node.replace_with(NavigableString(text))
 
     @staticmethod
     def _strip_chrome_classes(tag: Tag) -> None:

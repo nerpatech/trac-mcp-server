@@ -1332,3 +1332,136 @@ def test_nested_list_with_an_uncovered_item_passes_through_alone():
     assert r.warnings == [
         "li[style] is not covered; passed through as HTML"
     ]
+
+
+# --- review fixes (Trac /trac_mcp_server #218) -----------------------------
+#
+# A newline inside an inline pass-through starts a new Markdown line,
+# which can open an HTML block (backslashes then show) or a block.
+
+
+def test_inline_pass_through_newlines_become_spaces():
+    html = '<p><span style="color:red">\n*a* b\n</span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "\\" not in _visible(rendered), out
+    assert _counts(rendered) == _counts(html), out
+    assert _visible(rendered) == "*a* b", out
+    assert "\n" not in out, out
+
+
+def test_inline_pass_through_indented_block_starts_stay_text():
+    html = '<p><span style="color:red">a\n  # h\n  - l</span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "<h1>" not in rendered and "<ul>" not in rendered, out
+    assert "\\" not in _visible(rendered), out
+    assert _visible(rendered) == "a # h - l", out
+
+
+def test_inline_pass_through_with_a_block_child_shows_no_backslash():
+    html = '<p>x <span style="c">a\n<div>*b*</div></span></p>'
+    out = md(html)
+    rendered = _render(out)
+    assert "\\" not in _visible(rendered), out
+    assert "<em>" not in rendered, out
+
+
+def test_inline_pass_through_leaves_pre_text_newlines_alone():
+    out = md('<p>a <span style="c">x\n<pre>x\ny</pre></span></p>')
+    assert out == 'a <span style="c">x <pre>x\ny</pre></span>', out
+
+
+def test_inline_pass_through_has_no_line_start_escapes_of_its_own():
+    assert md('<p>a <span style="c">x\n# y\n- z</span></p>') == (
+        'a <span style="c">x # y - z</span>'
+    )
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<details><summary>x *y*</summary>z_ </details>",
+        '<p><iframe src="x">t *u*</iframe></p>',
+    ],
+)
+def test_html_block_start_tags_pass_through_as_blocks(html):
+    out = md(html)
+    assert "\\" not in out, out
+    assert "\\" not in _visible(_render(out)), out
+
+
+def test_details_renders_as_before_the_escaping_change():
+    out = md("<details><summary>x *y*</summary>z_ </details>")
+    assert _render(out) == (
+        "<details><summary>x *y*</summary>z_ </details>"
+    )
+
+
+def test_iframe_renders_as_before_the_escaping_change():
+    out = md('<p><iframe src="x">t *u*</iframe></p>')
+    assert _render(out) == '<iframe src="x">t *u*</iframe>'
+
+
+def test_uncovered_list_warns_for_the_list_and_its_item_once():
+    r = conv('<ul style="x"><li style="y">a</li><li>b</li></ul>')
+    assert sorted(r.warnings) == [
+        "li[style] is not covered; passed through as HTML",
+        "ul[style] is not covered; passed through as HTML",
+    ]
+
+
+def test_covered_list_with_an_uncovered_item_warns_once():
+    r = conv(f"<ul><li>a</li>{_LI}</ul>")
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+def test_nested_pass_through_list_keeps_the_outer_list_tight():
+    html = (
+        '<ul><li>a<ul><li style="color:red">b</li><li>c</li></ul></li>'
+        "<li>d</li></ul>"
+    )
+    r = conv(html)
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    assert "<p>" not in rendered, r.text
+    outer = root.findall("./ul")
+    assert len(outer) == 1, r.text
+    items = outer[0].findall("./li")
+    assert len(items) == 2, r.text
+    assert items[1].text_content().strip() == "d", r.text
+    inner = items[0].findall("./ul")
+    assert len(inner) == 1, r.text
+    assert [li.get("style") for li in inner[0].findall("./li")] == [
+        "color:red",
+        None,
+    ]
+    assert r.warnings == [
+        "li[style] is not covered; passed through as HTML"
+    ]
+
+
+def test_nested_pass_through_list_is_placed_like_a_covered_one():
+    r = conv(
+        '<ul><li>a<ul><li style="color:red">b</li></ul></li>'
+        "<li>d</li></ul>"
+    )
+    assert r.text == (
+        '- a\n  <ul><li style="color:red">b</li></ul>\n- d'
+    )
+
+
+def test_deflist_with_an_uncovered_item_passes_through_whole():
+    r = conv('<dl><dt>a</dt><dd style="c">b *x*</dd></dl>')
+    rendered = _render(r.text)
+    root = _tree(rendered)
+    assert len(root.findall(".//dl")) == 1, r.text
+    dds = root.findall(".//dl/dd")
+    assert [d.get("style") for d in dds] == ["c"], r.text
+    assert dds[0].text_content() == "b *x*", r.text
+    assert "\\" not in _visible(rendered), r.text
+    assert r.warnings == [
+        "dd[style] is not covered; passed through as HTML"
+    ]
