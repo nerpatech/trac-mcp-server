@@ -50,6 +50,7 @@ from ..link_rewrites import (
     link_map_arg,
     parse_pairs,
 )
+from ..version import format_cli_version, release_sha
 from . import assets as export_assets
 
 # ---------------------------------------------------------------------------
@@ -732,7 +733,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"trac-convert {__version__}",
+        version=(
+            f"trac-convert {format_cli_version(__version__, release_sha())}"
+        ),
     )
     parser.add_argument(
         "--from",

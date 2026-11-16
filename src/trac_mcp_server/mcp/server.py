@@ -37,6 +37,7 @@ from ..instances import caller_identity as _caller_identity
 from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging, startup_note
 from ..version import (
     check_version_consistency,
+    format_cli_version,
     format_server_version,
     release_sha,
 )
@@ -806,7 +807,10 @@ must not be piped manually. This does not apply to --transport http.
     parser.add_argument(
         "--version",
         action="version",
-        version=f"trac-mcp-server version {__version__}",
+        version=(
+            "trac-mcp-server version "
+            f"{format_cli_version(__version__, release_sha())}"
+        ),
     )
 
     return parser

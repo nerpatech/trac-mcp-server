@@ -47,6 +47,7 @@ from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
 from ..link_rewrites import link_map_arg
+from ..version import format_cli_version, release_sha
 from . import assets as export_assets
 
 EXIT_OK = 0
@@ -1312,7 +1313,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"trac-mcp version {__version__}",
+        version=(
+            "trac-mcp version "
+            f"{format_cli_version(__version__, release_sha())}"
+        ),
     )
     parser.add_argument(
         "--url", help="MCP endpoint URL, e.g. http://host:8091/mcp"
