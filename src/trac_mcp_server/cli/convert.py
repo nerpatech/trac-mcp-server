@@ -41,6 +41,7 @@ from ..converters.front_matter import (
 )
 from ..converters.html_to_markdown import trac_html_to_markdown
 from ..converters.markdown_to_tracwiki import convert_with_warnings
+from ..core.attachment_payload import coerce_attachment_payload
 from ..core.client import TracClient, WikiPageStoredReadbackFailed
 from ..link_rewrites import (
     LinkRewrites,
@@ -493,7 +494,7 @@ class _TracSession:
                 if classify_fault(e) == "not_found":
                     return None
                 raise
-            return export_assets.as_bytes(data)
+            return coerce_attachment_payload(data)
 
         return fetch
 
@@ -829,7 +830,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PREFIX",
         help=(
-            "With --assets: link the saved files as PREFIX/<name> (the URL"
+            "With --assets: link the saved files as PREFIX/<path> (the URL"
             " they are served from) instead of by their relative path from"
             " the output file (the current directory for stdout)."
         ),
@@ -1113,6 +1114,14 @@ def main(argv: list[str] | None = None) -> int:
             and not Path(args.assets).is_dir()
         ):
             parser.error(f"--assets: not a directory: {args.assets}")
+        # Before anything is fetched or written: the output file must be
+        # writable, as ``trac-mcp wiki-pull`` checks.
+        if args.output_file is not None and not args.to_clipboard:
+            parent = Path(args.output_file).parent
+            if not parent.is_dir():
+                parser.error(
+                    f"output directory does not exist: {parent}"
+                )
 
     # --- --check-trac: early dispatch before conversion validation ---
     if args.check_trac:
@@ -1363,11 +1372,9 @@ def main(argv: list[str] | None = None) -> int:
     assets_unchanged = 0
     if args.assets is not None:
         try:
-            refs = export_assets.find_refs(
-                result.text, instance_path(session.url)
-            )
+            scan = export_assets.scan_text(result.text, session.url)
             fetched = export_assets.fetch_all(
-                refs, session.attachment_fetcher()
+                list(scan.refs), session.attachment_fetcher()
             )
         except Exception as e:
             sys.stderr.write(
@@ -1380,11 +1387,12 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_TRAC
         assets_plan = export_assets.plan_assets(
             result.text,
-            instance_path(session.url),
+            session.url,
             fetched,
             args.assets,
             args.output_file if not args.to_clipboard else None,
             args.assets_url,
+            scan=scan,
         )
         try:
             _, assets_unchanged = export_assets.write_assets(

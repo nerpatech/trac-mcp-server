@@ -30,6 +30,7 @@ the same Trac identity as its MCP calls (e.g. ``auto_pm`` vs
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .. import __version__
 from ..converters.front_matter import exported_from
@@ -199,10 +201,10 @@ def resolve_endpoint(
 # ---------------------------------------------------------------------------
 
 
-async def call_tool(
-    url: str, token: str | None, name: str, arguments: dict[str, Any]
-):
-    """Open one MCP session, call one tool, return its CallToolResult."""
+@contextlib.asynccontextmanager
+async def _mcp_session(url: str, token: str | None):
+    """One initialised MCP session over streamable HTTP, for as many
+    tool calls as the caller makes before leaving the block."""
     import httpx
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client
@@ -220,7 +222,15 @@ async def call_tool(
         ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return await session.call_tool(name, arguments)
+                yield session
+
+
+async def call_tool(
+    url: str, token: str | None, name: str, arguments: dict[str, Any]
+):
+    """Open one MCP session, call one tool, return its CallToolResult."""
+    async with _mcp_session(url, token) as session:
+        return await session.call_tool(name, arguments)
 
 
 def _result_text(result) -> str:
@@ -838,6 +848,13 @@ def _pulled_instance(sc: dict, text: str) -> str:
     if not isinstance(instance, str) or not instance:
         exported = exported_from(text) or {}
         instance = exported.get("trac_instance")
+        source = exported.get("source")
+        if instance == "/" and isinstance(source, str):
+            # A root-served instance is told from other Trac servers by
+            # its host, which only the page's own URL names here.
+            parts = urlsplit(source)
+            if parts.scheme and parts.netloc:
+                instance = f"{parts.scheme}://{parts.netloc}/"
     if not isinstance(instance, str) or not instance:
         raise CliError(
             "--assets: the server did not say which Trac instance the "
@@ -851,8 +868,7 @@ def _pulled_instance(sc: dict, text: str) -> str:
 
 async def _fetch_attachment(
     args: argparse.Namespace,
-    url: str,
-    token: str | None,
+    session,
     ref: export_assets.AttachmentRef,
 ) -> bytes | None:
     """The bytes of one attachment through the server's attachment tools,
@@ -867,17 +883,19 @@ async def _fetch_attachment(
     else:
         tool = "wiki_attachment_get"
         arguments = {"page_name": ref.parent, "filename": ref.filename}
-    result = await call_tool(
-        url, token, tool, _with_instance(args, arguments)
+    result = await session.call_tool(
+        tool, _with_instance(args, arguments)
     )
     if result.isError:
         text = _result_text(result)
         if text.lstrip().startswith("Error (not_found)"):
             return None
+        lines = text.strip().splitlines()
         raise CliError(
             f"--assets: cannot fetch attachment '{ref.filename}' of "
-            f"{ref.describe()}: {text.strip().splitlines()[0]}; nothing "
-            "was written",
+            f"{ref.describe()}: "
+            f"{lines[0] if lines else 'the server sent no error text'}"
+            "; nothing was written",
             EXIT_TOOL_ERROR,
         )
     return base64.b64decode(_payload(result, "content_base64"))
@@ -894,9 +912,15 @@ async def _localise_assets(
     memory) and plan the rewrite. Nothing is written here: a failed fetch
     leaves the disk as it was."""
     instance = _pulled_instance(sc, text)
+    scan = export_assets.scan_text(text, instance, args.format)
     fetched: dict[export_assets.AttachmentRef, bytes | None] = {}
-    for ref in export_assets.find_refs(text, instance):
-        fetched[ref] = await _fetch_attachment(args, url, token, ref)
+    if scan.refs:
+        # One session for every attachment, not one per attachment.
+        async with _mcp_session(url, token) as session:
+            for ref in scan.refs:
+                fetched[ref] = await _fetch_attachment(
+                    args, session, ref
+                )
     plan = export_assets.plan_assets(
         text,
         instance,
@@ -904,6 +928,8 @@ async def _localise_assets(
         args.assets,
         None if args.file == "-" else args.file,
         args.assets_url,
+        fmt=args.format,
+        scan=scan,
     )
     return plan.text, plan
 
@@ -1298,7 +1324,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--assets-url",
         metavar="PREFIX",
         help=(
-            "With --assets: link the saved files as PREFIX/<name> (the URL "
+            "With --assets: link the saved files as PREFIX/<path> (the URL "
             "they are served from) instead of by their relative path from "
             "FILE."
         ),

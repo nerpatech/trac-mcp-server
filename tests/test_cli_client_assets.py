@@ -14,6 +14,7 @@ import base64
 import os
 import uuid
 import xmlrpc.client
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -106,14 +107,14 @@ def test_two_attachments_and_one_missing_markdown(tmp_path, capsys):
     with _served(trac) as url:
         rc = _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
     assert rc == cli.EXIT_OK
-    assert (img / "a.png").read_bytes() == PNG_A
-    assert (img / "b.png").read_bytes() == PNG_B
-    assert not (img / "c.png").exists()
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
+    assert (img / "P" / "b.png").read_bytes() == PNG_B
+    assert not (img / "P" / "c.png").exists()
     assert trac.fetched == ["P/a.png", "P/b.png", "P/c.png"]
     text = out.read_text()
     rel = os.path.relpath(img, out.parent)
-    assert f'[![a.png]({rel}/a.png "a.png")]({rel}/a.png)' in text
-    assert f'[![b.png]({rel}/b.png "b.png")]({rel}/b.png)' in text
+    assert f'[![a.png]({rel}/P/a.png "a.png")]({rel}/P/a.png)' in text
+    assert f'[![b.png]({rel}/P/b.png "b.png")]({rel}/P/b.png)' in text
     # the missing one is exactly as exported
     assert f"{BASE}/raw-attachment/wiki/P/c.png" in text
     assert f"{BASE}/attachment/wiki/P/c.png" in text
@@ -144,9 +145,11 @@ def test_assets_url_links_the_served_prefix(tmp_path):
         )
     assert rc == cli.EXIT_OK
     text = out.read_text()
-    assert '[![a.png](/images/a.png "a.png")](/images/a.png)' in text
+    assert (
+        '[![a.png](/images/P/a.png "a.png")](/images/P/a.png)' in text
+    )
     assert "static" not in text.split("---", 2)[2]
-    assert (img / "a.png").read_bytes() == PNG_A
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
 
 
 def test_a_second_run_leaves_unchanged_files_alone(tmp_path, capsys):
@@ -158,14 +161,14 @@ def test_a_second_run_leaves_unchanged_files_alone(tmp_path, capsys):
             == cli.EXIT_OK
         )
         capsys.readouterr()
-        (img / "b.png").write_bytes(b"locally changed")
-        os.utime(img / "a.png", (1_000_000_000, 1_000_000_000))
+        (img / "P" / "b.png").write_bytes(b"locally changed")
+        os.utime(img / "P" / "a.png", (1_000_000_000, 1_000_000_000))
         assert (
             _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
             == cli.EXIT_OK
         )
-    assert (img / "a.png").stat().st_mtime == 1_000_000_000
-    assert (img / "b.png").read_bytes() == PNG_B
+    assert (img / "P" / "a.png").stat().st_mtime == 1_000_000_000
+    assert (img / "P" / "b.png").read_bytes() == PNG_B
     assert (
         f"Saved 2 attachments to {img} (1 unchanged, 1 missing)"
         in capsys.readouterr().err
@@ -189,11 +192,11 @@ def test_format_html(tmp_path):
     assert rc == cli.EXIT_OK
     text = out.read_text()
     assert (
-        '<a href="img/a.png" style="padding:0; border:none">'
-        '<img alt="a.png" src="img/a.png" title="a.png" /></a>'
+        '<a href="img/P/a.png" style="padding:0; border:none">'
+        '<img alt="a.png" src="img/P/a.png" title="a.png" /></a>'
     ) in text
     assert f'src="{BASE}/raw-attachment/wiki/P/c.png"' in text
-    assert (img / "a.png").read_bytes() == PNG_A
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
 
 
 def test_ticket_attachment_and_nested_page(tmp_path):
@@ -210,15 +213,20 @@ def test_ticket_attachment_and_nested_page(tmp_path):
     with _served(trac) as url:
         rc = _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
     assert rc == cli.EXIT_OK
-    assert (img / "log.png").read_bytes() == b"ticket-bytes"
-    assert (img / "deep.png").read_bytes() == b"deep-bytes"
+    assert (
+        img / "ticket-42" / "log.png"
+    ).read_bytes() == b"ticket-bytes"
+    assert (img / "A" / "B" / "deep.png").read_bytes() == b"deep-bytes"
     assert (
         "#42/log.png" in trac.fetched and "A/B/deep.png" in trac.fetched
     )
-    assert "![log.png](img/log.png" in out.read_text()
+    assert "![log.png](img/ticket-42/log.png" in out.read_text()
+    assert "![deep.png](img/A/B/deep.png" in out.read_text()
 
 
-def test_a_name_collision_is_warned_about(tmp_path, capsys):
+def test_one_name_on_two_pages_lands_in_two_directories(
+    tmp_path, capsys
+):
     trac = AttachedTrac(extra_html=_image("Q", "a.png"))
     trac.attachments[("wiki", "Q", "a.png")] = b"q-bytes"
     out = tmp_path / "p.md"
@@ -226,12 +234,42 @@ def test_a_name_collision_is_warned_about(tmp_path, capsys):
     with _served(trac) as url:
         rc = _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
     assert rc == cli.EXIT_OK
-    assert (img / "a.png").read_bytes() == PNG_A
-    assert (img / "Q--a.png").read_bytes() == b"q-bytes"
-    assert (
-        "trac-mcp: warning: attachment 'a.png' of wiki page 'Q' is saved "
-        "as 'Q--a.png'" in capsys.readouterr().err
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
+    assert (img / "Q" / "a.png").read_bytes() == b"q-bytes"
+    assert "img/P/a.png" in out.read_text()
+    assert "img/Q/a.png" in out.read_text()
+    assert "is saved as" not in capsys.readouterr().err
+
+
+def test_a_rerun_after_a_missing_attachment_appears_moves_nothing(
+    tmp_path,
+):
+    trac = AttachedTrac(extra_html=_image("Q", "c.png"))
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    with _served(trac) as url:
+        assert (
+            _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
+            == cli.EXIT_OK
+        )
+        first = sorted(
+            p.relative_to(img).as_posix()
+            for p in img.rglob("*")
+            if p.is_file()
+        )
+        # P/c.png and Q/c.png were missing; Q/c.png now exists
+        trac.attachments[("wiki", "Q", "c.png")] = b"q-bytes"
+        assert (
+            _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
+            == cli.EXIT_OK
+        )
+    second = sorted(
+        p.relative_to(img).as_posix()
+        for p in img.rglob("*")
+        if p.is_file()
     )
+    assert first == ["P/a.png", "P/b.png"]
+    assert second == ["P/a.png", "P/b.png", "Q/c.png"]
 
 
 def test_a_server_error_on_the_second_fetch_writes_nothing(
@@ -253,18 +291,19 @@ def test_a_transport_failure_on_the_second_fetch_writes_nothing(
     tmp_path, monkeypatch, capsys
 ):
     import httpx
+    from mcp.client.session import ClientSession
 
-    real = cli.call_tool
+    real = ClientSession.call_tool
     fetches = []
 
-    async def flaky(url, token, name, arguments):
+    async def flaky(self, name, arguments=None, *a, **k):
         if name == "wiki_attachment_get":
             fetches.append(arguments["filename"])
             if len(fetches) == 2:
                 raise httpx.ConnectError("connection reset")
-        return await real(url, token, name, arguments)
+        return await real(self, name, arguments, *a, **k)
 
-    monkeypatch.setattr(cli, "call_tool", flaky)
+    monkeypatch.setattr(ClientSession, "call_tool", flaky)
     out = tmp_path / "p.md"
     img = tmp_path / "img"
     with _served(AttachedTrac()) as url:
@@ -274,6 +313,36 @@ def test_a_transport_failure_on_the_second_fetch_writes_nothing(
     assert not out.exists()
     assert not img.exists()
     assert "connection reset" in capsys.readouterr().err
+
+
+def test_all_the_attachments_are_fetched_over_one_session(
+    tmp_path, monkeypatch
+):
+    from mcp.client.session import ClientSession
+
+    real = ClientSession.initialize
+    opened = []
+
+    async def counting(self, *a, **k):
+        opened.append(1)
+        return await real(self, *a, **k)
+
+    monkeypatch.setattr(ClientSession, "initialize", counting)
+    trac = AttachedTrac()
+    out = tmp_path / "p.md"
+    with _served(trac) as url:
+        rc = _cli(
+            url,
+            "wiki-pull",
+            "P",
+            str(out),
+            "--assets",
+            str(tmp_path / "img"),
+        )
+    assert rc == cli.EXIT_OK
+    assert len(trac.fetched) == 3
+    # one for the pull, one for the three attachments
+    assert len(opened) == 2
 
 
 def test_a_page_without_attachments_makes_no_directory(
@@ -359,9 +428,28 @@ def test_assets_exists_only_on_wiki_pull():
 # --- which instance's attachment URLs these are -----------------------------
 
 
+def _fake_server(monkeypatch, content, structured, attachments=None):
+    """Replace the CLI's transport: the pull answers with ``content``,
+    the attachment tools from ``attachments`` (filename -> bytes)."""
+    call = _fake_call_tool(content, structured, attachments)
+
+    @asynccontextmanager
+    async def session(url, token):
+        yield SimpleNamespace(
+            call_tool=lambda name, arguments: call(
+                url, token, name, arguments
+            )
+        )
+
+    monkeypatch.setattr(cli, "call_tool", call)
+    monkeypatch.setattr(cli, "_mcp_session", session)
+
+
 def _fake_call_tool(content, structured, attachments=None):
     """A ``call_tool`` answering the pull with ``content`` and the
-    attachment tools from ``attachments`` (filename -> bytes)."""
+    attachment tools from ``attachments`` (filename -> bytes); a value
+    that is an exception instance is returned as an error result with
+    that text."""
 
     async def call(url, token, name, arguments):
         if name == "wiki_file_pull":
@@ -376,6 +464,14 @@ def _fake_call_tool(content, structured, attachments=None):
                 },
             )
         data = (attachments or {}).get(arguments["filename"])
+        if isinstance(data, str):
+            return SimpleNamespace(
+                isError=True,
+                content=[SimpleNamespace(text=data)]
+                if data != "<no content>"
+                else [],
+                structuredContent=None,
+            )
         if data is None:
             return SimpleNamespace(
                 isError=True,
@@ -405,28 +501,23 @@ _BODY = "![i](http://h/bcs/raw-attachment/wiki/P/a.png)\n"
 def test_instance_from_the_front_matter_when_the_result_has_none(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(
-        cli,
-        "call_tool",
-        _fake_call_tool(_FRONT + _BODY, {}, {"a.png": b"x"}),
-    )
+    _fake_server(monkeypatch, _FRONT + _BODY, {}, {"a.png": b"x"})
     out = tmp_path / "p.md"
     rc = _main(
         "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
     )
     assert rc == cli.EXIT_OK
-    assert "![i](img/a.png)" in out.read_text()
+    assert "![i](img/P/a.png)" in out.read_text()
 
 
 def test_instance_from_the_result_wins_over_the_front_matter(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(
-        cli,
-        "call_tool",
-        _fake_call_tool(
-            _FRONT + _BODY, {"instance": "/other"}, {"a.png": b"x"}
-        ),
+    _fake_server(
+        monkeypatch,
+        _FRONT + _BODY,
+        {"instance": "/other"},
+        {"a.png": b"x"},
     )
     out = tmp_path / "p.md"
     rc = _main(
@@ -440,9 +531,7 @@ def test_instance_from_the_result_wins_over_the_front_matter(
 def test_no_instance_anywhere_is_a_tool_error_and_writes_nothing(
     tmp_path, monkeypatch, capsys
 ):
-    monkeypatch.setattr(
-        cli, "call_tool", _fake_call_tool(_BODY, {}, {"a.png": b"x"})
-    )
+    _fake_server(monkeypatch, _BODY, {}, {"a.png": b"x"})
     out = tmp_path / "p.md"
     rc = _main(
         "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
@@ -450,6 +539,140 @@ def test_no_instance_anywhere_is_a_tool_error_and_writes_nothing(
     assert rc == cli.EXIT_TOOL_ERROR
     assert "instance" in capsys.readouterr().err
     assert not out.exists() and not (tmp_path / "img").exists()
+
+
+def test_root_instance_leaves_another_host_alone_and_fetches_nothing(
+    tmp_path, monkeypatch
+):
+    other = "https://trac.edgewall.org/raw-attachment/wiki/P/a.png"
+    own = "http://h:8000/raw-attachment/wiki/P/a.png"
+    fetched = []
+    _fake_server(
+        monkeypatch,
+        f"![x]({other})\n![y]({own})\n",
+        {"instance": "http://h:8000/"},
+        {"a.png": b"x"},
+    )
+    real = cli._mcp_session
+
+    @asynccontextmanager
+    async def watching(url, token):
+        async with real(url, token) as session:
+            inner = session.call_tool
+
+            def call(name, arguments):
+                fetched.append(arguments["filename"])
+                return inner(name, arguments)
+
+            yield SimpleNamespace(call_tool=call)
+
+    monkeypatch.setattr(cli, "_mcp_session", watching)
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_OK
+    assert fetched == ["a.png"]  # once: for our own host's URL
+    assert out.read_text() == f"![x]({other})\n![y](img/P/a.png)\n"
+
+
+def test_root_instance_in_front_matter_only_knows_its_host_from_source(
+    tmp_path, monkeypatch
+):
+    front = (
+        '---\ntitle: "T"\nsource: "https://trac.example.org/wiki/P"\n'
+        'trac_instance: "/"\ntrac_page: "P"\ntrac_version: 1\n---\n\n'
+    )
+    other = "https://trac.edgewall.org/raw-attachment/wiki/P/a.png"
+    own = "https://trac.example.org/raw-attachment/wiki/P/a.png"
+    _fake_server(
+        monkeypatch,
+        front + f"![x]({other})\n![y]({own})\n",
+        {},
+        {"a.png": b"x"},
+    )
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_OK
+    assert out.read_text().endswith(
+        f"![x]({other})\n![y](img/P/a.png)\n"
+    )
+
+
+def test_an_error_result_without_text_is_a_tool_error_not_an_index_error(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(
+        monkeypatch, _FRONT + _BODY, {}, {"a.png": "<no content>"}
+    )
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_TOOL_ERROR
+    err = capsys.readouterr().err
+    assert "--assets: cannot fetch attachment 'a.png'" in err
+    assert "no error text" in err
+    assert "IndexError" not in err
+    assert not out.exists() and not (tmp_path / "img").exists()
+
+
+def test_a_blank_error_text_is_the_same_tool_error(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(monkeypatch, _FRONT + _BODY, {}, {"a.png": "  \n"})
+    rc = _main(
+        "wiki-pull",
+        "P",
+        str(tmp_path / "p.md"),
+        "--assets",
+        str(tmp_path / "img"),
+    )
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "no error text" in capsys.readouterr().err
+
+
+def test_html_format_skips_code_and_fetches_only_the_rest(
+    tmp_path, monkeypatch
+):
+    u = "http://h/bcs/raw-attachment/wiki/P/a.png"
+    body = f'<pre><img src="{u}"></pre><img src="{u}">'
+    fake = _fake_call_tool(body, {"instance": "/bcs"}, {"a.png": b"x"})
+    asked = []
+
+    async def call(url, token, name, arguments):
+        if name != "wiki_file_pull":
+            asked.append(name)
+        return await fake(url, token, name, arguments)
+
+    monkeypatch.setattr(cli, "call_tool", call)
+
+    @asynccontextmanager
+    async def session(url, token):
+        yield SimpleNamespace(
+            call_tool=lambda name, arguments: call(
+                url, token, name, arguments
+            )
+        )
+
+    monkeypatch.setattr(cli, "_mcp_session", session)
+    out = tmp_path / "p.html"
+    rc = _main(
+        "wiki-pull",
+        "P",
+        str(out),
+        "--format",
+        "html",
+        "--assets",
+        str(tmp_path / "img"),
+    )
+    assert rc == cli.EXIT_OK
+    assert asked == ["wiki_attachment_get"]
+    assert out.read_text() == (
+        f'<pre><img src="{u}"></pre><img src="img/P/a.png">'
+    )
 
 
 # --- live -------------------------------------------------------------------
@@ -544,8 +767,8 @@ def test_live_wiki_pull_assets_saves_the_attachment_and_relinks(
                 )
                 == cli.EXIT_OK
             )
-            assert (img / filename).read_bytes() == png
-            rel = os.path.relpath(img / filename, posts)
+            assert (img / page / filename).read_bytes() == png
+            rel = os.path.relpath(img / page / filename, posts)
             links = _links(out.read_text())
             assert links.count(rel) == 2, (links, rel)
             assert not any("attachment" in link for link in links)
@@ -566,9 +789,9 @@ def test_live_wiki_pull_assets_saves_the_attachment_and_relinks(
                 )
                 == cli.EXIT_OK
             )
-            assert (img2 / filename).read_bytes() == png
+            assert (img2 / page / filename).read_bytes() == png
             links = _links(out2.read_text())
-            assert links.count(f"/images/{filename}") == 2, links
+            assert links.count(f"/images/{page}/{filename}") == 2, links
         finally:
             asyncio.run(
                 cli.call_tool(

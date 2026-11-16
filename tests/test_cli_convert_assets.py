@@ -76,15 +76,15 @@ def test_two_attachments_and_one_missing(trac, tmp_path, capsys):
     img = tmp_path / "static" / "images"
     rc = _run("-o", str(out), "--assets", str(img))
     assert rc == EXIT_OK
-    assert (img / "a.png").read_bytes() == PNG_A
-    assert (img / "b.png").read_bytes() == PNG_B
-    assert not (img / "c.png").exists()
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
+    assert (img / "P" / "b.png").read_bytes() == PNG_B
+    assert not (img / "P" / "c.png").exists()
     text = out.read_text()
     assert (
-        '[![a.png](../static/images/a.png "a.png")]'
-        "(../static/images/a.png)"
+        '[![a.png](../static/images/P/a.png "a.png")]'
+        "(../static/images/P/a.png)"
     ) in text
-    assert "(../static/images/b.png)" in text
+    assert "(../static/images/P/b.png)" in text
     assert f"{BASE}/raw-attachment/wiki/P/c.png" in text
     assert f"{BASE}/attachment/wiki/P/c.png" in text
     err = capsys.readouterr().err
@@ -107,7 +107,7 @@ def test_assets_url(trac, tmp_path):
     )
     assert rc == EXIT_OK
     assert (
-        '[![a.png](/images/a.png "a.png")](/images/a.png)'
+        '[![a.png](/images/P/a.png "a.png")](/images/P/a.png)'
         in out.read_text()
     )
 
@@ -119,11 +119,11 @@ def test_stdout_links_from_the_current_directory(
     rc = _run("--assets", "static/images")
     assert rc == EXIT_OK
     captured = capsys.readouterr()
-    assert "(static/images/a.png)" in captured.out
+    assert "(static/images/P/a.png)" in captured.out
     assert "Saved" not in captured.out
     assert "Saved 2 attachments" in captured.err
     assert (
-        tmp_path / "static" / "images" / "a.png"
+        tmp_path / "static" / "images" / "P" / "a.png"
     ).read_bytes() == PNG_A
 
 
@@ -155,8 +155,11 @@ def test_ticket_attachment_and_nested_page(trac, tmp_path):
     assert _run("-o", str(out), "--assets", str(img)) == EXIT_OK
     trac.get_ticket_attachment.assert_called_once_with(42, "log.png")
     trac.get_wiki_attachment.assert_any_call("A/B/deep.png")
-    assert (img / "log.png").read_bytes() == b"ticket"
-    assert (img / "deep.png").read_bytes() == b"deep"
+    assert (img / "ticket-42" / "log.png").read_bytes() == b"ticket"
+    assert (img / "A" / "B" / "deep.png").read_bytes() == b"deep"
+    text = out.read_text()
+    assert "![log.png](img/ticket-42/log.png" in text
+    assert "![deep.png](img/A/B/deep.png" in text
 
 
 def test_a_failure_on_the_second_fetch_writes_nothing(
@@ -192,6 +195,82 @@ def test_a_permission_fault_is_a_failure_not_a_missing_attachment(
     assert rc == EXIT_TRAC
     assert not out.exists() and not (tmp_path / "img").exists()
     assert "permission denied" in capsys.readouterr().err
+
+
+def test_one_name_on_two_pages_gets_two_directories(trac, tmp_path):
+    trac.get_wiki_page_html.return_value = _html(_image("Q", "a.png"))
+    trac.served["Q/a.png"] = b"q"
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    assert _run("-o", str(out), "--assets", str(img)) == EXIT_OK
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
+    assert (img / "Q" / "a.png").read_bytes() == b"q"
+    text = out.read_text()
+    assert "img/P/a.png" in text and "img/Q/a.png" in text
+
+
+def test_root_instance_leaves_another_host_alone(
+    trac, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+    own = "https://trac.example.com/raw-attachment/wiki/P/a.png"
+    other = "https://trac.edgewall.org/raw-attachment/wiki/P/a.png"
+    trac.get_wiki_page_html.return_value = (
+        f'<p><img alt="o" src="{other}"><img alt="a" src="{own}"></p>\n'
+    )
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    assert _run("-o", str(out), "--assets", str(img)) == EXIT_OK
+    trac.get_wiki_attachment.assert_called_once_with("P/a.png")
+    text = out.read_text()
+    assert f"![o]({other})" in text
+    assert "![a](img/P/a.png)" in text
+
+
+def test_a_missing_output_directory_stops_before_any_fetch(
+    trac, tmp_path, capsys
+):
+    img = tmp_path / "img"
+    rc = _main_usage(
+        [
+            "--from-wiki",
+            "P",
+            "--to",
+            "md",
+            "-o",
+            str(tmp_path / "missing_dir" / "p.md"),
+            "--assets",
+            str(img),
+        ]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert "output directory does not exist" in capsys.readouterr().err
+    assert not img.exists()
+    trac.get_wiki_attachment.assert_not_called()
+    trac.get_wiki_page.assert_not_called()
+    trac.get_wiki_page_html.assert_not_called()
+
+
+def test_an_output_parent_that_is_a_file_stops_before_any_fetch(
+    trac, tmp_path, capsys
+):
+    parent = tmp_path / "afile"
+    parent.write_text("x")
+    rc = _main_usage(
+        [
+            "--from-wiki",
+            "P",
+            "--to",
+            "md",
+            "-o",
+            str(parent / "p.md"),
+            "--assets",
+            str(tmp_path / "img"),
+        ]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert not (tmp_path / "img").exists()
+    trac.get_wiki_attachment.assert_not_called()
 
 
 # --- usage errors -----------------------------------------------------------
