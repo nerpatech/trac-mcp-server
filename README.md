@@ -161,7 +161,7 @@ It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the se
 
 ## Available Tools (54)
 
-Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances).
+Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances) -- except over HTTP with OIDC per-user auth (`TRAC_MCP_OIDC_RPC_URL`), where calls go only to the configured endpoint and the argument is not offered.
 
 ### Tickets (12)
 | Tool | Description |
@@ -189,7 +189,7 @@ Every tool below also accepts an optional `instance` argument to route the call 
 
 ### Ticket Comments (4)
 
-These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/README.md](plugins/README.md)); without it they answer MethodNotFound.
+These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/README.md](plugins/README.md)); without it each call returns a `method_not_available` error that says to install the plugin.
 
 | Tool | Description |
 |------|-------------|
@@ -254,7 +254,7 @@ These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/RE
 
 ### Timeline (1)
 
-`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call answers MethodNotFound.
+`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call returns a `method_not_available` error that says to install the plugin.
 
 | Tool | Description |
 |------|-------------|

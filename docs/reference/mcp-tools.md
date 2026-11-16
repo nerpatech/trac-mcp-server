@@ -1,13 +1,6 @@
 # MCP Tools Reference
 
-The Trac MCP Server provides 28 tools organized into six categories:
-
-- **System:** 2 tools (ping, get_server_time)
-- **Tickets:** 11 tools (search, get, create, update, delete, changelog, fields, actions, batch_create, batch_delete, batch_update)
-- **Wiki:** 6 tools (get, search, create, update, delete, recent_changes)
-- **Wiki File:** 3 tools (push, pull, detect_format)
-- **Milestones:** 5 tools (list, get, create, update, delete)
-- **Instances:** 1 tool (list_instances)
+This page documents a subset of the tools. The README's [Available Tools](../../README.md#available-tools-54) section lists all of them; the missing sections are tracked as Trac /trac_mcp_server #242.
 
 ## Instance Routing
 
