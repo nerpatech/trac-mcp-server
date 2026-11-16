@@ -10,7 +10,7 @@ For quick start and installation, see the [README](../../README.md).
 
 | Section | File | Description |
 |---------|------|-------------|
-| MCP Tools | [mcp-tools.md](mcp-tools.md) | All 27 MCP tools: system, tickets (incl. batch), wiki, wiki file, milestones |
+| MCP Tools | [mcp-tools.md](mcp-tools.md) | Per-tool reference: parameters, results and examples |
 | MCP Resources | [mcp-resources.md](mcp-resources.md) | Wiki page resources via URI templates |
 | CLI Reference | [cli.md](cli.md) | Command-line interface documentation |
 | Configuration | [configuration.md](configuration.md) | Config sources, file format, environment variables |

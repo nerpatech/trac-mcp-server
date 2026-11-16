@@ -6,6 +6,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+- **The README now lists all 54 registered tools, a test holds it to the registry, and two stale files are deleted (Trac /trac_mcp_server #226).**
+  - **Deleted**: `docs/project/PROJECT.md` and `test-report.md`; nothing linked to either. `test-report.md` is a generated artifact (`scripts/test_trac.py --output ./test-report.md`), so `/test-report.md` is now in `.gitignore`.
+  - **README**: `## Available Tools` said 46 while the registry (`[PING_SPEC] + ALL_SPECS`) holds 54. Added the eight missing: `ticket_comment_reply`, `ticket_comment_edit`, `ticket_comment_delete`, `ticket_comment_history` (new `### Ticket Comments (4)`), `timeline_search` (`### Timeline (1)`), and `convert_preview`, `ticket_render_check`, `wiki_render_check` (`### Previews and Render Checks (3)`). The comment and timeline tools carry a note that they need the `tracrpc_comment` Trac plugin (`plugins/README.md`) and answer MethodNotFound without it.
+  - **Test**: `tests/test_readme_tool_count.py` parses only the `## Available Tools (N)` section and checks that N equals the registered count, that the backticked names in its table rows are exactly the registered names (a failure lists what is missing and what is extra), and that each `### Title (k)` has k rows. Seen failing first: against the old README the count and name checks failed (46 vs 54, eight names missing), and a temporarily wrong subsection count made the third fail; restored, all pass.
+  - **overview.md**: the `mcp-tools.md` row no longer claims "All 27 MCP tools". `mcp-tools.md` itself is incomplete; those gaps are filed as Trac /trac_mcp_server #242.
+
 ## [3.0.0] - 2026-11-16
 
 Everything on `master` since 2.2.0 (2026-07-26). A major release: the
