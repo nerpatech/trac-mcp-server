@@ -32,6 +32,7 @@ from ..converters.common import (
     describe_indentation_loss,
     find_code_block_indentation_loss,
 )
+from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS, apply_flavor
 from ..converters.front_matter import (
     build_front_matter,
     exported_from,
@@ -796,6 +797,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--flavor",
+        dest="flavor",
+        choices=FLAVORS,
+        default=DEFAULT_FLAVOR,
+        help=(
+            "Markdown flavour of the source (md -> tracwiki only; any"
+            " other direction is a usage error): chatgpt converts"
+            " ChatGPT's \\( \\) and \\[ \\] math, favicon citation"
+            " residue and utm_* URL parameters; gemini rebuilds a copied"
+            " Gemini page's code blocks, bullet characters and [N] (url)"
+            " citations. With --from auto a non-default flavour reads the"
+            " input as Markdown. Default: commonmark (no change)."
+        ),
+    )
+    parser.add_argument(
         "--link-map",
         dest="link_map",
         action="append",
@@ -952,6 +968,7 @@ def convert_text(
     target_format: str,
     *,
     heading_anchors: bool = False,
+    flavor: str = DEFAULT_FLAVOR,
     render_html: Callable[[str], str] | None = None,
     link_map: dict[str, str]
     | Callable[[], dict[str, str]]
@@ -964,6 +981,10 @@ def convert_text(
     target_format: "md" or "tracwiki".
     heading_anchors: forwarded to convert_with_warnings() for md→tracwiki.
         Ignored on the tracwiki→md direction.
+    flavor: the Markdown flavour profile of the source, forwarded to
+        convert_with_warnings() (Trac /trac_mcp_server #216). A non-default
+        one means the source is Markdown, so "auto" does not detect; any
+        direction but md→tracwiki is a ValueError.
     render_html: a callable from TracWiki text to Trac's HTML for it.
         TracWiki→Markdown translates that HTML
         (``trac_html_to_markdown(render_html(text), text)``), so it is
@@ -986,12 +1007,21 @@ def convert_text(
     """
     _ALIAS = {"md": "markdown", "tracwiki": "tracwiki"}
 
-    if source_format == "auto":
+    if source_format == "auto" and flavor != DEFAULT_FLAVOR:
+        source = "markdown"
+    elif source_format == "auto":
         source = detect_format_heuristic(text)
     else:
         source = _ALIAS[source_format]
 
     target = _ALIAS[target_format]
+
+    if flavor != DEFAULT_FLAVOR and (
+        source != "markdown" or target != "tracwiki"
+    ):
+        raise ValueError(
+            f"flavor {flavor!r} applies to Markdown -> TracWiki only"
+        )
 
     if source == target:
         return ConversionResult(
@@ -1003,7 +1033,7 @@ def convert_text(
         )
     if source == "markdown" and target == "tracwiki":
         result = convert_with_warnings(
-            text, heading_anchors=heading_anchors
+            text, heading_anchors=heading_anchors, flavor=flavor
         )
         # Ticket #68: a TracWiki `{{{ }}}` block in Markdown input has
         # its body indentation eaten, and nothing else in this pipeline
@@ -1011,10 +1041,13 @@ def convert_text(
         # plausible. Reported here rather than raised: unlike the MCP
         # write tools, this binary stores nothing, so the caller still
         # holds the input and a stderr line is enough to act on.
+        # The Markdown that was converted, for a flavour its normalised
+        # text (#216).
+        converted_markdown, _ = apply_flavor(text, flavor)
         result.warnings.extend(
             describe_indentation_loss(loss)
             for loss in find_code_block_indentation_loss(
-                text, result.text
+                converted_markdown, result.text
             )
         )
         return result
@@ -1084,6 +1117,19 @@ def main(argv: list[str] | None = None) -> int:
     """
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --- --flavor (Trac /trac_mcp_server #216): Markdown -> TracWiki only.
+    # --from auto is not a conflict: a flavour says the source is Markdown.
+    if args.flavor != DEFAULT_FLAVOR and (
+        args.source_format == "tracwiki"
+        or args.target_format == "md"
+        or args.from_wiki is not None
+    ):
+        parser.error(
+            f"--flavor {args.flavor} applies to a Markdown source "
+            "converted to TracWiki (--from md --to tracwiki); it cannot "
+            "be used with a TracWiki source, --from-wiki or --to md"
+        )
 
     link_map_flag: LinkRewrites | None = None
     if args.link_map is not None:
@@ -1306,6 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
             args.source_format,
             args.target_format,
             heading_anchors=heading_anchors_bool,
+            flavor=args.flavor,
             render_html=(
                 session.page_renderer(args.from_wiki)
                 if args.from_wiki is not None

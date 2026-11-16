@@ -1,0 +1,690 @@
+"""Markdown flavour profiles of the write leg (Trac /trac_mcp_server #216).
+
+One block per rule. Each rule has a row showing what the flavour does and
+a row showing that the default (`commonmark`) leaves the same input exactly
+as the converter always did -- the expected strings of those rows were
+captured from the converter before this change.
+
+The normaliser rows read `apply_flavor` (Markdown in, Markdown out); the
+parser-rule rows read `markdown_to_tracwiki` (Markdown in, TracWiki out).
+"""
+
+import asyncio
+from unittest.mock import MagicMock
+
+import pytest
+
+from trac_mcp_server.converters.common import auto_convert
+from trac_mcp_server.converters.markdown_to_tracwiki import (
+    convert_with_warnings,
+    markdown_to_tracwiki,
+)
+
+GEMINI_HINT = (
+    'Line "Use code with caution." looks like text copied from a '
+    'Gemini page; convert with flavor "gemini" (--flavor gemini) to '
+    "rebuild its code blocks."
+)
+REBUILT_ONE = "gemini: rebuilt 1 code block(s) from 'Use code with caution.' markers"
+
+
+def _flavors():
+    from trac_mcp_server.converters import flavors
+
+    return flavors
+
+
+def _norm(text, flavor):
+    return _flavors().apply_flavor(text, flavor)
+
+
+# -- selection ----------------------------------------------------------------
+
+
+def test_the_flavors_and_the_default():
+    flavors = _flavors()
+    assert flavors.FLAVORS == ("commonmark", "chatgpt", "gemini")
+    assert flavors.DEFAULT_FLAVOR == "commonmark"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: markdown_to_tracwiki("x", flavor="bard"),
+        lambda: convert_with_warnings("x", flavor="bard"),
+        lambda: _norm("x", "bard"),
+        lambda: _flavors().flavor_plugins("bard"),
+    ],
+    ids=[
+        "markdown_to_tracwiki",
+        "convert_with_warnings",
+        "apply",
+        "plugins",
+    ],
+)
+def test_an_unknown_flavor_is_a_value_error_naming_the_valid_ones(call):
+    with pytest.raises(ValueError) as err:
+        call()
+    message = str(err.value)
+    assert "bard" in message
+    for name in ("commonmark", "chatgpt", "gemini"):
+        assert name in message
+
+
+def test_commonmark_is_the_identity_on_the_source():
+    text = "bash\nls\nUse code with caution.\n\u2022 x \\(y\\)\n"
+    assert _norm(text, "commonmark") == (text, [])
+    assert _flavors().flavor_plugins("commonmark") == []
+
+
+def test_auto_convert_forwards_the_flavor():
+    config = MagicMock()
+    result = asyncio.run(
+        auto_convert(
+            "Energy \\(E=mc^2\\) here",
+            config,
+            target_format="tracwiki",
+            source_format="markdown",
+            flavor="chatgpt",
+        )
+    )
+    assert result.text == "Energy `E=mc^2` here"
+    default = asyncio.run(
+        auto_convert(
+            "Energy \\(E=mc^2\\) here",
+            config,
+            target_format="tracwiki",
+            source_format="markdown",
+        )
+    )
+    assert default.text == "Energy (E=mc^2) here"
+
+
+# -- chatgpt 3a: inline math --------------------------------------------------
+
+INLINE_MATH_ROWS = [
+    # (id, source, chatgpt output, commonmark output)
+    (
+        "single",
+        "Energy \\(E=mc^2\\) here",
+        "Energy `E=mc^2` here",
+        "Energy (E=mc^2) here",
+    ),
+    (
+        "doubled",
+        "Energy \\\\(E=mc^2\\\\) here",
+        "Energy `E=mc^2` here",
+        "Energy \\(E=mc^2\\) here",
+    ),
+    (
+        "doubled unescapes underscore and star",
+        "Doubled \\\\(R\\_{\\text{OK1}}\\\\) and \\\\(a\\*b\\\\) end",
+        "Doubled `R_{\\text{OK1}}` and `a*b` end",
+        "Doubled \\(R_{\\text{OK1}}\\) and \\(a*b\\) end",
+    ),
+    (
+        "single keeps the content as written",
+        "Single \\(R\\_{x}\\) keep",
+        "Single `R\\_{x}` keep",
+        "Single (R_{x}) keep",
+    ),
+    (
+        "a backtick in the formula uses the triple-brace form",
+        "Tick \\\\(a`b\\\\) end",
+        "Tick {{{a`b}}} end",
+        "Tick \\(a`b\\) end",
+    ),
+    (
+        "brackets in the middle of a sentence",
+        "Mid \\[y\\] sentence",
+        "Mid `y` sentence",
+        "Mid [y] sentence",
+    ),
+    (
+        "doubled brackets in the middle of a sentence",
+        "Mid \\\\[y\\_1\\\\] sentence",
+        "Mid `y_1` sentence",
+        "Mid \\[y_1\\] sentence",
+    ),
+    (
+        "table cells",
+        "| a | b |\n| - | - |\n| \\\\(x\\_1\\\\) | \\[y\\] |",
+        "||=a=||=b=||\n||`x_1`||`y`||",
+        "||=a=||=b=||\n||\\(x_1\\)||[y]||",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "chatgpt", "commonmark"),
+    [row[1:] for row in INLINE_MATH_ROWS],
+    ids=[row[0] for row in INLINE_MATH_ROWS],
+)
+def test_inline_math(source, chatgpt, commonmark):
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == chatgpt
+    assert (
+        markdown_to_tracwiki(source, flavor="commonmark") == commonmark
+    )
+    assert markdown_to_tracwiki(source) == commonmark
+
+
+def test_a_lone_opener_is_not_math():
+    assert (
+        markdown_to_tracwiki("a \\(b c", flavor="chatgpt") == "a (b c"
+    )
+
+
+def test_math_does_not_cross_a_line():
+    source = "a \\(b\nc\\) d"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        markdown_to_tracwiki(source)
+    )
+
+
+# -- chatgpt 3b: display math -------------------------------------------------
+
+DISPLAY_MATH_ROWS = [
+    (
+        "single, one line",
+        "\\[ x = 1 \\]",
+        "{{{#!latex\nx = 1\n}}}",
+        "[ x = 1 ]",
+    ),
+    (
+        "doubled, one line, unescaped",
+        "\\\\[ V\\_{o} = 1 \\\\]",
+        "{{{#!latex\nV_{o} = 1\n}}}",
+        "\\[ V_{o} = 1 \\]",
+    ),
+    (
+        "doubled, several lines",
+        "\\\\[\nV\\_{o} = 1\n  + 2\n\\\\]",
+        "{{{#!latex\nV_{o} = 1\n  + 2\n}}}",
+        "\\[\nV_{o} = 1\n\n * 2\n   \\]",
+    ),
+    (
+        "between paragraphs",
+        "Before.\n\n\\[ a \\]\n\nAfter.",
+        "Before.\n\n{{{#!latex\na\n}}}\n\nAfter.",
+        "Before.\n\n[ a ]\n\nAfter.",
+    ),
+    (
+        "three spaces of indent",
+        "   \\[ a \\]",
+        "{{{#!latex\na\n}}}",
+        "[ a ]",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "chatgpt", "commonmark"),
+    [row[1:] for row in DISPLAY_MATH_ROWS],
+    ids=[row[0] for row in DISPLAY_MATH_ROWS],
+)
+def test_display_math(source, chatgpt, commonmark):
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == chatgpt
+    assert (
+        markdown_to_tracwiki(source, flavor="commonmark") == commonmark
+    )
+    assert markdown_to_tracwiki(source) == commonmark
+
+
+def test_brackets_that_are_not_a_whole_paragraph_stay_inline():
+    source = "Text first\n\\[ a \\]"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "Text first\n`a`"
+    )
+
+
+def test_two_bracket_lines_in_a_row_are_not_one_block():
+    assert markdown_to_tracwiki(
+        "\\[x\\]\n\\[y\\]", flavor="chatgpt"
+    ) == ("`x`\n`y`")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "```\n\\(x\\) \\\\(y\\\\)\n\\[ z \\]\n```",
+        "Span `\\(x\\)` and `\\\\[y\\\\]` here",
+        "~~~\n\\\\[\nx\n\\\\]\n~~~",
+    ],
+    ids=["fence", "code span", "tilde fence"],
+)
+def test_math_syntax_inside_code_is_untouched(source):
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        markdown_to_tracwiki(source)
+    )
+
+
+def test_a_fenced_block_survives_beside_display_math():
+    source = "\\[ a \\]\n\n```\n\\[ b \\]\n```\n"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "{{{#!latex\na\n}}}\n\n{{{\n\\[ b \\]\n}}}"
+    )
+
+
+# -- chatgpt 3c: citation residue ---------------------------------------------
+
+FAVICON = (
+    "[image](https://www.google.com/s2/favicons"
+    "?domain=https://device.report\\&sz=32)"
+)
+
+
+def test_a_favicon_citation_with_a_label_line_becomes_one_link():
+    source = f"Text.\n\n{FAVICON}\n\ndevice.report+1\n\nNext para"
+    assert _norm(source, "chatgpt") == (
+        "Text.\n\n[device.report](https://device.report)\n\nNext para",
+        [],
+    )
+
+
+def test_a_label_without_a_count():
+    source = f"{FAVICON}\nReuters\n"
+    assert _norm(source, "chatgpt")[0] == (
+        "[Reuters](https://device.report)\n"
+    )
+
+
+def test_a_label_of_several_words_needs_its_count():
+    source = f"{FAVICON}\n\nThe Verge+2\n"
+    assert _norm(source, "chatgpt")[0] == (
+        "[The Verge](https://device.report)\n"
+    )
+
+
+def test_a_favicon_citation_with_no_label_line_becomes_an_autolink():
+    source = f"{FAVICON}\n\nNext para here is prose"
+    assert _norm(source, "chatgpt")[0] == (
+        "<https://device.report>\n\nNext para here is prose"
+    )
+
+
+def test_a_favicon_citation_at_the_end_of_the_text():
+    assert _norm(FAVICON, "chatgpt")[0] == "<https://device.report>"
+
+
+def test_a_domain_without_a_scheme_gets_one():
+    source = (
+        "[image](https://www.google.com/s2/favicons"
+        "?domain=example.org&sz=32)\n\nexample.org+1"
+    )
+    assert (
+        _norm(source, "chatgpt")[0]
+        == "[example.org](https://example.org)"
+    )
+
+
+def test_a_favicon_citation_renders_as_a_labelled_link():
+    source = f"Text.\n\n{FAVICON}\n\ndevice.report+1\n\nNext para"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "Text.\n\n[https://device.report device.report]\n\nNext para"
+    )
+    assert markdown_to_tracwiki(source) == (
+        "Text.\n\n[https://www.google.com/s2/favicons"
+        "?domain=https://device.report&sz=32 image]"
+        "\n\ndevice.report+1\n\nNext para"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"```\n{FAVICON}\n\ndevice.report+1\n```",
+        f"Inline `{FAVICON}` here",
+    ],
+    ids=["fence", "code span"],
+)
+def test_a_favicon_citation_in_code_is_untouched(source):
+    assert _norm(source, "chatgpt")[0] == source
+
+
+def test_an_ordinary_image_link_is_untouched():
+    source = "[image](https://example.com/pic.png)\n\nlabel\n"
+    assert _norm(source, "chatgpt")[0] == source
+
+
+# -- chatgpt 3d: utm parameters -----------------------------------------------
+
+
+def test_utm_parameters_are_removed_from_every_url_form():
+    source = (
+        "See [x](https://e.com/a?utm_source=chatgpt.com&x=1) and "
+        "https://e.com/b?utm_source=a end <https://e.com/c?utm_medium=z>"
+    )
+    assert _norm(source, "chatgpt")[0] == (
+        "See [x](https://e.com/a?x=1) and https://e.com/b end "
+        "<https://e.com/c>"
+    )
+
+
+def test_utm_removal_keeps_the_other_parameters_in_order():
+    source = (
+        "https://e.com/p?a=1&utm_campaign=z&b=2&utm_source=q&c=3#frag"
+    )
+    assert (
+        _norm(source, "chatgpt")[0]
+        == "https://e.com/p?a=1&b=2&c=3#frag"
+    )
+
+
+def test_utm_removal_handles_an_escaped_ampersand():
+    assert _norm("https://e.com/p?utm_source=z\\&x=1", "chatgpt")[
+        0
+    ] == ("https://e.com/p?x=1")
+
+
+def test_a_url_ending_a_sentence_keeps_its_period():
+    assert _norm("Go to https://e.com/p?utm_source=z.", "chatgpt")[
+        0
+    ] == ("Go to https://e.com/p.")
+
+
+def test_a_url_in_a_closing_parenthesis_keeps_it():
+    assert _norm("(see https://e.com/p?utm_source=z)", "chatgpt")[
+        0
+    ] == ("(see https://e.com/p)")
+
+
+def test_a_url_without_utm_is_untouched():
+    source = "https://e.com/p?a=1&b=2#frag and https://e.com/q"
+    assert _norm(source, "chatgpt")[0] == source
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "```\nhttps://e.com/?utm_source=x\n```",
+        "Span `https://e.com/?utm_source=x` here",
+    ],
+    ids=["fence", "code span"],
+)
+def test_utm_in_code_is_untouched(source):
+    assert _norm(source, "chatgpt")[0] == source
+
+
+def test_utm_removal_through_the_converter():
+    source = "See [x](https://e.com/a?utm_source=chatgpt.com&x=1)."
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "See [https://e.com/a?x=1 x]."
+    )
+    assert markdown_to_tracwiki(source) == (
+        "See [https://e.com/a?utm_source=chatgpt.com&x=1 x]."
+    )
+
+
+def test_the_default_leaves_utm_alone():
+    source = "https://e.com/b?utm_source=a"
+    assert _norm(source, "commonmark")[0] == source
+
+
+# -- gemini 4a: code reconstruction -------------------------------------------
+
+
+def test_a_labelled_block_becomes_a_fence():
+    source = "Intro line\nbash\nls -la\nUse code with caution.\nAfter"
+    assert _norm(source, "gemini") == (
+        "Intro line\n\n```bash\nls -la\n```\nAfter",
+        [REBUILT_ONE],
+    )
+
+
+def test_a_block_at_the_start_needs_no_blank_line():
+    assert _norm("bash\nls\nUse code with caution.", "gemini")[0] == (
+        "```bash\nls\n```"
+    )
+
+
+def test_an_existing_blank_line_is_not_doubled():
+    source = "Intro\n\nbash\nls\nUse code with caution."
+    assert _norm(source, "gemini")[0] == "Intro\n\n```bash\nls\n```"
+
+
+def test_the_language_is_matched_case_insensitively_and_written_as_found():
+    assert _norm("Python\nx = 1\nUse code with caution.", "gemini")[
+        0
+    ] == ("```Python\nx = 1\n```")
+
+
+def test_the_code_is_kept_byte_for_byte():
+    code = (
+        "# Initialize the extension\n"
+        "def main():\n"
+        "    if __name__ == '__main__':\n"
+        "        run()\n"
+        "\n"
+        "\t# tab"
+    )
+    source = f"Step\npython\n{code}\nUse code with caution.\nDone"
+    assert _norm(source, "gemini")[0] == (
+        f"Step\n\n```python\n{code}\n```\nDone"
+    )
+
+
+def test_the_converted_code_survives_in_the_fence():
+    code = "# comment\nclass A:\n    x = __name__\n\n    def f(self):\n        pass"
+    source = f"Run:\npython\n{code}\nUse code with caution.\nDone"
+    converted = markdown_to_tracwiki(source, flavor="gemini")
+    assert (
+        converted == f"Run:\n\n{{{{{{#!python\n{code}\n}}}}}}\n\nDone"
+    )
+    broken = markdown_to_tracwiki(source)
+    assert "'''name'''" in broken or "= comment =" in broken
+
+
+def test_two_blocks_are_counted():
+    source = (
+        "a\nhtml\n<p>x</p>\nUse code with caution.\n"
+        "b\npython\nx = 1\nUse code with caution.\n"
+    )
+    text, warnings = _norm(source, "gemini")
+    assert text == (
+        "a\n\n```text/html\n<p>x</p>\n```\nb\n\n```python\nx = 1\n```\n"
+    )
+    assert warnings == [
+        "gemini: rebuilt 2 code block(s) from 'Use code with caution.' "
+        "markers"
+    ]
+
+
+def test_an_html_block_is_listed_as_text_html_not_rendered():
+    """Trac's `html` processor renders markup; a block of HTML source
+    would vanish from the page. `text/html` lists it (checked live in
+    test_converter_flavors_fixtures)."""
+    source = "html\n<p>x</p>\nUse code with caution."
+    assert _norm(source, "gemini")[0] == "```text/html\n<p>x</p>\n```"
+    assert markdown_to_tracwiki(source, flavor="gemini") == (
+        "{{{#!text/html\n<p>x</p>\n}}}"
+    )
+
+
+def test_a_language_line_with_no_closing_marker_changes_nothing():
+    source = "html\n<p>x</p>\nbye\n"
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_a_marker_before_any_language_line_changes_nothing():
+    source = "intro\n\nUse code with caution.\n\nmore"
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_a_word_that_is_not_a_language_is_not_a_label():
+    source = "banana\nx = 1\nUse code with caution.\n"
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_a_language_word_inside_a_sentence_is_not_a_label():
+    source = "use python here\nx = 1\nUse code with caution.\n"
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_fence_like_code_gets_a_longer_fence():
+    source = "markdown\n```py\nx\n```\nUse code with caution."
+    assert _norm(source, "gemini")[0] == (
+        "````markdown\n```py\nx\n```\n````"
+    )
+
+
+def test_a_label_inside_a_fence_is_untouched():
+    source = "```\nbash\nls\nUse code with caution.\n```\n"
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_the_marker_closes_the_nearest_label_after_it():
+    source = (
+        "```\nbash\nls\n```\n\npython\nx = 1\nUse code with caution.\n"
+    )
+    text, warnings = _norm(source, "gemini")
+    assert text == ("```\nbash\nls\n```\n\n```python\nx = 1\n```\n")
+    assert warnings == [REBUILT_ONE]
+
+
+# -- gemini 4b: bullets -------------------------------------------------------
+
+
+def test_a_bullet_character_becomes_a_list_item():
+    assert _norm(
+        "Intro\n\u2022 one\n  \u2022 two\n\u2022three", "gemini"
+    ) == (
+        "Intro\n- one\n- two\n- three",
+        [],
+    )
+    assert markdown_to_tracwiki(
+        "\u2022 one\n\u2022 two", flavor="gemini"
+    ) == (" * one\n * two")
+    assert markdown_to_tracwiki("\u2022 one\n\u2022 two") == (
+        "\u2022 one\n\u2022 two"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "```\n\u2022 x\n```",
+        "Use `\u2022 x` as the bullet",
+        "A bullet \u2022 mid-line stays",
+    ],
+    ids=["fence", "code span", "mid-line"],
+)
+def test_a_bullet_character_elsewhere_is_untouched(source):
+    assert _norm(source, "gemini")[0] == source
+
+
+def test_a_bullet_inside_a_rebuilt_block_is_untouched():
+    source = "intro\n\u2022 a\nUse code with caution.\n"
+    # No label line: nothing is rebuilt, the bullet becomes a list item.
+    assert (
+        _norm(source, "gemini")[0]
+        == "intro\n- a\nUse code with caution.\n"
+    )
+    source = "bash\necho \u2022\n\u2022 x\nUse code with caution.\n"
+    assert _norm(source, "gemini")[0] == (
+        "```bash\necho \u2022\n\u2022 x\n```\n"
+    )
+
+
+# -- gemini 4c: citations -----------------------------------------------------
+
+
+def test_a_spaced_citation_becomes_a_link():
+    assert _norm("see [1] (https://example.com/a) now", "gemini")[
+        0
+    ] == ("see [1](https://example.com/a) now")
+    assert (
+        markdown_to_tracwiki(
+            "see [1] (https://example.com/a) now", flavor="gemini"
+        )
+        == "see [https://example.com/a 1] now"
+    )
+    assert markdown_to_tracwiki(
+        "see [1] (https://example.com/a) now"
+    ) == ("see [1] (https://example.com/a) now")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "```\n[1] (https://example.com/a)\n```",
+        "Span `[1] (https://example.com/a)` here",
+        "see [x] (https://example.com/a)",
+        "see [1] (not a url)",
+    ],
+    ids=["fence", "code span", "label not digits", "no url"],
+)
+def test_other_citation_shapes_are_untouched(source):
+    assert _norm(source, "gemini")[0] == source
+
+
+# -- a profile leaves the other profile's input alone ------------------------
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"{FAVICON}\n\ndevice.report+1\n",
+        "Energy \\(E=mc^2\\) https://e.com/?utm_source=x\n",
+    ],
+    ids=["favicon", "math and utm"],
+)
+def test_gemini_does_not_touch_chatgpt_input(source):
+    assert _norm(source, "gemini")[0] == source
+    assert _flavors().flavor_plugins("gemini") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "bash\nls\nUse code with caution.\n",
+        "\u2022 one\n[1] (https://example.com/a)\n",
+    ],
+    ids=["code", "bullets and citations"],
+)
+def test_chatgpt_does_not_touch_gemini_input(source):
+    assert _norm(source, "chatgpt")[0] == source
+
+
+# -- 5: the hint under the default --------------------------------------------
+
+
+def test_the_default_hints_at_the_gemini_flavor():
+    source = "bash\nls\nUse code with caution.\n"
+    result = convert_with_warnings(source)
+    assert GEMINI_HINT in result.warnings
+    assert convert_with_warnings(
+        source, flavor="commonmark"
+    ).warnings == [GEMINI_HINT]
+    # No automatic switching: the output is today's.
+    assert result.text == "bash\nls\nUse code with caution."
+
+
+def test_the_hint_is_not_given_inside_code():
+    source = "```\nUse code with caution.\n```\n"
+    assert convert_with_warnings(source).warnings == []
+
+
+def test_the_hint_is_not_given_for_a_sentence_that_contains_it():
+    source = "Please do not say Use code with caution. here\n"
+    assert convert_with_warnings(source).warnings == []
+
+
+def test_the_gemini_flavor_reports_its_rebuilt_blocks_and_no_hint():
+    source = "bash\nls\nUse code with caution.\n"
+    result = convert_with_warnings(source, flavor="gemini")
+    assert result.warnings == [REBUILT_ONE]
+    assert result.text == "{{{#!sh\nls\n}}}"
+
+
+def test_the_chatgpt_flavor_has_no_gemini_hint():
+    source = "bash\nls\nUse code with caution.\n"
+    assert (
+        convert_with_warnings(source, flavor="chatgpt").warnings == []
+    )
+
+
+def test_commonmark_warnings_are_unchanged_without_the_marker():
+    result = convert_with_warnings("Some <b>bold</b> text\n")
+    assert result.warnings == [
+        "HTML tags detected - these may not render correctly in TracWiki."
+    ]

@@ -10,6 +10,12 @@ import logging
 
 import mcp.types as types
 
+from ...converters.flavors import (
+    DEFAULT_FLAVOR,
+    FLAVOR_SCHEMA,
+    apply_flavor,
+    flavor_problem,
+)
 from ...converters.markdown_to_tracwiki import convert_with_warnings
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
@@ -93,6 +99,7 @@ CONVERT_PREVIEW_TOOLS = [
                     ),
                     "default": "markdown",
                 },
+                "flavor": FLAVOR_SCHEMA,
                 "check_targets": {
                     "type": "boolean",
                     "description": (
@@ -184,6 +191,12 @@ async def _handle_convert_preview(
             "Provide format='markdown' or format='tracwiki'.",
         )
 
+    # Ticket #216: a Markdown flavour profile implies a Markdown source.
+    flavor = args.get("flavor", DEFAULT_FLAVOR)
+    problem = flavor_problem(flavor, fmt)
+    if problem is not None:
+        return build_error_response("validation_error", *problem)
+
     check_targets = args.get("check_targets", True)
     include_html = args.get("include_html", True)
 
@@ -218,11 +231,12 @@ async def _handle_convert_preview(
         )
 
     conversion_warnings: list[str] = []
+    markdown_source = content
     if fmt == "tracwiki":
         tracwiki = content
     else:
         try:
-            conversion = convert_with_warnings(content)
+            conversion = convert_with_warnings(content, flavor=flavor)
         except ValueError as e:
             # The converter refuses input it cannot represent (ticket #63).
             # Caught here rather than left to propagate: the dispatcher maps
@@ -237,6 +251,10 @@ async def _handle_convert_preview(
             )
         tracwiki = conversion.text
         conversion_warnings = conversion.warnings
+        # The Markdown-source checks read what was converted: the
+        # flavour's normalised text, so their findings (a list-item split,
+        # TracWiki markup in Markdown) line up with the converted output.
+        markdown_source, _ = apply_flavor(content, flavor)
 
     rendered_html = await run_sync(client.wiki_to_html, tracwiki)
     facts = extract_facts(rendered_html)
@@ -268,7 +286,7 @@ async def _handle_convert_preview(
         comment_numbers = await known_comment_numbers(client, ticket_id)
 
     warnings = build_warnings(
-        markdown_source=content,
+        markdown_source=markdown_source,
         tracwiki=tracwiki,
         facts=facts,
         probes=probes,
@@ -276,6 +294,7 @@ async def _handle_convert_preview(
         # The caller already told us what it wrote; pass it on rather
         # than letting the checks assume Markdown (ticket #65).
         source_format=fmt,
+        flavor=flavor,
         local_intertrac_bases=local_intertrac_bases(),
         own_prefix=own_intertrac_prefix(client),
         known_comment_numbers=comment_numbers,

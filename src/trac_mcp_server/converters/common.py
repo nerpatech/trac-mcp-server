@@ -477,6 +477,7 @@ async def auto_convert(
     config,
     target_format: str | None = None,
     source_format: str | None = None,
+    flavor: str = "commonmark",
 ) -> ConversionResult:
     """Automatically convert text based on server capabilities and source format.
 
@@ -499,6 +500,9 @@ async def auto_convert(
             knows the source format (e.g. from a file extension), since the
             heuristic can be fooled by content that contains examples of the
             *other* format inside code blocks or prose.
+        flavor: The Markdown flavour profile of a Markdown source
+            (``converters.flavors.FLAVORS``), forwarded to
+            ``markdown_to_tracwiki``. Ignored for a TracWiki source.
 
     Returns:
         ConversionResult with converted text and metadata
@@ -543,7 +547,7 @@ async def auto_convert(
             warnings=[],
         )
     elif source_format == "markdown" and target_format == "tracwiki":
-        return markdown_to_tracwiki(text)
+        return markdown_to_tracwiki(text, flavor=flavor)
     elif source_format == "tracwiki" and target_format == "markdown":
         raise ValueError(
             "TracWiki -> Markdown needs Trac's rendered HTML: use"

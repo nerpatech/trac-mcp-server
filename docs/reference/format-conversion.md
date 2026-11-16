@@ -40,6 +40,48 @@ on, which the inline tools do not.
 | `wiki_file_pull` | TracWiki | Markdown or TracWiki | For Markdown, Trac's rendered HTML for the page, translated: a one-way export (see below) |
 | `convert_preview` | Markdown | TracWiki | Converts, without writing anything |
 
+## Flavour profiles
+
+Text pasted from another bot is not always plain CommonMark. A **flavour
+profile** changes the Markdown before it is parsed and adds the parser
+rules the flavour needs (Trac /trac_mcp_server #216). It is chosen per
+call: `flavor` on `wiki_file_push` and `convert_preview`, `--flavor` on
+`trac-convert` (Markdown -> TracWiki only) and `trac-mcp wiki-push`. The
+values are `commonmark` (the default: the output is exactly what the
+converter always produced), `chatgpt` and `gemini`. A flavour implies a
+Markdown source, so `format="tracwiki"` with a non-default flavour is a
+validation error, and `format="auto"` (inline content included, which is
+otherwise TracWiki) converts as Markdown. The ticket tools never convert,
+so a paste meant for a ticket goes through `trac-convert --from md --to
+tracwiki --flavor ...` first.
+
+Nothing a flavour rewrites touches a fenced code block or an inline code
+span.
+
+**`chatgpt`**
+
+| Input | Output |
+|-------|--------|
+| inline math `\(x\)`, or `\\(x\\)` as the dialogue text has it | a code span, `` `x` ``; `{{{x}}}` when the formula holds a backtick. In the doubled form Markdown escapes inside the formula are removed (`R\_{x}` is `R_{x}`); letters after a backslash (`\text`) stay. The single form is kept as written |
+| `\[x\]` or `\\[x\\]` that is a whole paragraph (one or several lines) | `{{{#!latex` ... `}}}` (this Trac has no math processor; `latex` is accepted as Pygments highlighting, so the formula shows as source) |
+| `\[x\]` inside a table cell or a sentence | a code span, as inline math |
+| a line `[image](https://www.google.com/s2/favicons?domain=D...)` followed by a label line (`name` or `name+N`) | one link `[name](D)`; with no label line, `<D>` |
+| `utm_*` query parameters of a link target, autolink or bare URL | removed (the other parameters stay in order; an emptied `?` goes) |
+
+**`gemini`** (a copy of the rendered Gemini page, which is not Markdown)
+
+| Input | Output |
+|-------|--------|
+| a line that is exactly a language name (`html`, `bash`, `python`, ...), the code, then a line `Use code with caution.` | a fenced block in that language, the code byte for byte; the marker line is dropped, the fence is longer if the code holds a fence line, and one `gemini: rebuilt N code block(s) ...` warning is added. `html` is fenced as `text/html`, because the `html` processor would render the markup instead of showing it. Without the closing marker nothing changes |
+| a line starting with `•` | a `- ` list item |
+| `[N] (https://...)` | the link `[N](https://...)` |
+
+Under the default, a line `Use code with caution.` outside code adds the
+warning `Line "Use code with caution." looks like text copied from a Gemini
+page; convert with flavor "gemini" (--flavor gemini) to rebuild its code
+blocks.` Nothing is switched automatically: without the flavour a `#
+comment` in such code is a heading and `__name__` is bold.
+
 ## Holding Markdown?
 
 Convert it yourself before writing, with the `trac-convert` binary:
