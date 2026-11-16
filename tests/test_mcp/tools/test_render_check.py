@@ -1234,10 +1234,10 @@ class TestRenderCheckLive:
         assert not result.isError
         assert result.structuredContent["stats"]["sections"] >= 1
 
-    def test_project_milestones_reports_its_autolink_as_incidental(
+    def test_bare_humped_word_renders_plain_under_ignore_missing_pages(
         self,
     ):
-        """Live content, and this test has already been inverted once.
+        """Live render, and this test has already been inverted twice.
 
         It was written as "finds a dead link on `ProjectMilestones`"
         and passed on `missing_local_target`. Ticket #79 measured what
@@ -1260,36 +1260,38 @@ class TestRenderCheckLive:
         Found by the live suite, which `ci.sh` does not run -- the
         offline suite is green across this change, since the offline
         fixtures pin the pre-option render and are unaffected.
+
+        Ticket #225 deleted `ProjectMilestones`, an April-2026 mirror
+        page, so the test no longer reads a page: it renders that page's
+        kind of sentence through the same renderer (`wiki_to_html` on
+        the live suite's default instance) and the same checks
+        (`build_warnings`), as the #115 row below does.
         """
         from trac_mcp_server.config_bootstrap import bootstrap_config
         from trac_mcp_server.core.client import TracClient
+        from trac_mcp_server.preview.checks import build_warnings
+        from trac_mcp_server.preview.facts import extract_facts
 
         config, _ = bootstrap_config()
         client = TracClient(config)
 
-        result = asyncio.run(
-            _handle_wiki_render_check(
-                client,
-                {
-                    "page_name": "ProjectMilestones",
-                    "check_targets": False,
-                    "include_html": True,
-                },
-            )
+        source = (
+            " * Set up CI pipeline (GitHub Actions + local ci.sh)\n"
         )
-        assert not result.isError
-        warnings = [
-            w
-            for s in result.structuredContent["sections"]
-            for w in s["warnings"]
+        html = client.wiki_to_html(source)
+        codes = [
+            w["code"]
+            for w in build_warnings(
+                None,
+                source,
+                extract_facts(html),
+                probes={},
+                check_targets=False,
+                source_format="tracwiki",
+            )
         ]
-        codes = [w["code"] for w in warnings]
         assert "incidental_wiki_autolink" not in codes, codes
         assert "missing_local_target" not in codes, codes
-        html = "".join(
-            s["html"] or ""
-            for s in result.structuredContent["sections"]
-        )
         assert '/wiki/GitHub"' not in html, html
 
     def test_ticket_115_replication_string_is_flagged(self):
