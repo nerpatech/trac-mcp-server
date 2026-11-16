@@ -17,8 +17,10 @@ Markdown converter of #209/#213):
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from html import escape, unescape
-from html.parser import HTMLParser
+from html.entities import html5
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
 from urllib.parse import unquote, urlsplit
 
 
@@ -95,7 +97,8 @@ class LinkTargets:
         """The target of one ``href``: an in-page anchor as ``#frag``,
         else ``link_map`` applied, longest prefix first.
 
-        An in-page anchor is never rewritten, whatever the map says.
+        An in-page anchor is written ``#frag`` and never mapped by
+        ``link_map``, whatever the map says.
         Images are not mapped at all (#215).
         """
         if not url:
@@ -111,24 +114,89 @@ class LinkTargets:
 
 # --- the HTML export --------------------------------------------------------
 
-# One attribute of a start tag's raw text: the name, then optionally "="
-# and a double-quoted, single-quoted or unquoted value (the grammar
-# html.parser itself uses for them). Group "value" is the value without
-# its quotes; exactly one of "dq", "sq" and "bare" matches.
-_ATTRIBUTE = re.compile(
-    r"""
-    [\s/]*
-    (?P<name>[^\s/>=][^\s/>=]*)
-    (?:
-        \s*=\s*
-        (?:
-            "(?P<dq>[^"]*)" | '(?P<sq>[^']*)' | (?P<bare>[^\s>]*)
-        )
-    )?
-    """,
-    re.VERBOSE,
+# An attribute value is not text: HTML5 leaves a named character
+# reference written without its ";" literal when the next character is
+# an ASCII letter, digit or "=", so "?a=1&not=2" is the URL it looks like
+# and not "?a=1" + "\u00ac" + "=2". html.unescape (what HTMLParser uses)
+# decodes it either way. Same pattern as html.unescape's own.
+_CHARREF = re.compile(
+    r"&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)"
 )
-_TAG_NAME = re.compile(r"<[^\s/>]*")
+
+
+def _attribute_reference(match: re.Match[str]) -> str:
+    name = match.group(1)
+    if name[0] != "#" and name not in html5:
+        # The longest legacy (";"-less) name the text starts with, as
+        # html.unescape finds it; whether it decodes depends on what
+        # follows it.
+        for length in range(len(name) - 1, 1, -1):
+            if name[:length] in html5:
+                follower = name[length]
+                if (follower.isascii() and follower.isalnum()) or (
+                    follower == "="
+                ):
+                    return match.group(0)
+                break
+    return unescape(match.group(0))
+
+
+def unescape_attribute(value: str) -> str:
+    """``value`` of an attribute with its character references decoded
+    the HTML5 way (see ``_CHARREF``)."""
+    if "&" not in value:
+        return value
+    return _CHARREF.sub(_attribute_reference, value)
+
+
+@dataclass(frozen=True)
+class _Attribute:
+    """One attribute of a start tag's raw text."""
+
+    name: str  # lower-cased
+    value: str | None  # raw, without quotes; None when there is no "="
+    span: tuple[int, int]  # of the value text, quotes not included
+    quoted: bool
+
+
+def _attributes(raw: str) -> list[_Attribute]:
+    """The attributes of a start tag's raw text, read the way
+    ``HTMLParser.parse_starttag`` reads them: its own regexes, its own
+    loop (a name may start with ``=``, ``href==x`` is one attribute, and
+    the first text that is not an attribute ends the list)."""
+    found: list[_Attribute] = []
+    name = tagfind_tolerant.match(raw, 1)
+    pos = name.end() if name else 1
+    while pos < len(raw):
+        match = attrfind_tolerant.match(raw, pos)
+        if match is None:
+            break
+        pos = match.end()
+        attr_name, equals, value = match.group(1, 2, 3)
+        if not equals:
+            found.append(
+                _Attribute(
+                    attr_name.lower(), None, match.span(1), False
+                )
+            )
+            continue
+        start, end = match.span(3)
+        quoted = value[:1] in ("'", '"')
+        if quoted:
+            start, end = start + 1, end - 1
+            value = value[1:-1]
+        found.append(
+            _Attribute(attr_name.lower(), value, (start, end), quoted)
+        )
+    return found
+
+
+# Elements whose content HTML5 reads as text (RCDATA, RAWTEXT), whatever
+# it looks like, up to the element's end tag. html.parser does this only
+# for script and style.
+_TEXT_ELEMENTS = frozenset(
+    {"title", "textarea", "xmp", "iframe", "noembed", "noframes"}
+)
 
 
 class _StartTags(HTMLParser):
@@ -136,7 +204,10 @@ class _StartTags(HTMLParser):
 
     ``html.parser`` knows what is a tag and what is text, a comment or
     script/style content; it is asked only where the tags are, and the
-    attributes are read from their raw text by the caller.
+    attributes are read from their raw text by the caller. The elements
+    of ``_TEXT_ELEMENTS`` hold text up to their end tag, and
+    ``<plaintext>`` holds the rest of the document, so no tag in them is
+    reported.
     """
 
     def __init__(self, text: str):
@@ -147,9 +218,12 @@ class _StartTags(HTMLParser):
             m.end() for m in re.finditer("\n", text)
         ]
         self._floor = 0
+        self._plaintext = False
         self.tags: list[tuple[int, str]] = []
 
     def _note(self) -> None:
+        if self._plaintext:
+            return
         raw = self.get_starttag_text()
         if raw is None:  # pragma: no cover - a start tag always has it
             return
@@ -166,6 +240,10 @@ class _StartTags(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         self._note()
+        if tag == "plaintext":
+            self._plaintext = True
+        elif tag in _TEXT_ELEMENTS and self.cdata_elem is None:
+            self.set_cdata_mode(tag)
 
     def handle_startendtag(self, tag, attrs):
         self._note()
@@ -177,31 +255,17 @@ def _href_edits(
     """The ``(start, end, replacement)`` edits of one start tag's
     ``href`` values, as absolute offsets into the document."""
     edits: list[tuple[int, int, str]] = []
-    name = _TAG_NAME.match(raw)
-    pos = name.end() if name else 0
-    while True:
-        attr = _ATTRIBUTE.match(raw, pos)
-        if attr is None:
-            break
-        pos = attr.end()
-        if attr.group("name").lower() != "href":
+    for attr in _attributes(raw):
+        if attr.name != "href" or not attr.value:
             continue
-        for group in ("dq", "sq", "bare"):
-            value = attr.group(group)
-            if value is not None:
-                break
-        else:
-            continue  # "href" with no value
-        if not value:
-            continue
-        original = unescape(value)
+        original = unescape_attribute(attr.value)
         mapped = targets.map(original)
         if mapped == original:
             continue
-        start, end = attr.span(group)
         new = escape(mapped, quote=True)
-        if group == "bare":
+        if not attr.quoted:
             new = f'"{new}"'
+        start, end = attr.span
         edits.append((offset + start, offset + end, new))
     return edits
 
@@ -217,14 +281,16 @@ def rewrite_hrefs(
 
     The document is not parsed into a tree and written back, which would
     normalise quotes and entities everywhere. ``html.parser`` locates
-    the start tags; each tag's own text is read for its attributes, so
-    ``data-href`` and ``href=`` inside another attribute's value are not
-    taken for an ``href``. Text, ``<pre>`` content, comments and
-    script/style content are not tags and are never touched. The value
-    is unescaped before it is mapped; one whose target is unchanged
-    keeps its bytes, else the new target is escaped into the same quote
-    (double quotes for a value that had none). An empty ``href`` is left
-    alone, and ``src`` is never looked at.
+    the start tags; each tag's own text is read for its attributes with
+    the same regexes and loop ``html.parser`` uses, so ``data-href`` and
+    ``href=`` inside another attribute's value are not taken for an
+    ``href``. Text, ``<pre>`` content, comments, script/style content
+    and the content of ``title``, ``textarea`` and the like are not tags
+    and are never touched. The value is unescaped (the HTML5 attribute
+    way) before it is mapped; one whose target is unchanged keeps its
+    bytes, else the new target is escaped into the same quote (double
+    quotes for a value that had none). An empty ``href`` is left alone,
+    and ``src`` is never looked at.
     """
     targets = LinkTargets(link_map, document_url)
     parser = _StartTags(html)
@@ -233,6 +299,15 @@ def rewrite_hrefs(
     edits: list[tuple[int, int, str]] = []
     for offset, raw in parser.tags:
         edits.extend(_href_edits(offset, raw, targets))
-    for start, end, new in reversed(edits):
-        html = html[:start] + new + html[end:]
-    return html
+    if not edits:
+        return html
+    # Tags come in document order and an edit lies inside its tag, so
+    # the edits are in order and disjoint: one forward pass.
+    parts: list[str] = []
+    pos = 0
+    for start, end, new in edits:
+        parts.append(html[pos:start])
+        parts.append(new)
+        pos = end
+    parts.append(html[pos:])
+    return "".join(parts)

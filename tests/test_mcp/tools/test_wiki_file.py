@@ -3,6 +3,7 @@
 import xmlrpc.client
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import mcp.types as types
 import pytest
@@ -2785,3 +2786,51 @@ class TestStripYamlFrontmatterForms:
 
     def test_closing_fence_at_end_of_text(self):
         assert _strip_yaml_frontmatter("---\nx: 1\n---") == ""
+
+
+class TestPullDocumentUrlIsPercentEncoded:
+    """Trac percent-encodes the page path of the URLs it renders, so the
+    document URL must be built the same way for an anchor to be in-page
+    (Trac #219 review)."""
+
+    @staticmethod
+    def _client(page_name):
+        client = _make_client()
+        encoded = quote(page_name, safe="/")
+        client.get_wiki_page.return_value = "src"
+        client.get_wiki_page_info.return_value = {"version": 2}
+        client.get_wiki_page_html.return_value = (
+            f'<p><a href="http://localhost/trac/wiki/{encoded}#H">h</a> '
+            '<a href="http://localhost/trac/wiki/Other#H">o</a></p>\n'
+        )
+        return client
+
+    @pytest.mark.parametrize(
+        "page_name",
+        ["Rate%20Card", "Rate Card", "Café/Menu", "A+B"],
+    )
+    @pytest.mark.parametrize("fmt", ["html", "markdown"])
+    async def test_the_anchor_into_the_page_becomes_a_fragment(
+        self, tmp_path, page_name, fmt
+    ):
+        out = tmp_path / "out.txt"
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": page_name,
+                "file_path": str(out),
+                "format": fmt,
+            },
+            self._client(page_name),
+        )
+        assert not result.isError, result.content
+        text = out.read_text()
+        if fmt == "html":
+            assert '<a href="#H">h</a>' in text
+            assert (
+                '<a href="http://localhost/trac/wiki/Other#H">o</a>'
+                in text
+            )
+        else:
+            assert "[h](#H)" in text
+            assert "[o](http://localhost/trac/wiki/Other#H)" in text

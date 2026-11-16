@@ -174,8 +174,9 @@ WIKI_FILE_TOOLS = [
             "stored source verbatim. Translator warnings come back in "
             "structuredContent.warnings (always a list). "
             "link_rewrites ({from, to} URL-prefix rules, longest prefix "
-            "first) rewrites the links (never the images or in-page "
-            "#anchors) of a Markdown or html pull: given, it replaces "
+            "first) rewrites the links of a Markdown or html pull "
+            "(never the images; an in-page anchor is written #frag "
+            "and never mapped): given, it replaces "
             "the server's configured map ([] = no rewriting), omitted "
             "the configured map applies; structuredContent.link_"
             "rewrites_source says which was used (call, config or "
@@ -253,8 +254,9 @@ WIKI_FILE_TOOLS = [
                         "prefix replaced by `to` (longest `from` "
                         "first). Replaces the server's configured map "
                         "for this call; [] disables rewriting. Image "
-                        "sources and in-page #anchors are never "
-                        "rewritten. The schema refuses an empty `from` "
+                        "sources are never rewritten, and an in-page "
+                        "anchor is written #frag, never mapped. The "
+                        "schema refuses an empty `from` "
                         "or an extra key; a duplicate `from` is a "
                         "validation_error. Ignored for "
                         "format=tracwiki."
@@ -789,10 +791,15 @@ async def _handle_pull(
 
     # The page's own URL, as Trac renders a link into it ("[#Frag x]" is
     # "<this>#Frag"): those are in-page anchors, written "#Frag" and never
-    # rewritten, in Markdown and in html. client.config is the routed
-    # instance's, so the base is that instance's.
+    # mapped by link_rewrites, in Markdown and in html. client.config is
+    # the routed instance's, so the base is that instance's. Trac
+    # percent-encodes the page path, and so does page_url: a page named
+    # "Rate%20Card" is ".../wiki/Rate%2520Card", which is not the URL of
+    # "Rate Card". Tracwiki converts nothing and has no use for it.
     document_url = (
-        f"{client.config.trac_url.rstrip('/')}/wiki/{page_name}"
+        page_url(client.config.trac_url, page_name)
+        if fmt in ("markdown", "html")
+        else None
     )
 
     converted = False

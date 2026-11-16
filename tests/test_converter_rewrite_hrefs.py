@@ -8,12 +8,15 @@ mapped.
 """
 
 import re
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 
 from trac_mcp_server.converters.link_targets import (
     LinkTargets,
+    _StartTags,
     rewrite_hrefs,
 )
 
@@ -366,3 +369,194 @@ def test_a_real_render_with_a_map_changes_some_hrefs():
     assert out != html
     assert "https://blog.example/" in out
     assert f"{base}/wiki/WikiFormatting#" not in out
+
+
+# --- review fixes (#219) ----------------------------------------------------
+
+_T = "http://t/x/wiki/"
+_PUB = {"http://t/x/wiki/": "https://pub/"}
+
+
+# Finding 1: an attribute value unescapes the HTML5 way.
+
+
+def test_a_semicolonless_legacy_reference_before_equals_stays_literal():
+    # "&not=2" is NOT "\u00ac=2" in an attribute value (HTML5), so the
+    # value is the URL it looks like and the map applies to it.
+    html = f'<a href="{_T}A?a=1&not=2">x</a>'
+    assert (
+        rewrite_hrefs(html, _PUB, None)
+        == '<a href="https://pub/A?a=1&amp;not=2">x</a>'
+    )
+
+
+def test_a_literal_legacy_reference_in_an_unmapped_url_keeps_its_bytes():
+    html = '<a href="https://other/A?a=1&not=2">x</a>'
+    assert rewrite_hrefs(html, _PUB, None) == html
+
+
+@pytest.mark.parametrize(
+    "value, decoded",
+    [
+        ("a=1&copy;b", "a=1\u00a9b"),
+        ("a=1&copy b", "a=1\u00a9 b"),
+        ("a=1&copy", "a=1\u00a9"),
+        ("a=1&amp;b=2", "a=1&b=2"),
+        ("a=1&amp b", "a=1& b"),
+        ("a=1&amp=2", "a=1&amp=2"),
+        ("a=1&#38;b=2", "a=1&b=2"),
+        ("a=1&#x26;b=2", "a=1&b=2"),
+        ("a=1&not=2", "a=1&not=2"),
+        ("a=1&notit;b", "a=1&notit;b"),
+        ("a=1&para=2", "a=1&para=2"),
+        ("a=1&reg1", "a=1&reg1"),
+        ("a=1&not-x", "a=1\u00ac-x"),
+        ("a=1&not;=2", "a=1\u00ac=2"),
+        ("a=1&bogus;b", "a=1&bogus;b"),
+        ("plain", "plain"),
+    ],
+)
+def test_attribute_value_references_follow_html5(value, decoded):
+    from trac_mcp_server.converters.link_targets import (
+        unescape_attribute,
+    )
+
+    assert unescape_attribute(value) == decoded
+
+
+# Finding 2: the attribute grammar is HTMLParser's own.
+
+
+def test_a_nameless_equals_attribute_does_not_hide_the_href():
+    html = f'<a =foo href="{_T}A">x</a>'
+    assert (
+        rewrite_hrefs(html, _PUB, None)
+        == '<a =foo href="https://pub/A">x</a>'
+    )
+
+
+def test_a_doubled_equals_yields_the_value_htmlparser_reports():
+    html = f'<a href=="{_T}A">x</a>'
+    assert (
+        rewrite_hrefs(html, _PUB, None)
+        == '<a href=="https://pub/A">x</a>'
+    )
+
+
+_ODD_TAGS = [
+    f'<a href="{_T}A">',
+    f"<a href='{_T}A'>",
+    f"<a href={_T}A>",
+    f'<a =foo href="{_T}A">',
+    f'<a href=="{_T}A">',
+    f'<a href = "{_T}A" >',
+    f'<a href\n=\n"{_T}A">',
+    f'<a/href="{_T}A">',
+    f'<a x="1"href="{_T}A">',
+    f'<a x=\'a"b\' href="{_T}A">',
+    "<a href>",
+    "<a href=>",
+    '<a href="">',
+    f'<a HREF="{_T}A" Href="{_T}B">',
+    f'<a data-href="{_T}A" href="{_T}B">',
+    f'<a title="href=\'{_T}A\'" href="{_T}B">',
+    f'<a href="{_T}A?a=1&amp;b=2" id=x/>',
+    f"<a href={_T}A/>",
+    f'<a href="{_T}A"/>',
+    '<a href="unterminated>',
+    f"<a href='{_T}A\"B'>",
+    f"<a  \t href  =  '{_T}A'  class = c >",
+    f'<a ==x href="{_T}A">',
+    f'<a x= href="{_T}A">',
+]
+
+
+class _Reference(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.attrs = []
+
+    def handle_starttag(self, tag, attrs):
+        self.attrs.append(attrs)
+
+    handle_startendtag = handle_starttag
+
+
+@pytest.mark.parametrize("html", _ODD_TAGS)
+def test_the_tokeniser_sees_the_attributes_htmlparser_reports(html):
+    reference = _Reference()
+    reference.feed(html + "</a>")
+    reference.close()
+    from trac_mcp_server.converters.link_targets import _attributes
+
+    tags = _StartTags(html + "</a>")
+    tags.feed(html + "</a>")
+    tags.close()
+    mine = [
+        [
+            (
+                a.name,
+                unescape(a.value) if a.value else a.value,
+            )
+            for a in _attributes(raw)
+        ]
+        for _, raw in tags.tags
+    ]
+    assert mine == reference.attrs
+
+
+# Finding 3: raw-text elements hold text, not tags.
+
+
+@pytest.mark.parametrize(
+    "tag", ["textarea", "title", "xmp", "iframe", "noembed", "noframes"]
+)
+def test_a_raw_text_element_s_content_is_not_rewritten(tag):
+    inside = f'<{tag}><a href="{_T}Q">x</a></{tag}>'
+    after = f'<a href="{_T}Q">y</a>'
+    out = rewrite_hrefs(inside + after, _PUB, None)
+    assert out == inside + '<a href="https://pub/Q">y</a>'
+
+
+def test_a_raw_text_element_ends_at_its_end_tag_in_any_case():
+    html = f'<TEXTAREA><a href="{_T}Q">x</a></TextArea><a href="{_T}Q">y</a>'
+    assert rewrite_hrefs(html, _PUB, None) == (
+        f'<TEXTAREA><a href="{_T}Q">x</a></TextArea>'
+        '<a href="https://pub/Q">y</a>'
+    )
+
+
+def test_a_comment_opener_inside_textarea_does_not_swallow_its_end():
+    html = (
+        f'<textarea><!-- <a href="{_T}Q">x</a></textarea>'
+        f'<a href="{_T}Q">y</a>'
+    )
+    assert rewrite_hrefs(html, _PUB, None) == (
+        f'<textarea><!-- <a href="{_T}Q">x</a></textarea>'
+        '<a href="https://pub/Q">y</a>'
+    )
+
+
+def test_plaintext_content_runs_to_the_end_of_the_document():
+    html = f'<a href="{_T}Q">a</a><plaintext><a href="{_T}Q">b</a></plaintext>'
+    assert rewrite_hrefs(html, _PUB, None) == (
+        f'<a href="https://pub/Q">a</a><plaintext>'
+        f'<a href="{_T}Q">b</a></plaintext>'
+    )
+
+
+# Finding 5: many edits, one result.
+
+
+def test_many_links_are_all_rewritten_in_order():
+    n = 2000
+    html = "".join(
+        f'<p>{i}<a href="{_T}P{i}">l{i}</a><a href="http://z/{i}">z</a></p>\n'
+        for i in range(n)
+    )
+    expected = "".join(
+        f'<p>{i}<a href="https://pub/P{i}">l{i}</a>'
+        f'<a href="http://z/{i}">z</a></p>\n'
+        for i in range(n)
+    )
+    assert rewrite_hrefs(html, _PUB, None) == expected

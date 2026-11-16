@@ -1147,7 +1147,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Rewrite the page's links: a link target starting with FROM "
             "has that prefix replaced by TO (longest FROM first; "
-            "images and #anchors are never rewritten). Repeatable. "
+            "images are never rewritten; an in-page anchor is written "
+            "#frag and never mapped). Repeatable. "
             "Replaces export.link_rewrites of .trac_mcp/config.yaml, "
             "which is sent when this is not given. Markdown and html "
             "(no effect with tracwiki)."

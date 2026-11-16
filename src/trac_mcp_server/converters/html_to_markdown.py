@@ -969,8 +969,8 @@ def trac_html_to_markdown(
             it, code blocks carry no language.
         link_map: URL prefix -> replacement prefix, applied to
             ``a[href]`` (also inside raw HTML), longest prefix first.
-            An in-page anchor (see ``document_url``) and ``img[src]`` are
-            never rewritten.
+            An in-page anchor (see ``document_url``) is written
+            ``#frag`` and never mapped; ``img[src]`` is never rewritten.
         keep_toc: Keep the table of contents a ``[[PageOutline]]`` or
             ``[[TracGuideToc]]`` macro renders; it is dropped otherwise.
         deflist: ``"extra"`` writes a definition list as ``term`` /
