@@ -196,7 +196,7 @@ def _favicon_citation(m: re.Match[str]) -> str:
     if raw is not None:
         raw = raw.strip()
         count = _LABEL_COUNT_RE.search(raw)
-        label = raw[: count.start()] if count else raw
+        label = (raw[: count.start()] if count else raw).strip()
         # A label is a site name: one word, or words ending `+N`. A line
         # of prose after the favicon is not eaten.
         if (
@@ -206,9 +206,14 @@ def _favicon_citation(m: re.Match[str]) -> str:
             and (" " not in label or count)
         ):
             return f"[{label}]({domain})"
-    # No label line, or the line after it is prose: the link alone, and
-    # whatever followed the favicon line is kept.
-    return f"<{domain}>" + m.group(0)[len(m.group("first")) :]
+    # No label line, or the line after it is prose: the link alone, named
+    # by its domain (a Markdown link, not `<...>`, which the converter's
+    # HTML-tag check reads as a tag), and whatever followed the favicon
+    # line is kept.
+    name = re.sub(r"^[A-Za-z][A-Za-z0-9+.-]*://", "", domain).rstrip(
+        "/"
+    )
+    return f"[{name}]({domain})" + m.group(0)[len(m.group("first")) :]
 
 
 def _chatgpt_citations(text: str) -> tuple[str, list[str]]:
@@ -361,6 +366,12 @@ def _math_text(raw: str, doubled: bool) -> str:
     return raw.strip()
 
 
+def _unrepresentable(formula: str) -> bool:
+    """A formula holding a backtick AND `}}}` has no inline TracWiki form:
+    a code span cannot hold the backtick and `{{{ }}}` ends at the `}}}`."""
+    return "`" in formula and "}}}" in formula
+
+
 def inline_math_markup(text: str) -> str:
     """TracWiki for inline math: a code span, or `{{{ }}}` when the
     formula holds a backtick (a code span cannot)."""
@@ -383,8 +394,19 @@ def _parse_inline_math(
     inline: Any, m: re.Match[str], state: Any
 ) -> int | None:
     text = _inline_math_of(m)
-    if not text:
-        return None
+    if not text or _unrepresentable(text):
+        # Not math: read the opener as CommonMark does (`\\(` is a
+        # backslash, `\(` an escaped bracket) instead of returning None,
+        # which would drop the backslash and skip the escape rule.
+        opener = m.group("cgm_d") or m.group("cgm_bd")
+        bracket = "(" if m.group("cgm_d") is not None else "["
+        state.append_token(
+            {
+                "type": "text",
+                "raw": "\\" if len(opener) == 2 else bracket,
+            }
+        )
+        return m.start() + 2
     state.append_token({"type": "inline_math", "raw": text})
     return m.end()
 
@@ -435,36 +457,64 @@ _MATH_SENTINEL_RE = re.compile(r"\x00MT(\d+)\x00")
 Protected = tuple[str, str | None]
 
 
-def _protect_math(text: str) -> tuple[str, list[Protected]]:
-    mask = _code_mask(text)
-    spans: list[tuple[int, int, str | None]] = []
+def _math_spans(
+    text: str, mask: str
+) -> list[tuple[int, int, str, str]]:
+    """The math of ``text`` outside code, in order: ``(start, end, kind,
+    formula)``, kind "block" (a display paragraph), "inline" or "bad" (an
+    inline formula with no TracWiki form)."""
+    spans: list[tuple[int, int, str, str]] = []
     for m in _MATH_BLOCK_RE.finditer(mask):
         if "\x01" not in m.group(0) and _starts_a_paragraph(
             text, m.start()
         ):
-            spans.append((m.start(), m.end(), None))
+            spans.append((m.start(), m.end(), "block", ""))
     inline_mask = list(mask)
-    for start, end, _ in spans:
+    for start, end, _, _ in spans:
         inline_mask[start:end] = "\x01" * (end - start)
     for m in _MATH_INLINE_RE.finditer("".join(inline_mask)):
         if "\x01" in m.group(0):
             continue
         formula = _inline_math_of(m)
         if formula:
-            spans.append(
-                (m.start(), m.end(), inline_math_markup(formula))
-            )
+            kind = "bad" if _unrepresentable(formula) else "inline"
+            spans.append((m.start(), m.end(), kind, formula))
     spans.sort(key=lambda span: span[0])
+    return spans
+
+
+def _protect_math(text: str) -> tuple[str, list[Protected]]:
+    spans = [
+        span
+        for span in _math_spans(text, _code_mask(text))
+        if span[2] != "bad"
+    ]
     out: list[str] = []
     saved: list[Protected] = []
     last = 0
-    for start, end, rendered in spans:
+    for start, end, kind, formula in spans:
         out.append(text[last:start])
         out.append(f"\x00MT{len(saved)}\x00")
+        rendered = (
+            inline_math_markup(formula) if kind == "inline" else None
+        )
         saved.append((text[start:end], rendered))
         last = end
     out.append(text[last:])
     return "".join(out), saved
+
+
+def _chatgpt_math_notes(text: str) -> tuple[str, list[str]]:
+    """A warning for each formula left as written (see `_unrepresentable`);
+    the text is not changed."""
+    notes = [
+        f"chatgpt: formula left as written, TracWiki has no inline form "
+        f"for a formula holding both a backtick and '}}}}}}': "
+        f"{formula[:40]!r}"
+        for _, _, kind, formula in _math_spans(text, _code_mask(text))
+        if kind == "bad"
+    ]
+    return text, notes
 
 
 _PROTECTORS: dict[str, Callable[[str], tuple[str, list[Protected]]]] = {
@@ -519,12 +569,14 @@ _GEMINI_LANGUAGES = frozenset(
 
 
 def _fence_info(label: str) -> str:
-    """The fence info string for a language label, as written, except
-    ``html``: the converter passes ``html`` through as `{{{#!html`, and
+    """The fence info string for a language label, lowercased (the label is
+    matched case-insensitively, and the converter maps lowercase names:
+    `Python` would be `{{{#!Python`), except ``html``: the converter passes ``html`` through as `{{{#!html`, and
     Trac's `html` processor renders the markup instead of showing it, so
     a block of HTML source would vanish into the page (measured on
     /trac_test). `text/html` is the Pygments listing of the same source."""
-    return "text/html" if label.lower() == "html" else label
+    label = label.lower()
+    return "text/html" if label == "html" else label
 
 
 def _is_fence_line(line: str) -> bool:
@@ -552,7 +604,10 @@ def _gemini_code_blocks(text: str) -> tuple[str, list[str]]:
     floor = 0
     rebuilt = 0
     for marker, line in enumerate(lines):
-        if line.rstrip() != GEMINI_CODE_MARKER:
+        if (
+            line.rstrip() != GEMINI_CODE_MARKER
+            or masked[marker] != line
+        ):
             continue
         label = None
         has_code = False
@@ -616,7 +671,7 @@ def _gemini_citations(text: str) -> tuple[str, list[str]]:
 
 _NORMALISERS: dict[str, tuple[Normaliser, ...]] = {
     "commonmark": (),
-    "chatgpt": (_chatgpt_citations, _chatgpt_utm),
+    "chatgpt": (_chatgpt_citations, _chatgpt_utm, _chatgpt_math_notes),
     "gemini": (_gemini_code_blocks, _gemini_bullets, _gemini_citations),
 }
 
@@ -635,6 +690,11 @@ def apply_flavor(text: str, flavor: str) -> tuple[str, list[str]]:
     """
     check_flavor(flavor)
     warnings: list[str] = []
+    if flavor != DEFAULT_FLAVOR:
+        # CRLF and lone CR to LF, as the transport does elsewhere: the
+        # patterns end at `$`, which never matches before a `\r`. The
+        # default keeps its bytes.
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
     for normalise in _NORMALISERS[flavor]:
         text, found = normalise(text)
         warnings.extend(found)

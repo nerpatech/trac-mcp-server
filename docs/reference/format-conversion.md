@@ -66,7 +66,7 @@ over a line break).
 | inline math `\(x\)`, or `\\(x\\)` as the dialogue text has it | a code span, `` `x` ``; `{{{x}}}` when the formula holds a backtick. In the doubled form Markdown escapes inside the formula are removed (`R\_{x}` is `R_{x}`); letters after a backslash (`\text`) stay. The single form is kept as written |
 | `\[x\]` or `\\[x\\]` that is a whole paragraph (one or several lines) | `{{{#!latex` ... `}}}` (this Trac has no math processor; `latex` is accepted as Pygments highlighting, so the formula shows as source) |
 | `\[x\]` inside a table cell or a sentence | a code span, as inline math |
-| a line `[image](https://www.google.com/s2/favicons?domain=D...)` followed by a label line (`name` or `name+N`) | one link `[name](D)`; with no label line, `<D>` |
+| a line `[image](https://www.google.com/s2/favicons?domain=D...)` followed by a label line (`name` or `name+N`) | one link `[name](D)`; with no label line, `[D](D)` |
 | `utm_*` query parameters of a link target, autolink or bare URL | removed (the other parameters stay in order; an emptied `?` goes) |
 
 **`gemini`** (a copy of the rendered Gemini page, which is not Markdown)

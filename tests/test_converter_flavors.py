@@ -295,15 +295,17 @@ def test_a_label_of_several_words_needs_its_count():
     )
 
 
-def test_a_favicon_citation_with_no_label_line_becomes_an_autolink():
+def test_a_favicon_citation_with_no_label_line_becomes_a_link():
     source = f"{FAVICON}\n\nNext para here is prose"
     assert _norm(source, "chatgpt")[0] == (
-        "<https://device.report>\n\nNext para here is prose"
+        "[device.report](https://device.report)\n\nNext para here is prose"
     )
 
 
 def test_a_favicon_citation_at_the_end_of_the_text():
-    assert _norm(FAVICON, "chatgpt")[0] == "<https://device.report>"
+    assert _norm(FAVICON, "chatgpt")[0] == (
+        "[device.report](https://device.report)"
+    )
 
 
 def test_a_domain_without_a_scheme_gets_one():
@@ -442,10 +444,10 @@ def test_an_existing_blank_line_is_not_doubled():
     assert _norm(source, "gemini")[0] == "Intro\n\n```bash\nls\n```"
 
 
-def test_the_language_is_matched_case_insensitively_and_written_as_found():
+def test_the_language_is_matched_case_insensitively_and_written_lowercase():
     assert _norm("Python\nx = 1\nUse code with caution.", "gemini")[
         0
-    ] == ("```Python\nx = 1\n```")
+    ] == ("```python\nx = 1\n```")
 
 
 def test_the_code_is_kept_byte_for_byte():
@@ -1247,7 +1249,9 @@ def test_a_percent_encoded_favicon_domain_is_decoded():
     assert _norm(f"{favicon}\n\nexample.com+1\n", "chatgpt")[0] == (
         "[example.com](https://example.com)\n"
     )
-    assert _norm(favicon, "chatgpt")[0] == "<https://example.com>"
+    assert _norm(favicon, "chatgpt")[0] == (
+        "[example.com](https://example.com)"
+    )
 
 
 # 8. The hint builds no mask when the marker is absent.
@@ -1264,3 +1268,188 @@ def test_the_default_conversion_builds_no_code_mask_without_the_marker(
     monkeypatch.setattr(flavors, "_code_mask", boom)
     assert convert_with_warnings("plain `text`\n").warnings == []
     assert not flavors.has_gemini_code_marker("plain\n")
+
+
+# -- third review fixes (Trac /trac_mcp_server #216) ---------------------------
+
+# 1. A marker inside code is not a marker.
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "python\n{{{\nx=1\nUse code with caution.\n}}}\n",
+        "bash\nls `a\nUse code with caution.\nb` c\n",
+    ],
+    ids=["tracwiki block", "multi-line span"],
+)
+def test_a_marker_inside_code_is_skipped(source):
+    assert _norm(source, "gemini") == (source, [])
+
+
+# 2. A formula with a backtick and `}}}` has no inline TracWiki form.
+
+UNREPRESENTABLE = "inline \\(a`}}}b\\) x"
+
+
+def test_an_unrepresentable_formula_is_left_as_written():
+    assert markdown_to_tracwiki(UNREPRESENTABLE, flavor="chatgpt") == (
+        markdown_to_tracwiki(UNREPRESENTABLE)
+    )
+
+
+def test_an_unrepresentable_formula_is_named_in_a_warning():
+    warnings = convert_with_warnings(
+        UNREPRESENTABLE, flavor="chatgpt"
+    ).warnings
+    named = [w for w in warnings if "a`}}}b" in w]
+    assert len(named) == 1
+    assert named[0].startswith("chatgpt: ")
+
+
+def test_the_warning_names_the_first_40_characters_only():
+    formula = "a`}}}" + "0123456789" * 6
+    warnings = convert_with_warnings(
+        f"x \\({formula}\\) y", flavor="chatgpt"
+    ).warnings
+    assert len(warnings) == 1
+    assert formula[:40] in warnings[0]
+    assert formula[:41] not in warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("x \\(a`b\\) y", "x {{{a`b}}} y"),
+        ("x \\(a}}}b\\) y", "x `a}}}b` y"),
+    ],
+    ids=["backtick only", "braces only"],
+)
+def test_a_representable_formula_converts_without_a_warning(
+    source, expected
+):
+    result = convert_with_warnings(source, flavor="chatgpt")
+    assert result.text == expected
+    assert result.warnings == []
+
+
+def test_one_bad_formula_does_not_stop_the_others():
+    source = "\\(a`}}}b\\) and \\(c\\)"
+    result = convert_with_warnings(source, flavor="chatgpt")
+    assert result.text.endswith("and `c`")
+    assert len(result.warnings) == 1
+
+
+# 3. CRLF and lone CR are folded for the flavours, not for the default.
+
+
+def test_a_crlf_favicon_paste_converts_as_its_lf_version_does():
+    lf = f"Text.\n\n{FAVICON}\n\ndevice.report+1\n\nNext para\n"
+    for eol in ("\r\n", "\r"):
+        crlf = lf.replace("\n", eol)
+        assert _norm(crlf, "chatgpt") == _norm(lf, "chatgpt")
+        assert markdown_to_tracwiki(crlf, flavor="chatgpt") == (
+            markdown_to_tracwiki(lf, flavor="chatgpt")
+        )
+
+
+def test_a_crlf_display_math_paragraph_converts_as_its_lf_version_does():
+    lf = "x\n\n\\[\nE = m_c^2\n\\]\n\nafter\n"
+    crlf = lf.replace("\n", "\r\n")
+    assert markdown_to_tracwiki(crlf, flavor="chatgpt") == (
+        "x\n\n{{{#!latex\nE = m_c^2\n}}}\n\nafter"
+    )
+    assert markdown_to_tracwiki(crlf, flavor="chatgpt") == (
+        markdown_to_tracwiki(lf, flavor="chatgpt")
+    )
+
+
+def test_a_crlf_gemini_copy_converts_as_its_lf_version_does():
+    lf = "Run:\nbash\nls\nUse code with caution.\n\u2022 a\n"
+    crlf = lf.replace("\n", "\r\n")
+    assert _norm(crlf, "gemini") == _norm(lf, "gemini")
+
+
+def test_the_default_flavor_keeps_its_line_endings():
+    crlf = "a\r\nb\r\n"
+    assert _norm(crlf, "commonmark") == (crlf, [])
+    assert markdown_to_tracwiki(crlf) == markdown_to_tracwiki(
+        crlf, flavor="commonmark"
+    )
+
+
+# 4. The favicon fallback is a Markdown link, not `<...>` (an HTML tag to
+# the converter's own tag check).
+
+
+def test_the_favicon_fallback_raises_no_html_tag_warning():
+    source = (
+        "[image](https://www.google.com/s2/favicons?domain=a.com&sz=32)"
+        "\n\nThis is a long prose paragraph here.\n"
+    )
+    result = convert_with_warnings(source, flavor="chatgpt")
+    assert result.warnings == []
+    assert _norm(source, "chatgpt")[0] == (
+        "[a.com](https://a.com)\n\nThis is a long prose paragraph here.\n"
+    )
+
+
+def test_the_favicon_fallback_label_is_the_decoded_domain_without_scheme():
+    favicon = (
+        "[image](https://www.google.com/s2/favicons"
+        "?domain=https%3A%2F%2Fexample.com\\&sz=32)"
+    )
+    assert (
+        _norm(favicon, "chatgpt")[0]
+        == "[example.com](https://example.com)"
+    )
+
+
+# 5. A `+N` label is stripped.
+
+
+def test_a_label_with_a_space_before_its_count_is_stripped():
+    source = (
+        "[image](https://www.google.com/s2/favicons"
+        "?domain=reuters.com&sz=32)\nReuters +2\n"
+    )
+    assert (
+        _norm(source, "chatgpt")[0]
+        == "[Reuters](https://reuters.com)\n"
+    )
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "[https://reuters.com Reuters]"
+    )
+
+
+# 6. The fence label is lowercase.
+
+
+@pytest.mark.parametrize(
+    ("label", "fence", "processor"),
+    [
+        ("Python", "```python", "python"),
+        ("JSON", "```json", "json"),
+        ("Bash", "```bash", "sh"),
+        ("Html", "```text/html", "text/html"),
+        ("HTML", "```text/html", "text/html"),
+        ("C++", "```c++", "cpp"),
+    ],
+)
+def test_the_fence_label_is_lowercased(label, fence, processor):
+    source = f"{label}\nx\nUse code with caution.\n"
+    assert _norm(source, "gemini")[0] == f"{fence}\nx\n```\n"
+    assert markdown_to_tracwiki(source, flavor="gemini") == (
+        f"{{{{{{#!{processor}\nx\n}}}}}}"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["\\( \\)", "\\\\( \\\\) x", "a \\[ \\] b", "\\\\[ \\\\] c"],
+    ids=repr,
+)
+def test_an_empty_formula_reads_as_commonmark_does(source):
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        markdown_to_tracwiki(source)
+    )
