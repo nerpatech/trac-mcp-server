@@ -414,17 +414,68 @@ _LINE_START_ESCAPES = (
 )
 
 
-def _escape_line_start(text: str, first_line: bool) -> str:
+def _escape_line_start(
+    text: str, first_line: bool, serialised: bool = False
+) -> str:
+    """Backslash-escape what would start a block at a line start.
+
+    ``serialised``: the text is going into HTML markup, where ``>`` is
+    written ``&gt;`` (never a blockquote marker, and a backslash before
+    the entity would show it literally), so ``>`` is left alone.
+    """
     lines = text.split("\n")
     for n, line in enumerate(lines):
         if n == 0 and not first_line:
             continue
         for pattern, repl in _LINE_START_ESCAPES:
+            if serialised and pattern.pattern == "^>":
+                continue
             line, hits = pattern.subn(repl, line, count=1)
             if hits:
                 break
         lines[n] = line
     return "\n".join(lines)
+
+
+def _escape_text(text: str, serialised: bool = False) -> str:
+    """Backslash-escape what could change the Markdown structure.
+
+    ``serialised``: the text is a text node of HTML markup, which is
+    written with ``<`` and ``&`` as entities. CommonMark decodes those,
+    and a backslash before an entity would show it literally, so they
+    are not escaped here.
+    """
+    if not text:
+        return ""
+    out = []
+    for i, ch in enumerate(text):
+        before = text[i - 1] if i else ""
+        after = text[i + 1] if i + 1 < len(text) else ""
+        if ch == "\\":
+            bad = not after or after in _PUNCTUATION or after in "\r\n"
+            out.append("\\\\" if bad else ch)
+        elif ch in "*`":
+            out.append("\\" + ch)
+        elif ch == "_":
+            inside = before.isalnum() and after.isalnum()
+            out.append(ch if inside else "\\_")
+        elif (
+            ch == "<"
+            and not serialised
+            and re.match(r"[A-Za-z/!?]", after)
+        ):
+            out.append("\\<")
+        elif (
+            ch == "&"
+            and not serialised
+            and re.match(r"#?\w+;", text[i + 1 :])
+        ):
+            out.append("\\&")
+        elif ch in "[]~":  # `~` because `del` is written `~~`
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 # =============================================================================
@@ -603,6 +654,14 @@ class _TracConverter(MarkdownConverter):
             if reason:
                 self._warn(f"{reason}; passed through as HTML")
                 return "\n\n" + self._html_of(node) + "\n\n"
+        elif name in ("ul", "ol") and any(
+            self._uncovered(li)
+            for li in node.find_all("li", recursive=False)
+        ):
+            # An HTML item between Markdown items ends the list, so the
+            # whole list is HTML, as a table that cannot be a pipe table
+            # is. _passthrough warns for the item (once).
+            return self._passthrough(node, parent_tags)
         elif name not in ("[document]", "html", "body"):
             desc = self._uncovered(node)
             if desc:
@@ -699,13 +758,18 @@ class _TracConverter(MarkdownConverter):
                 self._warn(
                     f"{desc} is not covered; passed through as HTML"
                 )
-        markup = self._html_of(el)
         if el.name in _BLOCK_TAGS and "_inline" not in parent_tags:
-            return f"\n\n{markup}\n\n"
-        return markup
+            return f"\n\n{self._html_of(el)}\n\n"
+        # Not an HTML block: the markup sits inside a Markdown line, and
+        # CommonMark parses the text between inline tags as Markdown.
+        return self._html_of(el, escape_text=True)
 
-    def _html_of(self, el: Tag) -> str:
+    def _html_of(self, el: Tag, escape_text: bool = False) -> str:
         """The element as clean HTML, with no blank line in it.
+
+        ``escape_text``: the markup will be read inside Markdown inline
+        content, so its text nodes are Markdown-escaped (``_escape_text``,
+        ``_escape_line_start``); attributes never are.
 
         Trac's chrome is removed (link and image attributes, a cell's
         text alignment, the classes of covered tags, ``missing`` links),
@@ -746,7 +810,27 @@ class _TracConverter(MarkdownConverter):
                 code["class"] = f"language-{lang}"
             code.append(NavigableString(text))
             pre.append(code)
+        if escape_text:
+            self._escape_text_nodes(el)
         return _without_blank_lines(str(el))
+
+    @staticmethod
+    def _escape_text_nodes(el: Tag) -> None:
+        """Markdown-escape every text node under ``el``, in place.
+
+        Code tags are included: a raw ``<code>`` is not a Markdown code
+        span, so its text is still parsed as Markdown. Comments and the
+        like are not text.
+        """
+        for node in list(el.find_all(string=True)):
+            if type(node) is not NavigableString:
+                continue
+            text = _escape_line_start(
+                _escape_text(str(node), serialised=True),
+                first_line=False,
+                serialised=True,
+            )
+            node.replace_with(NavigableString(text))
 
     @staticmethod
     def _strip_chrome_classes(tag: Tag) -> None:
@@ -886,33 +970,7 @@ class _TracConverter(MarkdownConverter):
 
     def escape(self, text, parent_tags):
         """Escape only what could change the Markdown structure."""
-        if not text:
-            return ""
-        out = []
-        for i, ch in enumerate(text):
-            before = text[i - 1] if i else ""
-            after = text[i + 1] if i + 1 < len(text) else ""
-            if ch == "\\":
-                bad = (
-                    not after
-                    or after in _PUNCTUATION
-                    or after in "\r\n"
-                )
-                out.append("\\\\" if bad else ch)
-            elif ch in "*`":
-                out.append("\\" + ch)
-            elif ch == "_":
-                inside = before.isalnum() and after.isalnum()
-                out.append(ch if inside else "\\_")
-            elif ch == "<" and re.match(r"[A-Za-z/!?]", after):
-                out.append("\\<")
-            elif ch == "&" and re.match(r"#?\w+;", text[i + 1 :]):
-                out.append("\\&")
-            elif ch in "[]~":  # `~` because `del` is written `~~`
-                out.append("\\" + ch)
-            else:
-                out.append(ch)
-        return "".join(out)
+        return _escape_text(text)
 
     def process_text(self, el, parent_tags=None):
         text = super().process_text(el, parent_tags)
