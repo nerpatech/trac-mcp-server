@@ -729,13 +729,16 @@ def _link_rewrites_to_send(
     ``--link-map`` on the command line, else ``export.link_rewrites``
     from this machine's ``.trac_mcp/config.yaml`` -- only that key, and
     the environment is not read -- else nothing, and the server's own map
-    applies. A TracWiki or HTML pull rewrites no links (HTML is Trac's own
-    render, #211), so it sends none (the server would ignore it, and a
-    broken local config should not stop it).
+    applies. A Markdown and an HTML pull both rewrite links (the HTML
+    one only the ``href``s, #219), so both send it. A TracWiki pull
+    rewrites none, so it sends none (the server would ignore it, and a
+    broken local config should not stop it). A server that predates #219
+    ignores the map for HTML, which the "did not confirm" warning after
+    the call reports.
     """
     from ..link_rewrites import as_entries, parse_pairs
 
-    if args.format != "markdown":
+    if args.format not in ("markdown", "html"):
         if args.link_map:
             print(
                 "trac-mcp: warning: --link-map has no effect with "
@@ -1124,7 +1127,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="markdown",
         help=(
             "Output format (default: markdown; html is Trac's render "
-            "as a complete minimal HTML document)"
+            "as a complete minimal HTML document, with the hrefs of "
+            "its links rewritten by --link-map and in-page anchors "
+            "written #anchor; everything else is Trac's render "
+            "unchanged)"
         ),
     )
     p.add_argument(
@@ -1143,8 +1149,8 @@ def build_parser() -> argparse.ArgumentParser:
             "has that prefix replaced by TO (longest FROM first; "
             "images and #anchors are never rewritten). Repeatable. "
             "Replaces export.link_rewrites of .trac_mcp/config.yaml, "
-            "which is sent when this is not given. Markdown only (no "
-            "effect with html or tracwiki)."
+            "which is sent when this is not given. Markdown and html "
+            "(no effect with tracwiki)."
         ),
     )
 
