@@ -273,6 +273,97 @@ def test_an_output_parent_that_is_a_file_stops_before_any_fetch(
     trac.get_wiki_attachment.assert_not_called()
 
 
+# --- second review round (Trac /trac_mcp_server #215) ----------------------------
+
+
+def test_an_output_that_is_a_directory_is_a_usage_error_before_any_fetch(
+    trac, tmp_path, capsys
+):
+    out = tmp_path / "p.md"
+    out.mkdir()
+    rc = _main_usage(
+        [
+            "--from-wiki",
+            "P",
+            "--to",
+            "md",
+            "-o",
+            str(out),
+            "--assets",
+            str(tmp_path / "img"),
+        ]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert "is a directory" in capsys.readouterr().err
+    assert not (tmp_path / "img").exists()
+    trac.get_wiki_attachment.assert_not_called()
+    trac.get_wiki_page.assert_not_called()
+
+
+def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
+    trac, tmp_path, capsys
+):
+    img = tmp_path / "img"
+    img.mkdir()
+    (img / "P").write_bytes(b"an earlier attachment named P")
+    out = tmp_path / "p.md"
+    rc = _main_usage(
+        [
+            "--from-wiki",
+            "P",
+            "--to",
+            "md",
+            "-o",
+            str(out),
+            "--assets",
+            str(img),
+        ]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "is a file, not a directory" in err
+    trac.get_wiki_attachment.assert_not_called()
+    assert not out.exists()
+    assert (img / "P").read_bytes() == b"an earlier attachment named P"
+
+
+def test_a_write_failure_while_staging_leaves_nothing_and_keeps_the_old_output(
+    trac, tmp_path, monkeypatch, capsys
+):
+    from trac_mcp_server.cli import assets as export
+    from trac_mcp_server.cli.convert import EXIT_RUNTIME_ERROR
+
+    trac.served["P/c.png"] = b"C"
+    trac.served["P/d.png"] = b"D"
+    real = export._write_temp
+    calls = []
+
+    def flaky(path, data):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(export, "_write_temp", flaky, raising=False)
+    out = tmp_path / "p.md"
+    out.write_text("the old page")
+    rc = _run("-o", str(out), "--assets", str(tmp_path / "img"))
+    assert rc == EXIT_RUNTIME_ERROR
+    assert "No space left on device" in capsys.readouterr().err
+    assert out.read_text() == "the old page"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["p.md"]
+
+
+def test_the_output_and_the_assets_arrive_together_without_temp_files(
+    trac, tmp_path
+):
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    assert _run("-o", str(out), "--assets", str(img)) == EXIT_OK
+    assert out.exists() and (img / "P" / "a.png").exists()
+    assert [p for p in tmp_path.rglob("*") if ".tmp-" in p.name] == []
+
+
 # --- usage errors -----------------------------------------------------------
 # Like --link-map's, a usage error is argparse's: SystemExit(2).
 

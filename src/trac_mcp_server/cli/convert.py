@@ -1117,11 +1117,9 @@ def main(argv: list[str] | None = None) -> int:
         # Before anything is fetched or written: the output file must be
         # writable, as ``trac-mcp wiki-pull`` checks.
         if args.output_file is not None and not args.to_clipboard:
-            parent = Path(args.output_file).parent
-            if not parent.is_dir():
-                parser.error(
-                    f"output directory does not exist: {parent}"
-                )
+            problem = export_assets.check_output_path(args.output_file)
+            if problem is not None:
+                parser.error(problem)
 
     # --- --check-trac: early dispatch before conversion validation ---
     if args.check_trac:
@@ -1366,49 +1364,51 @@ def main(argv: list[str] | None = None) -> int:
             + result.text,
         )
 
-    # --- --assets: fetch every referenced attachment first, so a failed
-    # fetch leaves neither the assets nor the output file ---
+    # --- --assets: every file is written to a temporary sibling first
+    # and renamed into place at the end, the output file last, so a
+    # failed fetch or write leaves neither the assets nor the output ---
     assets_plan = None
-    assets_unchanged = 0
+    output_written = False
     if args.assets is not None:
-        try:
-            scan = export_assets.scan_text(result.text, session.url)
-            fetched = export_assets.fetch_all(
-                list(scan.refs), session.attachment_fetcher()
-            )
-        except Exception as e:
-            sys.stderr.write(
-                "trac-convert: "
-                + _classify_trac_error(
-                    e, session.url, action="attachment fetch"
+        out_file = args.output_file if not args.to_clipboard else None
+        scan = export_assets.scan_text(result.text, session.url)
+        with export_assets.AssetStage(
+            scan, args.assets, out_file, args.assets_url
+        ) as stage:
+            try:
+                stage.preflight()
+            except export_assets.AssetPathError as e:
+                parser.error(str(e))
+            try:
+                fetch = session.attachment_fetcher()
+                for ref in scan.refs:
+                    stage.add(ref, fetch(ref))
+            except export_assets.AssetError as e:
+                sys.stderr.write(f"trac-convert: {e}\n")
+                return EXIT_RUNTIME_ERROR
+            except Exception as e:
+                sys.stderr.write(
+                    "trac-convert: "
+                    + _classify_trac_error(
+                        e, session.url, action="attachment fetch"
+                    )
+                    + "; nothing was written\n"
                 )
-                + "; nothing was written\n"
+                return EXIT_TRAC
+            assets_plan = stage.plan(result.text)
+            result = replace(
+                result,
+                text=assets_plan.text,
+                warnings=[*result.warnings, *assets_plan.warnings],
             )
-            return EXIT_TRAC
-        assets_plan = export_assets.plan_assets(
-            result.text,
-            session.url,
-            fetched,
-            args.assets,
-            args.output_file if not args.to_clipboard else None,
-            args.assets_url,
-            scan=scan,
-        )
-        try:
-            _, assets_unchanged = export_assets.write_assets(
-                assets_plan, args.assets
-            )
-        except OSError as e:
-            sys.stderr.write(
-                f"trac-convert: cannot write the attachments to"
-                f" {args.assets}: {e.strerror or e}\n"
-            )
-            return EXIT_RUNTIME_ERROR
-        result = replace(
-            result,
-            text=assets_plan.text,
-            warnings=[*result.warnings, *assets_plan.warnings],
-        )
+            try:
+                if out_file is not None:
+                    stage.stage_output(result.text.encode("utf-8"))
+                    output_written = True
+                stage.commit()
+            except export_assets.AssetError as e:
+                sys.stderr.write(f"trac-convert: {e}\n")
+                return EXIT_RUNTIME_ERROR
 
     # --- write output ---
     if args.to_wiki is not None:
@@ -1438,6 +1438,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"trac-convert: clipboard write failed: {e}\n"
             )
             return EXIT_RUNTIME_ERROR
+    elif output_written:
+        pass  # written with the attachments
     elif args.output_file is not None:
         try:
             Path(args.output_file).write_text(
@@ -1470,9 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
         if assets_plan is not None:
             sys.stderr.write(
                 "info: "
-                + export_assets.summary(
-                    assets_plan, args.assets, assets_unchanged
-                )
+                + export_assets.summary(assets_plan, args.assets)
                 + "\n"
             )
 

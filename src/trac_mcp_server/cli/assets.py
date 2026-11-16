@@ -3,11 +3,16 @@ its links at the local copies (Trac /trac_mcp_server #215).
 
 Shared by ``trac-mcp wiki-pull --assets`` and ``trac-convert --from-wiki
 --assets``; nothing here knows how an attachment is fetched. A CLI scans
-the text with :func:`scan_text`, fetches each reference its own way, and
-passes the bytes to :func:`plan_assets`, which names the local files and
-rewrites the text. Nothing touches the disk until :func:`write_assets`,
-so a CLI that fetches everything first can stop on a failed fetch with
-nothing written.
+the text with :func:`scan_text`, opens an :class:`AssetStage`, checks it
+(:meth:`AssetStage.preflight`), fetches each reference its own way and
+hands every result to :meth:`AssetStage.add`, which writes the bytes to a
+temporary sibling of the final file at once (so no payload is kept in
+memory). :meth:`AssetStage.plan` then names the rewritten text, the
+output is staged the same way, and :meth:`AssetStage.commit` renames
+everything into place, assets first and the output last. Until the
+commit the stage can be dropped (:meth:`AssetStage.abort`, or leaving
+its ``with`` block) and the assets directory and the output are exactly
+as they were.
 
 Trac renders an attachment as absolute URLs: an image as
 ``<a href=".../attachment/wiki/PAGE/x.png"><img
@@ -45,8 +50,9 @@ from __future__ import annotations
 import html
 import os
 import re
+import secrets
+import shutil
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -120,11 +126,17 @@ class _Hit:
 @dataclass(frozen=True)
 class Scan:
     """The attachment URLs of one text: ``hits`` in document order (what
-    :func:`plan_assets` rewrites) and the distinct ``refs`` in order of
-    first appearance. One scan serves the fetch and the rewrite."""
+    :meth:`AssetPlanner.result` rewrites) and the distinct ``refs`` in
+    order of first appearance. One scan serves the fetch and the rewrite.
+
+    ``unmatched`` counts the URLs that have an attachment's path shape but
+    are not under the instance path (``prefix``): Trac behind a proxy with
+    another base path renders such URLs. They are left alone."""
 
     hits: tuple[_Hit, ...]
     refs: tuple[AttachmentRef, ...]
+    unmatched: int = 0
+    prefix: str = ""
 
 
 def _bad_segment(segment: str) -> bool:
@@ -183,6 +195,35 @@ def _parse_url(
             return None
         return AttachmentRef("ticket", number, decoded[1])
     return AttachmentRef("wiki", "/".join(decoded[:-1]), decoded[-1])
+
+
+_SHAPE = re.compile(r"/(?:raw-)?attachment/(?:wiki|ticket)/")
+
+
+def _misses_instance(url: str, prefix: str, host: str | None) -> bool:
+    """Whether ``url`` has the path of a Trac attachment but is not under
+    the instance path: a URL :func:`_parse_url` did not take that is not
+    just malformed or another host's. Where the host decides (an instance
+    at the root), another host's URL is expected -- a link to another
+    Trac -- and is no miss."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if not (
+        parts.scheme in ("http", "https")
+        or (parts.scheme == "" and url.startswith("/"))
+    ):
+        return False
+    if not prefix and parts.netloc:
+        try:
+            named = parts.hostname
+        except ValueError:
+            return False
+        if host is None or named != host:
+            return False
+    shape = _SHAPE.search(parts.path)
+    return shape is not None and parts.path[: shape.start()] != prefix
 
 
 # --- code is not a reference ----------------------------------------------
@@ -265,6 +306,15 @@ def _element_content(
     return (el.end(), close.start()), close.end()
 
 
+def _escaped(text: str, pos: int, begin: int) -> bool:
+    """Whether the character at ``pos`` is backslash-escaped: an odd
+    number of backslashes (back to ``begin``) precede it."""
+    k = pos
+    while k > begin and text[k - 1] == "\\":
+        k -= 1
+    return (pos - k) % 2 == 1
+
+
 def _html_regions(
     text: str, begin: int, limit: int, spans: list[tuple[int, int]]
 ) -> None:
@@ -284,6 +334,16 @@ def _inline_regions(
     """Inline code spans and raw code elements of Markdown prose, left to
     right: whichever opens first wins, so a literal ``<code>`` inside a
     span opens no element."""
+
+    def next_element(at: int) -> re.Match | None:
+        # The exporter writes a literal tag in prose as ``\\<pre>``: an
+        # escaped ``<`` opens nothing.
+        while True:
+            el = _ELEMENT_OPEN.search(text, at, limit)
+            if el is None or not _escaped(text, el.start(), begin):
+                return el
+            at = el.start() + 1
+
     runs = [
         (m.start(), m.end())
         for m in _TICKS.finditer(text, begin, limit)
@@ -304,7 +364,7 @@ def _inline_regions(
         if not elements_done and (
             element is None or element.start() < pos
         ):
-            element = _ELEMENT_OPEN.search(text, pos, limit)
+            element = next_element(pos)
             elements_done = element is None
         if element is not None and element.start() < tick:
             span, pos = _element_content(text, element, limit)
@@ -315,19 +375,18 @@ def _inline_regions(
             return
         start, end = runs[i]
         length = end - start
-        backslashes = 0
-        k = start
-        while k > begin and text[k - 1] == "\\":
-            backslashes += 1
-            k -= 1
-        if backslashes % 2:  # the first backtick is escaped, a literal
+        if _escaped(
+            text, start, begin
+        ):  # the first backtick is a literal
             if length == 1:
                 pos = end
                 continue
             start += 1
             length -= 1
         # The closer is the next run of exactly ``length`` (an escaped
-        # first backtick shortens the opener by one).
+        # first backtick shortens the opener by one). A backslash before
+        # a closer does not escape it: in a code span backslash is
+        # literal (CommonMark), and ``C:\\dir\\`` is a span.
         same = by_length.get(length, [])
         nxt = bisect_right(same, i)
         if nxt == len(same):
@@ -367,22 +426,25 @@ def scan_text(text: str, instance: str, fmt: str = "markdown") -> Scan:
     regions = _code_regions(text, fmt)
     starts = [r[0] for r in regions]
     hits: list[_Hit] = []
+    unmatched = 0
 
     def in_code(pos: int) -> bool:
         i = bisect_right(starts, pos) - 1
         return i >= 0 and pos < regions[i][1]
 
     def add(m: re.Match, group: int, kind: str, unescape: bool = False):
+        nonlocal unmatched
         raw = m.group(group)
         if raw is None:
             return
         where = m.start() if kind == "autolink" else m.start(group)
         if in_code(where):
             return
-        ref = _parse_url(
-            html.unescape(raw) if unescape else raw, prefix, host
-        )
+        url = html.unescape(raw) if unescape else raw
+        ref = _parse_url(url, prefix, host)
         if ref is None:
+            if _misses_instance(url, prefix, host):
+                unmatched += 1
             return
         if kind == "autolink":
             hits.append(_Hit(m.start(), m.end(), kind, ref))
@@ -413,37 +475,42 @@ def scan_text(text: str, instance: str, fmt: str = "markdown") -> Scan:
     seen: dict[AttachmentRef, None] = {}
     for h in kept:
         seen.setdefault(h.ref)
-    return Scan(tuple(kept), tuple(seen))
+    return Scan(tuple(kept), tuple(seen), unmatched, prefix)
 
 
-def find_refs(
-    text: str, instance: str, fmt: str = "markdown"
-) -> list[AttachmentRef]:
-    """The distinct attachments ``text`` references, in order of first
-    appearance."""
-    return list(scan_text(text, instance, fmt).refs)
+class AssetError(Exception):
+    """The assets or the output could not be written; the message says
+    what, and the stage has removed what it had written so far."""
 
 
-def fetch_all(
-    refs: list[AttachmentRef],
-    fetch: Callable[[AttachmentRef], bytes | None],
-) -> dict[AttachmentRef, bytes | None]:
-    """Fetch every reference through ``fetch``, in order. ``fetch``
-    returns the bytes, None for an attachment that does not exist, and
-    raises for any other failure -- which stops here, with the later ones
-    not fetched."""
-    return {ref: fetch(ref) for ref in refs}
+class AssetPathError(AssetError):
+    """A planned path cannot hold the attachment, found before anything
+    was fetched or written: a local-path problem, not a failed write."""
+
+
+@dataclass(frozen=True)
+class TooLarge:
+    """The outcome of a fetch the server refused for size: ``limit`` is
+    the server's inline limit in bytes, None if it did not say."""
+
+    limit: int | None = None
+
+
+Outcome = bytes | TooLarge | None  # None: the attachment does not exist
 
 
 @dataclass
 class AssetPlan:
-    """What ``--assets`` will do, decided and not yet done."""
+    """What ``--assets`` did or will do, decided."""
 
     text: str  # the text with its links rewritten
-    files: dict[str, bytes] = field(
-        default_factory=dict
-    )  # path under the assets directory, "/"-separated -> bytes
+    saved: list[str] = field(
+        default_factory=list
+    )  # path under the assets directory, "/"-separated, of every
+    # attachment that is (or will be) in it
+    unchanged: int = 0  # how many of ``saved`` were already there as is
     missing: list[AttachmentRef] = field(default_factory=list)
+    too_large: list[AttachmentRef] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -471,124 +538,392 @@ def _link(
 
 
 def _label(name: str) -> str:
-    return re.sub(r"([\\\[\]])", r"\\\1", name)
+    """A file name as the text of a Markdown link: escaped like ordinary
+    text, so ``*draft*.png`` renders as written."""
+    out = re.sub(r"([\\*_`\[\]<>~#])", r"\\\1", name)
+    return "\\" + out if out.startswith("!") else out
 
 
-def plan_assets(
-    text: str,
-    instance: str,
-    fetched: Mapping[AttachmentRef, bytes | None],
-    assets_dir: str | os.PathLike,
-    output_path: str | None,
-    assets_url: str | None = None,
-    *,
-    fmt: str = "markdown",
-    scan: Scan | None = None,
-) -> AssetPlan:
-    """Name the local files and rewrite ``text``.
+class AssetPlanner:
+    """Names the local file of each attachment and rewrites the text. Pure:
+    it touches no disk and keeps no bytes -- :meth:`place` is told what
+    each fetch gave, in order of first appearance, and says where the file
+    goes.
 
-    ``fetched`` maps every reference of ``text`` (:func:`find_refs`) to
-    its bytes, or None for one that was not found: that one keeps its
-    original URLs. ``output_path`` is the file the text will be written
-    to (None for stdout, which links from the current directory).
-    ``assets_url``, when given, is the URL prefix the files are served
-    from and replaces the relative path as the link. ``scan`` is the
-    :func:`scan_text` the caller already made of this ``text``.
-
-    Two attachments whose paths differ only in letter case (or one a file
-    where the other needs a directory) cannot both be saved on a
-    case-insensitive file system: the first, in order of appearance, is
-    saved and the later one is warned about and keeps its URLs.
+    Two attachments cannot both be saved when they have one path (a wiki
+    page named ``ticket-5`` and ticket #5), paths that differ only in
+    letter case (a case-insensitive file system keeps them apart no
+    better), or one is a file where the other needs a directory: the
+    first, in order of appearance, is saved and the later one is warned
+    about and keeps its URLs.
     """
-    if scan is None:
-        scan = scan_text(text, instance, fmt)
-    plan = AssetPlan(text=text)
-    links: dict[AttachmentRef, str] = {}
-    file_keys: dict[tuple[str, ...], str] = {}
-    dir_keys: dict[tuple[str, ...], str] = {}
-    for ref in scan.refs:
-        data = fetched[ref]
-        if data is None:
-            plan.missing.append(ref)
-            plan.warnings.append(
+
+    def __init__(
+        self,
+        scan: Scan,
+        assets_dir: str | os.PathLike,
+        output_path: str | None,
+        assets_url: str | None = None,
+    ) -> None:
+        self._scan = scan
+        self._assets_dir = assets_dir
+        self._output_path = output_path
+        self._assets_url = assets_url
+        self._links: dict[AttachmentRef, str] = {}
+        self._files: dict[
+            tuple[str, ...], tuple[str, AttachmentRef]
+        ] = {}
+        self._dirs: dict[tuple[str, ...], str] = {}
+        self.saved: list[str] = []
+        self.missing: list[AttachmentRef] = []
+        self.too_large: list[AttachmentRef] = []
+        self.warnings: list[str] = []
+
+    def _clash(
+        self,
+        ref: AttachmentRef,
+        parts: list[str],
+        path: str,
+        key: tuple[str, ...],
+    ) -> str | None:
+        same = self._files.get(key)
+        if same is not None:
+            first_path, first = same
+            if first_path == path:
+                return (
+                    f"{first.describe()} and {ref.describe()} both map "
+                    f"to {path}; keeping the first"
+                )
+            return (
+                f"its path '{path}' differs from '{first_path}' only in "
+                "letter case, which a case-insensitive file system "
+                "cannot keep apart"
+            )
+        directory = self._dirs.get(key)
+        if directory is not None:
+            return (
+                f"its path '{path}' is a file, but '{directory}' needs "
+                "it as a directory"
+            )
+        for n in range(1, len(key)):
+            ancestor = self._files.get(key[:n])
+            if ancestor is not None:
+                return (
+                    f"its path '{path}' needs '{'/'.join(parts[:n])}' "
+                    f"as a directory, but '{ancestor[0]}' is a file"
+                )
+        return None
+
+    def place(self, ref: AttachmentRef, outcome: Outcome) -> str | None:
+        """Where ``ref``'s file goes (a path under the assets directory,
+        "/"-separated), or None when it is not saved: not found, too
+        large, or in a clash. Only the kind of ``outcome`` is looked at."""
+        if outcome is None:
+            self.missing.append(ref)
+            self.warnings.append(
                 f"attachment '{ref.filename}' of {ref.describe()} was "
                 "not found; its links are left as they are"
             )
-            continue
+            return None
+        if isinstance(outcome, TooLarge):
+            self.too_large.append(ref)
+            limit = (
+                f"{outcome.limit} bytes (max_inline_bytes)"
+                if outcome.limit is not None
+                else "its max_inline_bytes"
+            )
+            self.warnings.append(
+                f"attachment '{ref.filename}' of {ref.describe()} is "
+                f"over the server's inline limit of {limit} and was not "
+                "fetched; its links are left as they are"
+            )
+            return None
         parts = ref.parts()
         path = "/".join(parts)
         key = tuple(p.casefold() for p in parts)
-        other = file_keys.get(key) or dir_keys.get(key)
-        for n in range(1, len(key)):
-            other = other or file_keys.get(key[:n])
-        if other is not None:
-            plan.warnings.append(
+        reason = self._clash(ref, parts, path, key)
+        if reason is not None:
+            self.warnings.append(
                 f"attachment '{ref.filename}' of {ref.describe()} is "
-                f"not saved: its path '{path}' clashes with '{other}' "
-                "(the same path apart from letter case, or a file and "
-                "a directory of one name); its links are left as they "
-                "are"
+                f"not saved: {reason}; its links are left as they are"
             )
-            continue
-        file_keys[key] = path
+            return None
+        self._files[key] = (path, ref)
         for n in range(1, len(key)):
-            dir_keys.setdefault(key[:n], path)
-        plan.files[path] = data
-        links[ref] = _link(parts, assets_dir, output_path, assets_url)
+            self._dirs.setdefault(key[:n], path)
+        self.saved.append(path)
+        self._links[ref] = _link(
+            parts, self._assets_dir, self._output_path, self._assets_url
+        )
+        return path
 
-    out: list[str] = []
-    pos = 0
-    for hit in scan.hits:
-        link = links.get(hit.ref)
-        if link is None:
-            continue
-        if hit.kind == "autolink":
-            # ``<assets/x.png>`` is not an autolink: a relative link
-            # needs the inline form, whose label is the file's name.
-            new = f"[{_label(hit.ref.filename)}]({link})"
-        elif hit.kind == "attr":
-            new = html.escape(link, quote=True)
+    def result(self, text: str, unchanged: int = 0) -> AssetPlan:
+        """The plan, with ``text`` rewritten (``text`` is the one the
+        scan was made of)."""
+        out: list[str] = []
+        pos = 0
+        for hit in self._scan.hits:
+            link = self._links.get(hit.ref)
+            if link is None:
+                continue
+            if hit.kind == "autolink":
+                # ``<assets/x.png>`` is not an autolink: a relative link
+                # needs the inline form, whose label is the file's name.
+                new = f"[{_label(hit.ref.filename)}]({link})"
+            elif hit.kind == "attr":
+                new = html.escape(link, quote=True)
+            else:
+                new = link
+            out.append(text[pos : hit.start])
+            out.append(new)
+            pos = hit.end
+        out.append(text[pos:])
+        warnings = list(self.warnings)
+        if self._scan.unmatched:
+            n = self._scan.unmatched
+            warnings.append(
+                f"{n} URL{'s' if n != 1 else ''} in the text "
+                f"{'have' if n != 1 else 'has'} the path of a Trac "
+                "attachment but "
+                f"{'are' if n != 1 else 'is'} not under this instance's "
+                f"path '{self._scan.prefix or '/'}' (Trac behind a "
+                "proxy with another base path?); left as "
+                f"{'they are' if n != 1 else 'it is'}"
+            )
+        return AssetPlan(
+            text="".join(out),
+            saved=list(self.saved),
+            unchanged=unchanged,
+            missing=list(self.missing),
+            too_large=list(self.too_large),
+            warnings=warnings,
+        )
+
+
+def check_output_path(path: str) -> str | None:
+    """Why the file ``path`` cannot be written, or None: it is a
+    directory, or its directory does not exist or cannot be written to
+    (the output is replaced by a rename, which needs the directory)."""
+    target = Path(path)
+    if target.is_dir():
+        return f"output path is a directory: {target}"
+    parent = target.parent
+    if not parent.is_dir():
+        return f"output directory does not exist: {parent}"
+    if not os.access(parent, os.W_OK | os.X_OK):
+        return f"output directory is not writable: {parent}"
+    return None
+
+
+def _write_temp(path: Path, data: bytes) -> None:
+    """Create ``path`` (it must not exist) holding ``data``, with the
+    mode a new file gets."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def _same_bytes(path: Path, data: bytes) -> bool:
+    try:
+        return (
+            path.is_file()
+            and path.stat().st_size == len(data)
+            and path.read_bytes() == data
+        )
+    except OSError:
+        return False
+
+
+class AssetStage:
+    """The attachments and the output of one export, written all or
+    nothing. Every file is first written to a temporary sibling (same
+    directory, ``.<name>.tmp-<random>``), as soon as it is given; only
+    :meth:`commit` renames them into place, the assets first and the
+    output last. Anything before the commit leaves the assets directory
+    (and any directory made for the files) and the output as they were.
+
+    A file already in place with the same bytes is not written at all.
+    A failure in the middle of the renames cannot be undone (a replaced
+    file is gone): the rest are not renamed and the error says how many
+    were.
+    """
+
+    def __init__(
+        self,
+        scan: Scan,
+        assets_dir: str | os.PathLike,
+        output_path: str | None = None,
+        assets_url: str | None = None,
+    ) -> None:
+        self.scan = scan
+        self.planner = AssetPlanner(
+            scan, assets_dir, output_path, assets_url
+        )
+        self.unchanged = 0
+        self._dir = Path(assets_dir)
+        self._output_path = output_path
+        self._assets: list[tuple[Path, Path]] = []  # temporary, final
+        self._output: tuple[Path, Path] | None = None
+        self._made: list[Path] = []  # directories this stage created
+
+    def __enter__(self) -> AssetStage:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.abort()
+
+    def preflight(self) -> None:
+        """Check every path the references plan, before anything is
+        fetched or written: no existing ancestor under the assets
+        directory may be a file (a directory could not be made there) and
+        no target may be an existing directory. Raises
+        :class:`AssetPathError`."""
+        for ref in self.scan.refs:
+            parts = ref.parts()
+            node = self._dir
+            if node.exists() and not node.is_dir():
+                raise AssetPathError(
+                    f"--assets: not a directory: {node}; nothing was "
+                    "fetched or written"
+                )
+            for i, segment in enumerate(parts):
+                node = node / segment
+                if not node.exists():
+                    break  # nothing below it exists either
+                last = i == len(parts) - 1
+                if last and node.is_dir():
+                    problem = f"{node} is a directory"
+                elif not last and not node.is_dir():
+                    problem = f"{node} is a file, not a directory"
+                else:
+                    continue
+                raise AssetPathError(
+                    f"--assets: cannot save attachment "
+                    f"'{ref.filename}' of {ref.describe()} as "
+                    f"{self._dir.joinpath(*parts)}: {problem}; "
+                    "nothing was fetched or written"
+                )
+
+    def _make_dir(self, directory: Path) -> None:
+        missing: list[Path] = []
+        node = directory
+        while not node.exists():
+            missing.append(node)
+            node = node.parent
+        for node in reversed(missing):
+            node.mkdir()
+            self._made.append(node)
+
+    def _stage(
+        self, final: Path, data: bytes, output: bool = False
+    ) -> None:
+        self._make_dir(final.parent)
+        temp = final.with_name(
+            f".{final.name[:60]}.tmp-{secrets.token_hex(6)}"
+        )
+        # Recorded before the write, so a half-written file is removed.
+        if output:
+            self._output = (temp, final)
         else:
-            new = link
-        out.append(text[pos : hit.start])
-        out.append(new)
-        pos = hit.end
-    out.append(text[pos:])
-    plan.text = "".join(out)
-    return plan
+            self._assets.append((temp, final))
+        _write_temp(temp, data)
+        if final.exists():
+            try:
+                shutil.copymode(final, temp)
+            except OSError:
+                pass
+
+    def add(self, ref: AttachmentRef, outcome: Outcome) -> None:
+        """Take the result of fetching ``ref``: bytes are written to a
+        temporary file now and are not kept. Raises
+        :class:`AssetError` when they cannot be."""
+        path = self.planner.place(ref, outcome)
+        if path is None or not isinstance(outcome, bytes):
+            return
+        final = self._dir.joinpath(*path.split("/"))
+        try:
+            if _same_bytes(final, outcome):
+                self.unchanged += 1
+                return
+            self._stage(final, outcome)
+        except OSError as e:
+            raise AssetError(
+                f"cannot write the attachments to {self._dir}: "
+                f"{path}: {e.strerror or e}; nothing was written"
+            ) from e
+
+    def plan(self, text: str) -> AssetPlan:
+        """The rewritten ``text`` and the report, once every reference
+        was :meth:`add`-ed."""
+        return self.planner.result(text, self.unchanged)
+
+    def stage_output(self, data: bytes) -> None:
+        """Write the output file's temporary sibling (the stage was made
+        with an ``output_path``)."""
+        assert self._output_path is not None
+        final = Path(os.path.realpath(self._output_path))
+        try:
+            self._stage(final, data, output=True)
+        except OSError as e:
+            raise AssetError(
+                f"cannot write the output file {self._output_path}: "
+                f"{e.strerror or e}; nothing was written"
+            ) from e
+
+    def commit(self) -> None:
+        """Rename every temporary file into place, the output last."""
+        pairs = list(self._assets)
+        if self._output is not None:
+            pairs.append(self._output)
+        done = 0
+        try:
+            for temp, final in pairs:
+                os.replace(temp, final)
+                done += 1
+        except OSError as e:
+            moved = done
+            self.abort()
+            raise AssetError(
+                f"cannot move {pairs[done][1]} into place: "
+                f"{e.strerror or e}; {moved} of {len(pairs)} files were "
+                "already moved, the rest were not written"
+            ) from e
+        self._assets = []
+        self._output = None
+        self._made = []
+
+    def abort(self) -> None:
+        """Remove every temporary file and every directory this stage
+        made. Nothing is left to do after a commit."""
+        pairs = list(self._assets)
+        if self._output is not None:
+            pairs.append(self._output)
+        for temp, _ in pairs:
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+        for directory in reversed(self._made):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        self._assets = []
+        self._output = None
+        self._made = []
 
 
-def write_assets(
-    plan: AssetPlan, assets_dir: str | os.PathLike
-) -> tuple[int, int]:
-    """Write the planned files under ``assets_dir`` (and the directories
-    between, created if needed): a file already there with identical
-    bytes is left alone, one with other bytes is overwritten -- it is the
-    same attachment, updated. Returns ``(written, unchanged)``."""
-    if not plan.files:
-        return 0, 0
-    directory = Path(assets_dir)
-    written = unchanged = 0
-    for name, data in plan.files.items():
-        path = directory.joinpath(*name.split("/"))
-        if path.is_file() and path.read_bytes() == data:
-            unchanged += 1
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        written += 1
-    return written, unchanged
-
-
-def summary(
-    plan: AssetPlan, assets_dir: str | os.PathLike, unchanged: int
-) -> str:
+def summary(plan: AssetPlan, assets_dir: str | os.PathLike) -> str:
     """The one-line report: ``Saved N attachments to DIR (M unchanged, K
     missing)``, where N counts every attachment now in DIR and M those
-    of them that were already there with identical bytes."""
-    n = len(plan.files)
+    of them that were already there with identical bytes; ``, S too
+    large`` follows when the server refused any for size."""
+    n = len(plan.saved)
     noun = "attachment" if n == 1 else "attachments"
+    large = (
+        f", {len(plan.too_large)} too large" if plan.too_large else ""
+    )
     return (
-        f"Saved {n} {noun} to {assets_dir} ({unchanged} unchanged, "
-        f"{len(plan.missing)} missing)"
+        f"Saved {n} {noun} to {assets_dir} ({plan.unchanged} unchanged, "
+        f"{len(plan.missing)} missing{large})"
     )

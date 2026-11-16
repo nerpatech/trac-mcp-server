@@ -675,6 +675,239 @@ def test_html_format_skips_code_and_fetches_only_the_rest(
     )
 
 
+# --- second review round (Trac /trac_mcp_server #215) ---------------------------
+
+_TOO_LARGE = (
+    "Error (validation_error): Inline result is 9000000 bytes, over this "
+    "server's limit of 5242880 bytes (max_inline_bytes)\n\n"
+    "Action: Ask the operator to raise max_inline_bytes."
+)
+
+
+def _three(*names):
+    return _FRONT + "".join(
+        f"![{n}](http://h/bcs/raw-attachment/wiki/P/{n})\n"
+        f"[{n}](http://h/bcs/attachment/wiki/P/{n})\n"
+        for n in names
+    )
+
+
+def _watch_fetches(monkeypatch):
+    """The names of the attachments asked for, in order."""
+    fetched = []
+    real = cli._mcp_session
+
+    @asynccontextmanager
+    async def watching(url, token):
+        async with real(url, token) as session:
+            inner = session.call_tool
+
+            def call(name, arguments):
+                fetched.append(arguments["filename"])
+                return inner(name, arguments)
+
+            yield SimpleNamespace(call_tool=call)
+
+    monkeypatch.setattr(cli, "_mcp_session", watching)
+    return fetched
+
+
+def test_a_too_large_attachment_is_kept_by_url_warned_and_counted(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(
+        monkeypatch,
+        _three("a.png", "big.png", "c.png"),
+        {},
+        {"a.png": b"A", "big.png": _TOO_LARGE, "c.png": b"C"},
+    )
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    rc = _main("wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_OK
+    assert (img / "P" / "a.png").read_bytes() == b"A"
+    assert (img / "P" / "c.png").read_bytes() == b"C"
+    assert not (img / "P" / "big.png").exists()
+    text = out.read_text()
+    assert "http://h/bcs/raw-attachment/wiki/P/big.png" in text
+    assert "http://h/bcs/attachment/wiki/P/big.png" in text
+    assert "img/P/a.png" in text and "img/P/c.png" in text
+    err = capsys.readouterr().err
+    assert "attachment 'big.png' of wiki page 'P'" in err
+    assert "5242880 bytes (max_inline_bytes)" in err
+    assert (
+        f"Saved 2 attachments to {img} (0 unchanged, 0 missing, "
+        "1 too large)" in err
+    )
+
+
+def test_a_validation_error_that_is_not_the_size_limit_still_aborts(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(
+        monkeypatch,
+        _three("a.png", "b.png"),
+        {},
+        {
+            "a.png": b"A",
+            "b.png": "Error (validation_error): bad filename\n",
+        },
+    )
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "bad filename" in capsys.readouterr().err
+    assert not out.exists() and not (tmp_path / "img").exists()
+
+
+def test_a_write_failure_while_staging_is_a_tool_error_and_leaves_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    from trac_mcp_server.cli import assets as export
+
+    names = ("a.png", "b.png", "c.png", "d.png", "e.png")
+    _fake_server(
+        monkeypatch,
+        _three(*names),
+        {},
+        {n: n.encode() for n in names},
+    )
+    real = export._write_temp
+    calls = []
+
+    def flaky(path, data):
+        calls.append(path)
+        if len(calls) == 3:
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(export, "_write_temp", flaky, raising=False)
+    out = tmp_path / "p.md"
+    out.write_text("the old page")
+    img = tmp_path / "img"
+    rc = _main("wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "No space left on device" in capsys.readouterr().err
+    assert len(calls) == 3
+    assert out.read_text() == "the old page"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["p.md"]
+
+
+def test_a_directory_that_cannot_be_made_is_a_tool_error_not_a_usage_error(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    img = tmp_path / "img"
+    real = Path.mkdir
+
+    def mkdir(self, *a, **k):
+        if img in (self, *self.parents):
+            raise OSError(28, "No space left on device")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    out = tmp_path / "p.md"
+    rc = _main("wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "No space left on device" in capsys.readouterr().err
+    assert not out.exists() and not img.exists()
+
+
+def test_a_failure_moving_the_files_into_place_is_a_tool_error(
+    tmp_path, monkeypatch, capsys
+):
+    from trac_mcp_server.cli import assets as export
+
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+
+    def refuse(src, dst):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(export.os, "replace", refuse)
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "Permission denied" in capsys.readouterr().err
+    assert not out.exists()
+    assert sorted(p.name for p in tmp_path.rglob("*")) == []
+
+
+def test_an_output_that_is_a_directory_is_a_usage_error_before_any_fetch(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    fetched = _watch_fetches(monkeypatch)
+    out = tmp_path / "p.md"
+    out.mkdir()
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_USAGE_ERROR
+    assert "is a directory" in capsys.readouterr().err
+    assert fetched == []
+    assert not (tmp_path / "img").exists()
+
+
+def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
+    tmp_path, monkeypatch, capsys
+):
+    # Page "blog" has an attachment "my-post"; a later pull of a page
+    # "blog/my-post" needs DIR/blog/my-post to be a directory.
+    img = tmp_path / "img"
+    (img / "blog").mkdir(parents=True)
+    (img / "blog" / "my-post").write_bytes(b"an earlier attachment")
+    front = _FRONT.replace("P", "blog/my-post")
+    _fake_server(
+        monkeypatch,
+        front
+        + "![x](http://h/bcs/raw-attachment/wiki/blog/my-post/x.png)\n",
+        {},
+        {"x.png": b"X"},
+    )
+    fetched = _watch_fetches(monkeypatch)
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "blog/my-post", str(out), "--assets", str(img)
+    )
+    assert rc == cli.EXIT_USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "is a file, not a directory" in err
+    assert "nothing was fetched or written" in err
+    assert fetched == []
+    assert not out.exists()
+    assert (img / "blog" / "my-post").read_bytes() == (
+        b"an earlier attachment"
+    )
+
+
+def test_urls_under_another_instance_path_are_warned_once(
+    tmp_path, monkeypatch, capsys
+):
+    other = "https://h/proxy/bcs/raw-attachment/wiki/P/a.png"
+    other2 = "https://h/proxy/bcs/attachment/wiki/P/a.png"
+    _fake_server(
+        monkeypatch,
+        _FRONT + f"![x]({other})\n[x]({other2})\n" + _BODY,
+        {},
+        {"a.png": b"x"},
+    )
+    out = tmp_path / "p.md"
+    rc = _main(
+        "wiki-pull", "P", str(out), "--assets", str(tmp_path / "img")
+    )
+    assert rc == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert err.count("2 URLs") == 1
+    assert "'/bcs'" in err
+    text = out.read_text()
+    assert f"![x]({other})" in text and f"[x]({other2})" in text
+    assert "![i](img/P/a.png)" in text
+
+
 # --- live -------------------------------------------------------------------
 
 

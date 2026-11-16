@@ -839,6 +839,10 @@ def _check_assets_args(args: argparse.Namespace) -> None:
             f"--assets: not a directory: {args.assets}",
             EXIT_USAGE_ERROR,
         )
+    if args.file != "-":
+        problem = export_assets.check_output_path(args.file)
+        if problem is not None:
+            raise CliError(problem, EXIT_USAGE_ERROR)
 
 
 def _pulled_instance(sc: dict, text: str) -> str:
@@ -866,14 +870,31 @@ def _pulled_instance(sc: dict, text: str) -> str:
     return instance
 
 
+def _too_large(text: str) -> export_assets.TooLarge | None:
+    """The refusal of an inline payload over ``max_inline_bytes``
+    (``Error (validation_error)`` naming it, ``file_io._over_cap``), as a
+    :class:`~.assets.TooLarge` carrying the server's limit; None for any
+    other error text."""
+    if not (
+        text.lstrip().startswith("Error (validation_error)")
+        and "max_inline_bytes" in text
+    ):
+        return None
+    limit = re.search(r"limit of (\d+) bytes", text)
+    return export_assets.TooLarge(
+        int(limit.group(1)) if limit else None
+    )
+
+
 async def _fetch_attachment(
     args: argparse.Namespace,
     session,
     ref: export_assets.AttachmentRef,
-) -> bytes | None:
+) -> export_assets.Outcome:
     """The bytes of one attachment through the server's attachment tools,
-    None when the server says it is not found; any other error result is
-    a CliError (a transport failure propagates as itself)."""
+    None when the server says it is not found, a ``TooLarge`` when it
+    refuses the size; any other error result is a CliError (a transport
+    failure propagates as itself)."""
     if ref.realm == "ticket":
         tool = "ticket_attachment_get"
         arguments: dict[str, Any] = {
@@ -890,6 +911,9 @@ async def _fetch_attachment(
         text = _result_text(result)
         if text.lstrip().startswith("Error (not_found)"):
             return None
+        too_large = _too_large(text)
+        if too_large is not None:
+            return too_large
         lines = text.strip().splitlines()
         raise CliError(
             f"--assets: cannot fetch attachment '{ref.filename}' of "
@@ -905,33 +929,45 @@ async def _localise_assets(
     args: argparse.Namespace,
     url: str,
     token: str | None,
-    sc: dict,
+    stage: export_assets.AssetStage,
     text: str,
-) -> tuple[str, export_assets.AssetPlan]:
-    """Fetch the attachments ``text`` references (all of them, into
-    memory) and plan the rewrite. Nothing is written here: a failed fetch
-    leaves the disk as it was."""
-    instance = _pulled_instance(sc, text)
-    scan = export_assets.scan_text(text, instance, args.format)
-    fetched: dict[export_assets.AttachmentRef, bytes | None] = {}
-    if scan.refs:
-        # One session for every attachment, not one per attachment.
-        async with _mcp_session(url, token) as session:
-            for ref in scan.refs:
-                fetched[ref] = await _fetch_attachment(
-                    args, session, ref
-                )
-    plan = export_assets.plan_assets(
-        text,
-        instance,
-        fetched,
-        args.assets,
-        None if args.file == "-" else args.file,
-        args.assets_url,
-        fmt=args.format,
-        scan=scan,
-    )
-    return plan.text, plan
+) -> export_assets.AssetPlan:
+    """Check the planned paths, fetch the attachments ``text`` references
+    (``stage.scan``) one by one into the stage's temporary files, and
+    plan the rewrite. Nothing is in place yet: a failed fetch or write
+    leaves the disk as it was once the caller drops the stage."""
+    try:
+        stage.preflight()
+    except export_assets.AssetPathError as e:
+        raise CliError(str(e), EXIT_USAGE_ERROR) from None
+    try:
+        if stage.scan.refs:
+            # One session for every attachment, not one per attachment.
+            async with _mcp_session(url, token) as session:
+                for ref in stage.scan.refs:
+                    stage.add(
+                        ref, await _fetch_attachment(args, session, ref)
+                    )
+    except export_assets.AssetError as e:
+        raise CliError(str(e), EXIT_TOOL_ERROR) from None
+    return stage.plan(text)
+
+
+def _commit_assets(
+    args: argparse.Namespace,
+    stage: export_assets.AssetStage,
+    data: bytes,
+) -> None:
+    """Stage the output file and move everything into place, the output
+    last; stdout is written after the attachments are in place."""
+    try:
+        if args.file != "-":
+            stage.stage_output(data)
+        stage.commit()
+    except export_assets.AssetError as e:
+        raise CliError(str(e), EXIT_TOOL_ERROR) from None
+    if args.file == "-":
+        _write_bytes(args.file, data)
 
 
 async def _run(
@@ -1083,25 +1119,27 @@ async def _run(
             )
         text = _payload(result, "content")
         plan = None
-        if args.assets is not None:
-            # Everything is fetched before anything is written: a failed
-            # fetch leaves neither assets nor the output file.
-            text, plan = await _localise_assets(
-                args, url, token, sc, text
+        if args.assets is None:
+            data = text.encode("utf-8")
+            _write_bytes(args.file, data)
+        else:
+            # Every file is written to a temporary sibling first and
+            # renamed into place at the end, the output last: a failed
+            # fetch or write leaves neither assets nor the output file.
+            scan = export_assets.scan_text(
+                text, _pulled_instance(sc, text), args.format
             )
-        data = text.encode("utf-8")
-        unchanged = 0
-        if plan is not None:
-            try:
-                _, unchanged = export_assets.write_assets(
-                    plan, args.assets
+            with export_assets.AssetStage(
+                scan,
+                args.assets,
+                None if args.file == "-" else args.file,
+                args.assets_url,
+            ) as stage:
+                plan = await _localise_assets(
+                    args, url, token, stage, text
                 )
-            except OSError as e:
-                raise CliError(
-                    f"cannot write the attachments to {args.assets}: {e}",
-                    EXIT_USAGE_ERROR,
-                ) from None
-        _write_bytes(args.file, data)
+                data = plan.text.encode("utf-8")
+                _commit_assets(args, stage, data)
         _say(
             args.file == "-",
             f"Pulled wiki page '{args.page}' (version {sc.get('version')}, "
@@ -1117,7 +1155,7 @@ async def _run(
             for warning in plan.warnings:
                 print(f"trac-mcp: warning: {warning}", file=sys.stderr)
             print(
-                f"trac-mcp: {export_assets.summary(plan, args.assets, unchanged)}",
+                f"trac-mcp: {export_assets.summary(plan, args.assets)}",
                 file=sys.stderr,
             )
         return EXIT_OK
