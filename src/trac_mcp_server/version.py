@@ -1,6 +1,15 @@
 """Version checking utilities for detecting stale MCP server binaries."""
 
+import re
+import sys
 from pathlib import Path
+
+#: What a stamped sha looks like: 40 hex, ``-dirty`` when the tree had
+#: changes. Matches what ``setup.py`` writes.
+_STAMP = re.compile(r"[0-9a-f]{40}(-dirty)?\Z")
+
+#: The data file build.sh bundles into a PyInstaller binary.
+FROZEN_SHA_FILE = "trac_mcp_server_RELEASE_SHA"
 
 
 def release_sha() -> str | None:
@@ -11,14 +20,37 @@ def release_sha() -> str | None:
     /trac_mcp_server #170); a checkout run in place, an editable install
     and a build from an sdist have no such module. A trailing ``-dirty``
     means a tracked file differed from the commit at build time.
+
+    A PyInstaller binary never runs ``setup.py``'s build step, so it has
+    no ``_release`` module either. ``build.sh`` bundles the sha as the
+    data file ``trac_mcp_server_RELEASE_SHA`` (``--add-data``), which
+    lands in ``sys._MEIPASS``; when the import fails in a frozen process
+    that file is read instead (Trac /trac_mcp_server #230). Its content
+    must be 40 hex, optionally ``-dirty``; anything else, or an
+    unreadable or undecodable file, is None. The ``_release`` value is
+    held to the same shape.
     """
     try:
         from ._release import RELEASE_SHA
     except ImportError:
-        return None
-    if isinstance(RELEASE_SHA, str) and RELEASE_SHA:
+        return _frozen_release_sha()
+    if isinstance(RELEASE_SHA, str) and _STAMP.match(RELEASE_SHA):
         return RELEASE_SHA
     return None
+
+
+def _frozen_release_sha() -> str | None:
+    """The sha build.sh bundled into a PyInstaller binary, or None."""
+    if not getattr(sys, "frozen", False):
+        return None
+    try:
+        text = (Path(sys._MEIPASS) / FROZEN_SHA_FILE).read_text(
+            encoding="ascii"
+        )
+    except (OSError, ValueError, AttributeError):
+        return None
+    sha = text.strip()
+    return sha if _STAMP.match(sha) else None
 
 
 def format_server_version(version: str, sha: str | None) -> str:
@@ -33,6 +65,25 @@ def format_server_version(version: str, sha: str | None) -> str:
     dirty = sha.endswith("-dirty")
     short = sha.removesuffix("-dirty")[:12]
     return f"{version}+g{short}" + (".dirty" if dirty else "")
+
+
+def format_cli_version(version: str, sha: str | None) -> str:
+    """``--version`` of the command-line tools: the server's form when
+    the commit is known, else the version with an explicit
+    ``(commit unknown)`` rather than a bare number that reads as a
+    complete answer (Trac /trac_mcp_server #230)."""
+    if sha:
+        return format_server_version(version, sha)
+    return f"{version} (commit unknown)"
+
+
+def cli_version() -> str:
+    """The string a command-line ``--version`` prints after its name:
+    the package version and the build commit (Trac /trac_mcp_server
+    #230). Looks ``release_sha`` up at call time."""
+    from . import __version__
+
+    return format_cli_version(__version__, release_sha())
 
 
 def check_version_consistency() -> tuple[bool, str]:

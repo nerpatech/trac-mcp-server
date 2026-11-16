@@ -126,6 +126,27 @@ for mod in "${CONVERT_EXTRA_IMPORTS[@]}"; do
     CONVERT_IMPORT_FLAGS="$CONVERT_IMPORT_FLAGS --hidden-import $mod"
 done
 
+# --- Release stamp ------------------------------------------------------------
+# A PyInstaller binary never runs setup.py's build step, so it has no
+# trac_mcp_server/_release.py. Bundle the sha as a data file instead;
+# version.release_sha() reads it from sys._MEIPASS (Trac /trac_mcp_server
+# #230). The sha comes from setup.py's own function so the binary and the
+# wheel agree. Nothing is written into src/.
+
+RELEASE_SHA=$(python -c 'import sys; from pathlib import Path; sys.path.insert(0, "."); import setup; print(setup.release_sha(Path(".").resolve()) or "")')
+
+STAMP_DIR=$(mktemp -d)
+trap 'rm -rf "$STAMP_DIR"' EXIT
+
+STAMP_FLAGS=()
+if [ -n "$RELEASE_SHA" ]; then
+    printf '%s\n' "$RELEASE_SHA" > "$STAMP_DIR/trac_mcp_server_RELEASE_SHA"
+    STAMP_FLAGS=(--add-data "$STAMP_DIR/trac_mcp_server_RELEASE_SHA:.")
+    echo "Release stamp: $RELEASE_SHA"
+else
+    echo "No release stamp (not a git checkout with a commit): the binaries will report \"commit unknown\"."
+fi
+
 # --- Build: trac-mcp-server ---------------------------------------------------
 
 echo "Running PyInstaller for trac-mcp-server..."
@@ -134,6 +155,7 @@ pyinstaller \
     --console \
     --name trac-mcp-server \
     --paths src \
+    "${STAMP_FLAGS[@]}" \
     $SERVER_IMPORT_FLAGS \
     --exclude-module logfire \
     --clean \
@@ -147,6 +169,7 @@ pyinstaller \
     --console \
     --name trac-convert \
     --paths src \
+    "${STAMP_FLAGS[@]}" \
     $CONVERT_IMPORT_FLAGS \
     --exclude-module logfire \
     --clean \
@@ -167,14 +190,30 @@ verify_binary() {
     fi
     echo ""
     echo "  $name → $path ($(du -h $path | cut -f1))"
-    echo "  Smoke: $(./$path --version)"
+    local smoke
+    smoke=$(./$path --version)
+    echo "  Smoke: $smoke"
+    # A stamp was bundled, so the binary must name that commit: a binary
+    # that says "commit unknown", or another commit, lost or mangled it.
+    # Fail the build rather than ship an unattributable binary. Windows
+    # (.exe) builds are not exercised (CI is Linux-only), so there a
+    # stamp that did not land is a warning.
+    if [ -n "$RELEASE_SHA" ] && [[ "$smoke" != *"+g${RELEASE_SHA:0:12}"* ]]; then
+        if [[ "$path" == *.exe ]]; then
+            echo "WARNING: $name does not report the stamped commit ${RELEASE_SHA:0:12} (Windows builds are not verified)"
+            return 0
+        fi
+        echo "ERROR: $name does not report the stamped commit: expected +g${RELEASE_SHA:0:12} (from $RELEASE_SHA)"
+        return 1
+    fi
 }
+
+verify_binary trac-mcp-server
+verify_binary trac-convert
 
 echo ""
 echo "==================================================================="
 echo "  Build successful!"
 echo "==================================================================="
-verify_binary trac-mcp-server
-verify_binary trac-convert
 echo ""
 echo "Build complete. Binaries in dist/."

@@ -29,7 +29,7 @@ trac-mcp-server --transport http --port 8080   # streamable HTTP instead of stdi
 | `--path PATH` | `/mcp` | URL path the MCP endpoint is mounted at, for `--transport http` |
 | `--allow-unauthenticated` | `false` | Allow `--transport http` to bind a non-loopback host without an auth token. Dangerous -- exposes Trac credentials to the network. Prefer `TRAC_MCP_AUTH_TOKEN`. |
 | `--file-access {local,off}` | `off` for http, `local` for stdio | Whether the file tools may read and write this process's filesystem through `file_path`/`output_path` (see [HTTP Transport](http-transport.md#file-access-file_access)) |
-| `--version` | -- | Show version and exit |
+| `--version` | -- | Show the version and the commit the build was made from, then exit: `3.0.0+g<12 hex of the sha>`, with `.dirty` after it when the tree had uncommitted changes at build time, or `3.0.0 (commit unknown)` for an editable install or a source run. |
 
 There is no `--auth-token` flag: it would leak the secret into the process list. Set it via `TRAC_MCP_AUTH_TOKEN` or `config.yaml`'s `server.auth_token`. See [HTTP Transport](http-transport.md) for the full auth and bind-safety rules.
 
@@ -105,7 +105,7 @@ trac-convert --version
 | `--trac-username USER` | -- | Override Trac username (default: `TRAC_USERNAME` env var or YAML config). |
 | `--trac-password PASS` | -- | Override Trac password (default: `TRAC_PASSWORD` env var or YAML config). Prefer `--trac-password-file` for secrets. |
 | `--trac-password-file PATH` | -- | Read Trac password from file (single line, trimmed). Takes precedence over `--trac-password`. |
-| `--version` | -- | Show version and exit |
+| `--version` | -- | Show the version and the commit the build was made from, then exit: `3.0.0+g<12 hex of the sha>`, with `.dirty` after it when the tree had uncommitted changes at build time, or `3.0.0 (commit unknown)` for an editable install or a source run. |
 
 ### Exit Codes
 
@@ -228,6 +228,7 @@ The server's write-time link gate and notes apply to all three writes, as for th
 | `--server NAME` | `.mcp.json` entry to use (default `trac-http`) |
 | `--token-env NAME` | Environment variable holding the bearer token |
 | `--instance PATH` | Trac instance, e.g. `/auto_pm` (default: the server's) |
+| `--version` | Show the version and the commit the build was made from, then exit: `3.0.0+g<12 hex of the sha>`, with `.dirty` after it when the tree had uncommitted changes at build time, or `3.0.0 (commit unknown)` for an editable install or a source run. |
 
 Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working directory up: that entry's `url` and its `Authorization: Bearer ...` header, with `${VAR}` and `${VAR:-default}` expanded from the environment exactly as Claude Code expands them. Run from a project directory, it therefore connects as the same identity the project's MCP session uses, with no extra setup. Failing both, it reads `TRAC_MCP_URL` and `TRAC_MCP_AUTH_TOKEN`. A variable named with `--token-env` must be set; if the default `TRAC_MCP_AUTH_TOKEN` is unset, `trac-mcp` says that it is sending no token. An HTTP failure is reported by status, e.g. `HTTP 401 Unauthorized -- the bearer token was missing or rejected`.
 

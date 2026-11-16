@@ -9,11 +9,14 @@ import sys
 import types
 from unittest.mock import mock_open, patch
 
+import pytest
 import tomllib
 
 import trac_mcp_server
 from trac_mcp_server.version import (
     check_version_consistency,
+    cli_version,
+    format_cli_version,
     format_server_version,
     release_sha,
 )
@@ -161,6 +164,19 @@ class TestReleaseSha:
         )
         assert release_sha() == "a" * 40 + "-dirty"
 
+    @pytest.mark.parametrize(
+        "value", ["unknown", "0123456789ab", "", "a" * 40 + "-dirt"]
+    )
+    def test_a_value_that_is_not_a_sha_is_none(
+        self, monkeypatch, value
+    ):
+        fake = types.ModuleType("trac_mcp_server._release")
+        fake.RELEASE_SHA = value
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", fake
+        )
+        assert release_sha() is None
+
 
 class TestFormatServerVersion:
     """serverInfo.version carries the commit when one is known."""
@@ -179,4 +195,138 @@ class TestFormatServerVersion:
         assert (
             format_server_version("2.2.0", sha)
             == "2.2.0+g0123456789ab.dirty"
+        )
+
+
+class TestFormatCliVersion:
+    """``--version`` names the build commit (Trac /trac_mcp_server
+    #230); without one it says so instead of printing a bare version
+    that reads as a complete answer."""
+
+    SHA = "0123456789abcdef" * 2 + "01234567"
+
+    def test_a_sha_gives_the_server_form(self):
+        assert (
+            format_cli_version("3.0.0", self.SHA)
+            == "3.0.0+g0123456789ab"
+        )
+
+    def test_a_dirty_sha_is_marked_dirty(self):
+        assert (
+            format_cli_version("3.0.0", self.SHA + "-dirty")
+            == "3.0.0+g0123456789ab.dirty"
+        )
+
+    def test_no_sha_says_the_commit_is_unknown(self):
+        assert (
+            format_cli_version("3.0.0", None)
+            == "3.0.0 (commit unknown)"
+        )
+
+    def test_an_empty_sha_says_the_commit_is_unknown(self):
+        assert (
+            format_cli_version("3.0.0", "") == "3.0.0 (commit unknown)"
+        )
+
+
+class TestReleaseShaFrozen:
+    """A PyInstaller binary has no ``_release`` module (setup.py's
+    build_py never runs for it); build.sh bundles the sha as a data
+    file under ``sys._MEIPASS`` instead (Trac /trac_mcp_server #230)."""
+
+    SHA = "0123456789abcdef" * 2 + "01234567"
+    FILE = "trac_mcp_server_RELEASE_SHA"
+
+    @pytest.fixture(autouse=True)
+    def no_release_module(self, monkeypatch):
+        # an editable checkout has no _release.py; guard it anyway
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", None
+        )
+
+    @pytest.fixture
+    def meipass(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(
+            sys, "_MEIPASS", str(tmp_path), raising=False
+        )
+        return tmp_path
+
+    def test_a_valid_file_is_the_sha(self, meipass):
+        (meipass / self.FILE).write_text(self.SHA + "\n")
+        assert release_sha() == self.SHA
+
+    def test_a_dirty_file_is_returned_as_written(self, meipass):
+        (meipass / self.FILE).write_text(self.SHA + "-dirty")
+        assert release_sha() == self.SHA + "-dirty"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "main",
+            "0123456789abcdef" * 2 + "0123456",
+            "",
+            "0123456789ABCDEF" * 2 + "01234567",
+            "0123456789abcdef" * 2 + "01234567-dirt",
+        ],
+    )
+    def test_a_malformed_file_is_none(self, meipass, text):
+        (meipass / self.FILE).write_text(text)
+        assert release_sha() is None
+
+    def test_a_missing_file_is_none(self, meipass):
+        assert release_sha() is None
+
+    def test_an_unreadable_file_is_none(self, meipass):
+        # a directory where the file should be: read_text raises OSError
+        (meipass / self.FILE).mkdir()
+        assert release_sha() is None
+
+    def test_an_undecodable_file_is_none(self, meipass):
+        (meipass / self.FILE).write_bytes(
+            b"\xff\xfe" + self.SHA.encode()
+        )
+        assert release_sha() is None
+
+    def test_not_frozen_ignores_the_file(self, tmp_path, monkeypatch):
+        (tmp_path / self.FILE).write_text(self.SHA)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(
+            sys, "_MEIPASS", str(tmp_path), raising=False
+        )
+        assert release_sha() is None
+
+    def test_the_release_module_wins_over_the_file(
+        self, meipass, monkeypatch
+    ):
+        (meipass / self.FILE).write_text(self.SHA)
+        fake = types.ModuleType("trac_mcp_server._release")
+        fake.RELEASE_SHA = "b" * 40
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", fake
+        )
+        assert release_sha() == "b" * 40
+
+
+class TestCliVersion:
+    def test_is_the_package_version_and_the_release_sha(
+        self, monkeypatch
+    ):
+        from trac_mcp_server import version as version_module
+
+        monkeypatch.setattr(
+            version_module, "release_sha", lambda: "c" * 40
+        )
+        assert (
+            cli_version()
+            == f"{trac_mcp_server.__version__}+g{'c' * 12}"
+        )
+
+    def test_says_unknown_without_a_sha(self, monkeypatch):
+        from trac_mcp_server import version as version_module
+
+        monkeypatch.setattr(version_module, "release_sha", lambda: None)
+        assert (
+            cli_version()
+            == f"{trac_mcp_server.__version__} (commit unknown)"
         )
