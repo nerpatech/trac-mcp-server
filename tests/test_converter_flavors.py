@@ -520,11 +520,13 @@ def test_a_language_word_inside_a_sentence_is_not_a_label():
     assert _norm(source, "gemini") == (source, [])
 
 
-def test_fence_like_code_gets_a_longer_fence():
-    source = "markdown\n```py\nx\n```\nUse code with caution."
-    assert _norm(source, "gemini")[0] == (
-        "````markdown\n```py\nx\n```\n````"
-    )
+def test_code_holding_a_fence_line_is_not_rebuilt():
+    """Review finding 1: a fence line between the label and the marker
+    means the label is not above this marker (the code of a rebuilt block
+    is never fence-like, so a plain fence always closes it)."""
+    for fence in ("```py", "~~~"):
+        source = f"markdown\n{fence}\nx\nUse code with caution."
+        assert _norm(source, "gemini") == (source, [])
 
 
 def test_a_label_inside_a_fence_is_untouched():
@@ -688,3 +690,301 @@ def test_commonmark_warnings_are_unchanged_without_the_marker():
     assert result.warnings == [
         "HTML tags detected - these may not render correctly in TracWiki."
     ]
+
+
+# -- review fixes (Trac /trac_mcp_server #216) --------------------------------
+
+# 1. The marker pairs with the NEAREST language line above it.
+
+
+def test_a_marker_pairs_with_the_nearest_label_not_the_first():
+    source = (
+        "Intro\n\npython\nprint(1)\n\nSome prose here.\n\n"
+        "bash\necho hi\nUse code with caution.\n"
+    )
+    assert _norm(source, "gemini") == (
+        "Intro\n\npython\nprint(1)\n\nSome prose here.\n\n"
+        "```bash\necho hi\n```\n",
+        [REBUILT_ONE],
+    )
+
+
+def test_a_rebuilt_block_leaves_an_existing_fence_and_text_alone():
+    source = (
+        "Text\n\n```\npython\n```\n\nbash\nls\nUse code with caution."
+    )
+    assert _norm(source, "gemini")[0] == (
+        "Text\n\n```\npython\n```\n\n```bash\nls\n```"
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "  python\nx = 1\nUse code with caution.\n",
+        "python\nx = 1\n  Use code with caution.\n",
+        "\tpython\nx = 1\nUse code with caution.\n",
+        "bash\n```\nls\nUse code with caution.\n",
+        "bash\n  ~~~\nls\nUse code with caution.\n",
+    ],
+    ids=[
+        "indented label",
+        "indented marker",
+        "tab label",
+        "fence between",
+        "indented tilde fence between",
+    ],
+)
+def test_a_block_that_does_not_start_at_column_zero_is_not_rebuilt(
+    source,
+):
+    assert _norm(source, "gemini") == (source, [])
+
+
+def test_each_marker_takes_one_label_only():
+    source = "bash\na\nUse code with caution.\nUse code with caution.\n"
+    assert _norm(source, "gemini") == (
+        "```bash\na\n```\nUse code with caution.\n",
+        [REBUILT_ONE],
+    )
+
+
+# 2. Indented code and multi-line or multi-backtick spans are code.
+
+
+@pytest.mark.parametrize(
+    ("flavor", "source"),
+    [
+        ("chatgpt", "para\n\n    curl https://a.b/?utm_source=x&q=1"),
+        ("chatgpt", "para\n\n\tcurl https://a.b/?utm_source=x&q=1"),
+        ("chatgpt", "    https://a.b/?utm_source=x"),
+        ("chatgpt", "para\n\n    \\(x\\) \\\\[y\\\\]"),
+        ("gemini", "para\n\n    \u2022 x\n    y"),
+        ("gemini", "para\n\n    [1] (https://example.com/a)"),
+        ("chatgpt", "x ``https://a.b/?utm_source=z`` y"),
+        ("chatgpt", "a `x\nhttps://a.b/?utm_source=z` b"),
+        ("gemini", "a `x\n\u2022 y` b"),
+    ],
+    ids=[
+        "indented url",
+        "tab-indented url",
+        "indented url at the start",
+        "indented math",
+        "indented bullets",
+        "indented citation",
+        "double-backtick span",
+        "span across a line break",
+        "bullet in a span across a line break",
+    ],
+)
+def test_indented_code_and_spans_are_untouched(flavor, source):
+    assert _norm(source, flavor)[0] == source
+
+
+def test_an_indented_line_that_continues_a_paragraph_is_not_code():
+    assert _norm("para\n    \u2022 x", "gemini")[0] == "para\n- x"
+    assert _norm("para\n    https://a.b/?utm_source=x", "chatgpt")[
+        0
+    ] == ("para\n    https://a.b/")
+
+
+def test_an_indented_line_in_a_list_item_is_not_code():
+    assert _norm(
+        "- item\n\n    https://a.b/?utm_source=x&q=1", "chatgpt"
+    )[0] == ("- item\n\n    https://a.b/?q=1")
+    assert _norm("1. item\n\n    \u2022 x", "gemini")[0] == (
+        "1. item\n\n- x"
+    )
+
+
+def test_a_blank_line_ends_a_span_that_would_cross_it():
+    source = "a `x\n\nhttps://a.b/?utm_source=z` b"
+    assert _norm(source, "chatgpt")[0] == "a `x\n\nhttps://a.b/` b"
+
+
+# 3. A backtick never belongs to a URL.
+
+
+def test_a_url_before_a_span_across_a_line_break_matches_commonmark():
+    source = "a `x\nhttps://a.b/?utm_source=z` b"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        markdown_to_tracwiki(source)
+    )
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "a `x https://a.b/?utm_source=z` b"
+    )
+
+
+# 4. Math is protected before the bracket-link stash sees the text.
+
+STASHED_MATH_ROWS = [
+    (
+        "doubled brackets",
+        "The map \\\\[f:A\\\\] here.",
+        "The map `f:A` here.",
+    ),
+    (
+        "single brackets",
+        "The map \\[f:A\\] here.",
+        "The map `f:A` here.",
+    ),
+    (
+        "doubled parens",
+        "The map \\\\(f:A\\\\) here.",
+        "The map `f:A` here.",
+    ),
+    ("single parens", "The map \\(f:A\\) here.", "The map `f:A` here."),
+    ("single display", "\\[f:A\\]", "{{{#!latex\nf:A\n}}}"),
+    ("doubled display", "\\\\[f:A\\\\]", "{{{#!latex\nf:A\n}}}"),
+    (
+        "multi-line display",
+        "\\\\[\nf:A\n  wiki:B\n\\\\]",
+        "{{{#!latex\nf:A\n  wiki:B\n}}}",
+    ),
+    (
+        "a bracket form inside",
+        "x \\(a[[b]] c [d:e f]\\) y",
+        "x `a[[b]] c [d:e f]` y",
+    ),
+    (
+        "in a table cell",
+        "| a |\n| - |\n| \\\\(f:A\\\\) |",
+        "||=a=||\n||`f:A`||",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [row[1:] for row in STASHED_MATH_ROWS],
+    ids=[row[0] for row in STASHED_MATH_ROWS],
+)
+def test_math_holding_a_link_shaped_word_is_math(source, expected):
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == expected
+
+
+def test_a_link_shaped_word_outside_math_is_still_a_link_under_chatgpt():
+    source = "See [wiki:Page label] and \\(x\\)."
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "See [wiki:Page label] and `x`."
+    )
+    assert markdown_to_tracwiki("See [wiki:Page label].") == (
+        markdown_to_tracwiki("See [wiki:Page label].", flavor="chatgpt")
+    )
+
+
+def test_math_in_a_bracket_span_survives_the_stash():
+    source = "[[Image(a.png, \\(x\\))]] end"
+    out = markdown_to_tracwiki(source, flavor="chatgpt")
+    assert "\x00" not in out
+    assert out == "[[Image(a.png, \\(x\\))]] end"
+
+
+def test_the_split_detector_parses_with_the_math_rules():
+    from trac_mcp_server.converters.markdown_to_tracwiki import (
+        find_list_item_splits,
+    )
+
+    source = "- a \\(f:A\\)\n  - sub\n\n  ```\n  x\n  ```\n"
+    found = find_list_item_splits(source, flavor="chatgpt")
+    assert [f["block"] for f in found] == ["code block"]
+
+
+# 5. Adversarial input stays linear (seconds before, a few hundredths now).
+
+ADVERSARIAL = {
+    "64KB of unclosed inline openers": ("chatgpt", "\\(a " * 16384),
+    "8000 unclosed bracket openers": ("chatgpt", "x \\[a " * 8000),
+    "8000 unclosed display paragraphs": ("chatgpt", "\\[a\n\n" * 8000),
+    "8000 display openers in one paragraph": (
+        "chatgpt",
+        "\\[a\n" * 8000,
+    ),
+    "doubled openers": ("chatgpt", "\\\\(a " * 8000),
+    "10000 lone language lines": ("gemini", "python\n" * 10000),
+    "10000 languages then markers": (
+        "gemini",
+        "bash\nUse code with caution.\n" * 5000,
+    ),
+    "10000 indented lines": (
+        "gemini",
+        "para\n\n" + "    \u2022 x\n" * 10000,
+    ),
+    "many backtick runs": (
+        "chatgpt",
+        "".join("`" * (i % 40 + 1) + "a " for i in range(20000)),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("flavor", "source"),
+    list(ADVERSARIAL.values()),
+    ids=list(ADVERSARIAL),
+)
+def test_adversarial_input_finishes_quickly(flavor, source):
+    import time
+
+    started = time.perf_counter()
+    markdown_to_tracwiki(source, flavor=flavor)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_long_closed_formula_still_converts():
+    body = "x + " * 200 + "y"
+    assert markdown_to_tracwiki(
+        f"a \\({body}\\) b", flavor="chatgpt"
+    ) == (f"a `{body}` b")
+
+
+# 6. Any whitespace-only line before a display paragraph.
+
+
+@pytest.mark.parametrize(
+    "blank", ["", " ", "  ", "\t", " \t ", "      "], ids=repr
+)
+def test_display_math_after_any_blank_line(blank):
+    source = f"x\n{blank}\n\\[\nE = m_c^2\n\\]"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "x\n\n{{{#!latex\nE = m_c^2\n}}}"
+    )
+
+
+# 7. A URL that runs into code is cut there.
+
+
+def test_a_url_running_into_a_code_span_is_cut_at_the_span():
+    source = "x https://x.com/?utm_source=a`code`"
+    assert _norm(source, "chatgpt")[0] == "x https://x.com/`code`"
+    assert markdown_to_tracwiki(source, flavor="chatgpt") == (
+        "x https://x.com/`code`"
+    )
+
+
+# 9. The normalised source rides on the result.
+
+
+def test_the_result_carries_the_normalised_source():
+    source = "bash\nls\nUse code with caution.\n"
+    result = convert_with_warnings(source, flavor="gemini")
+    assert result.normalised_source == _norm(source, "gemini")[0]
+    assert result.normalised_source == "```bash\nls\n```\n"
+
+
+def test_the_default_result_has_no_normalised_source():
+    assert convert_with_warnings("x\n").normalised_source is None
+    assert (
+        convert_with_warnings(
+            "x\n", flavor="commonmark"
+        ).normalised_source
+        is None
+    )
+
+
+def test_the_default_result_is_otherwise_unchanged():
+    result = convert_with_warnings("Some <b>bold</b> text\n")
+    assert result.text == "Some <b>bold</b> text"
+    assert result.source_format == "markdown"
+    assert result.target_format == "tracwiki"
+    assert result.converted is True
+    assert result.title is None

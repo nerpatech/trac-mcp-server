@@ -55,8 +55,9 @@ otherwise TracWiki) converts as Markdown. The ticket tools never convert,
 so a paste meant for a ticket goes through `trac-convert --from md --to
 tracwiki --flavor ...` first.
 
-Nothing a flavour rewrites touches a fenced code block or an inline code
-span.
+Nothing a flavour rewrites touches code: a fenced block (backtick or tilde),
+an indented code block, or an inline code span (multi-backtick, or running
+over a line break).
 
 **`chatgpt`**
 
@@ -72,7 +73,7 @@ span.
 
 | Input | Output |
 |-------|--------|
-| a line that is exactly a language name (`html`, `bash`, `python`, ...), the code, then a line `Use code with caution.` | a fenced block in that language, the code byte for byte; the marker line is dropped, the fence is longer if the code holds a fence line, and one `gemini: rebuilt N code block(s) ...` warning is added. `html` is fenced as `text/html`, because the `html` processor would render the markup instead of showing it. Without the closing marker nothing changes |
+| a line that is exactly a language name (`html`, `bash`, `python`, ...), the code, then a line `Use code with caution.` | a fenced block in that language, the code byte for byte; the marker line is dropped and one `gemini: rebuilt N code block(s) ...` warning is added. The marker takes the nearest language line above it, both start at column 0 and the label is outside code, and a fence line (` ``` ` or `~~~`) between them means no block is rebuilt. `html` is fenced as `text/html`, because the `html` processor would render the markup instead of showing it. Without the closing marker nothing changes |
 | a line starting with `•` | a `- ` list item |
 | `[N] (https://...)` | the link `[N](https://...)` |
 

@@ -26,7 +26,6 @@ from ...converters.common import (
 from ...converters.flavors import (
     DEFAULT_FLAVOR,
     FLAVOR_SCHEMA,
-    apply_flavor,
     flavor_problem,
 )
 from ...converters.front_matter import (
@@ -466,7 +465,9 @@ async def _handle_push(
         # The checks below read the Markdown that was converted: for a
         # flavour that is its normalised text, or a rebuilt code fence
         # would be invisible to them and a quoted one would not be (#216).
-        checked, _ = apply_flavor(content, flavor)
+        checked = content
+        if flavor != DEFAULT_FLAVOR and conversion.normalised_source:
+            checked = conversion.normalised_source
 
         # Refuse rather than warn (ticket #68, operator decision).
         # A TracWiki `{{{ }}}` block in a Markdown-detected file has

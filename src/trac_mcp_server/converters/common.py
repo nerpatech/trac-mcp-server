@@ -270,6 +270,12 @@ class ConversionResult:
         title: The page title (the text of the first ``h1``) of a
             conversion from Trac's HTML; None when there is none or the
             conversion does not read one
+        normalised_source: For a Markdown -> TracWiki conversion under a
+            Markdown flavour profile (#216), the source after the
+            flavour's pre-normalisers: the Markdown that was converted,
+            which the Markdown-source checks must read. None for the
+            default flavour (the source is converted as given) and for
+            every other conversion
     """
 
     text: str
@@ -278,6 +284,7 @@ class ConversionResult:
     converted: bool = False
     warnings: list[str] = field(default_factory=list)
     title: str | None = None
+    normalised_source: str | None = None
 
     # Backward compatibility: tracwiki property returns text
     @property
@@ -395,8 +402,14 @@ _INLINE_CODE_SPAN_RE = re.compile(
     r"(?P<ticks>`+)(?:(?!(?P=ticks)).)+(?P=ticks)"
 )
 
+#: The same, but a span may run over a line break as CommonMark's may --
+#: not over a blank line, which ends the paragraph and so the span.
+_MULTILINE_CODE_SPAN_RE = re.compile(
+    r"(?P<ticks>`+)(?:(?!(?P=ticks))(?:[^\n]|\n(?![ \t]*\n)))+(?P=ticks)"
+)
 
-def blank_inline_code_spans(text: str) -> str:
+
+def blank_inline_code_spans(text: str, multiline: bool = False) -> str:
     """Return ``text`` with inline code spans replaced by spaces,
     character for character, so the result has the SAME LENGTH as the
     input -- the companion to :func:`blank_code_fences` for the other
@@ -415,6 +428,12 @@ def blank_inline_code_spans(text: str) -> str:
 
     Newlines are preserved along with length, so any line-oriented
     logic downstream still sees the same shape.
+
+    ``multiline`` lets a span run over a line break (never over a blank
+    line). The default stays one line, which is what the preview checks
+    were measured with (see the note on ``_INLINE_CODE_SPAN_RE``); the
+    flavour pre-normalisers (#216) pass True, since a span they miss is
+    text they rewrite.
     """
 
     def _blank(match: re.Match[str]) -> str:
@@ -422,7 +441,10 @@ def blank_inline_code_spans(text: str) -> str:
             "\n" if ch == "\n" else " " for ch in match.group(0)
         )
 
-    return _INLINE_CODE_SPAN_RE.sub(_blank, text)
+    pattern = (
+        _MULTILINE_CODE_SPAN_RE if multiline else _INLINE_CODE_SPAN_RE
+    )
+    return pattern.sub(_blank, text)
 
 
 def detect_format_heuristic(text: str) -> str:

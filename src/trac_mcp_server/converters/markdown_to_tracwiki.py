@@ -18,6 +18,8 @@ from .flavors import (
     apply_flavor,
     flavor_plugins,
     has_gemini_code_marker,
+    protect_syntax,
+    restore_syntax,
 )
 
 # GitHub-style heading slug, mirrored from auto-pm's docs_linkcheck rule
@@ -197,6 +199,21 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
+
+
+def _stash_for_flavor(
+    markdown_text: str, flavor: str
+) -> tuple[str, list[str]]:
+    """`_stash_bracket_syntax`, with the flavour's own syntax (ChatGPT's
+    math) kept out of its reach: protected first, put back after, so the
+    parser's flavour rules see it whole (#216). For the default flavour
+    this is `_stash_bracket_syntax`."""
+    protected, saved = protect_syntax(markdown_text, flavor)
+    stashed, placeholders = _stash_bracket_syntax(protected)
+    if saved:
+        stashed = restore_syntax(stashed, saved)
+        placeholders = [restore_syntax(p, saved) for p in placeholders]
+    return stashed, placeholders
 
 
 def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
@@ -1522,7 +1539,9 @@ def _render_markdown(
     # placeholder table to resolve a sentinel before slugifying.
     _reject_unrepresentable_footnotes(markdown_text)
 
-    stashed_text, placeholders = _stash_bracket_syntax(markdown_text)
+    stashed_text, placeholders = _stash_for_flavor(
+        markdown_text, flavor
+    )
 
     # Create renderer and parser with table plugin enabled
     renderer = TracWikiRenderer(
@@ -1647,6 +1666,9 @@ def convert_with_warnings(
         target_format="tracwiki",
         converted=True,
         warnings=warnings,
+        normalised_source=(
+            markdown_text if flavor != DEFAULT_FLAVOR else None
+        ),
     )
 
 
@@ -1717,7 +1739,7 @@ def find_list_item_splits(
     is the output of `apply_flavor`, not the raw paste (#216); ``flavor``
     only adds that flavour's parser rules, as the converter has them.
     """
-    stashed, placeholders = _stash_bracket_syntax(markdown_text)
+    stashed, placeholders = _stash_for_flavor(markdown_text, flavor)
     parse = mistune.create_markdown(
         renderer=None,
         plugins=[*_MISTUNE_PLUGINS, *flavor_plugins(flavor)],

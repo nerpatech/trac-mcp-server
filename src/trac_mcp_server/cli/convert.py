@@ -32,7 +32,7 @@ from ..converters.common import (
     describe_indentation_loss,
     find_code_block_indentation_loss,
 )
-from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS, apply_flavor
+from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS
 from ..converters.front_matter import (
     build_front_matter,
     exported_from,
@@ -1043,7 +1043,11 @@ def convert_text(
         # holds the input and a stderr line is enough to act on.
         # The Markdown that was converted, for a flavour its normalised
         # text (#216).
-        converted_markdown, _ = apply_flavor(text, flavor)
+        converted_markdown = (
+            result.normalised_source
+            if result.normalised_source is not None
+            else text
+        )
         result.warnings.extend(
             describe_indentation_loss(loss)
             for loss in find_code_block_indentation_loss(
@@ -1124,11 +1128,13 @@ def main(argv: list[str] | None = None) -> int:
         args.source_format == "tracwiki"
         or args.target_format == "md"
         or args.from_wiki is not None
+        or args.check_trac
     ):
         parser.error(
             f"--flavor {args.flavor} applies to a Markdown source "
             "converted to TracWiki (--from md --to tracwiki); it cannot "
-            "be used with a TracWiki source, --from-wiki or --to md"
+            "be used with a TracWiki source, --from-wiki, --to md or "
+            "--check-trac"
         )
 
     link_map_flag: LinkRewrites | None = None

@@ -13,7 +13,6 @@ import mcp.types as types
 from ...converters.flavors import (
     DEFAULT_FLAVOR,
     FLAVOR_SCHEMA,
-    apply_flavor,
     flavor_problem,
 )
 from ...converters.markdown_to_tracwiki import convert_with_warnings
@@ -254,7 +253,8 @@ async def _handle_convert_preview(
         # The Markdown-source checks read what was converted: the
         # flavour's normalised text, so their findings (a list-item split,
         # TracWiki markup in Markdown) line up with the converted output.
-        markdown_source, _ = apply_flavor(content, flavor)
+        if conversion.normalised_source is not None:
+            markdown_source = conversion.normalised_source
 
     rendered_html = await run_sync(client.wiki_to_html, tracwiki)
     facts = extract_facts(rendered_html)

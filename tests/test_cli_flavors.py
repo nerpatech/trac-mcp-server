@@ -351,3 +351,35 @@ def test_wiki_push_flavor_through_the_real_server(tmp_path, capsys):
         rc = _cli(url, "wiki-push", "P", str(src), "--flavor", "gemini")
         assert rc == cli.EXIT_OK, capsys.readouterr().err
         assert trac.pages["P"] == [GEMINI_CONVERTED]
+
+
+# -- review of #216 -----------------------------------------------------------
+
+
+def test_a_flavor_with_check_trac_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--check-trac", "--flavor", "chatgpt"])
+    assert exit_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--flavor" in err and "--check-trac" in err
+
+
+def test_convert_text_normalises_once(monkeypatch):
+    from trac_mcp_server.converters import flavors
+
+    calls: list[str] = []
+
+    def counted(normalise):
+        def run(text):
+            calls.append(normalise.__name__)
+            return normalise(text)
+
+        return run
+
+    monkeypatch.setitem(
+        flavors._NORMALISERS,
+        "gemini",
+        tuple(counted(n) for n in flavors._NORMALISERS["gemini"]),
+    )
+    convert_text(GEMINI, "md", "tracwiki", flavor="gemini")
+    assert calls.count("_gemini_code_blocks") == 1

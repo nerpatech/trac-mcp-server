@@ -269,3 +269,37 @@ def test_preview_the_split_advisory_reads_the_normalised_text():
         for w in without.structuredContent["warnings"]
         if w["code"] == "list_item_split"
     ]
+
+
+# -- the normalisers run once per call (review of #216) -------------------------
+
+
+@pytest.fixture
+def normaliser_calls(monkeypatch):
+    from trac_mcp_server.converters import flavors
+
+    calls: list[str] = []
+
+    def counted(normalise):
+        def run(text):
+            calls.append(normalise.__name__)
+            return normalise(text)
+
+        return run
+
+    monkeypatch.setitem(
+        flavors._NORMALISERS,
+        "gemini",
+        tuple(counted(n) for n in flavors._NORMALISERS["gemini"]),
+    )
+    return calls
+
+
+async def test_push_normalises_once(normaliser_calls):
+    await _fm_push(GEMINI_COPY, name="copy.md", flavor="gemini")
+    assert normaliser_calls.count("_gemini_code_blocks") == 1
+
+
+def test_preview_normalises_once(normaliser_calls):
+    _preview({"content": GEMINI_COPY, "flavor": "gemini"})
+    assert normaliser_calls.count("_gemini_code_blocks") == 1
