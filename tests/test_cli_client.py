@@ -623,6 +623,149 @@ def test_live_cli_roundtrip_through_real_server(tmp_path):
             )
 
 
+@pytest.mark.live
+def test_live_ticket_comment_edit_long_body_and_expect_file(
+    tmp_path, capsys
+):
+    """Trac /trac_mcp_server #220, end to end on a /trac_test scratch
+    ticket: a comment is added (under the add limit), then edited from a
+    ~12000-character file (over it); ``ticket-pull --comment`` returns the
+    file's bytes exactly, and ``--expect-file`` with the original -- now
+    stale -- body is refused and changes nothing. The write gate is live,
+    so the bodies carry no links."""
+    import asyncio
+    import os
+    import re
+
+    from tests.live_helpers import trac_test_registry
+    from trac_mcp_server.config import Config
+
+    default_config = Config(
+        trac_url=os.environ["TRAC_URL"],
+        username=os.environ["TRAC_USERNAME"],
+        password=os.environ["TRAC_PASSWORD"],
+        insecure=os.environ.get("TRAC_INSECURE", "").lower()
+        in ("1", "true", "yes"),
+    )
+    instance = ["--instance", "/trac_test"]
+    original = "Original comment for ticket 220.\nsecond line\n"
+    long_body = "".join(
+        f"Line {i:04d} of the long edited comment, plain words only.\n"
+        for i in range(200)
+    )
+    assert len(long_body) > 10000
+    first = tmp_path / "original.wiki"
+    first.write_bytes(original.encode("utf-8"))
+    edited = tmp_path / "edited.wiki"
+    edited.write_bytes(long_body.encode("utf-8"))
+    desc = tmp_path / "desc.wiki"
+    desc.write_bytes(
+        b"Scratch ticket for the ticket-comment-edit live row.\n"
+    )
+
+    with _served_instances(trac_test_registry(default_config)) as url:
+        ticket_id = None
+        try:
+            assert (
+                _cli(
+                    url,
+                    *instance,
+                    "ticket-create",
+                    "--summary",
+                    "Ticket 220 live CLI scratch",
+                    "--description-file",
+                    str(desc),
+                )
+                == cli.EXIT_OK
+            )
+            created = re.search(
+                r"Created ticket #(\d+)", capsys.readouterr().out
+            )
+            assert created
+            ticket_id = int(created.group(1))
+            tid = str(ticket_id)
+            assert (
+                _cli(url, *instance, "ticket-comment", tid, str(first))
+                == cli.EXIT_OK
+            )
+            cnum = str(_printed_comment_number(capsys.readouterr().out))
+
+            assert (
+                _cli(
+                    url,
+                    *instance,
+                    "ticket-comment-edit",
+                    tid,
+                    cnum,
+                    str(edited),
+                    "--expect-file",
+                    str(first),
+                )
+                == cli.EXIT_OK
+            )
+            assert (
+                f"Stored comment {cnum} matches the file, byte-for-byte"
+                in capsys.readouterr().out
+            )
+            back = tmp_path / "back.wiki"
+            assert (
+                _cli(
+                    url,
+                    *instance,
+                    "ticket-pull",
+                    tid,
+                    str(back),
+                    "--comment",
+                    cnum,
+                )
+                == cli.EXIT_OK
+            )
+            assert back.read_bytes() == edited.read_bytes()
+
+            # The original body is stale now: refused, nothing changed.
+            assert (
+                _cli(
+                    url,
+                    *instance,
+                    "ticket-comment-edit",
+                    tid,
+                    cnum,
+                    str(first),
+                    "--expect-file",
+                    str(first),
+                )
+                == cli.EXIT_TOOL_ERROR
+            )
+            assert "nothing was edited" in capsys.readouterr().err
+            again = tmp_path / "again.wiki"
+            assert (
+                _cli(
+                    url,
+                    *instance,
+                    "ticket-pull",
+                    tid,
+                    str(again),
+                    "--comment",
+                    cnum,
+                )
+                == cli.EXIT_OK
+            )
+            assert again.read_bytes() == edited.read_bytes()
+        finally:
+            if ticket_id is not None:
+                asyncio.run(
+                    cli.call_tool(
+                        url,
+                        _TOKEN,
+                        "ticket_delete",
+                        {
+                            "ticket_id": ticket_id,
+                            "instance": "/trac_test",
+                        },
+                    )
+                )
+
+
 # ---------------------------------------------------------------------------
 # Failures the CLI must name precisely, before any network call where it can
 # ---------------------------------------------------------------------------
@@ -746,6 +889,7 @@ class FakeTracTickets(FakeTrac):
         # stores a comment; off by default so byte-exact round trips of
         # the bodies below are unchanged.
         self.fold_cr = False
+        self.comment_edits: list[dict] = []
 
     def _tick(self) -> int:
         self._clock += 1
@@ -851,6 +995,27 @@ class FakeTracTickets(FakeTrac):
         ticket["_ts"] = str(changed * 1_000_000)
         stamp = time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(changed))
         return [ticket_id, stamp, stamp, {"_ts": ticket["_ts"]}]
+
+    def edit_ticket_comment(self, ticket_id, cnum, comment):
+        """The plugin's editComment: no size limit, folds CR/CRLF like
+        the transport does when ``fold_cr`` is on, and moves ``_ts``."""
+        self.comment_edits.append(
+            {"ticket_id": ticket_id, "cnum": cnum, "comment": comment}
+        )
+        if self.fold_cr:
+            comment = comment.replace("\r\n", "\n").replace("\r", "\n")
+        for row in self.changelogs[ticket_id]:
+            if row[2] == "comment" and str(row[3]) == str(cnum):
+                row[4] = comment
+        self.tickets[ticket_id]["_ts"] = str(self._tick() * 1_000_000)
+        return None
+
+    def get_ticket_comment_history(self, ticket_id, cnum):
+        return [
+            [1, "t", "alice", row[4]]
+            for row in self.changelogs[ticket_id]
+            if row[2] == "comment" and str(row[3]) == str(cnum)
+        ]
 
     def create_ticket(
         self,
@@ -1515,3 +1680,336 @@ class TestTicketBodyReview:
             )
         assert rc == cli.EXIT_OK
         assert out.read_text() == "two"
+
+
+class TestTicketCommentEdit:
+    """``ticket-comment-edit`` (Trac /trac_mcp_server #220): replace comment
+    N from a file, locked by base_ts, optional --expect-file, byte-for-byte
+    read-back."""
+
+    @staticmethod
+    def _row(cnum, body):
+        return {
+            "field": "comment",
+            "oldvalue": str(cnum),
+            "newvalue": body,
+        }
+
+    def _stub(self, monkeypatch, changelogs=(), edit_error=False):
+        """Scripted ``call_tool``. ``changelogs`` answers each
+        ``ticket_changelog`` call in turn: a list of rows, the string
+        ``"error"`` for an error result, or an exception to raise."""
+        sent = []
+        queue = list(changelogs)
+
+        async def _record(url, token, name, arguments):
+            sent.append((name, arguments))
+            structured = {}
+            text = "ok"
+            is_error = False
+            if name == "ticket_get":
+                structured = {"_ts": "5"}
+            elif name == "ticket_comment_edit":
+                text = "Edited comment 3 on ticket #7.\nNOTE: gate line"
+                is_error = edit_error
+                if edit_error:
+                    text = "version_conflict: stale"
+            elif name == "ticket_changelog":
+                item = queue.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                if item == "error":
+                    is_error = True
+                    text = "changelog failed"
+                else:
+                    structured = {"changelog": item}
+            return SimpleNamespace(
+                isError=is_error,
+                content=[SimpleNamespace(text=text)],
+                structuredContent=structured,
+            )
+
+        monkeypatch.setattr(cli, "call_tool", _record)
+        return sent
+
+    @staticmethod
+    def _run(tmp_path, *extra, body="new text\n", instance=None):
+        src = _body_file(tmp_path, body)
+        head = ["--url", "http://x/mcp"]
+        if instance:
+            head += ["--instance", instance]
+        return cli.main(
+            [*head, "ticket-comment-edit", "7", "3", str(src), *extra],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+
+    @staticmethod
+    def _names(sent):
+        return [n for n, _ in sent]
+
+    def test_parser_accepts_the_arguments(self):
+        args = cli.build_parser().parse_args(
+            [
+                "ticket-comment-edit",
+                "7",
+                "3",
+                "f.wiki",
+                "--base-ts",
+                "9",
+                "--expect-file",
+                "old.wiki",
+            ]
+        )
+        assert (args.ticket, args.cnum, args.file) == (7, 3, "f.wiki")
+        assert args.base_ts == "9"
+        assert args.expect_file == "old.wiki"
+        bare = cli.build_parser().parse_args(
+            ["ticket-comment-edit", "7", "3", "-"]
+        )
+        assert bare.base_ts is None and bare.expect_file is None
+
+    def test_base_ts_comes_from_ticket_get_and_is_sent(
+        self, tmp_path, monkeypatch
+    ):
+        sent = self._stub(monkeypatch, [[self._row(3, "new text\n")]])
+        assert self._run(tmp_path) == cli.EXIT_OK
+        assert self._names(sent) == [
+            "ticket_get",
+            "ticket_comment_edit",
+            "ticket_changelog",
+        ]
+        assert sent[0][1]["include_comments"] is False
+        assert sent[1][1] == {
+            "ticket_id": 7,
+            "cnum": 3,
+            "comment": "new text\n",
+            "base_ts": "5",
+        }
+
+    def test_base_ts_flag_skips_the_read(self, tmp_path, monkeypatch):
+        sent = self._stub(monkeypatch, [[self._row(3, "new text\n")]])
+        assert self._run(tmp_path, "--base-ts", "42") == cli.EXIT_OK
+        assert self._names(sent) == [
+            "ticket_comment_edit",
+            "ticket_changelog",
+        ]
+        assert sent[0][1]["base_ts"] == "42"
+
+    def test_instance_reaches_every_call(self, tmp_path, monkeypatch):
+        sent = self._stub(
+            monkeypatch,
+            [[self._row(3, "old\n")], [self._row(3, "new text\n")]],
+        )
+        old = _body_file(tmp_path, "old\n", "old.wiki")
+        rc = self._run(
+            tmp_path,
+            "--expect-file",
+            str(old),
+            instance="/other",
+        )
+        assert rc == cli.EXIT_OK
+        assert len(sent) == 4
+        assert all(a["instance"] == "/other" for _, a in sent)
+
+    def test_body_over_the_comment_limit_is_sent(
+        self, tmp_path, monkeypatch
+    ):
+        from trac_mcp_server.core.client import MAX_COMMENT_CHARS
+
+        big = "x" * (MAX_COMMENT_CHARS * 3 + 1)
+        sent = self._stub(monkeypatch, [[self._row(3, big)]])
+        assert self._run(tmp_path, body=big) == cli.EXIT_OK
+        edit = [a for n, a in sent if n == "ticket_comment_edit"]
+        assert edit[0]["comment"] == big
+
+    def test_empty_file_is_a_usage_error_with_no_call(
+        self, tmp_path, monkeypatch
+    ):
+        _no_network(monkeypatch)
+        assert self._run(tmp_path, body="  \n") == cli.EXIT_USAGE_ERROR
+
+    def test_expect_file_match_proceeds(self, tmp_path, monkeypatch):
+        sent = self._stub(
+            monkeypatch,
+            [[self._row(3, "old\n")], [self._row(3, "new text\n")]],
+        )
+        old = _body_file(tmp_path, "old\n", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_OK
+        # Lock read, expect read, write, read-back.
+        assert self._names(sent) == [
+            "ticket_get",
+            "ticket_changelog",
+            "ticket_comment_edit",
+            "ticket_changelog",
+        ]
+
+    def test_expect_file_mismatch_refuses_before_any_write(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        stored = "café SECRETSTORED tail"
+        expected = "café SECRETEXPECT tail"
+        sent = self._stub(monkeypatch, [[self._row(3, stored)]])
+        old = _body_file(tmp_path, expected, "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "ticket_comment_edit" not in self._names(sent)
+        err = capsys.readouterr().err
+        # "café SECRET" is 12 bytes (the e-acute takes two); the
+        # texts first differ at the letter after it.
+        assert "byte offset 12" in err
+        assert str(len(stored.encode())) in err
+        assert str(len(expected.encode())) in err
+        assert "nothing was edited" in err
+        assert "SECRETSTORED" not in err and "SECRETEXPECT" not in err
+
+    def test_expect_file_with_a_missing_comment_exits_1(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sent = self._stub(monkeypatch, [[self._row(1, "other")]])
+        old = _body_file(tmp_path, "old\n", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "ticket_comment_edit" not in self._names(sent)
+        assert "has no comment 3" in capsys.readouterr().err
+
+    def test_readback_equal_prints_the_match_line(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._stub(monkeypatch, [[self._row(3, "new text\n")]])
+        assert self._run(tmp_path) == cli.EXIT_OK
+        out = capsys.readouterr().out
+        assert "Edited comment 3 on ticket #7." in out
+        assert "NOTE: gate line" in out
+        assert "Stored comment 3 matches the file, byte-for-byte" in out
+
+    def test_readback_equal_after_folding_crlf_exits_0(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._stub(monkeypatch, [[self._row(3, "a\nb\nc\nd")]])
+        assert self._run(tmp_path, body="a\r\nb\rc\nd") == cli.EXIT_OK
+        out = capsys.readouterr().out
+        assert "folded to LF" in out
+        assert "byte-for-byte" not in out
+
+    def test_readback_different_exits_4_and_names_the_offset(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._stub(monkeypatch, [[self._row(3, "new TEXT\n")]])
+        rc = self._run(tmp_path)
+        assert rc == cli.EXIT_STORED_INCOMPLETE
+        captured = capsys.readouterr()
+        assert "WAS edited" in captured.err
+        assert "byte offset 4" in captured.err
+        assert "new text" not in captured.err
+        assert "new TEXT" not in captured.err
+        assert "Edited comment 3 on ticket #7." in captured.out
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            ConnectionError("dropped"),
+            "error",
+            [],  # the comment is not in the changelog
+        ],
+    )
+    def test_readback_failure_exits_4(
+        self, tmp_path, monkeypatch, capsys, failure
+    ):
+        self._stub(monkeypatch, [failure])
+        rc = self._run(tmp_path)
+        assert rc == cli.EXIT_STORED_INCOMPLETE
+        captured = capsys.readouterr()
+        assert "WAS edited" in captured.err
+        assert "could not verify" in captured.err
+        assert "Edited comment 3 on ticket #7." in captured.out
+
+    def test_tool_error_exits_1_with_no_readback(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sent = self._stub(monkeypatch, [], edit_error=True)
+        rc = self._run(tmp_path)
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "version_conflict" in capsys.readouterr().err
+        assert "ticket_changelog" not in self._names(sent)
+
+    def test_failed_lock_read_exits_1_before_the_write(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()  # no ticket 9
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment-edit", "9", "1", str(src))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert trac.comment_edits == []
+
+    def test_real_server_edit_roundtrips_a_long_comment(
+        self, tmp_path, capsys
+    ):
+        from trac_mcp_server.core.client import MAX_COMMENT_CHARS
+
+        long_body = _HARD_BODY * 400
+        assert len(long_body) > MAX_COMMENT_CHARS * 3
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "first"), (2, "original\n")])
+        src = _body_file(tmp_path, long_body)
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment-edit", "7", "2", str(src))
+            assert rc == cli.EXIT_OK
+            out = tmp_path / "back.wiki"
+            assert (
+                _cli(
+                    url, "ticket-pull", "7", str(out), "--comment", "2"
+                )
+                == cli.EXIT_OK
+            )
+        assert out.read_bytes() == src.read_bytes()
+        assert trac.comment_edits[0]["comment"] == long_body
+        assert "byte-for-byte" in capsys.readouterr().out
+
+    def test_real_server_stale_base_ts_is_a_conflict(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "orig")])
+        src = _body_file(tmp_path)
+        with _served(trac) as url:
+            rc = _cli(
+                url,
+                "ticket-comment-edit",
+                "7",
+                "1",
+                str(src),
+                "--base-ts",
+                "1",
+            )
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "version_conflict" in capsys.readouterr().err
+        assert trac.comment_edits == []
+
+    def test_real_server_crlf_edit_reports_the_fold(
+        self, tmp_path, capsys
+    ):
+        trac = FakeTracTickets()
+        trac.add_ticket(7, comments=[(1, "orig")])
+        trac.fold_cr = True
+        src = tmp_path / "crlf.wiki"
+        src.write_bytes(b"one\r\ntwo\r\n")
+        with _served(trac) as url:
+            rc = _cli(url, "ticket-comment-edit", "7", "1", str(src))
+        assert rc == cli.EXIT_OK
+        assert "folded to LF" in capsys.readouterr().out
+
+    def test_comment_body_helper_takes_the_newest_parseable_row(self):
+        rows = [
+            self._row(2, "old"),
+            {"field": "status", "oldvalue": "a", "newvalue": "b"},
+            self._row("1.2", "threaded"),
+            {"field": "comment", "oldvalue": "abc", "newvalue": "junk"},
+            self._row(2, "newest"),
+            {"field": "comment", "oldvalue": "5", "newvalue": None},
+        ]
+        assert cli._comment_body(rows, 2) == "newest"
+        assert cli._comment_body(rows, 5) == ""
+        assert cli._comment_body(rows, 9) is None

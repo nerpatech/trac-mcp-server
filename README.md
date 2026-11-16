@@ -150,12 +150,13 @@ trac-mcp wiki-pull Docs/Design design.md
 trac-mcp attach-put --ticket 42 trace.bin
 trac-mcp attach-get --page Docs/Design diagram.png diagram.png
 trac-mcp ticket-comment 42 note.wiki              # TracWiki body sent verbatim; prints the new comment number
+trac-mcp ticket-comment-edit 42 3 note.wiki       # replace comment 3 from a file, verified byte for byte; --expect-file OLD guards a web edit
 trac-mcp ticket-describe 42 body.wiki             # replace the description, locked against concurrent edits
 trac-mcp ticket-create --summary "Title" --description-file body.wiki
 trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment) back, byte for byte
 ```
 
-It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
+It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, a `ticket-comment-edit`'s stored text, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
 ## Available Tools (46)
 
