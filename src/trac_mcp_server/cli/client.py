@@ -322,9 +322,10 @@ def _attach_target(args: argparse.Namespace) -> tuple[str, dict]:
 _CREATED_RE = re.compile(r"Created ticket #(\d+)")
 
 
-def _read_body(path: str, what: str) -> str:
+def _read_body(path: str, what: str, allow_empty: bool = False) -> str:
     """The body file as text, sent verbatim. An empty one is refused here
-    (the server would refuse it too), with the same non-UTF-8 warning as
+    (the server would refuse it too) unless ``allow_empty`` (a body that is
+    only compared, never sent), with the same non-UTF-8 warning as
     wiki-push."""
     if path == "-":
         # Text-mode stdin translates CRLF and lone CR to LF, which a file
@@ -346,7 +347,7 @@ def _read_body(path: str, what: str) -> str:
             f"-- check the stored {what}",
             file=sys.stderr,
         )
-    if not text.strip():
+    if not allow_empty and not text.strip():
         raise CliError(
             f"{path} is empty: no {what} to send", EXIT_USAGE_ERROR
         )
@@ -472,6 +473,168 @@ async def _ticket_update(
     return EXIT_OK
 
 
+def _comment_body(changelog: list, cnum: int) -> str | None:
+    """The stored body of comment ``cnum`` in a ``ticket_changelog``
+    payload, or None when there is no such comment. The changelog is
+    chronological, so the last matching row is the newest; the number is
+    the shared parser's (a threaded ``1.10`` is comment ``10``), and a row
+    whose number does not parse is skipped."""
+    body: str | None = None
+    for entry in changelog:
+        if entry.get("field") != "comment":
+            continue
+        parsed = TracClient.parse_comment_number(entry.get("oldvalue"))
+        if parsed is not None and parsed.cnum == cnum:
+            body = entry.get("newvalue") or ""
+    return body
+
+
+def _first_difference(a: bytes, b: bytes) -> int:
+    """The index of the first byte where ``a`` and ``b`` differ (the
+    shorter length when one is a prefix of the other)."""
+    for i, (x, y) in enumerate(zip(a, b, strict=False)):
+        if x != y:
+            return i
+    return min(len(a), len(b))
+
+
+def _fold_line_endings(text: str) -> str:
+    """CRLF and lone CR as LF, which is what the XML-RPC transport does to
+    a comment before Trac stores it."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+async def _read_comment_body(
+    args: argparse.Namespace, url: str, token: str | None
+) -> tuple[str | None, Any]:
+    """Comment ``args.cnum``'s stored body, read from the changelog:
+    ``(body, None)``, ``(None, None)`` when the ticket has no such
+    comment, or ``(None, error_result)`` when the read itself failed."""
+    result = await call_tool(
+        url,
+        token,
+        "ticket_changelog",
+        _with_instance(args, {"ticket_id": args.ticket}),
+    )
+    if result.isError:
+        return None, result
+    return _comment_body(_payload(result, "changelog"), args.cnum), None
+
+
+async def _ticket_comment_edit(
+    args: argparse.Namespace, url: str, token: str | None
+) -> int:
+    """ticket-comment-edit: replace comment ``args.cnum`` from a file."""
+    # No MAX_COMMENT_CHARS check here, unlike ticket-comment: that limit is
+    # applied only where a comment is ADDED (ticket.update). The edit path
+    # (ticket_comment_edit -> the plugin's editComment) has none, and the
+    # case this command exists for is a 33 KB comment.
+    if args.file == "-" and args.expect_file == "-":
+        raise CliError(
+            "standard input can feed only one of FILE and --expect-file",
+            EXIT_USAGE_ERROR,
+        )
+    text = _read_body(args.file, "comment")
+    expected = (
+        _read_body(
+            args.expect_file, "expected comment", allow_empty=True
+        )
+        if args.expect_file is not None
+        else None
+    )
+    base_ts, failed = await _lock_token(args, url, token)
+    if failed is not None:
+        return _report(failed)
+
+    if expected is not None:
+        stored, failed = await _read_comment_body(args, url, token)
+        if failed is not None:
+            return _report(failed)
+        if stored is None:
+            raise CliError(
+                f"ticket #{args.ticket} has no comment {args.cnum}; "
+                "nothing was edited",
+                EXIT_TOOL_ERROR,
+            )
+        # Trac stores LF; a CRLF file this command pushed must still be
+        # usable as the next --expect-file, so compare on folded texts.
+        stored_f = _fold_line_endings(stored)
+        expected_f = _fold_line_endings(expected)
+        if stored_f != expected_f:
+            stored_b = stored_f.encode("utf-8")
+            expected_b = expected_f.encode("utf-8")
+            raise CliError(
+                f"comment {args.cnum} of ticket #{args.ticket} no longer "
+                f"matches {args.expect_file}: first difference at byte "
+                f"offset {_first_difference(stored_b, expected_b)} "
+                f"(stored {len(stored_b)} bytes, expected "
+                f"{len(expected_b)} bytes); nothing was edited",
+                EXIT_TOOL_ERROR,
+            )
+
+    result = await call_tool(
+        url,
+        token,
+        "ticket_comment_edit",
+        _with_instance(
+            args,
+            {
+                "ticket_id": args.ticket,
+                "cnum": args.cnum,
+                "comment": text,
+                "base_ts": base_ts,
+            },
+        ),
+    )
+    if result.isError:
+        return _report(result)
+
+    # The edit is stored. Report that first, so the tool's text and the
+    # gate's notes survive whatever the read-back does.
+    _report(result)
+
+    def _unverified(why: str) -> int:
+        print(
+            f"trac-mcp: comment {args.cnum} WAS edited, but trac-mcp "
+            f"could not verify it against the file ({why}) -- do not "
+            f"retry the write (exit {EXIT_STORED_INCOMPLETE})",
+            file=sys.stderr,
+        )
+        return EXIT_STORED_INCOMPLETE
+
+    try:
+        stored, failed = await _read_comment_body(args, url, token)
+    except Exception as e:  # transport failure or a payload-less result
+        return _unverified(f"read-back failed: {e}")
+    if failed is not None:
+        return _unverified(f"read-back failed: {_result_text(failed)}")
+    if stored is None:
+        return _unverified("the read-back found no such comment")
+    if stored == text:
+        print(
+            f"Stored comment {args.cnum} matches the text sent, "
+            "byte-for-byte"
+        )
+        return EXIT_OK
+    if stored == _fold_line_endings(text):
+        print(
+            f"Stored comment {args.cnum} matches the text sent with line "
+            "endings folded to LF (Trac stores CR and CRLF as LF)"
+        )
+        return EXIT_OK
+    stored_b = stored.encode("utf-8")
+    sent_b = text.encode("utf-8")
+    print(
+        f"trac-mcp: comment {args.cnum} WAS edited, but the stored text "
+        "differs from the file at byte offset "
+        f"{_first_difference(stored_b, sent_b)} (stored "
+        f"{len(stored_b)} bytes, file {len(sent_b)} bytes) -- do not "
+        f"retry blindly (exit {EXIT_STORED_INCOMPLETE})",
+        file=sys.stderr,
+    )
+    return EXIT_STORED_INCOMPLETE
+
+
 async def _ticket_create(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -538,15 +701,9 @@ async def _ticket_pull(
         )
         if result.isError:
             return _report(result)
-        body = None
-        for entry in _payload(result, "changelog"):
-            if entry.get("field") != "comment":
-                continue
-            parsed = TracClient.parse_comment_number(
-                entry.get("oldvalue")
-            )
-            if parsed is not None and parsed.cnum == args.comment:
-                body = entry.get("newvalue") or ""
+        body = _comment_body(
+            _payload(result, "changelog"), args.comment
+        )
         if body is None:
             raise CliError(
                 f"ticket #{args.ticket} has no comment {args.comment}",
@@ -651,6 +808,9 @@ async def _run(
 
     if cmd in ("ticket-comment", "ticket-describe"):
         return await _ticket_update(args, url, token)
+
+    if cmd == "ticket-comment-edit":
+        return await _ticket_comment_edit(args, url, token)
 
     if cmd == "ticket-create":
         return await _ticket_create(args, url, token)
@@ -891,7 +1051,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="trac-mcp",
         description=(
             "Push and pull wiki pages, attachments and ticket bodies "
-            "(ticket-comment, ticket-describe, ticket-create, ticket-pull) "
+            "(ticket-comment, ticket-comment-edit, ticket-describe, "
+            "ticket-create, ticket-pull) "
             "between this machine and a trac-mcp-server over HTTP. "
             "Connects using --url, else the nearest .mcp.json's trac-http "
             "entry, else TRAC_MCP_URL."
@@ -1041,6 +1202,29 @@ def build_parser() -> argparse.ArgumentParser:
                 type=int,
                 help="Comment number to reply to (quotes it)",
             )
+
+    p = sub.add_parser(
+        "ticket-comment-edit",
+        help="Replace an existing ticket comment from a file",
+    )
+    p.add_argument("ticket", type=int, help="Ticket number")
+    p.add_argument("cnum", type=int, help="Comment number to replace")
+    p.add_argument(
+        "file",
+        help="Local TracWiki file ('-' for stdin), sent verbatim",
+    )
+    p.add_argument(
+        "--base-ts",
+        help="Change token to lock against (default: the ticket's "
+        "current _ts, read just before the write)",
+    )
+    p.add_argument(
+        "--expect-file",
+        metavar="PATH",
+        help="Refuse unless comment CNUM's stored body equals this file "
+        "(line endings folded to LF; covers an edit made in the web UI "
+        "since you read it). '-' for stdin, unless FILE is '-'",
+    )
 
     p = sub.add_parser(
         "ticket-create",
