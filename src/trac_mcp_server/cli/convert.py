@@ -1376,13 +1376,11 @@ def main(argv: list[str] | None = None) -> int:
             scan, args.assets, out_file, args.assets_url
         ) as stage:
             try:
-                stage.preflight()
-            except export_assets.AssetPathError as e:
-                parser.error(str(e))
-            try:
                 fetch = session.attachment_fetcher()
                 for ref in scan.refs:
                     stage.add(ref, fetch(ref))
+            except export_assets.AssetPathError as e:
+                parser.error(str(e))
             except export_assets.AssetError as e:
                 sys.stderr.write(f"trac-convert: {e}\n")
                 return EXIT_RUNTIME_ERROR

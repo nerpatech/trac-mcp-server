@@ -932,24 +932,28 @@ async def _localise_assets(
     stage: export_assets.AssetStage,
     text: str,
 ) -> export_assets.AssetPlan:
-    """Check the planned paths, fetch the attachments ``text`` references
-    (``stage.scan``) one by one into the stage's temporary files, and
-    plan the rewrite. Nothing is in place yet: a failed fetch or write
-    leaves the disk as it was once the caller drops the stage."""
-    try:
-        stage.preflight()
-    except export_assets.AssetPathError as e:
-        raise CliError(str(e), EXIT_USAGE_ERROR) from None
-    try:
-        if stage.scan.refs:
-            # One session for every attachment, not one per attachment.
-            async with _mcp_session(url, token) as session:
-                for ref in stage.scan.refs:
-                    stage.add(
-                        ref, await _fetch_attachment(args, session, ref)
-                    )
-    except export_assets.AssetError as e:
-        raise CliError(str(e), EXIT_TOOL_ERROR) from None
+    """Fetch the attachments ``text`` references (``stage.scan``) one by
+    one into the stage's temporary files (each is checked against the
+    disk once fetched, and only the ones to be saved are), and plan the
+    rewrite. Nothing is in place yet: a failed fetch or write leaves the
+    disk as it was once the caller drops the stage."""
+    if stage.scan.refs:
+        # One session for every attachment, not one per attachment.
+        async with _mcp_session(url, token) as session:
+            for ref in stage.scan.refs:
+                outcome = await _fetch_attachment(args, session, ref)
+                # The session's anyio task groups wrap whatever leaves
+                # this block in an ExceptionGroup, and only a CliError is
+                # unwrapped by main(): the stage's errors are converted
+                # here, where they are still themselves.
+                try:
+                    stage.add(ref, outcome)
+                except export_assets.AssetPathError as e:
+                    raise CliError(str(e), EXIT_USAGE_ERROR) from None
+                except export_assets.AssetError as e:
+                    raise CliError(
+                        f"--assets: {e}", EXIT_TOOL_ERROR
+                    ) from None
     return stage.plan(text)
 
 

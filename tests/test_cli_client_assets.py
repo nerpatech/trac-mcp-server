@@ -852,7 +852,7 @@ def test_an_output_that_is_a_directory_is_a_usage_error_before_any_fetch(
     assert not (tmp_path / "img").exists()
 
 
-def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
+def test_a_file_where_a_directory_is_needed_is_a_usage_error_and_writes_nothing(
     tmp_path, monkeypatch, capsys
 ):
     # Page "blog" has an attachment "my-post"; a later pull of a page
@@ -876,8 +876,10 @@ def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
     assert rc == cli.EXIT_USAGE_ERROR
     err = capsys.readouterr().err
     assert "is a file, not a directory" in err
-    assert "nothing was fetched or written" in err
-    assert fetched == []
+    assert "nothing was written" in err
+    # the paths are checked once the attachment is fetched (a fetch only
+    # reads), so that only attachments that would be written can conflict
+    assert fetched == ["x.png"]
     assert not out.exists()
     assert (img / "blog" / "my-post").read_bytes() == (
         b"an earlier attachment"
@@ -901,11 +903,191 @@ def test_urls_under_another_instance_path_are_warned_once(
     )
     assert rc == cli.EXIT_OK
     err = capsys.readouterr().err
-    assert err.count("2 URLs") == 1
-    assert "'/bcs'" in err
+    assert err.count("2 attachment-like URLs did not match") == 1
+    assert "instance path '/bcs'" in err
+    assert "link_rewrites" in err and "proxy" in err
     text = out.read_text()
     assert f"![x]({other})" in text and f"[x]({other2})" in text
     assert "![i](img/P/a.png)" in text
+
+
+# --- third review round (Trac /trac_mcp_server #215) ------------------------
+
+
+def test_a_write_failure_under_the_real_session_is_exit_1_not_a_transport_error(
+    tmp_path, monkeypatch, capsys
+):
+    """The real ``_mcp_session`` runs in anyio task groups, which wrap
+    whatever leaves its block in an ExceptionGroup: an ``AssetError``
+    raised there used to surface as "call to ... failed: AssetError"
+    (exit 3)."""
+    from trac_mcp_server.cli import assets as export
+
+    real = export._write_temp
+    calls = []
+
+    def flaky(path, data):
+        calls.append(path)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        real(path, data)
+
+    monkeypatch.setattr(export, "_write_temp", flaky)
+    out = tmp_path / "p.md"
+    img = tmp_path / "img"
+    with _served(AttachedTrac()) as url:
+        rc = _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
+    err = capsys.readouterr().err
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert "--assets: cannot write the attachments" in err
+    assert "No space left on device" in err
+    assert "call to" not in err
+    assert not out.exists() and not img.exists()
+
+
+def test_a_path_conflict_under_the_real_session_is_a_usage_error(
+    tmp_path, capsys
+):
+    img = tmp_path / "img"
+    (img / "P" / "a.png").mkdir(parents=True)
+    out = tmp_path / "p.md"
+    with _served(AttachedTrac()) as url:
+        rc = _cli(url, "wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_USAGE_ERROR
+    assert "is a directory" in capsys.readouterr().err
+    assert not out.exists()
+    assert [p.name for p in img.rglob("*")] == ["P", "a.png"]
+
+
+def test_a_conflict_at_a_missing_attachments_path_only_warns(
+    tmp_path, monkeypatch, capsys
+):
+    # x.png is not on the server: whatever sits at its planned path is
+    # no obstacle, nothing is written there.
+    _fake_server(
+        monkeypatch,
+        _three("a.png", "x.png"),
+        {},
+        {"a.png": b"A"},
+    )
+    img = tmp_path / "img"
+    (img / "P" / "x.png").mkdir(parents=True)
+    out = tmp_path / "p.md"
+    rc = _main("wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert "attachment 'x.png' of wiki page 'P' was not found" in err
+    assert (img / "P" / "a.png").read_bytes() == b"A"
+    assert (img / "P" / "x.png").is_dir()
+
+
+def test_a_conflict_at_a_found_attachments_path_writes_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(
+        monkeypatch,
+        _three("a.png", "x.png"),
+        {},
+        {"a.png": b"A", "x.png": b"X"},
+    )
+    img = tmp_path / "img"
+    (img / "P" / "x.png").mkdir(parents=True)
+    out = tmp_path / "p.md"
+    rc = _main("wiki-pull", "P", str(out), "--assets", str(img))
+    assert rc == cli.EXIT_USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "x.png is a directory" in err
+    assert "nothing was written" in err
+    assert not out.exists()
+    assert sorted(
+        p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+    ) == ["img", "img/P", "img/P/x.png"]
+
+
+def test_a_conflict_at_a_too_large_or_clashing_attachments_path_only_warns(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(
+        monkeypatch,
+        _three("big.png"),
+        {},
+        {"big.png": _TOO_LARGE},
+    )
+    img = tmp_path / "img"
+    (img / "P" / "big.png").mkdir(parents=True)
+    rc = _main(
+        "wiki-pull", "P", str(tmp_path / "p.md"), "--assets", str(img)
+    )
+    assert rc == cli.EXIT_OK
+    assert "over the server's inline limit" in capsys.readouterr().err
+
+
+def test_a_symlinked_output_links_from_the_directory_it_is_written_in(
+    tmp_path, monkeypatch
+):
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    site = tmp_path / "site"
+    site.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "out.md").symlink_to("../site/page.md")
+    img = work / "img"
+    rc = _main(
+        "wiki-pull", "P", str(work / "out.md"), "--assets", str(img)
+    )
+    assert rc == cli.EXIT_OK
+    assert (work / "out.md").is_symlink()
+    text = (site / "page.md").read_text()
+    assert "(../work/img/P/a.png)" in text
+    assert "(img/P/a.png)" not in text
+
+
+def test_a_dangling_symlinked_output_is_a_usage_error_and_makes_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    fetched = _watch_fetches(monkeypatch)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "out.md").symlink_to("../nosite/page.md")
+    img = tmp_path / "img"
+    rc = _main(
+        "wiki-pull", "P", str(work / "out.md"), "--assets", str(img)
+    )
+    assert rc == cli.EXIT_USAGE_ERROR
+    assert "output directory does not exist" in capsys.readouterr().err
+    assert fetched == []
+    assert not (tmp_path / "nosite").exists() and not img.exists()
+
+
+def test_an_output_that_is_a_planned_attachment_is_a_usage_error(
+    tmp_path, monkeypatch, capsys
+):
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "img" / "P").mkdir(parents=True)
+    rc = _main("wiki-pull", "P", "img/P/a.png", "--assets", "img")
+    assert rc == cli.EXIT_USAGE_ERROR
+    err = capsys.readouterr().err
+    assert "img/P/a.png" in err and "nothing was written" in err
+    assert sorted(
+        p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+    ) == ["img", "img/P"]
+
+
+def test_an_output_where_an_attachments_directory_goes_is_a_usage_error(
+    tmp_path, monkeypatch, capsys
+):
+    # Output ``img/P`` is a file; the attachment needs ``img/P`` as a
+    # directory. This used to fail at the last rename, after the
+    # attachments were in place.
+    _fake_server(monkeypatch, _three("a.png"), {}, {"a.png": b"A"})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "img").mkdir()
+    rc = _main("wiki-pull", "P", "img/P", "--assets", "img")
+    assert rc == cli.EXIT_USAGE_ERROR
+    assert "nothing was written" in capsys.readouterr().err
+    assert list((tmp_path / "img").iterdir()) == []
 
 
 # --- live -------------------------------------------------------------------

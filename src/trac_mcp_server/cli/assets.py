@@ -3,11 +3,13 @@ its links at the local copies (Trac /trac_mcp_server #215).
 
 Shared by ``trac-mcp wiki-pull --assets`` and ``trac-convert --from-wiki
 --assets``; nothing here knows how an attachment is fetched. A CLI scans
-the text with :func:`scan_text`, opens an :class:`AssetStage`, checks it
-(:meth:`AssetStage.preflight`), fetches each reference its own way and
-hands every result to :meth:`AssetStage.add`, which writes the bytes to a
-temporary sibling of the final file at once (so no payload is kept in
-memory). :meth:`AssetStage.plan` then names the rewritten text, the
+the text with :func:`scan_text`, opens an :class:`AssetStage`, fetches
+each reference its own way and hands every result to
+:meth:`AssetStage.add`, which checks the path an attachment that will be
+saved would go to (:meth:`AssetStage.preflight`: a fetch only reads, and
+a missing or too-large attachment has no path to check) and writes the
+bytes to a temporary sibling of the final file at once (so no payload is
+kept in memory). :meth:`AssetStage.plan` then names the rewritten text, the
 output is staged the same way, and :meth:`AssetStage.commit` renames
 everything into place, assets first and the output last. Until the
 commit the stage can be dropped (:meth:`AssetStage.abort`, or leaving
@@ -53,9 +55,10 @@ import re
 import secrets
 import shutil
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import SplitResult, quote, unquote, urlsplit
 
 
 @dataclass(frozen=True)
@@ -101,7 +104,9 @@ def _instance_host(instance: str) -> str | None:
 
 # A Markdown link or image target: ``](URL)``, ``](URL "title")``,
 # ``](<URL>)``. The URL has no space; a parenthesis in it is balanced (the
-# exporter percent-encodes the ones that are not).
+# exporter percent-encodes the ones that are not). A ``]`` that is
+# backslash-escaped closes no label (:func:`_escaped`): a match there is
+# left out by the scan.
 _MD_TARGET = re.compile(
     r"\]\(\s*(?:<([^<>\s]*)>|((?:[^\s()<>]|\([^\s()<>]*\))*))"
 )
@@ -112,6 +117,13 @@ _AUTOLINK = re.compile(r"<(https?://[^\s<>]+)>")
 _HTML_ATTR = re.compile(
     r"(?<![\w:-])(?:src|href)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
     re.IGNORECASE,
+)
+
+# An HTML tag opener with its attributes, as ``_ELEMENT_OPEN`` reads one
+# (the length bound is the same); used to find the tags Markdown prose
+# escapes (``\<img src="...">``), whose attributes are text.
+_TAG_OPEN = re.compile(
+    r"<[A-Za-z][\w:-]*(?:[^>\"']|\"[^\"]*\"|'[^']*'){0,1000}>"
 )
 
 
@@ -147,15 +159,16 @@ def _bad_segment(segment: str) -> bool:
     )
 
 
-def _parse_url(
+def _scoped(
     url: str, prefix: str, host: str | None
-) -> AttachmentRef | None:
-    """The attachment ``url`` names, or None."""
+) -> SplitResult | None:
+    """The parts of ``url`` when it can be a URL of this instance by
+    scheme and host: ``http(s)`` or root-relative, and -- for an instance
+    at the root, whose path says nothing -- on its own host. None
+    otherwise."""
     try:
         parts = urlsplit(url)
     except ValueError:
-        return None
-    if parts.query or parts.fragment or "?" in url or "#" in url:
         return None
     if parts.scheme in ("http", "https"):
         pass
@@ -172,6 +185,18 @@ def _parse_url(
             return None
         if host is None or named != host:
             return None
+    return parts
+
+
+def _parse_url(
+    url: str, prefix: str, host: str | None
+) -> AttachmentRef | None:
+    """The attachment ``url`` names, or None."""
+    parts = _scoped(url, prefix, host)
+    if parts is None:
+        return None
+    if parts.query or parts.fragment or "?" in url or "#" in url:
+        return None
     segments = parts.path.split("/")
     # parts.path starts with "/": segments[0] is "".
     want = [*prefix.split("/")[1:]] if prefix else []
@@ -206,22 +231,9 @@ def _misses_instance(url: str, prefix: str, host: str | None) -> bool:
     just malformed or another host's. Where the host decides (an instance
     at the root), another host's URL is expected -- a link to another
     Trac -- and is no miss."""
-    try:
-        parts = urlsplit(url)
-    except ValueError:
+    parts = _scoped(url, prefix, host)
+    if parts is None:
         return False
-    if not (
-        parts.scheme in ("http", "https")
-        or (parts.scheme == "" and url.startswith("/"))
-    ):
-        return False
-    if not prefix and parts.netloc:
-        try:
-            named = parts.hostname
-        except ValueError:
-            return False
-        if host is None or named != host:
-            return False
     shape = _SHAPE.search(parts.path)
     return shape is not None and parts.path[: shape.start()] != prefix
 
@@ -432,13 +444,28 @@ def scan_text(text: str, instance: str, fmt: str = "markdown") -> Scan:
         i = bisect_right(starts, pos) - 1
         return i >= 0 and pos < regions[i][1]
 
+    # Markdown prose: a tag whose ``<`` is backslash-escaped is text, so
+    # the attributes inside it are not URL positions.
+    escaped_tags: list[tuple[int, int]] = []
+    if fmt != "html":
+        escaped_tags = [
+            (m.start(), m.end())
+            for m in _TAG_OPEN.finditer(text)
+            if _escaped(text, m.start(), 0)
+        ]
+    tag_starts = [t[0] for t in escaped_tags]
+
+    def in_escaped_tag(pos: int) -> bool:
+        i = bisect_right(tag_starts, pos) - 1
+        return i >= 0 and pos < escaped_tags[i][1]
+
     def add(m: re.Match, group: int, kind: str, unescape: bool = False):
         nonlocal unmatched
         raw = m.group(group)
         if raw is None:
             return
         where = m.start() if kind == "autolink" else m.start(group)
-        if in_code(where):
+        if in_code(where) or (kind == "attr" and in_escaped_tag(where)):
             return
         url = html.unescape(raw) if unescape else raw
         ref = _parse_url(url, prefix, host)
@@ -454,6 +481,8 @@ def scan_text(text: str, instance: str, fmt: str = "markdown") -> Scan:
     if fmt != "html":
         angled: set[int] = set()  # where a ``](<URL>)`` target's "<" is
         for m in _MD_TARGET.finditer(text):
+            if _escaped(text, m.start(), 0):
+                continue  # ``\\](URL)``: the label is not closed here
             if m.group(1) is not None:
                 angled.add(m.start(1) - 1)
             add(m, 1 if m.group(1) is not None else 2, "md")
@@ -526,8 +555,10 @@ def _link(
             + "/"
             + "/".join(quote(seg) for seg in parts)
         )
+    # The output is written to its real place (a symlink is written
+    # through), so the links are relative to the directory of THAT.
     start = (
-        os.path.abspath(os.path.dirname(output_path) or ".")
+        os.path.dirname(os.path.realpath(output_path))
         if output_path is not None
         else os.getcwd()
     )
@@ -682,12 +713,11 @@ class AssetPlanner:
         if self._scan.unmatched:
             n = self._scan.unmatched
             warnings.append(
-                f"{n} URL{'s' if n != 1 else ''} in the text "
-                f"{'have' if n != 1 else 'has'} the path of a Trac "
-                "attachment but "
-                f"{'are' if n != 1 else 'is'} not under this instance's "
-                f"path '{self._scan.prefix or '/'}' (Trac behind a "
-                "proxy with another base path?); left as "
+                f"{n} attachment-like URL{'s' if n != 1 else ''} did "
+                "not match instance path "
+                f"'{self._scan.prefix or '/'}' (Trac behind a proxy with "
+                "another base path, or a link_rewrites rule moved "
+                f"{'them' if n != 1 else 'it'}); left as "
                 f"{'they are' if n != 1 else 'it is'}"
             )
         return AssetPlan(
@@ -704,7 +734,9 @@ def check_output_path(path: str) -> str | None:
     """Why the file ``path`` cannot be written, or None: it is a
     directory, or its directory does not exist or cannot be written to
     (the output is replaced by a rename, which needs the directory)."""
-    target = Path(path)
+    # The file is replaced at its real place: a symlink is followed, so
+    # what must exist is the directory of its target.
+    target = Path(os.path.realpath(path))
     if target.is_dir():
         return f"output path is a directory: {target}"
     parent = target.parent
@@ -772,19 +804,30 @@ class AssetStage:
     def __exit__(self, *exc) -> None:
         self.abort()
 
-    def preflight(self) -> None:
-        """Check every path the references plan, before anything is
-        fetched or written: no existing ancestor under the assets
-        directory may be a file (a directory could not be made there) and
-        no target may be an existing directory. Raises
-        :class:`AssetPathError`."""
-        for ref in self.scan.refs:
+    def preflight(
+        self, refs: Iterable[AttachmentRef] | None = None
+    ) -> None:
+        """Check the paths ``refs`` (default: every reference of the
+        scan) plan: no existing ancestor under the assets directory may
+        be a file (a directory could not be made there), no target may be
+        an existing directory, and the output file may be neither a
+        target nor inside or around one (it is renamed into place last, a
+        file and a directory of one name cannot both be). Raises
+        :class:`AssetPathError`. :meth:`add` runs it for each attachment
+        it is going to write, after that attachment was fetched, so a
+        path that nothing will be written to is no obstacle."""
+        output = (
+            Path(os.path.realpath(self._output_path))
+            if self._output_path is not None
+            else None
+        )
+        for ref in self.scan.refs if refs is None else refs:
             parts = ref.parts()
             node = self._dir
             if node.exists() and not node.is_dir():
                 raise AssetPathError(
                     f"--assets: not a directory: {node}; nothing was "
-                    "fetched or written"
+                    "written"
                 )
             for i, segment in enumerate(parts):
                 node = node / segment
@@ -801,8 +844,24 @@ class AssetStage:
                     f"--assets: cannot save attachment "
                     f"'{ref.filename}' of {ref.describe()} as "
                     f"{self._dir.joinpath(*parts)}: {problem}; "
-                    "nothing was fetched or written"
+                    "nothing was written"
                 )
+            if output is not None:
+                place = Path(
+                    os.path.realpath(self._dir.joinpath(*parts))
+                )
+                if (
+                    place == output
+                    or place in output.parents
+                    or output in place.parents
+                ):
+                    raise AssetPathError(
+                        f"--assets: the output file {self._output_path} "
+                        f"and attachment '{ref.filename}' of "
+                        f"{ref.describe()} (saved as "
+                        f"{self._dir.joinpath(*parts)}) cannot share a "
+                        "path; nothing was written"
+                    )
 
     def _make_dir(self, directory: Path) -> None:
         missing: list[Path] = []
@@ -818,9 +877,10 @@ class AssetStage:
         self, final: Path, data: bytes, output: bool = False
     ) -> None:
         self._make_dir(final.parent)
-        temp = final.with_name(
-            f".{final.name[:60]}.tmp-{secrets.token_hex(6)}"
-        )
+        # The stem is cut by bytes (at a character boundary): a 255-byte
+        # name of four-byte characters plus the suffix is over the limit.
+        stem = os.fsencode(final.name)[:60].decode("utf-8", "ignore")
+        temp = final.with_name(f".{stem}.tmp-{secrets.token_hex(6)}")
         # Recorded before the write, so a half-written file is removed.
         if output:
             self._output = (temp, final)
@@ -836,10 +896,13 @@ class AssetStage:
     def add(self, ref: AttachmentRef, outcome: Outcome) -> None:
         """Take the result of fetching ``ref``: bytes are written to a
         temporary file now and are not kept. Raises
-        :class:`AssetError` when they cannot be."""
+        :class:`AssetPathError` when the path it would be saved at
+        cannot hold it (:meth:`preflight`), :class:`AssetError` when the
+        bytes cannot be written."""
         path = self.planner.place(ref, outcome)
         if path is None or not isinstance(outcome, bytes):
             return
+        self.preflight([ref])
         final = self._dir.joinpath(*path.split("/"))
         try:
             if _same_bytes(final, outcome):
@@ -862,6 +925,14 @@ class AssetStage:
         with an ``output_path``)."""
         assert self._output_path is not None
         final = Path(os.path.realpath(self._output_path))
+        if not final.parent.is_dir():
+            # check_output_path refuses this before anything is fetched;
+            # never make the directory of a file the user named.
+            raise AssetError(
+                f"cannot write the output file {self._output_path}: "
+                f"output directory does not exist: {final.parent}; "
+                "nothing was written"
+            )
         try:
             self._stage(final, data, output=True)
         except OSError as e:

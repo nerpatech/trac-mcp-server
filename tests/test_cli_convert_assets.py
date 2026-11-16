@@ -300,7 +300,7 @@ def test_an_output_that_is_a_directory_is_a_usage_error_before_any_fetch(
     trac.get_wiki_page.assert_not_called()
 
 
-def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
+def test_a_file_where_a_directory_is_needed_is_a_usage_error_and_writes_nothing(
     trac, tmp_path, capsys
 ):
     img = tmp_path / "img"
@@ -322,9 +322,10 @@ def test_a_file_where_a_directory_is_needed_is_a_usage_error_before_any_fetch(
     assert rc == EXIT_USAGE_ERROR
     err = capsys.readouterr().err
     assert "is a file, not a directory" in err
-    trac.get_wiki_attachment.assert_not_called()
+    assert "nothing was written" in err
     assert not out.exists()
     assert (img / "P").read_bytes() == b"an earlier attachment named P"
+    assert [p.name for p in tmp_path.rglob("*")] == ["img", "P"]
 
 
 def test_a_write_failure_while_staging_leaves_nothing_and_keeps_the_old_output(
@@ -465,3 +466,88 @@ def test_assets_with_check_trac_is_a_usage_error(
         ["--check-trac", "--assets", str(tmp_path / "img")]
     )
     assert rc == EXIT_USAGE_ERROR
+
+
+# --- third review round (Trac /trac_mcp_server #215) ----------------------------
+
+
+def test_a_conflict_at_a_missing_attachments_path_only_warns(
+    trac, tmp_path, capsys
+):
+    # c.png is not on the server; a directory of that name where it
+    # would go is no obstacle.
+    img = tmp_path / "img"
+    (img / "P" / "c.png").mkdir(parents=True)
+    out = tmp_path / "p.md"
+    assert _run("-o", str(out), "--assets", str(img)) == EXIT_OK
+    err = capsys.readouterr().err
+    assert "attachment 'c.png' of wiki page 'P' was not found" in err
+    assert (img / "P" / "a.png").read_bytes() == PNG_A
+    assert (img / "P" / "c.png").is_dir()
+
+
+def test_a_conflict_at_a_found_attachments_path_writes_nothing(
+    trac, tmp_path, capsys
+):
+    img = tmp_path / "img"
+    (img / "P" / "b.png").mkdir(parents=True)
+    out = tmp_path / "p.md"
+    rc = _main_usage(
+        ["--from-wiki", "P", "--to", "md", "-o", str(out)]
+        + ["--assets", str(img)]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert "b.png is a directory" in capsys.readouterr().err
+    assert not out.exists()
+    assert sorted(
+        p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")
+    ) == ["img", "img/P", "img/P/b.png"]
+
+
+def test_a_dangling_symlinked_output_is_a_usage_error_before_any_fetch(
+    trac, tmp_path, capsys
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "out.md").symlink_to("../nosite/page.md")
+    img = tmp_path / "img"
+    rc = _main_usage(
+        ["--from-wiki", "P", "--to", "md", "-o", str(work / "out.md")]
+        + ["--assets", str(img)]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert "output directory does not exist" in capsys.readouterr().err
+    trac.get_wiki_attachment.assert_not_called()
+    assert not (tmp_path / "nosite").exists() and not img.exists()
+
+
+def test_a_symlinked_output_links_from_where_it_is_written(
+    trac, tmp_path
+):
+    (tmp_path / "site").mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "out.md").symlink_to("../site/page.md")
+    img = work / "img"
+    assert (
+        _run("-o", str(work / "out.md"), "--assets", str(img))
+        == EXIT_OK
+    )
+    assert (
+        "(../work/img/P/a.png"
+        in (tmp_path / "site" / "page.md").read_text()
+    )
+
+
+def test_an_output_that_is_a_planned_attachment_is_a_usage_error(
+    trac, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "img" / "P").mkdir(parents=True)
+    rc = _main_usage(
+        ["--from-wiki", "P", "--to", "md", "-o", "img/P/a.png"]
+        + ["--assets", "img"]
+    )
+    assert rc == EXIT_USAGE_ERROR
+    assert "nothing was written" in capsys.readouterr().err
+    assert [p.name for p in (tmp_path / "img" / "P").iterdir()] == []

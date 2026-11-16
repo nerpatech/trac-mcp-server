@@ -1050,6 +1050,190 @@ def test_a_backslash_before_a_closing_backtick_still_closes_the_span():
     assert [r.filename for r in _refs(text)] == ["a.png", "b.png"]
 
 
+# --- third review round (Trac /trac_mcp_server #215) ------------------------
+
+
+def test_an_escaped_tag_in_prose_has_no_attribute_hits():
+    text = (
+        f'Write \\<img src="{A_URL}"> for an image. '
+        f'And \\<a href="{B_URL}">x</a>.'
+    )
+    assert _refs(text) == []
+    assert assets.scan_text(text, INST).unmatched == 0
+
+
+def test_an_unescaped_tag_and_one_after_an_escaped_backslash_still_hit():
+    text = (
+        f'<img src="{A_URL}"> and \\\\<img src="{B_URL}">'
+        f' and \\<img src="/bcs/raw-attachment/wiki/P/c.png">'
+    )
+    assert [r.filename for r in _refs(text)] == ["a.png", "b.png"]
+
+
+def test_an_escaped_tag_does_not_hide_a_later_attribute():
+    text = f'\\<img src="{A_URL}"> <img src="{B_URL}">'
+    assert [r.filename for r in _refs(text)] == ["b.png"]
+
+
+def test_a_backslash_does_not_escape_an_attribute_in_html():
+    text = f'\\<img src="{A_URL}">'
+    assert [r.filename for r in _refs(text, INST, "html")] == ["a.png"]
+
+
+def test_an_escaped_bracket_before_the_paren_is_not_a_link_target():
+    text = f"\\[docs\\]({A_URL}) and [b]({B_URL})"
+    assert [r.filename for r in _refs(text)] == ["b.png"]
+
+
+def test_a_normal_link_still_matches():
+    assert [r.filename for r in _refs(f"[docs]({A_URL})")] == ["a.png"]
+
+
+def test_an_escaped_bracket_inside_the_label_still_matches():
+    assert [r.filename for r in _refs(f"[a\\]b]({A_URL})")] == ["a.png"]
+
+
+def test_a_bracket_after_an_escaped_backslash_is_a_real_link():
+    assert [r.filename for r in _refs(f"[a\\\\]({A_URL})")] == ["a.png"]
+
+
+def test_an_escaped_bracket_before_an_angle_target_leaves_the_autolink():
+    # ``\](<URL>)``: no link, but the ``<URL>`` is still an autolink.
+    url = "https://h/bcs/raw-attachment/wiki/P/a.pdf"
+    text = f"\\[docs\\](<{url}>)"
+    scan = assets.scan_text(text, INST)
+    assert [h.kind for h in scan.hits] == ["autolink"]
+
+
+def test_the_temp_name_of_a_long_multibyte_file_name_fits_the_file_system(
+    tmp_path,
+):
+    from urllib.parse import quote
+
+    name = "\U0001f600" * 62 + ".png"  # 252 bytes: a legal name
+    assert len(name.encode()) == 252
+    scan = assets.scan_text(
+        f"![x](/bcs/raw-attachment/wiki/P/{quote(name)})", INST
+    )
+    stage = assets.AssetStage(scan, tmp_path / "img")
+    for ref in scan.refs:
+        stage.add(ref, b"x")
+    temps = [p.name for p in (tmp_path / "img" / "P").iterdir()]
+    assert len(temps) == 1 and all(len(t.encode()) < 100 for t in temps)
+    assert temps[0].encode().decode("utf-8")  # a whole character cut
+    stage.commit()
+    assert (tmp_path / "img" / "P" / name).read_bytes() == b"x"
+
+
+def test_a_conflict_at_a_missing_attachments_path_is_no_conflict(
+    tmp_path,
+):
+    d = tmp_path / "img"
+    (d / "P" / "x.png").mkdir(parents=True)
+    scan = assets.scan_text(
+        "![x](/bcs/raw-attachment/wiki/P/x.png) "
+        "![y](/bcs/raw-attachment/wiki/P/y.png)",
+        INST,
+    )
+    stage = assets.AssetStage(scan, d)
+    x, y = scan.refs
+    stage.add(x, None)
+    stage.add(y, b"Y")
+    stage.commit()
+    assert (d / "P" / "y.png").read_bytes() == b"Y"
+    assert (d / "P" / "x.png").is_dir()
+
+
+def test_a_conflict_at_a_found_attachments_path_is_refused_by_add(
+    tmp_path,
+):
+    d = tmp_path / "img"
+    (d / "P" / "x.png").mkdir(parents=True)
+    scan = assets.scan_text(
+        "![x](/bcs/raw-attachment/wiki/P/x.png)", INST
+    )
+    stage = assets.AssetStage(scan, d)
+    with pytest.raises(assets.AssetPathError, match="is a directory"):
+        stage.add(scan.refs[0], b"X")
+    stage.abort()
+    assert _tree(tmp_path) == ["img", "img/P", "img/P/x.png"]
+
+
+def test_a_symlinked_output_links_from_where_it_is_written(tmp_path):
+    (tmp_path / "site").mkdir()
+    (tmp_path / "work").mkdir()
+    link = tmp_path / "work" / "out.md"
+    link.symlink_to("../site/page.md")
+    plan = _plan(
+        "![i](/bcs/raw-attachment/wiki/P/x.png)",
+        output=str(link),
+        assets_dir=tmp_path / "work" / "img",
+    )
+    assert plan.text == "![i](../work/img/P/x.png)"
+
+
+def test_check_output_path_follows_a_symlink_to_its_real_place(
+    tmp_path,
+):
+    (tmp_path / "work").mkdir()
+    dangling = tmp_path / "work" / "out.md"
+    dangling.symlink_to("../nosite/page.md")
+    problem = assets.check_output_path(str(dangling))
+    assert problem is not None and "does not exist" in problem
+    assert str(tmp_path / "nosite") in problem
+    (tmp_path / "site").mkdir()
+    good = tmp_path / "work" / "ok.md"
+    good.symlink_to("../site/page.md")
+    assert assets.check_output_path(str(good)) is None
+    (tmp_path / "site" / "d").mkdir()
+    to_dir = tmp_path / "work" / "d.md"
+    to_dir.symlink_to("../site/d")
+    assert "is a directory" in assets.check_output_path(str(to_dir))
+
+
+def test_stage_output_never_makes_the_outputs_directory(tmp_path):
+    dangling = tmp_path / "out.md"
+    dangling.symlink_to("nosite/page.md")
+    stage = _stage(
+        "no attachments", tmp_path / "img", output=str(dangling)
+    )
+    with pytest.raises(assets.AssetError, match="does not exist"):
+        stage.stage_output(b"x")
+    stage.abort()
+    assert not (tmp_path / "nosite").exists()
+
+
+def test_the_output_as_a_planned_attachment_is_refused(tmp_path):
+    d = tmp_path / "img"
+    (d / "P").mkdir(parents=True)
+    scan = assets.scan_text(
+        "![x](/bcs/raw-attachment/wiki/P/a.png)", INST
+    )
+    for output in (d / "P" / "a.png", d / "P"):
+        stage = assets.AssetStage(scan, d, str(output))
+        with pytest.raises(assets.AssetPathError, match="output file"):
+            stage.add(scan.refs[0], b"A")
+        stage.abort()
+    # an output elsewhere in the assets directory is no clash
+    stage = assets.AssetStage(scan, d, str(d / "page.md"))
+    stage.add(scan.refs[0], b"A")
+    stage.abort()
+
+
+def test_the_output_inside_a_planned_attachments_place_is_refused(
+    tmp_path,
+):
+    d = tmp_path / "img"
+    d.mkdir()
+    scan = assets.scan_text(
+        "![x](/bcs/raw-attachment/wiki/P/a.png)", INST
+    )
+    stage = assets.AssetStage(scan, d, str(d / "P" / "a.png" / "x.md"))
+    with pytest.raises(assets.AssetPathError, match="output file"):
+        stage.add(scan.refs[0], b"A")
+    stage.abort()
+
+
 # The attachment references of every exported fixture, written out by hand
 # from the files (not produced by the scanner). Only the blog post has
 # any: four images, each as ``![alt](raw-attachment/...)`` wrapped in a
@@ -1190,9 +1374,9 @@ def test_urls_under_another_instance_path_are_counted_and_warned_once():
     assert [r.filename for r in scan.refs] == ["ok.png"]
     plan = _plan(text, output="o.md", assets_dir="d")
     (warning,) = plan.warnings
-    assert "3 URLs" in warning
-    assert "'/bcs'" in warning
-    assert "proxy" in warning
+    assert "3 attachment-like URLs did not match" in warning
+    assert "instance path '/bcs'" in warning
+    assert "proxy" in warning and "link_rewrites" in warning
     # left untouched
     assert plan.text.count("/proxy/trac/") == 2
     assert "/x/attachment/ticket/3/f.txt" in plan.text
@@ -1202,7 +1386,7 @@ def test_one_unmatched_url_is_singular():
     scan = assets.scan_text("[a](/other/attachment/wiki/P/a.png)", INST)
     assert scan.unmatched == 1
     plan = _plan("[a](/other/attachment/wiki/P/a.png)", output="o.md")
-    assert "1 URL " in plan.warnings[0]
+    assert "1 attachment-like URL did not match" in plan.warnings[0]
 
 
 def test_matched_urls_and_plain_links_are_not_unmatched():
