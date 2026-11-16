@@ -5,32 +5,11 @@ attachment XML-RPC calls that hand back the fetched bytes wrapped
 differently depending on how ``_parse_xmlrpc_value`` decoded the
 response. The coercion logic is identical for both realms -- an
 attachment's bytes don't care whether they're attached to a ticket or a
-wiki page -- so it lives here once rather than twice.
+wiki page -- so it lives once, in ``core.attachment_payload`` (which
+the CLIs can import without loading this package), and is re-exported
+here.
 """
 
-import xmlrpc.client
-
-
-def coerce_attachment_payload(data: object) -> bytes:
-    """Normalize a decoded XML-RPC attachment payload to raw bytes.
-
-    ``_parse_xmlrpc_value``'s base64 arm returns ``bytes``; this
-    defensively handles the other shapes it or a future parser change
-    could hand back, so callers always get bytes to write to disk.
-
-    Raises:
-        ValueError: If data is not str, bytes/bytearray, or Binary.
-    """
-    if isinstance(data, str):
-        # Treat as already-decoded text payload (rare); encode to utf-8
-        return data.encode("utf-8")
-    if isinstance(data, (bytes, bytearray)):
-        return bytes(data)
-    if isinstance(data, xmlrpc.client.Binary):
-        return data.data
-    raise ValueError(
-        f"Unexpected attachment payload type: {type(data).__name__}"
-    )
-
+from ...core.attachment_payload import coerce_attachment_payload
 
 __all__ = ["coerce_attachment_payload"]

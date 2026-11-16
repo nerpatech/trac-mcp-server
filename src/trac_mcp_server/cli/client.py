@@ -30,6 +30,7 @@ the same Trac identity as its MCP calls (e.g. ``auto_pm`` vs
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -38,11 +39,14 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .. import __version__
+from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
 from ..file_handler import detect_file_format, read_file_with_encoding
 from ..link_rewrites import link_map_arg
+from . import assets as export_assets
 
 EXIT_OK = 0
 EXIT_TOOL_ERROR = 1  # the server answered with an error result
@@ -197,10 +201,10 @@ def resolve_endpoint(
 # ---------------------------------------------------------------------------
 
 
-async def call_tool(
-    url: str, token: str | None, name: str, arguments: dict[str, Any]
-):
-    """Open one MCP session, call one tool, return its CallToolResult."""
+@contextlib.asynccontextmanager
+async def _mcp_session(url: str, token: str | None):
+    """One initialised MCP session over streamable HTTP, for as many
+    tool calls as the caller makes before leaving the block."""
     import httpx
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamable_http_client
@@ -218,7 +222,15 @@ async def call_tool(
         ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                return await session.call_tool(name, arguments)
+                yield session
+
+
+async def call_tool(
+    url: str, token: str | None, name: str, arguments: dict[str, Any]
+):
+    """Open one MCP session, call one tool, return its CallToolResult."""
+    async with _mcp_session(url, token) as session:
+        return await session.call_tool(name, arguments)
 
 
 def _result_text(result) -> str:
@@ -804,6 +816,164 @@ def _refuses_force(text: str) -> bool:
     )
 
 
+def _check_assets_args(args: argparse.Namespace) -> None:
+    """The usage rules of ``wiki-pull --assets`` (Trac /trac_mcp_server
+    #215), checked before anything is fetched."""
+    if args.command != "wiki-pull":
+        return
+    if args.assets is None:
+        if args.assets_url is not None:
+            raise CliError(
+                "--assets-url needs --assets", EXIT_USAGE_ERROR
+            )
+        return
+    if args.format == "tracwiki":
+        raise CliError(
+            "--assets works with --format markdown or html, not "
+            "tracwiki: a TracWiki page names its attachments, not their "
+            "URLs",
+            EXIT_USAGE_ERROR,
+        )
+    if Path(args.assets).exists() and not Path(args.assets).is_dir():
+        raise CliError(
+            f"--assets: not a directory: {args.assets}",
+            EXIT_USAGE_ERROR,
+        )
+    if args.file != "-":
+        problem = export_assets.check_output_path(args.file)
+        if problem is not None:
+            raise CliError(problem, EXIT_USAGE_ERROR)
+
+
+def _pulled_instance(sc: dict, text: str) -> str:
+    """The instance a pull came from: the result's own ``instance``,
+    else the ``trac_instance`` of a Markdown export's front matter."""
+    instance = sc.get("instance")
+    if not isinstance(instance, str) or not instance:
+        exported = exported_from(text) or {}
+        instance = exported.get("trac_instance")
+        source = exported.get("source")
+        if instance == "/" and isinstance(source, str):
+            # A root-served instance is told from other Trac servers by
+            # its host, which only the page's own URL names here.
+            parts = urlsplit(source)
+            if parts.scheme and parts.netloc:
+                instance = f"{parts.scheme}://{parts.netloc}/"
+    if not isinstance(instance, str) or not instance:
+        raise CliError(
+            "--assets: the server did not say which Trac instance the "
+            "page came from (no instance in the result, no "
+            "trac_instance in the front matter), so its attachment URLs "
+            "cannot be recognised; nothing was written",
+            EXIT_TOOL_ERROR,
+        )
+    return instance
+
+
+def _too_large(text: str) -> export_assets.TooLarge | None:
+    """The refusal of an inline payload over ``max_inline_bytes``
+    (``Error (validation_error)`` naming it, ``file_io._over_cap``), as a
+    :class:`~.assets.TooLarge` carrying the server's limit; None for any
+    other error text."""
+    if not (
+        text.lstrip().startswith("Error (validation_error)")
+        and "max_inline_bytes" in text
+    ):
+        return None
+    limit = re.search(r"limit of (\d+) bytes", text)
+    return export_assets.TooLarge(
+        int(limit.group(1)) if limit else None
+    )
+
+
+async def _fetch_attachment(
+    args: argparse.Namespace,
+    session,
+    ref: export_assets.AttachmentRef,
+) -> export_assets.Outcome:
+    """The bytes of one attachment through the server's attachment tools,
+    None when the server says it is not found, a ``TooLarge`` when it
+    refuses the size; any other error result is a CliError (a transport
+    failure propagates as itself)."""
+    if ref.realm == "ticket":
+        tool = "ticket_attachment_get"
+        arguments: dict[str, Any] = {
+            "ticket_id": int(ref.parent),
+            "filename": ref.filename,
+        }
+    else:
+        tool = "wiki_attachment_get"
+        arguments = {"page_name": ref.parent, "filename": ref.filename}
+    result = await session.call_tool(
+        tool, _with_instance(args, arguments)
+    )
+    if result.isError:
+        text = _result_text(result)
+        if text.lstrip().startswith("Error (not_found)"):
+            return None
+        too_large = _too_large(text)
+        if too_large is not None:
+            return too_large
+        lines = text.strip().splitlines()
+        raise CliError(
+            f"--assets: cannot fetch attachment '{ref.filename}' of "
+            f"{ref.describe()}: "
+            f"{lines[0] if lines else 'the server sent no error text'}"
+            "; nothing was written",
+            EXIT_TOOL_ERROR,
+        )
+    return base64.b64decode(_payload(result, "content_base64"))
+
+
+async def _localise_assets(
+    args: argparse.Namespace,
+    url: str,
+    token: str | None,
+    stage: export_assets.AssetStage,
+    text: str,
+) -> export_assets.AssetPlan:
+    """Fetch the attachments ``text`` references (``stage.scan``) one by
+    one into the stage's temporary files (each is checked against the
+    disk once fetched, and only the ones to be saved are), and plan the
+    rewrite. Nothing is in place yet: a failed fetch or write leaves the
+    disk as it was once the caller drops the stage."""
+    if stage.scan.refs:
+        # One session for every attachment, not one per attachment.
+        async with _mcp_session(url, token) as session:
+            for ref in stage.scan.refs:
+                outcome = await _fetch_attachment(args, session, ref)
+                # The session's anyio task groups wrap whatever leaves
+                # this block in an ExceptionGroup, and only a CliError is
+                # unwrapped by main(): the stage's errors are converted
+                # here, where they are still themselves.
+                try:
+                    stage.add(ref, outcome)
+                except export_assets.AssetPathError as e:
+                    raise CliError(str(e), EXIT_USAGE_ERROR) from None
+                except export_assets.AssetError as e:
+                    raise CliError(
+                        f"--assets: {e}", EXIT_TOOL_ERROR
+                    ) from None
+    return stage.plan(text)
+
+
+def _commit_assets(
+    args: argparse.Namespace,
+    stage: export_assets.AssetStage,
+    data: bytes,
+) -> None:
+    """Stage the output file and move everything into place, the output
+    last; stdout is written after the attachments are in place."""
+    try:
+        if args.file != "-":
+            stage.stage_output(data)
+        stage.commit()
+    except export_assets.AssetError as e:
+        raise CliError(str(e), EXIT_TOOL_ERROR) from None
+    if args.file == "-":
+        _write_bytes(args.file, data)
+
+
 async def _run(
     args: argparse.Namespace, url: str, token: str | None
 ) -> int:
@@ -951,8 +1121,29 @@ async def _run(
                 "link map was applied",
                 file=sys.stderr,
             )
-        data = _payload(result, "content").encode("utf-8")
-        _write_bytes(args.file, data)
+        text = _payload(result, "content")
+        plan = None
+        if args.assets is None:
+            data = text.encode("utf-8")
+            _write_bytes(args.file, data)
+        else:
+            # Every file is written to a temporary sibling first and
+            # renamed into place at the end, the output last: a failed
+            # fetch or write leaves neither assets nor the output file.
+            scan = export_assets.scan_text(
+                text, _pulled_instance(sc, text), args.format
+            )
+            with export_assets.AssetStage(
+                scan,
+                args.assets,
+                None if args.file == "-" else args.file,
+                args.assets_url,
+            ) as stage:
+                plan = await _localise_assets(
+                    args, url, token, stage, text
+                )
+                data = plan.text.encode("utf-8")
+                _commit_assets(args, stage, data)
         _say(
             args.file == "-",
             f"Pulled wiki page '{args.page}' (version {sc.get('version')}, "
@@ -964,6 +1155,13 @@ async def _run(
         # #210): stderr, so a script that captures stdout still sees them.
         for warning in sc.get("warnings") or []:
             print(f"trac-mcp: warning: {warning}", file=sys.stderr)
+        if plan is not None:
+            for warning in plan.warnings:
+                print(f"trac-mcp: warning: {warning}", file=sys.stderr)
+            print(
+                f"trac-mcp: {export_assets.summary(plan, args.assets)}",
+                file=sys.stderr,
+            )
         return EXIT_OK
 
     if cmd == "attach-put":
@@ -1154,6 +1352,25 @@ def build_parser() -> argparse.ArgumentParser:
             "(no effect with tracwiki)."
         ),
     )
+    p.add_argument(
+        "--assets",
+        metavar="DIR",
+        help=(
+            "Download the Trac attachments the page references (markdown "
+            "or html) into DIR and point their links at the local files. "
+            "An attachment that does not exist keeps its links, with a "
+            "warning."
+        ),
+    )
+    p.add_argument(
+        "--assets-url",
+        metavar="PREFIX",
+        help=(
+            "With --assets: link the saved files as PREFIX/<path> (the URL "
+            "they are served from) instead of by their relative path from "
+            "FILE."
+        ),
+    )
 
     for name, helptext in (
         ("attach-put", "Upload a local file as an attachment"),
@@ -1307,6 +1524,7 @@ def main(
 ) -> int:
     args = build_parser().parse_args(argv)
     try:
+        _check_assets_args(args)
         if args.command == "detect-format":
             return _detect_format(args)
         url, token, where = resolve_endpoint(

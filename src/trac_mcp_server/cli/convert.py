@@ -41,6 +41,7 @@ from ..converters.front_matter import (
 )
 from ..converters.html_to_markdown import trac_html_to_markdown
 from ..converters.markdown_to_tracwiki import convert_with_warnings
+from ..core.attachment_payload import coerce_attachment_payload
 from ..core.client import TracClient, WikiPageStoredReadbackFailed
 from ..link_rewrites import (
     LinkRewrites,
@@ -48,6 +49,7 @@ from ..link_rewrites import (
     link_map_arg,
     parse_pairs,
 )
+from . import assets as export_assets
 
 # ---------------------------------------------------------------------------
 # Exit-code constants
@@ -467,6 +469,35 @@ class _TracSession:
         """Trac's HTML for ``text`` (file, stdin, clipboard input)."""
         return self._render(lambda client: client.wiki_to_html(text))
 
+    def attachment_fetcher(
+        self,
+    ) -> Callable[[export_assets.AttachmentRef], bytes | None]:
+        """A fetch callback for ``--assets``: the attachment's bytes, None
+        when Trac says it does not exist, any other failure raised."""
+        import xmlrpc.client
+
+        from ..core.faults import classify_fault
+
+        client = self.client()
+
+        def fetch(ref: export_assets.AttachmentRef) -> bytes | None:
+            try:
+                if ref.realm == "ticket":
+                    data = client.get_ticket_attachment(
+                        int(ref.parent), ref.filename
+                    )
+                else:
+                    data = client.get_wiki_attachment(
+                        f"{ref.parent}/{ref.filename}"
+                    )
+            except xmlrpc.client.Fault as e:
+                if classify_fault(e) == "not_found":
+                    return None
+                raise
+            return coerce_attachment_payload(data)
+
+        return fetch
+
     def page_renderer(self, page_name: str) -> Callable[[str], str]:
         """A renderer returning the HTML of wiki page ``page_name``.
 
@@ -782,6 +813,29 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--assets",
+        dest="assets",
+        default=None,
+        metavar="DIR",
+        help=(
+            "With --from-wiki PAGE --to md: download the Trac attachments"
+            " the page references into DIR and point their links at the"
+            " local files. An attachment that does not exist keeps its"
+            " links, with a warning."
+        ),
+    )
+    parser.add_argument(
+        "--assets-url",
+        dest="assets_url",
+        default=None,
+        metavar="PREFIX",
+        help=(
+            "With --assets: link the saved files as PREFIX/<path> (the URL"
+            " they are served from) instead of by their relative path from"
+            " the output file (the current directory for stdout)."
+        ),
+    )
+    parser.add_argument(
         "--trac-url",
         dest="trac_url",
         default=None,
@@ -1039,6 +1093,34 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             parser.error(str(e))
 
+    # --- --assets (Trac /trac_mcp_server #215): a usage error unless this
+    # is a --from-wiki export to Markdown ---
+    if args.assets is None:
+        if args.assets_url is not None:
+            parser.error("--assets-url needs --assets")
+    else:
+        if args.from_wiki is None:
+            parser.error(
+                "--assets needs --from-wiki: only the Trac page's own"
+                " export names attachments to download"
+            )
+        if args.to_wiki is not None or args.target_format == "tracwiki":
+            parser.error(
+                "--assets works with --to md, not tracwiki: a TracWiki"
+                " page names its attachments, not their URLs"
+            )
+        if (
+            Path(args.assets).exists()
+            and not Path(args.assets).is_dir()
+        ):
+            parser.error(f"--assets: not a directory: {args.assets}")
+        # Before anything is fetched or written: the output file must be
+        # writable, as ``trac-mcp wiki-pull`` checks.
+        if args.output_file is not None and not args.to_clipboard:
+            problem = export_assets.check_output_path(args.output_file)
+            if problem is not None:
+                parser.error(problem)
+
     # --- --check-trac: early dispatch before conversion validation ---
     if args.check_trac:
         if args.from_wiki is not None or args.to_wiki is not None:
@@ -1282,6 +1364,50 @@ def main(argv: list[str] | None = None) -> int:
             + result.text,
         )
 
+    # --- --assets: every file is written to a temporary sibling first
+    # and renamed into place at the end, the output file last, so a
+    # failed fetch or write leaves neither the assets nor the output ---
+    assets_plan = None
+    output_written = False
+    if args.assets is not None:
+        out_file = args.output_file if not args.to_clipboard else None
+        scan = export_assets.scan_text(result.text, session.url)
+        with export_assets.AssetStage(
+            scan, args.assets, out_file, args.assets_url
+        ) as stage:
+            try:
+                fetch = session.attachment_fetcher()
+                for ref in scan.refs:
+                    stage.add(ref, fetch(ref))
+            except export_assets.AssetPathError as e:
+                parser.error(str(e))
+            except export_assets.AssetError as e:
+                sys.stderr.write(f"trac-convert: {e}\n")
+                return EXIT_RUNTIME_ERROR
+            except Exception as e:
+                sys.stderr.write(
+                    "trac-convert: "
+                    + _classify_trac_error(
+                        e, session.url, action="attachment fetch"
+                    )
+                    + "; nothing was written\n"
+                )
+                return EXIT_TRAC
+            assets_plan = stage.plan(result.text)
+            result = replace(
+                result,
+                text=assets_plan.text,
+                warnings=[*result.warnings, *assets_plan.warnings],
+            )
+            try:
+                if out_file is not None:
+                    stage.stage_output(result.text.encode("utf-8"))
+                    output_written = True
+                stage.commit()
+            except export_assets.AssetError as e:
+                sys.stderr.write(f"trac-convert: {e}\n")
+                return EXIT_RUNTIME_ERROR
+
     # --- write output ---
     if args.to_wiki is not None:
         info, write_rc = _put_wiki_page(
@@ -1310,6 +1436,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"trac-convert: clipboard write failed: {e}\n"
             )
             return EXIT_RUNTIME_ERROR
+    elif output_written:
+        pass  # written with the attachments
     elif args.output_file is not None:
         try:
             Path(args.output_file).write_text(
@@ -1339,6 +1467,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         for warning in result.warnings:
             sys.stderr.write(f"warning: {warning}\n")
+        if assets_plan is not None:
+            sys.stderr.write(
+                "info: "
+                + export_assets.summary(assets_plan, args.assets)
+                + "\n"
+            )
 
     return EXIT_OK
 

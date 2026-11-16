@@ -147,6 +147,7 @@ When the server runs on another machine (the HTTP transport), its file tools can
 ```bash
 trac-mcp wiki-push Docs/Design design.md          # Markdown is converted on the way in
 trac-mcp wiki-pull Docs/Design design.md
+trac-mcp wiki-pull Docs/Design design.md --assets static/images --assets-url /images   # also saves the page's attachments, relinked
 trac-mcp attach-put --ticket 42 trace.bin
 trac-mcp attach-get --page Docs/Design diagram.png diagram.png
 trac-mcp ticket-comment 42 note.wiki              # TracWiki body sent verbatim; prints the new comment number
