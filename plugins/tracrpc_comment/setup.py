@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Packaging for the tracrpc_comment Trac plugin.
 
-Installed into the TRAC server's virtualenv (on the Trac host), NOT into the
-trac-mcp-server venv on the workstation -- the two run on different machines.
+Installed into the virtualenv Trac runs from, NOT into the trac-mcp-server
+venv: the plugin runs inside Trac, and the MCP server is a client of it.
 See plugins/README.md.
 """
 
@@ -17,7 +17,7 @@ setup(
                 'and a version-checked wiki put over Trac XML-RPC.',
     license='MIT',
     packages=['tracrpc_comment'],
-    # Declares the Trac components this egg provides. Trac reads this to
+    # Declares the Trac components this package provides. Trac reads this to
     # discover them; they still have to be enabled per environment with
     #   trac-admin <env> config set components tracrpc_comment.* enabled
     entry_points={
@@ -29,7 +29,7 @@ setup(
         ],
     },
     # Not declared as an install_requires: TracXMLRPC is a plugin of the Trac
-    # environment this installs into, not a PyPI dependency this egg should
+    # environment this installs into, not a PyPI dependency this package should
     # be allowed to resolve and install on its own.
     install_requires=[],
 )

@@ -46,7 +46,9 @@ the rest of the RPC surface:
 ```
 
 A disabled component is inert, so nothing further needs uninstalling, and
-disabling it in one instance leaves every other instance as it was.
+disabling it in one instance leaves every other instance as it was. Do not
+`pip uninstall` it to switch it off for one instance: the venv is shared, so
+that removes it from every instance served from it at once.
 
 ### Two behaviours worth knowing before you use it
 
@@ -152,6 +154,9 @@ so it is not pinned here: keep that venv on `setuptools<81`.
 # 3. reload the server Trac runs in (a graceful worker reload is enough)
 ```
 
+The host needs `git` and a route to the remote the URL names. Any clone of
+this repository works in place of the GitHub URL, a local mirror included.
+
 **A host with no route to PyPI** cannot fetch the isolated build
 environment's `setuptools`, so install with `--no-build-isolation`: pip then
 builds with the Trac venv's own setuptools, which must stay `<81` for
@@ -160,7 +165,8 @@ Trac 1.6's `pkg_resources` anyway.
 **Moving to a newer commit.** Every commit keeps version 1.2.0 until the
 plugin's code is next released, so a plain `pip install` of a newer sha sees
 `TracRpcComment 1.2.0` already installed and does nothing. Reinstall it
-explicitly, with `--no-deps` so Trac itself is left alone:
+explicitly. `--no-deps` keeps the reinstall to the plugin alone (it declares
+no dependencies today, so this is a guard, not a change):
 
 ```
 <trac-venv>/bin/pip install --force-reinstall --no-deps \
@@ -178,10 +184,14 @@ in that venv lists the three `tracrpc_comment.*` entries.
 in the venv is enabled only where an instance's `trac.ini` says so; unlike an
 egg in an instance's `plugins/` directory, it gets no default. But instances
 served by the same worker processes share one Python working set, so they
-all run the same version of it. Do not also drop a `TracRpcComment-*.egg`
-into an instance's `plugins/`: an egg and the venv install side by side are
-two versions in one process, and Trac's loader skips the second with
-`VersionConflict` in that instance's `trac.log`.
+all run the same version of it. Do not also keep a `TracRpcComment-*.egg`
+in an instance's `plugins/`: a host moving from per-instance eggs to the venv
+install deletes every such egg in the same change, then reloads. Trac's
+loader skips an egg the venv install already provides, but only an egg of a
+*different* version says so (`VersionConflict` in that instance's
+`trac.log`); one of the same version, 1.2.0 for every commit so far, is
+skipped silently and waits for the next version bump. Look for the file, not
+for the log line.
 
 ### The maintainers' Trac host
 
@@ -196,8 +206,9 @@ ticket 69. In short:
    its copy of `origin`, which has every commit before GitHub does), then a
    new pin in rookery, staged with `stage.sh trac <rookery commit>` (the
    stage serves `/trac_test`) and deployed with
-   `deploy.sh trac <rookery commit>`. A whole-plugin rollback is
-   `deploy.sh trac --rollback`.
+   `deploy.sh trac <rookery commit>`. `deploy.sh trac --rollback` rolls
+   back the whole stack release (Trac, every plugin and uWSGI), not the
+   plugin alone; to switch the plugin off, disable it per instance.
  * **Never `pip install` into a release venv.** A release is root-owned and
    recorded by the deploy; changing it in place is unrecorded, and lost or
    inconsistent on the next deploy or rollback.
