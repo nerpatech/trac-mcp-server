@@ -4,10 +4,9 @@ Code in this directory **does not run in the MCP server**. It is installed on
 the Trac host and runs inside Trac's own process. The MCP server is a client of
 it.
 
-That split is the thing to keep straight: per `Reference/environment/HostTopology`
-in the `auto_pm` store, the MCP server runs on the workstation (`debian`) and
-Trac runs on `kpoxa`, a different machine on a different subnet. `deploy.sh` at
-the repo root deploys the *former* and has nothing to do with this directory.
+That split is the thing to keep straight: the MCP server and Trac are separate
+services, usually on separate hosts, and deploying the MCP server never
+installs or updates anything in this directory.
 
 ## `tracrpc_comment`
 
@@ -38,19 +37,18 @@ Stock `TicketRPC` yields none of the five above, and stock `WikiRPC` does not
 yield `putPageIfVersion`.
 
 The installed `tracxmlrpc` is never modified. Rollback is one `config set
-... disabled` plus a reload, and cannot affect the rest of the RPC surface:
+... disabled` in that instance's `trac.ini` plus a reload, and cannot affect
+the rest of the RPC surface:
 
 ```
-ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/<env> \
-    config set components "tracrpc_comment.*" disabled'
-ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
+<trac-venv>/bin/trac-admin <env> config set components "tracrpc_comment.*" disabled
+# then reload the server Trac runs in
 ```
 
-The egg file can be left in place in that environment's own `plugins/`
-directory -- a disabled component is inert, so nothing further needs
-uninstalling. Because it was installed per environment rather than into the
-shared venv (see below), disabling it on one instance cannot affect any
-other.
+A disabled component is inert, so nothing further needs uninstalling, and
+disabling it in one instance leaves every other instance as it was. Do not
+`pip uninstall` it to switch it off for one instance: the venv is shared, so
+that removes it from every instance served from it at once.
 
 ### Two behaviours worth knowing before you use it
 
@@ -131,160 +129,93 @@ and falls back to the old changelog scan when the method is missing (remembered
 for five minutes) or the answer is unusable, so installing it is optional but
 saves reading the changelog.
 
-## Installing on the Trac host
+## Installing on a Trac host
 
-Requires no root: uWSGI's master runs as `user`, and `master = true` makes
-`HUP` a graceful worker reload.
-
-### Install by commit into the Trac stack venv
+### Install by commit into Trac's venv
 
 The plugin is pip-installable straight from a commit of this repository.
 `plugins/tracrpc_comment/pyproject.toml` carries only a `[build-system]`
 table (`setuptools>=40.8.0`, the first release with `setuptools.build_meta`);
 `setup.py` stays the metadata source, so the version is still the one in
 `setup.py`. The `setuptools<81` that Trac 1.6 needs (it imports
-`pkg_resources`, which setuptools 81 removed) is a property of the *stack
+`pkg_resources`, which setuptools 81 removed) is a property of the *Trac
 venv's* own setuptools at run time, not of pip's isolated build environment,
-so it is not pinned here: keep the stack venv on `setuptools<81`.
+so it is not pinned here: keep that venv on `setuptools<81`.
 
 ```
-# 1. install once into the venv Trac's uWSGI workers run from. <sha> is the
-#    commit to deploy -- a sha, not a branch, so what runs is what was
-#    reviewed.
-ssh kpoxa '/home/user/trac/.venv/bin/pip install \
-    "git+https://github.com/nerpatech/trac-mcp-server@<sha>#subdirectory=plugins/tracrpc_comment"'
+# 1. install into the venv Trac runs from. <sha> is the commit to deploy --
+#    a sha, not a branch, so what runs is what was reviewed.
+<trac-venv>/bin/pip install \
+    "git+https://github.com/nerpatech/trac-mcp-server@<sha>#subdirectory=plugins/tracrpc_comment"
 
-# 2. enable it in ONE instance -- /trac_test FIRST, the rest once proven
-ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/trac_test \
-    config set components "tracrpc_comment.*" enabled'
+# 2. enable it in ONE instance -- a test instance first, the rest once proven
+<trac-venv>/bin/trac-admin <env> config set components "tracrpc_comment.*" enabled
 
-# 3. one reload
-ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
+# 3. reload the server Trac runs in (a graceful worker reload is enough)
 ```
 
-The same path works from the internal origin mirror: use that remote's URL
-in place of the GitHub one. The host needs `git` and a route to whichever
-remote it names.
+The host needs `git` and a route to the remote the URL names. Any clone of
+this repository works in place of the GitHub URL, a local mirror included.
 
 **A host with no route to PyPI** cannot fetch the isolated build
 environment's `setuptools`, so install with `--no-build-isolation`: pip then
-builds with the stack venv's own setuptools, which must stay `<81` for
-Trac 1.6's `pkg_resources` anyway:
-
-```
-ssh kpoxa '/home/user/trac/.venv/bin/pip install --no-build-isolation \
-    "git+https://github.com/nerpatech/trac-mcp-server@<sha>#subdirectory=plugins/tracrpc_comment"'
-```
+builds with the Trac venv's own setuptools, which must stay `<81` for
+Trac 1.6's `pkg_resources` anyway.
 
 **Moving to a newer commit.** Every commit keeps version 1.2.0 until the
 plugin's code is next released, so a plain `pip install` of a newer sha sees
 `TracRpcComment 1.2.0` already installed and does nothing. Reinstall it
-explicitly (`--no-deps`, so Trac itself is left alone):
+explicitly. `--no-deps` keeps the reinstall to the plugin alone (it declares
+no dependencies today, so this is a guard, not a change):
 
 ```
-ssh kpoxa '/home/user/trac/.venv/bin/pip install --force-reinstall --no-deps \
-    "git+https://github.com/nerpatech/trac-mcp-server@<newsha>#subdirectory=plugins/tracrpc_comment"'
+<trac-venv>/bin/pip install --force-reinstall --no-deps \
+    "git+https://github.com/nerpatech/trac-mcp-server@<newsha>#subdirectory=plugins/tracrpc_comment"
 ```
+
+For the same reason, the version does not tell you which commit is running.
 
 Confirm by content, not by pip exiting 0: `system.listMethods` from a
 reconnected session must list `ticket.editComment`, `wiki.putPageIfVersion`
 and `ticket.getChangeAt`. `importlib.metadata.entry_points(group="trac.plugins")`
 in that venv lists the three `tracrpc_comment.*` entries.
 
-**Why this removes the `VersionConflict` trap.** All instances run in the
-same uWSGI worker processes, and a pip install is one process-wide
-distribution: there is exactly one version of `TracRpcComment` in the
-working set, so no instance can load a different one (see the upgrade notes
-under the per-environment steps below, which are about exactly that).
-*Enabling* is still per instance, a `config set` in that instance's own
-`trac.ini`, so `config set ... disabled` plus a reload still switches it off
-for one instance without touching the others. Removing the code is the
-opposite: `pip uninstall TracRpcComment` removes it for every instance at
-once.
+**Enabling is per instance, the version is per process.** A plugin installed
+in the venv is enabled only where an instance's `trac.ini` says so; unlike an
+egg in an instance's `plugins/` directory, it gets no default. But instances
+served by the same worker processes share one Python working set, so they
+all run the same version of it. Do not also keep a `TracRpcComment-*.egg`
+in an instance's `plugins/`: a host moving from per-instance eggs to the venv
+install deletes every such egg in the same change, then reloads. Trac's
+loader skips an egg the venv install already provides, but only an egg of a
+*different* version says so (`VersionConflict` in that instance's
+`trac.log`); one of the same version, 1.2.0 for every commit so far, is
+skipped silently and waits for the next version bump. Look for the file, not
+for the log line.
 
-**An instance that still has a per-environment egg** must lose it before
-this install takes effect there: delete `TracRpcComment-*.egg` from that
-instance's `plugins/` in the same change, then reload. An egg and the pip
-install side by side are two versions in one process, which is the
-`VersionConflict` again. The production instances move together, since they
-share worker processes; that migration is rookery ticket 69.
+### The maintainers' Trac host
 
-### Current state of the production instances: per-environment eggs, until rookery ticket 69 migrates them
+On the host behind this project's own Trac, the plugin is not installed by
+hand. It ships inside the Trac stack release, pinned by a commit of this
+repository in the deployment repository's lock file (rookery,
+`services/trac-uwsgi/requirements.lock`). The procedure is in rookery
+`services/trac-uwsgi/README.md`, and the migration that set it up is rookery
+ticket 69. In short:
 
-Each instance has its own egg in its own `plugins/` directory, not an install
-in the shared Trac venv, so disabling or removing it on one instance can
-never affect another (confirmed by the `TracRpcComment-1.0.0-py3.11.egg`
-deployed for #98 -- see the rollback note above). Use these steps only to
-keep an instance in step with the others until the migration lands.
-
-```
-# 1. build the egg -- with a Python matching the target Trac venv's own
-#    version (3.11 on kpoxa), not necessarily this repo's own venv; the
-#    Trac venv's own interpreter is a convenient way to guarantee that.
-#    This only BUILDS a distributable egg file, it does not install
-#    anything into that venv's site-packages.
-scp -r plugins/tracrpc_comment kpoxa:/tmp/
-ssh kpoxa 'cd /tmp/tracrpc_comment && /home/user/trac/.venv/bin/python setup.py bdist_egg'
-
-# 2. copy the egg into ONE environment's own plugins/ directory --
-#    /trac_test FIRST, the rest once proven -- then enable it there
-ssh kpoxa 'cp /tmp/tracrpc_comment/dist/TracRpcComment-1.2.0-py3.11.egg \
-    /home/user/trac/projects/trac_test/plugins/'
-ssh kpoxa '/home/user/trac/.venv/bin/trac-admin /home/user/trac/projects/trac_test \
-    config set components "tracrpc_comment.*" enabled'
-
-# 3. reload
-ssh kpoxa 'kill -HUP $(cat /var/run/uwsgi/uwsgi.pid)'
-```
-
-Confirm by content, not by the install exiting 0 — `system.listMethods` from a
-reconnected session must list `ticket.editComment` (and, from 1.2.0,
-`wiki.putPageIfVersion` and `ticket.getChangeAt`).
-
-**Upgrading from 1.0.0** (the release with neither `wiki.putPageIfVersion` nor
-`ticket.getChangeAt`): **every instance moves at once.** Install the 1.2.0 egg
-into every instance first, then send one reload; a single instance can't be
-upgraded on its own. 1.1.0 (which had `putPageIfVersion` only) was never rolled
-out: every instance runs 1.0.0, and the upgrade goes straight to 1.2.0.
- * **Why:** all instances run in the same uWSGI worker processes. The first
-   instance a worker opens adds its egg's version to the process-wide
-   `pkg_resources` working set. Trac's loader then skips a different version
-   of the same egg in any other instance, with
-   `Skipping "TracRpcComment 1.2.0": VersionConflict: (TracRpcComment 1.0.0 ...)`
-   in that instance's `trac.log`.
- * **What the components are:** they are registered process-wide, so every
-   instance gets the components of whichever version loaded first. On
-   2026-11-04, `/trac_test` alone carried 1.1.0: it went on listing 85 methods
-   with no `wiki.putPageIfVersion`, served by `trac_mcp_server`'s 1.0.0 egg.
-   The jump to 1.2.0 is also what makes a stale egg (a 1.1.0 built before
-   `ticket.getChangeAt` existed, say) fail visibly with `VersionConflict`
-   instead of loading silently with the method missing.
- * **How:** in each instance's `plugins/`, swap
-   `TracRpcComment-1.0.0-py3.11.egg` for `TracRpcComment-1.2.0-py3.11.egg`,
-   then reload once. **Remove any `TracRpcComment-1.1.0-py3.11.egg` found in an
-   instance's `plugins/` too** (`/trac_test` is the known one), so each
-   instance holds exactly one egg. The `tracrpc_comment.*` pattern already
-   enabled covers the new component and method.
- * **Until then** the MCP server works unchanged: both new methods are
-   optional, and a missing one is remembered for five minutes and bypassed.
-
-The per-environment isolation described above holds for *enabling*, which is
-per-instance config. It doesn't hold for *versions*.
-
-Step 1's exact build command is reconstructed from the deployed artifact's
-name and Trac's own per-environment-egg convention, not a verbatim transcript
-of what was run on kpoxa -- worth a quick check against that host before
-relying on it to bring up an eleventh instance.
-
-As of 2026-09-17, step 2 has been repeated for every instance on this host
-except `/trac_test` (already covered above): `auto_pm`, `bcs`, `bfg`, `grow`,
-`llm_balancer`, `nerpasite`, `scopemate`, `trac_mcp_server` -- each confirmed
-by `system.listMethods` returning 85 methods (was 79), including all six new
-ones. `/core` had `config set` run too and the egg is installed there, but it
-cannot be confirmed the same way: `agent_rpc` holds no `XML_RPC` permission
-grant on `/core` at all, so `system.listMethods` itself returns `403 XML_RPC
-privileges are required` -- pre-existing on that instance and unrelated to
-this plugin.
+ * **Moving it** means a commit here, pushed to `origin` (the host builds from
+   its copy of `origin`, which has every commit before GitHub does), then a
+   new pin in rookery, staged with `stage.sh trac <rookery commit>` (the
+   stage serves `/trac_test`) and deployed with
+   `deploy.sh trac <rookery commit>`. `deploy.sh trac --rollback` rolls
+   back the whole stack release (Trac, every plugin and uWSGI), not the
+   plugin alone; to switch the plugin off, disable it per instance.
+ * **Never `pip install` into a release venv.** A release is root-owned and
+   recorded by the deploy; changing it in place is unrecorded, and lost or
+   inconsistent on the next deploy or rollback.
+ * **Enabling stays per instance**, in `[components]`, with the release's own
+   `trac-admin`, run as the instance's owner, never as root.
+ * **The rookery release id**, not the version in `setup.py`, tells which pin
+   is running.
 
 ## Tests
 
