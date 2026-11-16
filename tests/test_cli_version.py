@@ -1,13 +1,14 @@
 """``--version`` of trac-mcp, trac-convert and trac-mcp-server names the
 build commit, or says it is unknown (Trac /trac_mcp_server #230).
 
-Each CLI looks ``release_sha`` up in its own module namespace, so the
-tests patch it there.
+Each parser builds its string through ``version.cli_version``, which
+looks ``release_sha`` up in ``trac_mcp_server.version``, so that is the
+one place the tests patch.
 """
 
 import pytest
 
-from trac_mcp_server import __version__
+from trac_mcp_server import __version__, version
 from trac_mcp_server.cli import client, convert
 from trac_mcp_server.mcp import server
 
@@ -24,7 +25,7 @@ CLIS = [
 
 
 def version_output(module, monkeypatch, capsys, sha):
-    monkeypatch.setattr(module, "release_sha", lambda: sha)
+    monkeypatch.setattr(version, "release_sha", lambda: sha)
     with pytest.raises(SystemExit) as exc:
         module.build_parser().parse_args(["--version"])
     assert exc.value.code == 0

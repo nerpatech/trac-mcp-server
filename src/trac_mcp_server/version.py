@@ -27,13 +27,14 @@ def release_sha() -> str | None:
     lands in ``sys._MEIPASS``; when the import fails in a frozen process
     that file is read instead (Trac /trac_mcp_server #230). Its content
     must be 40 hex, optionally ``-dirty``; anything else, or an
-    unreadable file, is None.
+    unreadable or undecodable file, is None. The ``_release`` value is
+    held to the same shape.
     """
     try:
         from ._release import RELEASE_SHA
     except ImportError:
         return _frozen_release_sha()
-    if isinstance(RELEASE_SHA, str) and RELEASE_SHA:
+    if isinstance(RELEASE_SHA, str) and _STAMP.match(RELEASE_SHA):
         return RELEASE_SHA
     return None
 
@@ -43,8 +44,10 @@ def _frozen_release_sha() -> str | None:
     if not getattr(sys, "frozen", False):
         return None
     try:
-        text = (Path(sys._MEIPASS) / FROZEN_SHA_FILE).read_text()
-    except (OSError, AttributeError):
+        text = (Path(sys._MEIPASS) / FROZEN_SHA_FILE).read_text(
+            encoding="ascii"
+        )
+    except (OSError, ValueError, AttributeError):
         return None
     sha = text.strip()
     return sha if _STAMP.match(sha) else None
@@ -72,6 +75,15 @@ def format_cli_version(version: str, sha: str | None) -> str:
     if sha:
         return format_server_version(version, sha)
     return f"{version} (commit unknown)"
+
+
+def cli_version() -> str:
+    """The string a command-line ``--version`` prints after its name:
+    the package version and the build commit (Trac /trac_mcp_server
+    #230). Looks ``release_sha`` up at call time."""
+    from . import __version__
+
+    return format_cli_version(__version__, release_sha())
 
 
 def check_version_consistency() -> tuple[bool, str]:

@@ -24,7 +24,6 @@ from pathlib import Path
 
 import pyperclip
 
-from .. import __version__
 from ..config_bootstrap import bootstrap_config
 from ..converters import detect_format_heuristic
 from ..converters.common import (
@@ -50,7 +49,7 @@ from ..link_rewrites import (
     link_map_arg,
     parse_pairs,
 )
-from ..version import format_cli_version, release_sha
+from ..version import cli_version
 from . import assets as export_assets
 
 # ---------------------------------------------------------------------------
@@ -733,9 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=(
-            f"trac-convert {format_cli_version(__version__, release_sha())}"
-        ),
+        version=f"trac-convert {cli_version()}",
     )
     parser.add_argument(
         "--from",

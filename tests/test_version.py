@@ -15,6 +15,7 @@ import tomllib
 import trac_mcp_server
 from trac_mcp_server.version import (
     check_version_consistency,
+    cli_version,
     format_cli_version,
     format_server_version,
     release_sha,
@@ -163,6 +164,19 @@ class TestReleaseSha:
         )
         assert release_sha() == "a" * 40 + "-dirty"
 
+    @pytest.mark.parametrize(
+        "value", ["unknown", "0123456789ab", "", "a" * 40 + "-dirt"]
+    )
+    def test_a_value_that_is_not_a_sha_is_none(
+        self, monkeypatch, value
+    ):
+        fake = types.ModuleType("trac_mcp_server._release")
+        fake.RELEASE_SHA = value
+        monkeypatch.setitem(
+            sys.modules, "trac_mcp_server._release", fake
+        )
+        assert release_sha() is None
+
 
 class TestFormatServerVersion:
     """serverInfo.version carries the commit when one is known."""
@@ -268,6 +282,12 @@ class TestReleaseShaFrozen:
         (meipass / self.FILE).mkdir()
         assert release_sha() is None
 
+    def test_an_undecodable_file_is_none(self, meipass):
+        (meipass / self.FILE).write_bytes(
+            b"\xff\xfe" + self.SHA.encode()
+        )
+        assert release_sha() is None
+
     def test_not_frozen_ignores_the_file(self, tmp_path, monkeypatch):
         (tmp_path / self.FILE).write_text(self.SHA)
         monkeypatch.setattr(sys, "frozen", False, raising=False)
@@ -286,3 +306,27 @@ class TestReleaseShaFrozen:
             sys.modules, "trac_mcp_server._release", fake
         )
         assert release_sha() == "b" * 40
+
+
+class TestCliVersion:
+    def test_is_the_package_version_and_the_release_sha(
+        self, monkeypatch
+    ):
+        from trac_mcp_server import version as version_module
+
+        monkeypatch.setattr(
+            version_module, "release_sha", lambda: "c" * 40
+        )
+        assert (
+            cli_version()
+            == f"{trac_mcp_server.__version__}+g{'c' * 12}"
+        )
+
+    def test_says_unknown_without_a_sha(self, monkeypatch):
+        from trac_mcp_server import version as version_module
+
+        monkeypatch.setattr(version_module, "release_sha", lambda: None)
+        assert (
+            cli_version()
+            == f"{trac_mcp_server.__version__} (commit unknown)"
+        )

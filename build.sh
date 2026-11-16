@@ -193,19 +193,27 @@ verify_binary() {
     local smoke
     smoke=$(./$path --version)
     echo "  Smoke: $smoke"
-    # A stamp was bundled, so a binary that still says "commit unknown"
-    # lost it: fail the build rather than ship an unattributable binary.
-    if [ -n "$RELEASE_SHA" ] && [[ "$smoke" == *"(commit unknown)"* ]]; then
-        echo "ERROR: $name reports \"commit unknown\" although the build stamped $RELEASE_SHA"
+    # A stamp was bundled, so the binary must name that commit: a binary
+    # that says "commit unknown", or another commit, lost or mangled it.
+    # Fail the build rather than ship an unattributable binary. Windows
+    # (.exe) builds are not exercised (CI is Linux-only), so there a
+    # stamp that did not land is a warning.
+    if [ -n "$RELEASE_SHA" ] && [[ "$smoke" != *"+g${RELEASE_SHA:0:12}"* ]]; then
+        if [[ "$path" == *.exe ]]; then
+            echo "WARNING: $name does not report the stamped commit ${RELEASE_SHA:0:12} (Windows builds are not verified)"
+            return 0
+        fi
+        echo "ERROR: $name does not report the stamped commit: expected +g${RELEASE_SHA:0:12} (from $RELEASE_SHA)"
         return 1
     fi
 }
+
+verify_binary trac-mcp-server
+verify_binary trac-convert
 
 echo ""
 echo "==================================================================="
 echo "  Build successful!"
 echo "==================================================================="
-verify_binary trac-mcp-server
-verify_binary trac-convert
 echo ""
 echo "Build complete. Binaries in dist/."
