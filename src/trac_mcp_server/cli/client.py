@@ -322,9 +322,10 @@ def _attach_target(args: argparse.Namespace) -> tuple[str, dict]:
 _CREATED_RE = re.compile(r"Created ticket #(\d+)")
 
 
-def _read_body(path: str, what: str) -> str:
+def _read_body(path: str, what: str, allow_empty: bool = False) -> str:
     """The body file as text, sent verbatim. An empty one is refused here
-    (the server would refuse it too), with the same non-UTF-8 warning as
+    (the server would refuse it too) unless ``allow_empty`` (a body that is
+    only compared, never sent), with the same non-UTF-8 warning as
     wiki-push."""
     if path == "-":
         # Text-mode stdin translates CRLF and lone CR to LF, which a file
@@ -346,7 +347,7 @@ def _read_body(path: str, what: str) -> str:
             f"-- check the stored {what}",
             file=sys.stderr,
         )
-    if not text.strip():
+    if not allow_empty and not text.strip():
         raise CliError(
             f"{path} is empty: no {what} to send", EXIT_USAGE_ERROR
         )
@@ -528,9 +529,16 @@ async def _ticket_comment_edit(
     # applied only where a comment is ADDED (ticket.update). The edit path
     # (ticket_comment_edit -> the plugin's editComment) has none, and the
     # case this command exists for is a 33 KB comment.
+    if args.file == "-" and args.expect_file == "-":
+        raise CliError(
+            "standard input can feed only one of FILE and --expect-file",
+            EXIT_USAGE_ERROR,
+        )
     text = _read_body(args.file, "comment")
     expected = (
-        _read_body(args.expect_file, "expected comment")
+        _read_body(
+            args.expect_file, "expected comment", allow_empty=True
+        )
         if args.expect_file is not None
         else None
     )
@@ -548,9 +556,13 @@ async def _ticket_comment_edit(
                 "nothing was edited",
                 EXIT_TOOL_ERROR,
             )
-        if stored != expected:
-            stored_b = stored.encode("utf-8")
-            expected_b = expected.encode("utf-8")
+        # Trac stores LF; a CRLF file this command pushed must still be
+        # usable as the next --expect-file, so compare on folded texts.
+        stored_f = _fold_line_endings(stored)
+        expected_f = _fold_line_endings(expected)
+        if stored_f != expected_f:
+            stored_b = stored_f.encode("utf-8")
+            expected_b = expected_f.encode("utf-8")
             raise CliError(
                 f"comment {args.cnum} of ticket #{args.ticket} no longer "
                 f"matches {args.expect_file}: first difference at byte "
@@ -600,12 +612,13 @@ async def _ticket_comment_edit(
         return _unverified("the read-back found no such comment")
     if stored == text:
         print(
-            f"Stored comment {args.cnum} matches the file, byte-for-byte"
+            f"Stored comment {args.cnum} matches the text sent, "
+            "byte-for-byte"
         )
         return EXIT_OK
     if stored == _fold_line_endings(text):
         print(
-            f"Stored comment {args.cnum} matches the file with line "
+            f"Stored comment {args.cnum} matches the text sent with line "
             "endings folded to LF (Trac stores CR and CRLF as LF)"
         )
         return EXIT_OK
@@ -1209,8 +1222,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-file",
         metavar="PATH",
         help="Refuse unless comment CNUM's stored body equals this file "
-        "byte for byte (covers an edit made in the web UI since you "
-        "read it)",
+        "(line endings folded to LF; covers an edit made in the web UI "
+        "since you read it). '-' for stdin, unless FILE is '-'",
     )
 
     p = sub.add_parser(

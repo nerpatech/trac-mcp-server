@@ -704,7 +704,7 @@ def test_live_ticket_comment_edit_long_body_and_expect_file(
                 == cli.EXIT_OK
             )
             assert (
-                f"Stored comment {cnum} matches the file, byte-for-byte"
+                f"Stored comment {cnum} matches the text sent, byte-for-byte"
                 in capsys.readouterr().out
             )
             back = tmp_path / "back.wiki"
@@ -1864,6 +1864,92 @@ class TestTicketCommentEdit:
         assert "nothing was edited" in err
         assert "SECRETSTORED" not in err and "SECRETEXPECT" not in err
 
+    def test_expect_file_crlf_matches_a_stored_lf_body(
+        self, tmp_path, monkeypatch
+    ):
+        # A CRLF file this command pushed is stored as LF; the same file
+        # must then work as the next --expect-file.
+        sent = self._stub(
+            monkeypatch,
+            [[self._row(3, "a\nb\n")], [self._row(3, "new text\n")]],
+        )
+        old = _body_file(tmp_path, "a\r\nb\r\n", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_OK
+        assert "ticket_comment_edit" in self._names(sent)
+
+    def test_expect_file_mismatch_offset_is_on_the_folded_texts(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # Unfolded the texts first differ at byte 2 (LF vs CR); folded,
+        # at byte 3 (X vs Y).
+        sent = self._stub(monkeypatch, [[self._row(3, "ab\nX")]])
+        old = _body_file(tmp_path, "ab\r\nY", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_TOOL_ERROR
+        assert "ticket_comment_edit" not in self._names(sent)
+        err = capsys.readouterr().err
+        assert "byte offset 3" in err
+        assert "stored 4 bytes, expected 4 bytes" in err
+
+    def test_whitespace_expect_file_matches_a_whitespace_stored_comment(
+        self, tmp_path, monkeypatch
+    ):
+        sent = self._stub(
+            monkeypatch,
+            [[self._row(3, "  \n")], [self._row(3, "new text\n")]],
+        )
+        old = _body_file(tmp_path, "  \n", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_OK
+        assert "ticket_comment_edit" in self._names(sent)
+
+    def test_empty_expect_file_proceeds_on_an_empty_stored_comment(
+        self, tmp_path, monkeypatch
+    ):
+        sent = self._stub(
+            monkeypatch,
+            [[self._row(3, "")], [self._row(3, "new text\n")]],
+        )
+        old = _body_file(tmp_path, "", "old.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(old))
+        assert rc == cli.EXIT_OK
+        assert "ticket_comment_edit" in self._names(sent)
+
+    def test_stdin_cannot_feed_both_file_and_expect_file(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _no_network(monkeypatch)
+
+        class _Boom:
+            @property
+            def buffer(self):
+                raise AssertionError("stdin must not be read")
+
+            def read(self):
+                raise AssertionError("stdin must not be read")
+
+        monkeypatch.setattr(cli.sys, "stdin", _Boom())
+        rc = cli.main(
+            [
+                "--url",
+                "http://x/mcp",
+                "ticket-comment-edit",
+                "7",
+                "3",
+                "-",
+                "--expect-file",
+                "-",
+            ],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+        assert (
+            "standard input can feed only one"
+            in capsys.readouterr().err
+        )
+
     def test_expect_file_with_a_missing_comment_exits_1(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -1882,7 +1968,10 @@ class TestTicketCommentEdit:
         out = capsys.readouterr().out
         assert "Edited comment 3 on ticket #7." in out
         assert "NOTE: gate line" in out
-        assert "Stored comment 3 matches the file, byte-for-byte" in out
+        assert (
+            "Stored comment 3 matches the text sent, byte-for-byte"
+            in out
+        )
 
     def test_readback_equal_after_folding_crlf_exits_0(
         self, tmp_path, monkeypatch, capsys
@@ -1890,7 +1979,10 @@ class TestTicketCommentEdit:
         self._stub(monkeypatch, [[self._row(3, "a\nb\nc\nd")]])
         assert self._run(tmp_path, body="a\r\nb\rc\nd") == cli.EXIT_OK
         out = capsys.readouterr().out
-        assert "folded to LF" in out
+        assert (
+            "matches the text sent with line endings folded to LF"
+            in out
+        )
         assert "byte-for-byte" not in out
 
     def test_readback_different_exits_4_and_names_the_offset(
@@ -1966,7 +2058,10 @@ class TestTicketCommentEdit:
             )
         assert out.read_bytes() == src.read_bytes()
         assert trac.comment_edits[0]["comment"] == long_body
-        assert "byte-for-byte" in capsys.readouterr().out
+        assert (
+            "Stored comment 2 matches the text sent, byte-for-byte"
+            in capsys.readouterr().out
+        )
 
     def test_real_server_stale_base_ts_is_a_conflict(
         self, tmp_path, capsys
