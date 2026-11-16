@@ -3,6 +3,7 @@
 import xmlrpc.client
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import mcp.types as types
 import pytest
@@ -2003,23 +2004,22 @@ class TestPullHtml:
         await _pull(client, tmp_path, format="html")
         client.get_wiki_page.assert_not_called()
 
-    async def test_link_rewrites_are_ignored_and_not_validated(
+    async def test_a_bad_link_rewrites_is_a_validation_error_before_any_read(
         self, tmp_path
     ):
-        client = _html_client(
-            configured=((_RULE["from"], _RULE["to"]),)
-        )
+        client = _html_client()
         result, text = await _pull(
             client,
             tmp_path,
             format="html",
             link_rewrites=[{"from": "", "to": 1}],
         )
-        assert not result.isError, result.content
-        assert (
-            result.structuredContent["link_rewrites_source"] == "none"
-        )
-        assert 'href="http://localhost/trac/wiki/Other"' in text
+        assert result.isError is True
+        assert "validation_error" in result.content[0].text
+        assert "link_rewrites" in result.content[0].text
+        assert text is None
+        client.get_wiki_page_info.assert_not_called()
+        client.get_wiki_page_html.assert_not_called()
 
     @pytest.mark.parametrize("where", ["info", "html"])
     async def test_not_found_from_a_read_is_not_found(
@@ -2055,6 +2055,209 @@ class TestPullHtml:
         result, text = await _pull(_html_client(), tmp_path)
         assert result.structuredContent["format"] == "markdown"
         assert not text.startswith("<!doctype")
+
+
+_HTML_LINKS = (
+    f'<p><a class="wiki" href="{_PREFIX}Other">Other</a> '
+    f'<a class="wiki" href="{_PREFIX}TestPage#Sec">Sec</a> '
+    '<a href="#Bare">Bare</a> '
+    '<img alt="i" src="http://localhost/trac/raw-attachment/wiki/P/i.png"/>'
+    f'<pre>&lt;a href="{_PREFIX}Other"&gt;</pre>'
+    "</p>\n"
+)
+
+
+def _html_links_client(configured=()):
+    client = _html_client(configured=configured)
+    client.get_wiki_page_html.return_value = _HTML_LINKS
+    return client
+
+
+class TestPullHtmlLinkRewrites:
+    """format=html rewrites ``href``s only (Trac #219)."""
+
+    async def test_no_map_leaves_a_page_link_but_anchors_become_fragments(
+        self, tmp_path
+    ):
+        result, text = await _pull(
+            _html_links_client(), tmp_path, format="html"
+        )
+        assert not result.isError, result.content
+        assert (
+            result.structuredContent["link_rewrites_source"] == "none"
+        )
+        assert f'<a class="wiki" href="{_PREFIX}Other">' in text
+        assert '<a class="wiki" href="#Sec">Sec</a>' in text
+        assert '<a href="#Bare">Bare</a>' in text
+        assert f"{_PREFIX}TestPage#" not in text
+
+    async def test_the_call_map_applies_to_hrefs_only(self, tmp_path):
+        result, text = await _pull(
+            _html_links_client(),
+            tmp_path,
+            format="html",
+            link_rewrites=[_RULE],
+        )
+        assert not result.isError, result.content
+        assert (
+            result.structuredContent["link_rewrites_source"] == "call"
+        )
+        assert (
+            '<a class="wiki" href="https://blog.example/Other">' in text
+        )
+        # an in-page anchor is never mapped; the image and the escaped
+        # text are not links
+        assert '<a class="wiki" href="#Sec">Sec</a>' in text
+        assert (
+            'src="http://localhost/trac/raw-attachment/wiki/P/i.png"'
+            in text
+        )
+        assert f'&lt;a href="{_PREFIX}Other"&gt;' in text
+
+    async def test_the_configured_map_applies_when_the_call_has_none(
+        self, tmp_path
+    ):
+        client = _html_links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(client, tmp_path, format="html")
+        assert (
+            result.structuredContent["link_rewrites_source"] == "config"
+        )
+        assert (
+            '<a class="wiki" href="https://blog.example/Other">' in text
+        )
+
+    async def test_the_call_replaces_the_configured_map(self, tmp_path):
+        client = _html_links_client(
+            ((_RULE["from"], "https://cfg.example/"),)
+        )
+        result, text = await _pull(
+            client, tmp_path, format="html", link_rewrites=[_RULE]
+        )
+        assert (
+            result.structuredContent["link_rewrites_source"] == "call"
+        )
+        assert "https://blog.example/Other" in text
+        assert "cfg.example" not in text
+
+    async def test_an_empty_call_list_disables_the_configured_map(
+        self, tmp_path
+    ):
+        client = _html_links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(
+            client, tmp_path, format="html", link_rewrites=[]
+        )
+        assert (
+            result.structuredContent["link_rewrites_source"] == "call"
+        )
+        assert f'href="{_PREFIX}Other"' in text
+        assert "blog.example" not in text
+        # in-page anchors still become fragments
+        assert '<a class="wiki" href="#Sec">Sec</a>' in text
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            [{"from": "", "to": "x"}],
+            [_RULE, _RULE],
+            [{"from": "a"}],
+            "a=b",
+        ],
+    )
+    async def test_a_bad_map_is_a_validation_error_before_any_read(
+        self, tmp_path, bad
+    ):
+        client = _html_links_client()
+        result, text = await _pull(
+            client, tmp_path, format="html", link_rewrites=bad
+        )
+        assert result.isError is True
+        assert "validation_error" in result.content[0].text
+        client.get_wiki_page_info.assert_not_called()
+        client.get_wiki_page_html.assert_not_called()
+        assert text is None
+
+    async def test_the_document_url_is_the_routed_instances_wiki_url(
+        self, tmp_path
+    ):
+        client = _html_links_client()
+        client.config.trac_url = "http://other.example/trac_two/"
+        client.get_wiki_page_html.return_value = (
+            '<a href="http://other.example/trac_two/wiki/TestPage#S">s</a>'
+            '<a href="http://other.example/trac_two/wiki/Other#S">o</a>'
+        )
+        _, text = await _pull(client, tmp_path, format="html")
+        assert '<a href="#S">s</a>' in text
+        assert (
+            '<a href="http://other.example/trac_two/wiki/Other#S">o</a>'
+            in text
+        )
+
+    async def test_trac_own_wrapper_is_still_removed_with_a_map(
+        self, tmp_path
+    ):
+        client = _html_links_client()
+        client.get_wiki_page_html.return_value = (
+            f'<html><body><a href="{_PREFIX}Other">o</a></body></html>'
+        )
+        _, text = await _pull(
+            client, tmp_path, format="html", link_rewrites=[_RULE]
+        )
+        assert text.count("<html") == 1
+        assert text.endswith(
+            '<body>\n<a href="https://blog.example/Other">o</a>'
+            "</body></html>\n"
+        )
+
+    async def test_markup_without_an_href_is_unchanged_byte_for_byte(
+        self, tmp_path
+    ):
+        # _HTML_FRAGMENT has a page link; rewrite it away and what is
+        # left must be Trac's own bytes.
+        client = _html_client()
+        _, text = await _pull(
+            client,
+            tmp_path,
+            format="html",
+            link_rewrites=[
+                {"from": "http://localhost/trac/wiki/", "to": "/w/"}
+            ],
+        )
+        assert text.endswith(
+            "<body>\n"
+            + _HTML_FRAGMENT.replace(
+                "http://localhost/trac/wiki/", "/w/"
+            )
+            + "</body></html>\n"
+        )
+
+    async def test_tracwiki_is_unchanged_by_a_map(self, tmp_path):
+        client = _html_links_client(((_RULE["from"], _RULE["to"]),))
+        result, text = await _pull(
+            client, tmp_path, format="tracwiki", link_rewrites=[_RULE]
+        )
+        assert (
+            result.structuredContent["link_rewrites_source"] == "none"
+        )
+        assert text == "SOURCE MUST NOT BE READ"
+        client.get_wiki_page_html.assert_not_called()
+
+    def test_the_descriptions_say_html_hrefs_are_rewritten(self):
+        from trac_mcp_server.mcp.tools.wiki_file import WIKI_FILE_TOOLS
+
+        tool = next(
+            t for t in WIKI_FILE_TOOLS if t.name == "wiki_file_pull"
+        )
+        text = " ".join(tool.description.split())
+        assert "unchanged" in text
+        schema = tool.inputSchema["properties"]
+        rewrites = " ".join(
+            schema["link_rewrites"]["description"].split()
+        )
+        assert "Ignored for format=html" not in rewrites
+        assert "format=html" in rewrites
+        assert "href" in " ".join(
+            schema["format"]["description"].split()
+        )
 
 
 class TestPullReportedVersion:
@@ -2583,3 +2786,51 @@ class TestStripYamlFrontmatterForms:
 
     def test_closing_fence_at_end_of_text(self):
         assert _strip_yaml_frontmatter("---\nx: 1\n---") == ""
+
+
+class TestPullDocumentUrlIsPercentEncoded:
+    """Trac percent-encodes the page path of the URLs it renders, so the
+    document URL must be built the same way for an anchor to be in-page
+    (Trac #219 review)."""
+
+    @staticmethod
+    def _client(page_name):
+        client = _make_client()
+        encoded = quote(page_name, safe="/")
+        client.get_wiki_page.return_value = "src"
+        client.get_wiki_page_info.return_value = {"version": 2}
+        client.get_wiki_page_html.return_value = (
+            f'<p><a href="http://localhost/trac/wiki/{encoded}#H">h</a> '
+            '<a href="http://localhost/trac/wiki/Other#H">o</a></p>\n'
+        )
+        return client
+
+    @pytest.mark.parametrize(
+        "page_name",
+        ["Rate%20Card", "Rate Card", "Café/Menu", "A+B"],
+    )
+    @pytest.mark.parametrize("fmt", ["html", "markdown"])
+    async def test_the_anchor_into_the_page_becomes_a_fragment(
+        self, tmp_path, page_name, fmt
+    ):
+        out = tmp_path / "out.txt"
+        result = await _registry.call_tool(
+            "wiki_file_pull",
+            {
+                "page_name": page_name,
+                "file_path": str(out),
+                "format": fmt,
+            },
+            self._client(page_name),
+        )
+        assert not result.isError, result.content
+        text = out.read_text()
+        if fmt == "html":
+            assert '<a href="#H">h</a>' in text
+            assert (
+                '<a href="http://localhost/trac/wiki/Other#H">o</a>'
+                in text
+            )
+        else:
+            assert "[h](#H)" in text
+            assert "[o](http://localhost/trac/wiki/Other#H)" in text

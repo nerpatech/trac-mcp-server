@@ -28,7 +28,6 @@ import copy
 import re
 import string
 import textwrap
-from urllib.parse import unquote, urlsplit
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import (
@@ -40,6 +39,7 @@ from markdownify import (
 )
 
 from .common import ConversionResult, tracwiki_to_markdown_lang
+from .link_targets import LinkTargets
 
 __all__ = ["trac_html_to_markdown"]
 
@@ -432,16 +432,6 @@ def _escape_line_start(text: str, first_line: bool) -> str:
 # =============================================================================
 
 
-def _absolute_path(url: str) -> str | None:
-    """The unquoted path of an absolute ``http(s)`` URL with no query,
-    without one trailing ``/``; None for any other URL (relative, or
-    carrying a query, which makes it another document)."""
-    parts = urlsplit(url)
-    if not (parts.scheme and parts.netloc) or parts.query:
-        return None
-    return unquote(parts.path).rstrip("/")
-
-
 class _TracConverter(MarkdownConverter):
     class Options(MarkdownConverter.DefaultOptions):
         bs4_options = "lxml"
@@ -477,19 +467,8 @@ class _TracConverter(MarkdownConverter):
     ):
         super().__init__(code_language_callback=self._pre_language)
         self._source = source
-        self._link_map = sorted(
-            (link_map or {}).items(), key=lambda kv: -len(kv[0])
-        )
-        # (unquoted URL, unquoted path when it is absolute) -- see
-        # _in_page_anchor.
-        self._document = (
-            (
-                unquote(document_url).rstrip("/"),
-                _absolute_path(document_url),
-            )
-            if document_url
-            else None
-        )
+        # Shared with the HTML export (Trac #219).
+        self._targets = LinkTargets(link_map, document_url)
         self._keep_toc = keep_toc
         self._deflist = deflist
         self.warnings: list[str] = []
@@ -740,7 +719,7 @@ class _TracConverter(MarkdownConverter):
                 a.unwrap()
         for tag in (el, *el.find_all(True)):
             if tag.get("href"):
-                tag["href"] = self._map_url(tag["href"])
+                tag["href"] = self._targets.map(tag["href"])
             if tag.name == "a":
                 for attr in ("title", "rel"):
                     tag.attrs.pop(attr, None)
@@ -786,54 +765,6 @@ class _TracConverter(MarkdownConverter):
 
     # --- links and images ------------------------------------------------
 
-    def _in_page_anchor(self, url: str) -> str | None:
-        """``#frag`` when ``url`` points into this document, else None.
-
-        Trac renders ``[#Frag x]`` as ``<document URL>#Frag`` (the
-        page's own URL from ``getPageHTML``, the instance root from
-        ``wikiToHtml``), not as a bare ``#Frag``; bare ones come only
-        from macro output. Both are in-page. When both URLs are absolute
-        only the PATH is compared, unquoted and ignoring one trailing
-        ``/``: Trac builds its absolute URLs from its own base URL, which
-        can name another scheme or host than the daemon's ``TRAC_URL``
-        (a LAN address against the public name), while the path is what
-        names the page. Otherwise the whole URL before the ``#`` is
-        compared, unquoted. A URL with a query is another document. The
-        same document with no fragment is an ordinary link.
-        """
-        base, sep, frag = url.partition("#")
-        if not sep:
-            return None
-        if base == "":
-            return url  # a bare "#frag" (or "#"), whatever the map says
-        if frag and self._document is not None:
-            whole, path = self._document
-            base_path = _absolute_path(base)
-            if path is not None and base_path is not None:
-                same = base_path == path
-            else:
-                same = unquote(base).rstrip("/") == whole
-            if same:
-                return f"#{frag}"
-        return None
-
-    def _map_url(self, url):
-        """The target of one ``href``: an in-page anchor as ``#frag``,
-        else ``link_map`` applied, longest prefix first.
-
-        An in-page anchor is never rewritten, whatever the map says.
-        Images are not mapped at all (#215).
-        """
-        if not url:
-            return url
-        anchor = self._in_page_anchor(url)
-        if anchor is not None:
-            return anchor
-        for prefix, replacement in self._link_map:
-            if url.startswith(prefix):
-                return replacement + url[len(prefix) :]
-        return url
-
     def convert_a(self, el, text, parent_tags):
         if "_noformat" in parent_tags or "missing" in _classes(el):
             return text
@@ -843,7 +774,7 @@ class _TracConverter(MarkdownConverter):
         href = el.get("href")
         if not href:
             return f"{prefix}{text}{suffix}"
-        target = self._map_url(href)
+        target = self._targets.map(href)
         if (
             target == href
             and el.get_text().strip() == href
@@ -1038,8 +969,8 @@ def trac_html_to_markdown(
             it, code blocks carry no language.
         link_map: URL prefix -> replacement prefix, applied to
             ``a[href]`` (also inside raw HTML), longest prefix first.
-            An in-page anchor (see ``document_url``) and ``img[src]`` are
-            never rewritten.
+            An in-page anchor (see ``document_url``) is written
+            ``#frag`` and never mapped; ``img[src]`` is never rewritten.
         keep_toc: Keep the table of contents a ``[[PageOutline]]`` or
             ``[[TracGuideToc]]`` macro renders; it is dropped otherwise.
         deflist: ``"extra"`` writes a definition list as ``term`` /

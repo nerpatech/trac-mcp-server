@@ -261,8 +261,8 @@ class ExportConfig(BaseModel):
         link_rewrites: ``{from, to}`` rules applied to every link target
             (``href``) of an exported page: a target starting with
             ``from`` has that prefix replaced by ``to``, the longest
-            ``from`` first. Image sources and in-page ``#`` anchors are
-            never rewritten.
+            ``from`` first. Image sources are never rewritten, and an
+            in-page anchor is written ``#frag`` and never mapped.
     """
 
     link_rewrites: list[dict[str, str]] = Field(

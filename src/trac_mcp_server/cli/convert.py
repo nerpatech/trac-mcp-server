@@ -774,8 +774,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Rewrite links of a TracWiki -> Markdown conversion: a link"
             " target starting with FROM has that prefix replaced by TO"
-            " (longest FROM first; images and #anchors are never"
-            " rewritten). Repeatable. Replaces the configured map"
+            " (longest FROM first; images are never rewritten; an"
+            " in-page anchor is written #frag and never mapped)."
+            " Repeatable. Replaces the configured map"
             " (export.link_rewrites, TRAC_MCP_LINK_REWRITES). Has no"
             " effect in any other direction."
         ),

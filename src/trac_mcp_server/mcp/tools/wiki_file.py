@@ -31,6 +31,7 @@ from ...converters.front_matter import (
     split_front_matter,
 )
 from ...converters.html_to_markdown import trac_html_to_markdown
+from ...converters.link_targets import rewrite_hrefs
 from ...converters.markdown_to_tracwiki import (
     describe_list_item_split,
     find_list_item_splits,
@@ -165,16 +166,21 @@ WIKI_FILE_TOOLS = [
             "(title, source, trac_instance, trac_page, trac_version, "
             "exported), and wiki_file_push refuses that text unless "
             'force=true. format="html" is Trac\'s render as a complete '
-            "minimal HTML document (links absolute, no CSS); "
+            "minimal HTML document (no CSS): the hrefs of its links are "
+            "rewritten (in-page anchors become #frag, link_rewrites "
+            "applies) and everything else is Trac's render unchanged, "
+            "so other links stay absolute; "
             'format="tracwiki" returns the '
             "stored source verbatim. Translator warnings come back in "
             "structuredContent.warnings (always a list). "
             "link_rewrites ({from, to} URL-prefix rules, longest prefix "
-            "first) rewrites the links (never the images or in-page "
-            "#anchors) of a Markdown pull: given, it replaces the "
-            "server's configured map ([] = no rewriting), omitted the "
-            "configured map applies; structuredContent.link_rewrites_"
-            "source says which was used (call, config or none). "
+            "first) rewrites the links of a Markdown or html pull "
+            "(never the images; an in-page anchor is written #frag "
+            "and never mapped): given, it replaces "
+            "the server's configured map ([] = no rewriting), omitted "
+            "the configured map applies; structuredContent.link_"
+            "rewrites_source says which was used (call, config or "
+            "none). "
             "Where the server's file_access is 'off' (the http default) "
             "the text comes back in structuredContent.content and a "
             "file_path is refused; where it is 'local', file_path (a path "
@@ -211,8 +217,10 @@ WIKI_FILE_TOOLS = [
                         "Output format, for the inline text or the "
                         "file: markdown (Trac's render translated to "
                         "Markdown), html (Trac's render as a complete "
-                        "minimal HTML document) or tracwiki (the stored "
-                        "source)"
+                        "minimal HTML document, with the hrefs of its "
+                        "links rewritten: in-page anchors as #frag, "
+                        "link_rewrites applied; the rest of the render "
+                        "unchanged) or tracwiki (the stored source)"
                     ),
                 },
                 "version": {
@@ -239,15 +247,18 @@ WIKI_FILE_TOOLS = [
                         "additionalProperties": False,
                     },
                     "description": (
-                        "Link-rewrite rules for format=markdown: a "
+                        "Link-rewrite rules for format=markdown and "
+                        "format=html (the `href` of each link; nothing "
+                        "else of the HTML changes): a "
                         "link target starting with `from` has that "
                         "prefix replaced by `to` (longest `from` "
                         "first). Replaces the server's configured map "
                         "for this call; [] disables rewriting. Image "
-                        "sources and in-page #anchors are never "
-                        "rewritten. The schema refuses an empty `from` "
+                        "sources are never rewritten, and an in-page "
+                        "anchor is written #frag, never mapped. The "
+                        "schema refuses an empty `from` "
                         "or an extra key; a duplicate `from` is a "
-                        "validation_error. Ignored for format=html and "
+                        "validation_error. Ignored for "
                         "format=tracwiki."
                     ),
                 },
@@ -659,8 +670,9 @@ def _html_document(page_name: str, fragment: str) -> str:
     """Wrap Trac's rendered HTML as a complete minimal document.
 
     Trac's own ``<html><body>`` wrapper, when present, is removed first
-    so the document has exactly one of each; the inner HTML is never
-    parsed or altered (Trac renders its links absolute), and a response
+    so the document has exactly one of each; the inner HTML is not
+    parsed or altered here (``fragment`` is Trac's render with its
+    ``href``s already rewritten, see ``rewrite_hrefs``), and a response
     with no such wrapper is used as it is. No CSS; only the page name,
     which is text, is escaped.
     """
@@ -727,7 +739,8 @@ async def _handle_pull(
     Fetches a wiki page from Trac and returns it as TracWiki source or,
     for Markdown, as Trac's own rendered HTML translated to Markdown
     (Trac /trac_mcp_server #210), or, for html, as that render in a
-    minimal document (#211). The text is returned inline or, where
+    minimal document (#211) whose link ``href``s are rewritten (#219)
+    and which is otherwise Trac's render unchanged. The text is returned inline or, where
     file_access is ``local``, written to a server-side file.
     """
     page_name = args.get("page_name")
@@ -754,11 +767,11 @@ async def _handle_pull(
         )
 
     # Ticket #213: the map is chosen before any Trac read, so a bad rule
-    # costs no round trip. tracwiki and html do no link translation:
-    # nothing to map.
+    # costs no round trip. markdown and html (#219) rewrite links;
+    # tracwiki is the stored source and has none to map.
     link_rewrites: tuple[tuple[str, str], ...] = ()
     link_rewrites_source = "none"
-    if fmt == "markdown":
+    if fmt in ("markdown", "html"):
         if args.get("link_rewrites") is not None:
             try:
                 link_rewrites = validate_link_rewrites(
@@ -775,6 +788,19 @@ async def _handle_pull(
         elif client.config.link_rewrites:
             link_rewrites = client.config.link_rewrites
             link_rewrites_source = "config"
+
+    # The page's own URL, as Trac renders a link into it ("[#Frag x]" is
+    # "<this>#Frag"): those are in-page anchors, written "#Frag" and never
+    # mapped by link_rewrites, in Markdown and in html. client.config is
+    # the routed instance's, so the base is that instance's. Trac
+    # percent-encodes the page path, and so does page_url: a page named
+    # "Rate%20Card" is ".../wiki/Rate%2520Card", which is not the URL of
+    # "Rate Card". Tracwiki converts nothing and has no use for it.
+    document_url = (
+        page_url(client.config.trac_url, page_name)
+        if fmt in ("markdown", "html")
+        else None
+    )
 
     converted = False
     warnings: list[str] = []
@@ -797,13 +823,6 @@ async def _handle_pull(
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
-            # The page's own URL, as Trac renders a link into it
-            # ("[#Frag x]" is "<this>#Frag"): those are in-page anchors,
-            # written "#Frag" and never rewritten. client.config is the
-            # routed instance's, so the base is that instance's.
-            document_url = (
-                f"{client.config.trac_url.rstrip('/')}/wiki/{page_name}"
-            )
             conversion = trac_html_to_markdown(
                 html,
                 content,
@@ -825,9 +844,10 @@ async def _handle_pull(
             converted = conversion.converted
             warnings.extend(conversion.warnings)
         elif fmt == "html":
-            # Trac's own render, unchanged, in a minimal document. No
-            # source is read; the version is still read first so the
-            # HTML is fetched at it and the version reported is its own.
+            # Trac's own render in a minimal document, with only the
+            # ``href`` values of its links rewritten (#219). No source is
+            # read; the version is still read first so the HTML is
+            # fetched at it and the version reported is its own.
             info = await run_sync(
                 client.get_wiki_page_info, page_name, version
             )
@@ -839,7 +859,14 @@ async def _handle_pull(
             html = await run_sync(
                 client.get_wiki_page_html, page_name, pinned
             )
-            output_content = _html_document(page_name, html)
+            output_content = _html_document(
+                page_name,
+                rewrite_hrefs(
+                    html,
+                    as_dict(link_rewrites),
+                    document_url,
+                ),
+            )
             converted = True
         else:
             # tracwiki: the stored source, unchanged; no HTML read.

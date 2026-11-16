@@ -203,33 +203,120 @@ def test_html_is_a_choice_and_writes_the_servers_document(
     assert (tmp_path / "p.md").read_text() == document
 
 
-def test_html_sends_no_link_rewrites_and_ignores_a_local_config(
+def test_html_sends_the_local_config_map(
     isolated_config, sent, tmp_path, capsys
-):
-    # A broken config would be a usage error for markdown; for html it
-    # is never read, as for tracwiki.
-    _write_config(isolated_config, "export: [oops]\n")
-    assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
-    assert "link_rewrites" not in _args(sent)
-    assert capsys.readouterr().err == ""
-
-
-def test_html_sends_no_link_rewrites_from_a_valid_local_config(
-    isolated_config, sent, tmp_path
 ):
     _write_config(isolated_config, _YAML)
     assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
+    assert _args(sent)["link_rewrites"] == [_RULE]
+    assert capsys.readouterr().err == ""
+
+
+def test_html_with_no_map_anywhere_sends_none(
+    isolated_config, sent, tmp_path
+):
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_OK
     assert "link_rewrites" not in _args(sent)
 
 
-def test_html_with_the_flag_warns_and_sends_none(
+def test_html_with_a_broken_local_config_is_a_usage_error(
+    isolated_config, sent, tmp_path, capsys
+):
+    # html reads the map as markdown does, so a broken one is refused.
+    _write_config(isolated_config, "export: [oops]\n")
+    assert _pull(tmp_path, "--format", "html") == cli.EXIT_USAGE_ERROR
+    assert "must be a mapping" in capsys.readouterr().err
+    assert sent == []
+
+
+def test_html_with_the_flag_sends_the_map_without_a_warning(
     isolated_config, sent, tmp_path, capsys
 ):
     rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
     assert rc == cli.EXIT_OK
+    assert _args(sent)["link_rewrites"] == [
+        {"from": "/a/", "to": "/b/"}
+    ]
+    assert capsys.readouterr().err == ""
+
+
+def test_html_flag_replaces_the_local_config_map(
+    isolated_config, sent, tmp_path
+):
+    _write_config(isolated_config, _YAML)
+    rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_OK
+    assert _args(sent)["link_rewrites"] == [
+        {"from": "/a/", "to": "/b/"}
+    ]
+
+
+def test_html_flag_overrides_a_broken_local_config(
+    isolated_config, sent, tmp_path
+):
+    _write_config(isolated_config, "export: [oops]\n")
+    rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_OK
+    assert _args(sent)["link_rewrites"] == [
+        {"from": "/a/", "to": "/b/"}
+    ]
+
+
+def test_html_with_an_old_daemon_refusing_link_rewrites_is_named(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    reply["result"] = SimpleNamespace(
+        isError=True,
+        content=[
+            SimpleNamespace(
+                text="Input validation error: Additional properties "
+                "are not allowed ('link_rewrites' was unexpected)"
+            )
+        ],
+        structuredContent=None,
+    )
+    rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_TOOL_ERROR
+    assert (
+        "predates link rewriting (Trac /trac_mcp_server #213)"
+        in capsys.readouterr().err
+    )
+
+
+def test_html_from_a_server_that_ignores_the_map_warns_unconfirmed(
+    isolated_config, sent, reply, tmp_path, capsys
+):
+    # A server that predates #219 answers html with source "none".
+    reply["result"] = SimpleNamespace(
+        isError=False,
+        content=[SimpleNamespace(text="Pulled ...")],
+        structuredContent={
+            "content": "<p>x</p>",
+            "version": 1,
+            "format": "html",
+            "link_rewrites_source": "none",
+        },
+    )
+    rc = _pull(tmp_path, "--format", "html", "--link-map", "/a/=/b/")
+    assert rc == cli.EXIT_OK
+    assert "did not confirm the link map was applied" in (
+        capsys.readouterr().err
+    )
+
+
+def test_tracwiki_with_the_flag_warns_and_sends_none_whatever_the_config(
+    isolated_config, sent, tmp_path, capsys
+):
+    _write_config(isolated_config, _YAML)
+    rc = _pull(
+        tmp_path, "--format", "tracwiki", "--link-map", "/a/=/b/"
+    )
+    assert rc == cli.EXIT_OK
     assert "link_rewrites" not in _args(sent)
-    err = capsys.readouterr().err
-    assert "--link-map has no effect with --format html" in err
+    assert (
+        "--link-map has no effect with --format tracwiki"
+        in capsys.readouterr().err
+    )
 
 
 def test_tracwiki_warning_names_tracwiki(
@@ -399,6 +486,21 @@ def test_through_the_server_html_is_a_document_around_trac_html(
     assert "<title>P</title>" in text
     assert f'<a href="{_PREFIX}Other">Other</a>' in text
     assert text.endswith("</body></html>\n")
+
+
+def test_through_the_server_html_hrefs_follow_the_flags_map(
+    isolated_config, tmp_path
+):
+    text = _served_pull(
+        tmp_path,
+        "--format",
+        "html",
+        "--link-map",
+        f"{_PREFIX}=https://blog.example/",
+    )
+    assert '<a href="https://blog.example/Other">Other</a>' in text
+    assert f'href="{_PREFIX}Other"' not in text
+    assert 'href="#Heading"' in text
 
 
 # --- an old daemon, and a server that does not confirm ---------------------
