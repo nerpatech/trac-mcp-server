@@ -3,7 +3,7 @@
     "must_warn": [],
     "note": "Baseline: must produce zero warnings (check_targets=False).",
     "requires_check_targets": false,
-    "tracwiki": "This is a clean paragraph with a real [wiki:ProjectMilestones link] and nothing wrong with it."
+    "tracwiki": "This is a clean paragraph with a real [wiki:WikiStart link] and nothing wrong with it."
   },
   "row02_missing_local_target": {
     "must_warn": [
