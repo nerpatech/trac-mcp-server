@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Any, NamedTuple, TypeVar, cast
+from typing import Any, Literal, NamedTuple, TypeVar, cast
 from xml.etree import ElementTree
 
 import requests
@@ -48,12 +48,14 @@ MAX_COMMENT_CHARS = 10000
 class CommentNumber(NamedTuple):
     """A parsed changeLog comment row's ``oldvalue``.
 
-    ``cnum`` is the comment's own number; ``reply_to`` is the comment it
-    is threaded under, or None for a flat comment.
+    ``cnum`` is the comment's own number; ``reply_to`` is what it is
+    threaded under: the number of another comment, the string
+    ``"description"`` for a reply to the ticket description (Trac
+    /trac_mcp_server #207), or None for a flat comment.
     """
 
     cnum: int
-    reply_to: int | None
+    reply_to: int | Literal["description"] | None
 
 
 def _keepalive_socket_options() -> list[tuple[int, int, int | bytes]]:
@@ -1088,21 +1090,27 @@ class TracClient:
         In a changeLog row ``[time, author, field, oldvalue, newvalue,
         permanent]`` with ``field == "comment"``, ``oldvalue`` holds the
         comment number. A plain comment's is ``"5"``. A reply made in the
-        web UI is threaded: ``"2.5"`` is comment 5, a reply to comment 2.
-        Trac itself takes the LAST dotted part as the comment's number
-        (``cnum``); the ``trac-change-5-...`` HTML ids, ``#comment:5``
-        anchors and ``comment:5`` links all use it. So ``"5"`` gives
-        ``CommentNumber(5, None)`` and ``"2.5"`` gives
-        ``CommentNumber(5, 2)``.
+        web UI is threaded: ``"2.5"`` is comment 5, a reply to comment 2,
+        and ``"description.5"`` is comment 5, a reply to the ticket
+        description (Trac /trac_mcp_server #207). Trac itself takes the
+        LAST dotted part as the comment's number (``cnum``); the first is
+        the parent, a comment number or the word ``description``. The
+        ``trac-change-5-...`` HTML ids, ``#comment:5`` anchors and
+        ``comment:5`` links all use ``cnum``. So ``"5"`` gives
+        ``CommentNumber(5, None)``, ``"2.5"`` gives
+        ``CommentNumber(5, 2)`` and ``"description.5"`` gives
+        ``CommentNumber(5, "description")``.
 
         Accepts a str (surrounding whitespace ignored) or an int. Returns
         None for anything else: None, the empty string, non-numeric text,
         more than two dotted parts or an empty part (``"2."``, ``".5"``),
-        a non-positive number, a float, a bool. Each part must be ASCII
-        digits and is then parsed with ``int()``. Neither test alone is
-        enough: ``"²".isdigit()`` is True but ``int("²")``
-        raises, and ``int()`` alone accepts ``"1_0"``, ``"+5"`` and
-        ``"٥"``.
+        a non-positive number, a float, a bool, and any first part other
+        than digits or exactly the lowercase ``description``
+        (``"Description.5"``, ``"foo.5"``), or ``"description"`` alone.
+        Each number must be ASCII digits and is then parsed with
+        ``int()``. Neither test alone is enough: ``"²".isdigit()`` is
+        True but ``int("²")`` raises, and ``int()`` alone accepts
+        ``"1_0"``, ``"+5"`` and ``"٥"``.
         """
         if isinstance(oldvalue, bool):
             return None
@@ -1115,6 +1123,13 @@ class TracClient:
         parts = oldvalue.strip().split(".")
         if len(parts) > 2:
             return None
+        parent: int | Literal["description"] | None = None
+        if len(parts) == 2 and parts[0] == "description":
+            # A reply to the ticket description (Trac #207): the parent
+            # is a word, so only the number part goes through the digit
+            # rules below.
+            parent = "description"
+            parts = parts[1:]
         # ASCII digits only: int() alone also takes "1_0", "+5" and
         # non-ASCII digits such as "\u0665". isdigit() is only the
         # pre-filter (it passes "\u00b2"); int() still does the parsing.
@@ -1126,8 +1141,9 @@ class TracClient:
             return None
         if any(n <= 0 for n in numbers):
             return None
-        reply_to = numbers[0] if len(numbers) == 2 else None
-        return CommentNumber(numbers[-1], reply_to)
+        if parent is None and len(numbers) == 2:
+            parent = numbers[0]
+        return CommentNumber(numbers[-1], parent)
 
     @staticmethod
     def _parse_trac_time(value: Any) -> float | None:

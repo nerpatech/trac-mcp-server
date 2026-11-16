@@ -3951,6 +3951,10 @@ def test_put_wiki_page_readback_below_expected_is_flagged_with_none_between(
         (5, 5, None),
         ("  5 ", 5, None),
         (" 2.5\n", 5, 2),
+        # A reply to the DESCRIPTION is "description.N" (Trac #207).
+        ("description.5", 5, "description"),
+        ("description.10", 10, "description"),
+        ("  description.2 ", 2, "description"),
     ],
 )
 def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
@@ -3991,6 +3995,19 @@ def test_parse_comment_number_accepts(oldvalue, cnum, reply_to):
         0,
         -3,
         ["5"],
+        # Only the lowercase token "description", then a positive
+        # number (Trac #207).
+        "Description.5",
+        "DESCRIPTION.5",
+        "description.",
+        "description.0",
+        "description.5.1",
+        "description.-1",
+        "description.\u0665",
+        "foo.5",
+        "description",
+        ".description",
+        "5.description",
     ],
 )
 def test_parse_comment_number_rejects(oldvalue):

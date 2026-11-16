@@ -702,6 +702,17 @@ class TestKnownCommentNumbersParsing:
         ]
         assert self._known(rows) == frozenset({1, 2, 5, 6})
 
+    def test_description_reply_row_is_known_under_its_own_number(self):
+        """Trac #207. A reply to the description is "description.2":
+        comment 2, so a comment:2 link is live. Unparsed it was a gap
+        (2 is below max, so not the max+1 allowance)."""
+        rows = [
+            ["t", "a", "comment", "1", "one", 1],
+            ["t", "a", "comment", "description.2", "reply", 1],
+            ["t", "a", "comment", "3", "three", 1],
+        ]
+        assert self._known(rows) == frozenset({1, 2, 3, 4})
+
     def test_threaded_row_feeds_the_next_number(self):
         rows = [["t", "a", "comment", "1.7", "reply", 1]]
         assert self._known(rows) == frozenset({7, 8})
@@ -1813,6 +1824,85 @@ class TestTicketCommentWriteGateLive:
                 client.delete_ticket(writer_id)
             except Exception:
                 pass
+
+    def test_a_reply_to_the_description_is_comment_two(self, ticket):
+        """Ticket #207, live. A comment made in the web UI as a reply
+        to the DESCRIPTION is stored with oldvalue "description.N",
+        which the parser read as no number at all: ticket_get listed
+        ``number: null``, ``reply_to=N`` answered not_found, and a
+        ``comment:N`` link in a description write was refused as
+        dangling once a later comment existed. The fixture's seeded
+        comment is 1; the web-form reply is 2 and a plain comment 3
+        follows it, so 2 is a gap unless the parser knows the row."""
+        from tests.live_helpers import post_description_reply
+        from trac_mcp_server.mcp.tools.ticket_read import (
+            _handle_get as handle_get,
+        )
+        from trac_mcp_server.mcp.tools.ticket_write import (
+            _handle_update as handle_update,
+        )
+
+        client, ticket_id = ticket
+        reply_text = "Seeded for the ticket 207 live row. On the text."
+        number = post_description_reply(ticket_id, reply_text)
+        assert number == 2
+        client.update_ticket(ticket_id, "a plain third comment")
+
+        row = [
+            e
+            for e in client.get_ticket_changelog(ticket_id)
+            if e[2] == "comment" and e[4] == reply_text
+        ]
+        assert len(row) == 1
+        assert str(row[0][3]).startswith("description."), row[0]
+
+        got = asyncio.run(handle_get(client, {"ticket_id": ticket_id}))
+        assert not got.isError, _text(got)
+        by_body = {
+            c["body"]: c for c in got.structuredContent["comments"]
+        }
+        listed = by_body[reply_text]
+        assert listed["number"] == "2"
+        assert listed["in_reply_to"] == "description"
+        assert by_body["a plain third comment"]["number"] == "3"
+
+        written = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "description": (
+                        "Seeded for the ticket 207 live row. See "
+                        "comment:2 for context."
+                    ),
+                    "base_ts": self._base_ts(client, ticket_id),
+                },
+            )
+        )
+        assert not written.isError, _text(written)
+        assert "link_check_failed" not in _text(written)
+        assert "dangling_comment_ref" not in _text(written)
+
+        replied = asyncio.run(
+            handle_update(
+                client,
+                {
+                    "ticket_id": ticket_id,
+                    "comment": "Seeded for the ticket 207 live row.",
+                    "reply_to": 2,
+                    "base_ts": self._base_ts(client, ticket_id),
+                },
+            )
+        )
+        assert not replied.isError, _text(replied)
+        quoted = [
+            e[4]
+            for e in client.get_ticket_changelog(ticket_id)
+            if e[2] == "comment"
+            and (e[4] or "").startswith("Replying to [comment:2 ")
+        ]
+        assert len(quoted) == 1
+        assert f"> {reply_text}" in quoted[0]
 
     def test_ticket_create_with_a_bare_comment_ref_is_refused(self):
         """Ticket #108's second half, live: a new ticket has no

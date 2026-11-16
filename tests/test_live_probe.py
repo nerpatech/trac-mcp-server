@@ -579,3 +579,119 @@ def test_k_selecting_a_live_row_probes_and_exits_2():
     assert f"http://127.0.0.1:{port}/trac_test" in out
     assert "unreachable" in out
     assert "dummy-pw" not in out
+
+
+# ---------------------------------------------------------------------
+# The web-form helper behind the description-reply live row (#207)
+# ---------------------------------------------------------------------
+
+
+def test_form_input_value_ignores_a_data_value_attribute():
+    html = '<input name="t" data-value="x" value="real">'
+    assert live_helpers._form_input_value(html, "t") == "real"
+
+
+def test_form_input_value_ignores_a_data_name_input():
+    html = (
+        '<input data-name="t" value="wrong">'
+        '<form><input type="hidden" name="t" value="right"></form>'
+    )
+    assert live_helpers._form_input_value(html, "t") == "right"
+
+
+def test_form_input_value_decodes_entities():
+    html = '<input name="t" value="a&amp;b&quot;c">'
+    assert live_helpers._form_input_value(html, "t") == 'a&b"c'
+
+
+@pytest.mark.parametrize(
+    "html, expected",
+    [
+        ("""<input name="t" value="t'k">""", "t'k"),
+        ("""<input name="t" value='t"k'>""", 't"k'),
+    ],
+)
+def test_form_input_value_keeps_the_other_quote_character(
+    html, expected
+):
+    assert live_helpers._form_input_value(html, "t") == expected
+
+
+@pytest.mark.parametrize(
+    "html",
+    ['<input name="other" value="x">', '<input name="t">', ""],
+)
+def test_form_input_value_missing_field_names_it(html):
+    with pytest.raises(AssertionError, match="__FORM_TOKEN"):
+        live_helpers._form_input_value(
+            f"<form>{html}</form>" if html else "<p>none</p>",
+            "__FORM_TOKEN",
+        )
+
+
+def test_description_reply_messages_never_show_userinfo(monkeypatch):
+    """A failing GET names the URL without ``user:secret@``."""
+    config = live_helpers.Config(
+        trac_url="http://u:secret@host.invalid/trac_test",
+        username="agent",
+        password=PASSWORD,
+    )
+    monkeypatch.setattr(
+        live_helpers, "trac_test_config", lambda: config
+    )
+
+    class Answer:
+        status_code = 500
+        text = ""
+        headers = {}
+
+    monkeypatch.setattr(
+        live_helpers.requests.Session, "get", lambda *a, **k: Answer()
+    )
+    with pytest.raises(AssertionError) as caught:
+        live_helpers.post_description_reply(7, "hello")
+    message = str(caught.value)
+    assert "500" in message
+    assert "host.invalid/trac_test/ticket/7" in message
+    assert "secret" not in message
+    assert "u:" not in message
+
+
+def test_description_reply_post_message_never_shows_userinfo(
+    monkeypatch,
+):
+    """A refused POST names the URL without ``user:secret@`` either."""
+    config = live_helpers.Config(
+        trac_url="http://u:secret@host.invalid/trac_test",
+        username="agent",
+        password=PASSWORD,
+    )
+    monkeypatch.setattr(
+        live_helpers, "trac_test_config", lambda: config
+    )
+
+    class Page:
+        status_code = 200
+        text = (
+            '<input name="__FORM_TOKEN" value="tok">'
+            '<input name="view_time" value="1">'
+            '<input name="start_time" value="2">'
+        )
+        headers = {}
+
+    class Refused:
+        status_code = 400
+        text = ""
+        headers = {}
+
+    monkeypatch.setattr(
+        live_helpers.requests.Session, "get", lambda *a, **k: Page()
+    )
+    monkeypatch.setattr(
+        live_helpers.requests.Session, "post", lambda *a, **k: Refused()
+    )
+    with pytest.raises(AssertionError) as caught:
+        live_helpers.post_description_reply(7, "hello")
+    message = str(caught.value)
+    assert "400" in message
+    assert "secret" not in message

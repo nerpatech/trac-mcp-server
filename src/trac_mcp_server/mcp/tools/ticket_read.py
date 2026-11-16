@@ -275,8 +275,10 @@ def _extract_comments(changelog: list) -> list[dict[str, Any]]:
         last dotted part, ``"5"`` for both), the key
         ``ticket_render_check``'s ``comment`` parameter is keyed on, so
         the number reported here is the one that tool accepts. A
-        threaded comment also carries ``in_reply_to`` (``"2"``); a flat
-        one has no such key. An entry without a parseable number yields
+        threaded comment also carries ``in_reply_to`` (``"2"``, or
+        ``"description"`` for a reply to the ticket description, whose
+        oldvalue is ``"description.5"``, Trac #207); a flat one has no
+        such key. An entry without a parseable number yields
         ``number: None`` rather than a fabricated ordinal.
     """
     comments: list[dict[str, Any]] = []
@@ -388,11 +390,13 @@ def _format_comment_section(
             lines.extend(["", _omitted_notice(omitted)])
         # Only the heading carries "(reply to M)"; the omitted notice
         # names its range by the plain ref.
-        reply_note = (
-            f" (reply to {comment['in_reply_to']})"
-            if comment.get("in_reply_to")
-            else ""
-        )
+        in_reply_to = comment.get("in_reply_to")
+        if in_reply_to == "description":
+            reply_note = " (reply to the description)"
+        elif in_reply_to:
+            reply_note = f" (reply to {in_reply_to})"
+        else:
+            reply_note = ""
         lines.extend(
             [
                 "",

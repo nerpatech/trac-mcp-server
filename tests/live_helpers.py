@@ -1,6 +1,6 @@
 """Helpers for the live (``--run-live``) rows. Trac /trac_mcp_server #173.
 
-Four things live here so the rows and conftest share one copy:
+Five things live here so the rows and conftest share one copy:
 
   * ``trac_test_url()`` / ``trac_test_client()`` /
     ``trac_test_registry()``: the destructive-test instance. It is
@@ -18,6 +18,9 @@ Four things live here so the rows and conftest share one copy:
   * the runtime write guard (``live_write_guard``): while it is
     installed, a TracClient XML-RPC WRITE whose client is not on
     ``/trac_test`` is recorded and refused before any byte is sent.
+  * ``post_description_reply``: a comment made as a reply to a ticket's
+    description, which only Trac's web form can make (Trac
+    /trac_mcp_server #207).
   * the stale-leftover sweep (``select_stale`` / ``sweep_stale``):
     deletes this branch's per-run objects that an interrupted run left
     on /trac_test.
@@ -33,12 +36,14 @@ every method the client has.
 import contextlib
 import logging
 import os
+import re
 import xmlrpc.client
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
+from lxml import html as lxml_html
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import TracClient
@@ -165,6 +170,105 @@ class _PinnedTestRegistry(InstanceRegistry):
         with self._lock:
             # The reload built a fresh dict; no loader state is shared.
             self._declared[self._pinned.name] = self._pinned
+
+
+# ---------------------------------------------------------------------
+# A reply to a ticket's description (Trac /trac_mcp_server #207)
+# ---------------------------------------------------------------------
+
+
+def _form_input_value(html: str, name: str) -> str:
+    """The ``value`` of the ``<input name="NAME">`` tag in ``html``.
+
+    Parsed with lxml, not a regex: a regex on ``name=``/``value=`` also
+    matches inside ``data-name=``/``data-value=`` and cuts a value at
+    the other quote character (#207 review). lxml decodes entities.
+    Raises ``AssertionError`` naming the field when there is no such
+    tag or it has no value: the form changed, and a POST built without
+    it would only come back as a bare 400.
+    """
+    tree = lxml_html.fromstring(html)
+    for node in tree.xpath("//input[@name=$n]", n=name):
+        value = node.get("value")
+        if value is not None:
+            return value
+    raise AssertionError(
+        f"the ticket page has no <input name={name!r}> with a value"
+    )
+
+
+def post_description_reply(ticket_id: int, text: str) -> int:
+    """Comment on a /trac_test ticket as a REPLY TO ITS DESCRIPTION.
+
+    Returns the new comment's number. Trac stores such a comment's
+    changelog ``oldvalue`` as ``"description.N"``, not ``"N"`` or
+    ``"M.N"``, and only the web form can make one: XML-RPC
+    ``ticket.update`` has no ``replyto``, and the tracrpc_comment
+    plugin's ``replyToComment`` needs a numeric parent comment. So this
+    posts Trac's own ticket form, the recipe verified against /trac_test
+    (2026-11-15):
+
+      1. Basic auth on every request (``TRAC_USERNAME`` /
+         ``TRAC_PASSWORD``); no login cookie is needed.
+      2. GET ``/ticket/<id>`` and take ``__FORM_TOKEN``, ``view_time``
+         and ``start_time`` from its ``<input>`` tags.
+      3. Set the cookie ``trac_form_token`` to that token: Trac's CSRF
+         check compares the form field with the cookie, and without the
+         cookie the POST is a bare 400.
+      4. POST ``/ticket/<id>`` with those three, ``comment``,
+         ``replyto=description``, ``action=leave`` and ``submit``, a
+         ``Referer`` of the ticket page and redirects off. Success is a
+         303 whose ``Location`` ends ``#comment:N``.
+
+    ``live_write_guard`` only patches the XML-RPC call, so it cannot see
+    this POST. The ``is_trac_test_url`` check below is the same
+    PATH-only test that guard applies, kept as a belt-and-braces refusal
+    before anything is sent; ``trac_test_url()`` already guarantees the
+    path, and neither checks the host. Fails loudly (``AssertionError``)
+    on any other answer. Messages name the URL with its userinfo
+    stripped: ``TRAC_TEST_URL`` may carry ``user:password@``.
+    """
+    config = trac_test_config()
+    base = config.trac_url.rstrip("/")
+    if not is_trac_test_url(base):
+        raise LiveWriteRefused(
+            "post_description_reply refuses a URL that is not "
+            f"{TEST_INSTANCE}"
+        )
+    url = f"{base}/ticket/{ticket_id}"
+    shown = strip_userinfo(url)
+    with requests.Session() as session:
+        session.auth = (config.username, config.password)
+        session.verify = not config.insecure
+        page = session.get(url, timeout=30)
+        assert page.status_code == 200, (
+            f"GET {shown} answered {page.status_code}"
+        )
+        token = _form_input_value(page.text, "__FORM_TOKEN")
+        fields = {
+            "__FORM_TOKEN": token,
+            "view_time": _form_input_value(page.text, "view_time"),
+            "start_time": _form_input_value(page.text, "start_time"),
+            "comment": text,
+            "replyto": "description",
+            "action": "leave",
+            "submit": "Submit changes",
+        }
+        session.cookies.set("trac_form_token", token)
+        response = session.post(
+            url,
+            data=fields,
+            headers={"Referer": url},
+            timeout=30,
+            allow_redirects=False,
+        )
+    location = response.headers.get("Location", "")
+    match = re.search(r"#comment:(\d+)$", location)
+    assert response.status_code == 303 and match, (
+        f"POST {shown} answered {response.status_code}, Location "
+        f"{location!r}: expected 303 to #comment:N"
+    )
+    return int(match.group(1))
 
 
 # ---------------------------------------------------------------------
