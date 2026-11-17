@@ -1,4 +1,5 @@
-"""README's "Available Tools" section must match the registered tools.
+"""README's "Available Tools" section and the tool reference page must
+match the registered tools.
 
 The names come from the built registry (``build_registry`` over
 ``[PING_SPEC] + ALL_SPECS`` with the page alias and strict schema, the way
@@ -16,6 +17,19 @@ list so a duplicate registration shows. The checks:
 
 Parsing is scoped to that one section (parsed once): other README tables
 also start rows with a backticked name (environment variables).
+
+``docs/reference/mcp-tools.md`` is held to the same registry (Trac
+/trac_mcp_server #242):
+
+- every registered tool has a heading line exactly ``## <name>``;
+- every ``## `` heading is either exactly a registered tool name or one of
+  the explicit ``PROSE_HEADINGS`` ("Instance Routing", "Write Gate
+  Status"); anything else fails and is listed, so a removed or renamed tool
+  leaves no stale section however the old heading is dressed up
+  (``## old_tool (removed)``, ``## `old_tool` ``). A heading is not judged
+  by its shape;
+- lines inside fenced code blocks are not headings: a fenced ``## x`` hides
+  no missing section and reports no extra one.
 """
 
 import functools
@@ -32,10 +46,20 @@ from trac_mcp_server.mcp.tools.registry import (
 )
 
 README = Path(__file__).resolve().parent.parent / "README.md"
+TOOLS_PAGE = (
+    Path(__file__).resolve().parent.parent
+    / "docs"
+    / "reference"
+    / "mcp-tools.md"
+)
 
 HEADING = re.compile(r"^## Available Tools \((\d+)\)\s*$")
 SUBSECTION = re.compile(r"^### (.+) \((\d+)\)\s*$")
 ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+# The tool reference's prose sections: the only `## ` headings that are not
+# a registered tool name.
+PROSE_HEADINGS = frozenset({"Instance Routing", "Write Gate Status"})
 
 
 def _registered() -> list[str]:
@@ -135,3 +159,97 @@ def test_subsection_counts_match_rows():
     assert total == _heading_count(), (
         f"subsection counts sum to {total}, heading says {_heading_count()}"
     )
+
+
+def _headings_outside_fences(text: str) -> list[str]:
+    """The text of every ``## `` heading in ``text`` that is not inside a
+    fenced code block (a fence closes on the same character, at least as
+    long as the one that opened it)."""
+    headings: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines():
+        marker = FENCE.match(line)
+        if fence is not None:
+            if (
+                marker
+                and marker.group(1)[0] == fence[0]
+                and len(marker.group(1)) >= len(fence)
+            ):
+                fence = None
+        elif marker:
+            fence = marker.group(1)
+        elif line.startswith("## "):
+            headings.append(line[3:].strip())
+    return headings
+
+
+def _page_headings() -> list[str]:
+    """The text of every ``## `` heading of the tool reference page."""
+    return _headings_outside_fences(
+        TOOLS_PAGE.read_text(encoding="utf-8")
+    )
+
+
+def _unknown_headings(
+    headings: list[str], registered: set[str]
+) -> list[str]:
+    """Headings that are neither a registered tool name nor a prose one."""
+    return [h for h in headings if h not in registered | PROSE_HEADINGS]
+
+
+def test_tool_reference_has_a_section_per_registered_tool():
+    headings = set(_page_headings())
+    missing = sorted(set(_registered()) - headings)
+    assert not missing, (
+        f"{TOOLS_PAGE.name} has no '## <name>' section for "
+        f"{len(missing)} registered tool(s): {missing}"
+    )
+
+
+def test_tool_reference_sections_name_registered_tools():
+    registered = set(_registered())
+    headings = _page_headings()
+    unknown = _unknown_headings(headings, registered)
+    assert not unknown, (
+        f"{TOOLS_PAGE.name} has '## ' headings that are neither a "
+        f"registered tool name nor one of {sorted(PROSE_HEADINGS)}: "
+        f"{unknown}"
+    )
+    named = [h for h in headings if h in registered]
+    assert len(named) == len(set(named)), (
+        f"{TOOLS_PAGE.name} has a section twice: {_duplicates(named)}"
+    )
+
+
+def test_headings_inside_fences_are_not_headings():
+    text = "\n".join(
+        [
+            "## real",
+            "```markdown",
+            "## fenced",
+            "```",
+            "  ~~~",
+            "  ## tilde fenced",
+            "  ```",
+            "  ## still tilde fenced",
+            "  ~~~",
+            "## after",
+        ]
+    )
+    assert _headings_outside_fences(text) == ["real", "after"]
+
+
+def test_unknown_headings_are_listed_not_judged_by_shape():
+    registered = {"old_tool", "ticket_get"}
+    headings = [
+        "ticket_get",
+        "Instance Routing",
+        "old_tool (removed)",
+        "`old_tool`",
+        "Mystery Section",
+    ]
+    assert _unknown_headings(headings, registered) == [
+        "old_tool (removed)",
+        "`old_tool`",
+        "Mystery Section",
+    ]

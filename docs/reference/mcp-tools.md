@@ -1,6 +1,6 @@
 # MCP Tools Reference
 
-This page documents a subset of the tools. The README's [Available Tools](../../README.md#available-tools-54) section lists all of them; the missing sections are tracked as Trac /trac_mcp_server #242.
+This page documents every tool the server registers, one section each. The README's [Available Tools](../../README.md#available-tools-54) section lists them by area. `tests/test_readme_tool_count.py` checks that each registered tool has a `## <name>` section here and that no section names a tool that is not registered.
 
 ## Instance Routing
 
@@ -10,6 +10,12 @@ tables below for brevity) that routes the call to another Trac project
 instead of the default one -- see
 [Multiple Instances](configuration.md#multiple-instances). Call
 `list_instances` to discover what's reachable.
+
+The exception is HTTP with OIDC per-user auth (`TRAC_MCP_OIDC_RPC_URL`; see
+[HTTP Transport: OIDC Per-User Auth](http-transport.md#oidc-per-user-auth)):
+there every call goes only to the configured endpoint and the `instance`
+argument is not offered, so none of the tools below carries it, and the
+instance echo described next is not added.
 
 **Every result names the instance it reached.** Omitting the argument falls
 back to the server's default instance, which used to be silent: a page or
@@ -944,6 +950,913 @@ Each update object:
 
 ---
 
+## ticket_attachment_put
+
+**Description:** Upload an attachment to a Trac ticket, as content_base64 (or, only where this server's file_access is 'local', a file_path on the SERVER's filesystem). To attach a file from your own machine without putting its bytes in the transcript, run the trac-mcp CLI there: `trac-mcp attach-put --ticket N FILE`.
+
+**Permission:** TICKET_APPEND.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number to attach to (minimum: 1) |
+| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. |
+| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). |
+| `filename` | string | No | - | Attachment filename stored on the ticket. Defaults to the basename of file_path; required with content_base64. |
+| `description` | string | No | `""` | Attachment description |
+| `replace` | boolean | No | `false` | If true, overwrite an existing attachment with the same filename. Default false. |
+
+Pass exactly one of `content_base64` and `file_path`. The path form is refused unless the server's `file_access` is `local` (the stdio default; `off` over http, see [File Access](http-transport.md#file-access-file_access)). An inline upload is capped by the server's `max_inline_bytes` (default 5 MiB). To attach a file from your own machine without putting its bytes in the transcript, run `trac-mcp attach-put --ticket N FILE` there.
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Uploaded attachment 'trace.log' to ticket #42 (36 bytes, replace=False)"
+}
+```
+```json
+{
+  "ticket_id": 42,
+  "requested_filename": "trace.log",
+  "attached_filename": "trace.log",
+  "renamed_on_collision": false,
+  "file_path": null,
+  "source": "inline content",
+  "bytes_uploaded": 36,
+  "replace": false,
+  "description": "Server trace from the failing login"
+}
+```
+
+`file_path` is the path the caller passed (`null` for an inline upload) and `source` is that path or `"inline content"`. When `replace` is false and the name is taken, Trac stores the file under another name: `attached_filename` then differs from `requested_filename` and `renamed_on_collision` is `true`.
+
+**Error Responses:**
+
+- **validation_error:** Missing `ticket_id`, neither or both of `content_base64` and `file_path`, invalid base64, no `filename` with `content_base64`, or an inline payload over `max_inline_bytes`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): content_base64 is required\n\nAction: Provide content_base64 (or file_path, only where the server's file_access is 'local')."
+  }
+  ```
+
+- **permission_denied:** `file_path` while `file_access` is `off`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): file_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp attach-put --ticket N FILE), or pass the bytes inline instead of a path."
+  }
+  ```
+
+- **not_found:** Ticket does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Ticket 999 does not exist.\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_attachment_put",
+  "arguments": {
+    "ticket_id": 42,
+    "filename": "trace.log",
+    "content_base64": "VHJhY2ViYWNrIChtb3N0IHJlY2VudCBjYWxsIGxhc3QpLi4u",
+    "description": "Server trace from the failing login"
+  }
+}
+```
+
+---
+
+## ticket_attachment_get
+
+**Description:** Download a ticket attachment. Where the server's file_access is 'off' (the http default) the bytes come back base64 in structuredContent.content_base64 and an output_path is refused; where it is 'local', output_path (a path on the server's own filesystem) is required. To save one on your own machine, run the trac-mcp CLI there: `trac-mcp attach-get --ticket N NAME FILE`.
+
+**Permission:** TICKET_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number the attachment belongs to (minimum: 1) |
+| `filename` | string | **Yes** | - | Attachment filename to download |
+| `output_path` | string | With `local` | - | Absolute path on the SERVER's filesystem; the parent directory must already exist. Refused unless the server's file_access is 'local', and required there. Where file_access is 'off', omit it to get the bytes inline. |
+
+**Success Response:**
+
+With `file_access` `off` (the http default) the bytes come back inline:
+```json
+{
+  "type": "text",
+  "text": "Fetched attachment 'trace.log' from ticket #42 (36 bytes); the bytes are base64 in structuredContent.content_base64"
+}
+```
+```json
+{
+  "ticket_id": 42,
+  "filename": "trace.log",
+  "content_base64": "VHJhY2ViYWNrIChtb3N0IHJlY2VudCBjYWxsIGxhc3QpLi4u",
+  "bytes": 36
+}
+```
+
+With `file_access` `local` the bytes are written to `output_path` and stay out of the result:
+```json
+{
+  "type": "text",
+  "text": "Downloaded attachment 'trace.log' from ticket #42 to /tmp/trace.log (36 bytes)"
+}
+```
+```json
+{
+  "ticket_id": 42,
+  "filename": "trace.log",
+  "output_path": "/tmp/trace.log",
+  "bytes_written": 36
+}
+```
+
+An inline result over the server's `max_inline_bytes` is refused with a `validation_error`.
+
+**Error Responses:**
+
+- **validation_error:** Missing `ticket_id` or `filename`, or no `output_path` where `file_access` is `local`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): filename is required\n\nAction: Provide filename parameter."
+  }
+  ```
+
+- **permission_denied:** `output_path` while `file_access` is `off`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): output_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp attach-get --ticket N NAME FILE), or pass the bytes inline instead of a path."
+  }
+  ```
+
+- **not_found:** Ticket or attachment does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_attachment_get",
+  "arguments": {
+    "ticket_id": 42,
+    "filename": "trace.log"
+  }
+}
+```
+
+---
+
+## ticket_attachment_list
+
+**Description:** List attachments on a Trac ticket.
+
+**Permission:** TICKET_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number to list attachments for (minimum: 1) |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Ticket #42 has 2 attachment(s):\n- trace.log (36 bytes) by alice\n- screenshot.png (48211 bytes) by bob"
+}
+```
+```json
+{
+  "ticket_id": 42,
+  "count": 2,
+  "attachments": [
+    {
+      "filename": "trace.log",
+      "description": "Server trace from the failing login",
+      "size": 36,
+      "time": "20260116T08:12:00",
+      "author": "alice"
+    },
+    {
+      "filename": "screenshot.png",
+      "description": "",
+      "size": 48211,
+      "time": "20260117T09:30:00",
+      "author": "bob"
+    }
+  ]
+}
+```
+
+A ticket with none answers `Ticket #42 has no attachments.` with `count` `0` and an empty `attachments` list. `time` is Trac's compact `YYYYMMDDTHH:MM:SS` string.
+
+**Error Responses:**
+
+- **validation_error:** Missing `ticket_id`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): ticket_id is required\n\nAction: Provide ticket_id parameter."
+  }
+  ```
+
+**Known failure:** a missing ticket (or the wrong `instance`) is not an error. Neither the handler nor TracXMLRPC's `ticket.listAttachments` checks that the ticket exists, so the call answers `Ticket #999 has no attachments.` with `count` `0`, exactly as for an existing ticket with none. Check the ticket with `ticket_get` first when that matters. Tracked as Trac /trac_mcp_server #253.
+
+**Example Call:**
+```json
+{
+  "name": "ticket_attachment_list",
+  "arguments": {
+    "ticket_id": 42
+  }
+}
+```
+
+---
+
+## ticket_attachment_delete
+
+**Description:** Delete a ticket attachment permanently. Requires TICKET_ADMIN permission.
+
+**Permission:** TICKET_ADMIN.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number the attachment belongs to (minimum: 1) |
+| `filename` | string | **Yes** | - | Attachment filename to delete |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Deleted attachment 'trace.log' from ticket #42."
+}
+```
+```json
+{
+  "ticket_id": 42,
+  "filename": "trace.log"
+}
+```
+
+**Error Responses:**
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Deleting ticket attachments requires TICKET_ADMIN. Contact Trac administrator."
+  }
+  ```
+
+- **validation_error:** Missing `ticket_id` or `filename`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): filename is required\n\nAction: Provide filename parameter."
+  }
+  ```
+
+- **not_found:** Ticket or attachment does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_attachment_delete",
+  "arguments": {
+    "ticket_id": 42,
+    "filename": "trace.log"
+  }
+}
+```
+
+---
+
+## ticket_comment_reply
+
+**Description:** Post a threaded reply to a ticket comment. Unlike ticket_update, this records real threading, so the reply nests under its parent in the web UI. Set quote=true to also prepend the parent's text as a quote block. TracWiki, stored byte-for-byte, and checked by the same write-time link gate as ticket_update -- on the reply's own new text, not the quoted parent.
+
+**Permission:** TICKET_APPEND. **Needs the `tracrpc_comment` Trac plugin** (`plugins/tracrpc_comment/`, see [plugins/README.md](../../plugins/README.md)): stock XmlRpcPlugin has no comment-level methods. Without it the call answers `method_not_available` with an install hint (see the error below).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number (minimum: 1) |
+| `cnum` | integer | **Yes** | - | Comment number being replied to, as ticket_changelog reports it. (minimum: 1) |
+| `comment` | string | **Yes** | - | Reply body. TracWiki, verbatim. |
+| `quote` | boolean | No | `false` | Prepend the parent comment as a quote block. Default false. |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
+
+`cnum` is the comment number `ticket_changelog` (or `ticket_get`) reports, never a row count: description edits consume numbers and deletes never renumber, so gaps are normal. The write-time link gate checks the reply's own `comment`, not the quoted parent (see [Write Gate Status](#write-gate-status)).
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Posted comment 5 on ticket #42 as a threaded reply to comment 3."
+}
+```
+
+The text only; the tool returns no `structuredContent`. With the write gate off the [gate-off line](#write-gate-status) follows it.
+
+**Error Responses:**
+
+- **method_not_available:** The `tracrpc_comment` plugin is not installed or enabled on the Trac server
+  ```json
+  {
+    "type": "text",
+    "text": "Error (method_not_available): RPC method \"ticket.replyToComment\" not found\n\nAction: This tool needs the 'tracrpc_comment' plugin on the Trac server. Install it from the trac-mcp-server repo's plugins/ directory and enable it with: trac-admin <env> config set components 'tracrpc_comment.*' enabled"
+  }
+  ```
+
+- **link_check_failed:** The reply carries a broken link
+  ```json
+  {
+    "type": "text",
+    "text": "Error (link_check_failed): Refusing to write comment: 1 blocking link error.\n\n- [<code>] <finding>\n\n[...]\n\nAction: Correct the link and retry the write, or add a 'preview-checks: allow <code>' pragma if the content is deliberate."
+  }
+  ```
+
+- **validation_error:** Missing `ticket_id`, `cnum` or `comment`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): comment is required\n\nAction: Provide comment."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_comment_reply",
+  "arguments": {
+    "ticket_id": 42,
+    "cnum": 3,
+    "comment": "Confirmed on staging; the timeout is 30s, not 60s.",
+    "quote": true
+  }
+}
+```
+
+---
+
+## ticket_comment_edit
+
+**Description:** Correct the text of an existing ticket comment. The previous text is kept as a revision (readable with ticket_comment_history), so this is a correction, not an erasure. TracWiki, stored byte-for-byte, and checked by the same write-time link gate as ticket_update. Requires base_ts (ticket_get's _ts on THIS ticket_id/instance): the underlying RPC has no precondition of its own, so without it a call that resolves to the wrong instance or ticket overwrites an unrelated comment there with no warning (ticket #104).
+
+**Permission:** TICKET_EDIT_COMMENT. **Needs the `tracrpc_comment` Trac plugin** (`plugins/tracrpc_comment/`, see [plugins/README.md](../../plugins/README.md)); without it the call answers `method_not_available` with an install hint.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number (minimum: 1) |
+| `cnum` | integer | **Yes** | - | Comment number as ticket_changelog reports it. Do not count rows -- numbering has gaps. (minimum: 1) |
+| `comment` | string | **Yes** | - | Replacement body. TracWiki, verbatim. |
+| `base_ts` | string | **Yes** | - | Change token from a ticket_get() call on THIS ticket_id, made on THIS instance, immediately before this edit (a numeric string -- pass it through as-is). Rejected with a version_conflict error if it does not match the ticket's current _ts -- which is also what happens when the instance/ticket_id resolved to a ticket other than the one just read. Required: unlike ticket_update, there is no server-side lock this falls back to, so omitting it would leave every call unprotected. |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
+
+`base_ts` is checked client-side against a fresh `ticket.get` before the edit, because the underlying RPC has no precondition of its own. Take it from `ticket_get`'s `_ts` on the same `ticket_id` and the same instance, immediately before the edit.
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Edited comment 3 on ticket #42. The previous text is kept as a revision -- read it with ticket_comment_history.\nReplaced (previous text): 'Reproduced on staging.'"
+}
+```
+
+The `Replaced (previous text)` line is the first 80 characters of the prior revision, read best-effort: it is left out when that read fails. With the write gate off the [gate-off line](#write-gate-status) follows. The tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **version_conflict:** `base_ts` does not match the ticket's current `_ts`: the ticket changed, or the `instance`/`ticket_id` pair resolved to a different ticket than intended. Nothing was edited.
+  ```json
+  {
+    "type": "text",
+    "text": "Error (version_conflict): Ticket #42's current base_ts is 1737390720000000, not the 1737300000000000 this call supplied -- comment 3 was NOT edited. Either the ticket changed since you read it, or this instance/ticket_id pair resolved to a different ticket than the one you intended.\n\nAction: Re-read with ticket_get(ticket_id=42) on the instance you meant to target, confirm it is the right ticket, and retry with the fresh base_ts from that response."
+  }
+  ```
+
+- **method_not_available:** The `tracrpc_comment` plugin is not installed or enabled on the Trac server
+  ```json
+  {
+    "type": "text",
+    "text": "Error (method_not_available): RPC method \"ticket.editComment\" not found\n\nAction: This tool needs the 'tracrpc_comment' plugin on the Trac server. Install it from the trac-mcp-server repo's plugins/ directory and enable it with: trac-admin <env> config set components 'tracrpc_comment.*' enabled"
+  }
+  ```
+
+- **link_check_failed:** The replacement text carries a broken link
+  ```json
+  {
+    "type": "text",
+    "text": "Error (link_check_failed): Refusing to write comment: 1 blocking link error.\n\n- [<code>] <finding>\n\n[...]\n\nAction: Correct the link and retry the write, or add a 'preview-checks: allow <code>' pragma if the content is deliberate."
+  }
+  ```
+
+- **validation_error:** Missing `ticket_id`, `cnum`, `comment` or `base_ts`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): base_ts is required\n\nAction: Provide base_ts."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_comment_edit",
+  "arguments": {
+    "ticket_id": 42,
+    "cnum": 3,
+    "comment": "Reproduced on staging with the 9 AM load profile.",
+    "base_ts": "1737390720000000"
+  }
+}
+```
+
+---
+
+## ticket_comment_delete
+
+**Description:** Delete a ticket comment permanently. Cannot be undone. Refuses when the comment was posted together with field changes, because Trac would also REVERT those changes -- deleting the comment that accompanied a close reopens the ticket. Pass force=true only after reading what the refusal names. Requires TICKET_ADMIN.
+
+**Permission:** TICKET_ADMIN. **Needs the `tracrpc_comment` Trac plugin** (`plugins/tracrpc_comment/`, see [plugins/README.md](../../plugins/README.md)); without it the call answers `method_not_available` with an install hint.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number (minimum: 1) |
+| `cnum` | integer | **Yes** | - | Comment number as ticket_changelog reports it. Do not count rows -- numbering has gaps. (minimum: 1) |
+| `force` | boolean | No | `false` | Delete even though bundled field changes will be reverted. Default false. |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Deleted comment 3 on ticket #42."
+}
+```
+
+With `force=true` the text ends `Bundled field changes were reverted.` The tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **bundled_change_refused:** The comment was posted together with field changes, which Trac would also revert. The text is the server's own refusal, which names the fields.
+  ```json
+  {
+    "type": "text",
+    "text": "Error (bundled_change_refused): [the server's refusal, naming the fields that would be reverted]\n\nAction: Re-read the ticket and confirm the field changes may be reverted, then retry with force=true. Prefer editing the comment instead if the record should be kept."
+  }
+  ```
+
+- **method_not_available:** The `tracrpc_comment` plugin is not installed or enabled on the Trac server
+  ```json
+  {
+    "type": "text",
+    "text": "Error (method_not_available): RPC method \"ticket.deleteComment\" not found\n\nAction: This tool needs the 'tracrpc_comment' plugin on the Trac server. Install it from the trac-mcp-server repo's plugins/ directory and enable it with: trac-admin <env> config set components 'tracrpc_comment.*' enabled"
+  }
+  ```
+
+- **validation_error:** Missing `ticket_id` or `cnum`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): cnum is required\n\nAction: Provide cnum."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_comment_delete",
+  "arguments": {
+    "ticket_id": 42,
+    "cnum": 3
+  }
+}
+```
+
+---
+
+## ticket_comment_history
+
+**Description:** Read the edit revisions of a ticket comment, oldest first. A never-edited comment has exactly one revision, so an empty result means the comment does not exist.
+
+**Permission:** TICKET_VIEW. **Needs the `tracrpc_comment` Trac plugin** (`plugins/tracrpc_comment/`, see [plugins/README.md](../../plugins/README.md)); without it the call answers `method_not_available` with an install hint.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `ticket_id` | integer | **Yes** | - | Ticket number (minimum: 1) |
+| `cnum` | integer | **Yes** | - | Comment number as ticket_changelog reports it. Do not count rows -- numbering has gaps. (minimum: 1) |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Comment 3 on ticket #42 -- 2 revision(s), oldest first:\n\n--- revision 0 by carol at 20260116T08:12:00 ---\nReproduced on staging.\n\n--- revision 1 by carol at 20260116T09:05:00 ---\nReproduced on staging with the 9 AM load profile."
+}
+```
+
+The text only; the tool returns no `structuredContent`. A comment that does not exist on an existing ticket (or whose number falls in a gap) is not an error: the text reads `No comment 3 on ticket #42. Comment numbering has gaps -- check ticket_changelog.` A ticket that does not exist is an error (below).
+
+**Error Responses:**
+
+- **method_not_available:** The `tracrpc_comment` plugin is not installed or enabled on the Trac server
+  ```json
+  {
+    "type": "text",
+    "text": "Error (method_not_available): RPC method \"ticket.getCommentHistory\" not found\n\nAction: This tool needs the 'tracrpc_comment' plugin on the Trac server. Install it from the trac-mcp-server repo's plugins/ directory and enable it with: trac-admin <env> config set components 'tracrpc_comment.*' enabled"
+  }
+  ```
+
+- **validation_error:** Missing `ticket_id` or `cnum`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): cnum is required\n\nAction: Provide cnum."
+  }
+  ```
+
+- **not_found:** The ticket does not exist (`getCommentHistory` loads the ticket first, and Trac's `ResourceNotFound` reaches the client as an XML-RPC fault with code 404, which the registry's fault translation reports as `not_found`)
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Ticket 999 does not exist.\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_comment_history",
+  "arguments": {
+    "ticket_id": 42,
+    "cnum": 3
+  }
+}
+```
+
+---
+
+## ticket_component_create
+
+**Description:** Create a new ticket component. Requires TICKET_ADMIN permission. Component must not already exist.
+
+**Permission:** TICKET_ADMIN.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | **Yes** | - | Component name (required, must be unique). |
+| `description` | string | No | `""` | Optional component description. |
+| `owner` | string | No | `""` | Optional default owner username. |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Component 'backend' created."
+}
+```
+
+The text only; the tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **validation_error:** Missing or empty `name`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): name is required\n\nAction: Pass a non-empty component name."
+  }
+  ```
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+A component that already exists comes back as the server's own fault text in a `server_error` (`Contact Trac administrator or retry later.`): only milestones have an `already_exists` error type.
+
+**Example Call:**
+```json
+{
+  "name": "ticket_component_create",
+  "arguments": {
+    "name": "backend",
+    "description": "Server-side code",
+    "owner": "alice"
+  }
+}
+```
+
+---
+
+## ticket_component_list
+
+**Description:** List all ticket components with their attributes (name, description, owner). Requires TICKET_VIEW.
+
+**Permission:** TICKET_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| *(none)* | - | - | - | No parameters required |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "[{\"name\": \"backend\", \"owner\": \"alice\", \"description\": \"Server-side code\"}, {\"name\": \"frontend\", \"owner\": \"\", \"description\": \"\"}]"
+}
+```
+
+The text block is the JSON array itself (`json.dumps` of one `{name, owner, description}` object per component, in the order Trac lists them); the tool returns no `structuredContent`. `owner` and `description` are empty strings when unset.
+
+**Error Responses:**
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_component_list",
+  "arguments": {}
+}
+```
+
+---
+
+## ticket_component_delete
+
+**Description:** Delete a ticket component. Requires TICKET_ADMIN permission.
+
+**Permission:** TICKET_ADMIN.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `name` | string | **Yes** | - | Component name to delete. |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Component 'backend' deleted."
+}
+```
+
+The text only; the tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **validation_error:** Missing or empty `name`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): name is required\n\nAction: Pass a non-empty component name."
+  }
+  ```
+
+- **not_found:** Component does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_component_delete",
+  "arguments": {
+    "name": "backend"
+  }
+}
+```
+
+---
+
+## ticket_enum_create
+
+**Description:** Create a new value for a Trac enum field (priority, resolution, severity, type, or version). Requires TICKET_ADMIN permission.
+
+**Permission:** TICKET_ADMIN.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `enum_type` | string | **Yes** | - | Enum field to mutate. Must be one of priority, resolution, severity, type, version. (one of `priority`, `resolution`, `severity`, `type`, `version`) |
+| `name` | string | **Yes** | - | New enum value name. |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "priority value 'urgent' created."
+}
+```
+
+The text only; the tool returns no `structuredContent`.
+
+**Known failure:** creating a `version` currently fails with a `server_error`. `TracClient.create_enum` sends `(name, 0)` for every enum type, but TracXMLRPC's Version `create` takes `(name, attributes)` with a dict, so the call is rejected. The other four types work, and `ticket_enum_list` and `ticket_enum_delete` work for versions. Tracked as Trac /trac_mcp_server #251.
+
+**Error Responses:**
+
+- **validation_error:** `enum_type` missing or not one of `priority`, `resolution`, `severity`, `type`, `version`; or `name` missing or empty
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): enum_type must be one of ['priority', 'resolution', 'severity', 'type', 'version']\n\nAction: Pass a valid enum_type."
+  }
+  ```
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_enum_create",
+  "arguments": {
+    "enum_type": "priority",
+    "name": "urgent"
+  }
+}
+```
+
+---
+
+## ticket_enum_list
+
+**Description:** List all values for a Trac enum field. Returns values in Trac's configured order. Requires TICKET_VIEW permission.
+
+**Permission:** TICKET_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `enum_type` | string | **Yes** | - | Enum field to list. Must be one of priority, resolution, severity, type, version. (one of `priority`, `resolution`, `severity`, `type`, `version`) |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "[\"blocker\", \"critical\", \"major\", \"minor\", \"trivial\"]"
+}
+```
+
+The text block is the JSON array of value names (`json.dumps`), in Trac's configured order; the tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **validation_error:** `enum_type` missing or not one of `priority`, `resolution`, `severity`, `type`, `version`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): enum_type must be one of ['priority', 'resolution', 'severity', 'type', 'version']\n\nAction: Pass a valid enum_type."
+  }
+  ```
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_enum_list",
+  "arguments": {
+    "enum_type": "priority"
+  }
+}
+```
+
+---
+
+## ticket_enum_delete
+
+**Description:** Delete a value from a ticket enum field (priority, resolution, severity, type, or version). Requires TICKET_ADMIN permission.
+
+**Permission:** TICKET_ADMIN.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `enum_type` | string | **Yes** | - | Enum field to mutate. Must be one of priority, resolution, severity, type, version. (one of `priority`, `resolution`, `severity`, `type`, `version`) |
+| `name` | string | **Yes** | - | Enum value name to delete. |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "priority value 'urgent' deleted."
+}
+```
+
+The text only; the tool returns no `structuredContent`.
+
+**Error Responses:**
+
+- **validation_error:** `enum_type` missing or not one of `priority`, `resolution`, `severity`, `type`, `version`; or `name` missing or empty
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): name is required\n\nAction: Pass a non-empty enum value name."
+  }
+  ```
+
+- **not_found:** Value does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use ticket_search to verify ticket exists."
+  }
+  ```
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Try adding a comment instead, or contact ticket owner."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "ticket_enum_delete",
+  "arguments": {
+    "enum_type": "priority",
+    "name": "urgent"
+  }
+}
+```
+
+---
+
 ## wiki_get
 
 **Description:** Get wiki page content with Markdown output. Returns full content with metadata (version, author, modified date).
@@ -1266,6 +2179,247 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 ---
 
+## wiki_get_history
+
+**Description:** Get wiki page revision history newest-first. Returns list of revisions with version, author, lastModified, and comment (commit message). Useful for detecting prior edits or scanning attribution markers in change comments.
+
+**Permission:** WIKI_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to retrieve history for (required) |
+| `limit` | integer | No | - | Maximum revisions to return, newest first. Omit for all revisions. (minimum: 1) |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "# DevelopmentGuide history\n\n- v3 by alice at 2025-01-20 10:00: Add the release checklist\n- v2 by bob at 2025-01-12 16:41: (no comment)\n- v1 by alice at 2025-01-05 09:15: Initial draft"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "revisions": [
+    {
+      "version": 3,
+      "author": "alice",
+      "lastModified": "2025-01-20 10:00",
+      "comment": "Add the release checklist"
+    },
+    {
+      "version": 2,
+      "author": "bob",
+      "lastModified": "2025-01-12 16:41",
+      "comment": ""
+    },
+    {
+      "version": 1,
+      "author": "alice",
+      "lastModified": "2025-01-05 09:15",
+      "comment": "Initial draft"
+    }
+  ]
+}
+```
+
+Revisions are newest first. A version whose metadata cannot be fetched (a gap, or no permission) is skipped, so a partial history comes back rather than none. `comment` is the change comment, `""` when there is none.
+
+**Error Responses:**
+
+- **validation_error:** Missing `page_name`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): page_name is required\n\nAction: Provide page_name parameter."
+  }
+  ```
+
+- **not_found:** Page does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Wiki page \"NoSuchPage\" does not exist\n\nAction: Use wiki_search to find pages similar to 'NoSuchPage'."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_get_history",
+  "arguments": {
+    "page_name": "DevelopmentGuide",
+    "limit": 10
+  }
+}
+```
+
+---
+
+## wiki_diff
+
+**Description:** Unified diff between two versions of a wiki page, computed on the stored TracWiki, together with the revisions in the range (version, author, time, change comment), oldest first. The start is from_version (default: the version before to_version; the empty page when to_version is 1) or from_author: the newest version by that author at or before to_version, i.e. everything since that author's last write (identical=true when the author wrote to_version itself). Returns the resolved versions, identical, added/removed line counts and the hunk count; a diff longer than max_chars is cut at a hunk boundary and flagged truncated, with the counts still covering the whole diff.
+
+**Permission:** WIKI_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to diff (required) |
+| `to_version` | integer | No | - | End version (default: latest) (minimum: 1) |
+| `from_version` | integer | No | - | Start version, lower than to_version (default: to_version - 1). Not together with from_author. (minimum: 1) |
+| `from_author` | string | No | - | Start at the newest version by this Trac username at or before to_version. An error if that author has none -- never a fall-back to version 1. Not together with from_version. |
+| `context` | integer | No | `3` | Unchanged lines around each change (default: 3) (minimum: 0) |
+| `max_chars` | integer | No | `50000` | Maximum length of the returned diff (default: 50000) (minimum: 1000) |
+
+`from_version` and `from_author` are mutually exclusive. With neither, the diff starts at the version before `to_version` (skipping deleted ones), or at the empty page when `to_version` is 1. Both bodies are fetched and diffed server-side (on the stored TracWiki, with CRLF read as LF), so only the diff and the change comments reach the caller.
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "# DevelopmentGuide diff: v2 -> v3\n+2 -1 lines in 1 hunk(s)\nRevisions (oldest first):\n- v3 by alice at 2025-01-20 10:00: Add the release checklist\n----\n--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -1,7 +1,8 @@\n = Release =\n \n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n \n Done.\n See also\n"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "from_version": 2,
+  "to_version": 3,
+  "latest_version": 3,
+  "identical": false,
+  "added": 2,
+  "removed": 1,
+  "hunks": 1,
+  "hunks_shown": 1,
+  "truncated": false,
+  "minimal": true,
+  "line_endings_normalized": false,
+  "diff": "--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -1,7 +1,8 @@\n = Release =\n \n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n \n Done.\n See also\n",
+  "revisions": [
+    {
+      "version": 3,
+      "author": "alice",
+      "lastModified": "2025-01-20 10:00",
+      "comment": "Add the release checklist"
+    }
+  ]
+}
+```
+
+`from_version` is `null` when the diff starts from the empty page. `from_author` is echoed back when it was passed. `added` and `removed` count lines over the whole diff; a diff longer than `max_chars` is cut at a hunk boundary, `truncated` is `true`, `hunks_shown` is below `hunks`, and the text ends with a `[truncated: ...]` line. `identical` is `true` when the two bodies are equal (the text then says `Identical: no change in this range.`). `minimal` is `false` when more than 2000 lines changed: one block then replaces everything between the common start and end, and the counts over-state the edit. `line_endings_normalized` is `true` when either body had CRLF line endings.
+
+**Error Responses:**
+
+- **validation_error:** Missing `page_name`, both `from_version` and `from_author`, an empty `from_author`, or `from_version` not below `to_version`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): from_version and from_author are mutually exclusive\n\nAction: Pass one start: from_version=N or from_author='username'."
+  }
+  ```
+
+- **not_found:** Page does not exist, `to_version` is above the latest, or `from_author` wrote no version at or before `to_version`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Wiki page \"DevelopmentGuide\" has no version 9 (latest is 3)\n\nAction: Omit to_version for the latest, or list versions with wiki_get_history."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_diff",
+  "arguments": {
+    "page_name": "DevelopmentGuide",
+    "from_version": 2,
+    "to_version": 3
+  }
+}
+```
+
+---
+
+## wiki_conventions
+
+**Description:** Get an instance's wiki conventions in one read-only call: the style its WikiStart declares (a line `'''Wiki style:''' [<prefix>:wiki:<StylePage> <name>]`, or `undeclared`/`malformed`), that style page's body as stored (read from the instance the link names, within the caller's allowed instances; reported unavailable with a reason rather than failing), and every PageTemplates/* page with its body. Bodies are TracWiki, byte-for-byte.
+
+**Permission:** WIKI_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| *(none)* | - | - | - | No parameters required |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "{\n  \"style\": \"agent\",\n  \"declaration_lines\": [...],\n  \"style_page\": {...},\n  \"templates\": [...]\n}"
+}
+```
+```json
+{
+  "style": "agent",
+  "declaration_lines": [
+    "'''Wiki style:''' [auto_pm:wiki:Rules/documentation/WikiStyleAgent agent]"
+  ],
+  "style_page": {
+    "instance": "/auto_pm",
+    "name": "Rules/documentation/WikiStyleAgent",
+    "version": 7,
+    "body": "= Wiki style: agent =\n..."
+  },
+  "templates": [
+    {
+      "name": "PageTemplates/Rule",
+      "version": 2,
+      "body": "= Rule: ... =\n..."
+    }
+  ]
+}
+```
+
+The text block is the same object as indented JSON (shortened above). The tool reads `WikiStart` and takes the style from its `'''Wiki style:''' [<prefix>:wiki:<StylePage> <name>]` line (outside any `{{{ }}}` block): `style` is that name, or `undeclared` (no such line; `style_page` is `null`) or `malformed` (a line that does not parse, or lines that disagree; `style_page` is `null`). `declaration_lines` are the marker lines found, in document order. `style_page` is read from the instance the link names (this one when the prefix is omitted or is its own), within the caller's allowed instances, and `instance` is that instance's path. `templates` lists every `PageTemplates/*` page of this instance, sorted by name. Bodies are TracWiki, byte-for-byte.
+
+A style page or template that cannot be read is reported in place, not as an error:
+```json
+{
+  "instance": "/other",
+  "name": "Rules/documentation/WikiStyleAgent",
+  "available": false,
+  "reason": "instance_not_allowed",
+  "message": "[error details]"
+}
+```
+
+A template's record has `name`, `available`, `reason` and `message` (no `instance`). `reason` is `not_found`, `permission_denied` or `error` for a failed page read, and, for the style page only, `unknown_instance` or `instance_not_allowed`.
+
+**Error Responses:**
+
+- **permission_denied:** The call could not read `WikiStart` or list the pages (a missing `WikiStart` is not an error: it reads as `undeclared`)
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Contact Trac administrator for write access to wiki pages."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_conventions",
+  "arguments": {}
+}
+```
+
+---
+
 ## wiki_file_push
 
 **Description:** Push a document to a Trac wiki page. Takes the text inline as `content`, or -- only where the server's `file_access` is `local` -- as a `file_path` on the **server's** filesystem; auto-detects format (Markdown/TracWiki), converts if needed, and creates or updates the wiki page. To push a file from your own machine, use the [`trac-mcp` CLI](cli.md#trac-mcp) there: `trac-mcp wiki-push PAGE FILE`.
@@ -1505,6 +2659,304 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 ---
 
+## wiki_attachment_put
+
+**Description:** Upload an attachment to a Trac wiki page, as content_base64 (or, only where this server's file_access is 'local', a file_path on the SERVER's filesystem). To attach a file from your own machine without putting its bytes in the transcript, run the trac-mcp CLI there: `trac-mcp attach-put --page PAGE FILE`. Internally calls wiki.putAttachmentEx with a 'page_name/filename' path. Target wiki page must exist (use `wiki_create` or `wiki_file_push` first).
+
+**Permission:** WIKI_MODIFY.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to attach to. The page must already exist. |
+| `filename` | string | No | - | Attachment filename stored on the page. Defaults to the basename of file_path; required with content_base64. |
+| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. |
+| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). |
+| `description` | string | No | `""` | Attachment description |
+| `replace` | boolean | No | `false` | If true, overwrite an existing attachment with the same filename. If false and a collision occurs, Trac stores the file under a renamed path; see attached_filename in the response. Default false. |
+
+Pass exactly one of `content_base64` and `file_path`. The path form is refused unless the server's `file_access` is `local` (the stdio default; `off` over http, see [File Access](http-transport.md#file-access-file_access)). An inline upload is capped by the server's `max_inline_bytes` (default 5 MiB). To attach a file from your own machine without putting its bytes in the transcript, run `trac-mcp attach-put --page PAGE FILE` there.
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Uploaded attachment 'diagram.png' to wiki page 'DevelopmentGuide' (70 bytes, replace=False)"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "requested_filename": "diagram.png",
+  "attached_filename": "diagram.png",
+  "renamed_on_collision": false,
+  "page_path": "DevelopmentGuide/diagram.png",
+  "file_path": null,
+  "source": "inline content",
+  "bytes_uploaded": 70,
+  "replace": false,
+  "description": "Architecture overview"
+}
+```
+
+`page_path` is the `PageName/filename` path Trac stores it under. `file_path` is the path the caller passed (`null` for an inline upload) and `source` is that path or `"inline content"`. When `replace` is false and the name is taken, Trac stores the file under another name: `attached_filename` then differs from `requested_filename` and `renamed_on_collision` is `true`.
+
+**Error Responses:**
+
+- **validation_error:** Missing `page_name`, neither or both of `content_base64` and `file_path`, invalid base64, no `filename` with `content_base64`, or an inline payload over `max_inline_bytes`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): filename is required with content_base64\n\nAction: Provide the attachment filename to store."
+  }
+  ```
+
+- **permission_denied:** `file_path` while `file_access` is `off`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): file_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp attach-put --page PAGE FILE), or pass the bytes inline instead of a path."
+  }
+  ```
+
+- **not_found:** The wiki page does not exist (create it first with `wiki_create` or `wiki_file_push`)
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use wiki_search to find pages similar to 'NoSuchPage'."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_attachment_put",
+  "arguments": {
+    "page_name": "DevelopmentGuide",
+    "filename": "diagram.png",
+    "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHbyWPQAAAABJRU5ErkJggg==",
+    "description": "Architecture overview"
+  }
+}
+```
+
+---
+
+## wiki_attachment_get
+
+**Description:** Download a wiki attachment. Where the server's file_access is 'off' (the http default) the bytes come back base64 in structuredContent.content_base64 and an output_path is refused; where it is 'local', output_path (a path on the server's own filesystem) is required. To save one on your own machine, run `trac-mcp attach-get --page PAGE NAME FILE` there. Internally calls wiki.getAttachment with a 'page_name/filename' path.
+
+**Permission:** WIKI_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name the attachment belongs to |
+| `filename` | string | **Yes** | - | Attachment filename to download |
+| `output_path` | string | With `local` | - | Absolute path on the SERVER's filesystem; the parent directory must already exist. Refused unless the server's file_access is 'local', and required there. Where file_access is 'off', omit it to get the bytes inline. |
+
+**Success Response:**
+
+With `file_access` `off` (the http default) the bytes come back inline:
+```json
+{
+  "type": "text",
+  "text": "Fetched attachment 'diagram.png' from wiki page 'DevelopmentGuide' (70 bytes); the bytes are base64 in structuredContent.content_base64"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "filename": "diagram.png",
+  "page_path": "DevelopmentGuide/diagram.png",
+  "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHbyWPQAAAABJRU5ErkJggg==",
+  "bytes": 70
+}
+```
+
+With `file_access` `local` the bytes are written to `output_path` and stay out of the result:
+```json
+{
+  "type": "text",
+  "text": "Downloaded attachment 'diagram.png' from wiki page 'DevelopmentGuide' to /tmp/diagram.png (70 bytes)"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "filename": "diagram.png",
+  "page_path": "DevelopmentGuide/diagram.png",
+  "output_path": "/tmp/diagram.png",
+  "bytes_written": 70
+}
+```
+
+An inline result over the server's `max_inline_bytes` is refused with a `validation_error`.
+
+**Error Responses:**
+
+- **validation_error:** Missing `page_name` or `filename`, or no `output_path` where `file_access` is `local`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): filename is required\n\nAction: Provide filename parameter."
+  }
+  ```
+
+- **permission_denied:** `output_path` while `file_access` is `off`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): output_path is refused: file_access is 'off' on this server, so a path would name a file on the server's machine, not yours.\n\nAction: Use the trac-mcp CLI on your own machine (trac-mcp attach-get --page PAGE NAME FILE), or pass the bytes inline instead of a path."
+  }
+  ```
+
+- **not_found:** Page or attachment does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use wiki_search to find pages similar to 'NoSuchPage'."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_attachment_get",
+  "arguments": {
+    "page_name": "DevelopmentGuide",
+    "filename": "diagram.png"
+  }
+}
+```
+
+---
+
+## wiki_attachment_list
+
+**Description:** List attachments on a Trac wiki page. Returns a flat list of 'page_name/filename' path strings (NOT tuples — this differs from ticket_attachment_list).
+
+**Permission:** WIKI_VIEW.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name to list attachments for |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Wiki page 'DevelopmentGuide' has 2 attachment(s):\n- DevelopmentGuide/diagram.png\n- DevelopmentGuide/release-notes.pdf"
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "count": 2,
+  "attachments": [
+    "DevelopmentGuide/diagram.png",
+    "DevelopmentGuide/release-notes.pdf"
+  ]
+}
+```
+
+`attachments` is a flat list of `PageName/filename` strings, not the per-attachment records `ticket_attachment_list` returns (no size, author or description). A page with none answers `Wiki page 'DevelopmentGuide' has no attachments.` with `count` `0`.
+
+**Error Responses:**
+
+- **validation_error:** Missing `page_name`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): page_name is required\n\nAction: Provide page_name parameter."
+  }
+  ```
+
+**Known failure:** a missing page (or the wrong `instance`) is not an error. Neither the handler nor TracXMLRPC's `wiki.listAttachments` checks that the page exists, so the call answers `Wiki page 'NoSuchPage' has no attachments.` with `count` `0`, exactly as for an existing page with none. Check the page with `wiki_get` first when that matters. Tracked as Trac /trac_mcp_server #253.
+
+**Example Call:**
+```json
+{
+  "name": "wiki_attachment_list",
+  "arguments": {
+    "page_name": "DevelopmentGuide"
+  }
+}
+```
+
+---
+
+## wiki_attachment_delete
+
+**Description:** Delete a wiki attachment permanently. Requires WIKI_DELETE permission. Internally calls wiki.deleteAttachment with a 'page_name/filename' path.
+
+**Permission:** WIKI_DELETE.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `page_name` | string | **Yes** | - | Wiki page name the attachment belongs to |
+| `filename` | string | **Yes** | - | Attachment filename to delete |
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "Deleted attachment 'diagram.png' from wiki page 'DevelopmentGuide'."
+}
+```
+```json
+{
+  "page_name": "DevelopmentGuide",
+  "filename": "diagram.png",
+  "page_path": "DevelopmentGuide/diagram.png"
+}
+```
+
+**Error Responses:**
+
+- **permission_denied:** Insufficient permissions
+  ```json
+  {
+    "type": "text",
+    "text": "Error (permission_denied): [error details]\n\nAction: Deleting wiki attachments requires WIKI_DELETE. Contact Trac administrator."
+  }
+  ```
+
+- **validation_error:** Missing `page_name` or `filename`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): filename is required\n\nAction: Provide filename parameter."
+  }
+  ```
+
+- **not_found:** Page or attachment does not exist
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): [error details]\n\nAction: Use wiki_search to find pages similar to 'NoSuchPage'."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "wiki_attachment_delete",
+  "arguments": {
+    "page_name": "DevelopmentGuide",
+    "filename": "diagram.png"
+  }
+}
+```
+
+---
+
 ## milestone_list
 
 **Description:** List milestone names, optionally only those starting with a prefix. With `details` or `status`, also the due and completion date of each listed milestone, read in `system.multicall` batches of 50 (one `ticket.milestone.get` each, one at a time if the server has no `system.multicall`) instead of one `milestone_get` call per milestone. Requires MILESTONE_VIEW permission.
@@ -1735,6 +3187,91 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
   "name": "milestone_delete",
   "arguments": {
     "name": "v1.0-beta"
+  }
+}
+```
+
+---
+
+## timeline_search
+
+**Description:** Search the Trac timeline -- tickets, wiki edits, changesets, milestones and more, ordered together and author-attributed. Each event's title/description/url are rendered server-side as plain text, not TracWiki or Markdown.
+
+**Permission:** TIMELINE_VIEW. **Needs the `tracrpc_comment` Trac plugin** (`plugins/tracrpc_comment/`, see [plugins/README.md](../../plugins/README.md)): stock XmlRpcPlugin has no timeline methods. Without it the call answers `method_not_available` with an install hint (see the error below).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `start` | integer | **Yes** | - | Start of the time range, as a unix timestamp (seconds since epoch), inclusive (required). |
+| `stop` | integer | **Yes** | - | End of the time range, as a unix timestamp (seconds since epoch), inclusive (required). |
+| `filters` | array of string | No | - | Event kinds to include (e.g. ticket, wiki, changeset, milestone -- available kinds depend on what's enabled on this instance). Omit for every kind; pass an empty list to select none. |
+| `max_results` | integer | No | `100` | Maximum events to return, newest first (default: 100, max: 1000). (minimum: 1, maximum: 1000) |
+
+`start` and `stop` are unix timestamps in seconds. `max_results` is clamped to the range 1 to 1000. With `filters` omitted the tool first asks the server which event kinds exist (`timeline.getFilters`) and requests all of them; an empty list selects none.
+
+**Success Response:**
+```json
+{
+  "type": "text",
+  "text": "2 timeline event(s), newest first:\n\n- [ticket] 20260116T09:05:00 alice: Ticket #42 (defect): Fix login timeout issue closed (http://trac.example.com/project/ticket/42#comment:4)\n- [wiki] 20260115T17:20:00 bob: DevelopmentGuide edited (http://trac.example.com/project/wiki/DevelopmentGuide?version=3)"
+}
+```
+```json
+{
+  "events": [
+    {
+      "kind": "ticket",
+      "date": "20260116T09:05:00",
+      "author": "alice",
+      "title": "Ticket #42 (defect): Fix login timeout issue closed",
+      "description": "Fixed in the session middleware.",
+      "url": "http://trac.example.com/project/ticket/42#comment:4"
+    },
+    {
+      "kind": "wiki",
+      "date": "20260115T17:20:00",
+      "author": "bob",
+      "title": "DevelopmentGuide edited",
+      "description": "Add the release checklist",
+      "url": "http://trac.example.com/project/wiki/DevelopmentGuide?version=3"
+    }
+  ],
+  "total": 2,
+  "showing": 2
+}
+```
+
+`title`, `description` and `url` are rendered server-side as plain text, not TracWiki or Markdown, and passed through unconverted. `url` is absolute (the plugin renders with `absurls=True`), so it carries the Trac instance's base URL. `date` is Trac's compact `YYYYMMDDTHH:MM:SS` string. `total` and `showing` are both the number of events returned. An empty range answers `No timeline events in the given range.` with `{"events": [], "total": 0, "showing": 0}`.
+
+**Error Responses:**
+
+- **method_not_available:** The `tracrpc_comment` plugin is not installed or enabled on the Trac server
+  ```json
+  {
+    "type": "text",
+    "text": "Error (method_not_available): RPC method \"timeline.getFilters\" not found\n\nAction: This tool needs the 'tracrpc_comment' plugin on the Trac server. Install it from the trac-mcp-server repo's plugins/ directory and enable it with: trac-admin <env> config set components 'tracrpc_comment.*' enabled"
+  }
+  ```
+  With `filters` passed the missing method is `timeline.getEvents`.
+
+- **validation_error:** Missing `start` or `stop`
+  ```json
+  {
+    "type": "text",
+    "text": "Error (validation_error): start, stop is required\n\nAction: Provide start, stop."
+  }
+  ```
+
+**Example Call:**
+```json
+{
+  "name": "timeline_search",
+  "arguments": {
+    "start": 1768521600,
+    "stop": 1768608000,
+    "filters": ["ticket", "wiki"],
+    "max_results": 50
   }
 }
 ```
