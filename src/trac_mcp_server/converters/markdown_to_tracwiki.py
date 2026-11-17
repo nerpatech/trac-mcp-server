@@ -377,13 +377,22 @@ def _item_runs(
     return runs
 
 
+def _ends_with_citation(text: str) -> bool:
+    """Whether the last non-empty line of ``text`` is a Trac citation line
+    (starts with ``>`` once stripped)."""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    return bool(lines) and lines[-1].startswith(">")
+
+
 def _item_block_separator(
     prev_kind: str,
     next_kind: str,
     list_seen: bool,
     prev_text: str,
     next_text: str,
-) -> Literal["br", "adjacent", "blank", "quote_gap", "between"]:
+) -> Literal[
+    "br", "adjacent", "blank", "quote_gap", "between", "marker"
+]:
     """How two neighbouring blocks of a list item are separated (#143, #145).
 
     Trac ends a list at any blank line, so the pre-#143 "blank" is the
@@ -409,16 +418,32 @@ def _item_block_separator(
       (``"\\n\\n"``: it would end the list) or starts a block in Trac
       (``_starts_a_block_in_trac``: a list marker at that column opens an
       item, ``>`` a citation).
+    * ``"marker"`` (#197): a ``quote`` directly after a nested list
+      (``prev_kind == "list"``): no blank line, every ``>`` line at the
+      item's MARKER column. Such a citation line closes every nested list
+      whose marker column is greater, so the quote lands in the outer item
+      (measured on /trac_test: several lines, text after it, a second quote
+      joined by ``>``, an ordered item, depth 1). The item is innermost
+      again afterwards, so the caller resets `list_seen`. Refused
+      (``"blank"``, the pre-#197 form) when the nested list's text
+      (`prev_text`) holds a blank line (Trac has closed every list there, so
+      the ``>`` renders outside the item and the next item starts a new
+      list) or ends with a citation line (the ``>`` joins that
+      blockquote); measured on /trac_test.
 
     A ``quote`` (#145) is Trac's citation syntax, ``> `` lines at the item's
     continuation indent: ``"adjacent"`` after the item text (kind ``para``),
     a ``para``/``text`` run, or a ``code``/``table`` child, and a following
     paragraph is ``"adjacent"`` to it too. ``"blank"`` keeps the pre-#145
     form (blank line, two-space-indented quote) where Trac cannot take the
-    citation: once a nested list has appeared and no paragraph has closed it
-    since (it would attach to the innermost nested item, #112/#125; a
-    ``"between"`` run closes it, #176), and after a run with a passthrough
-    line (F1 below).
+    citation at the continuation indent: once a nested list has appeared and
+    no paragraph or quote has closed it since (it would attach to the
+    innermost nested item, #112/#125; a ``"between"`` run closes it, #176,
+    and so does a quote directly after the list, ``"marker"``, #197), and
+    after a run with a passthrough line (F1 below). Where the list was seen
+    but the quote does not directly follow it (after a ``code`` or ``table``
+    child that attached to the nested item, a ``text`` run, ...) it stays
+    ``"blank"``: unmeasured.
 
     Review fixes (#145): a ``quote`` is also ``"blank"`` after a run whose
     text already holds a blank line, and a paragraph after a quote is
@@ -444,6 +469,12 @@ def _item_block_separator(
     """
     if next_kind == "quote":
         if list_seen:
+            if (
+                prev_kind == "list"
+                and "\n\n" not in prev_text
+                and not _ends_with_citation(prev_text)
+            ):
+                return "marker"
             return "blank"
         if prev_kind == "quote":
             return "quote_gap"
@@ -1242,7 +1273,9 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # text: a code or table block joins at any indent (#144), and
                 # a `>` citation line stays inside the item at marker + 4
                 # (measured), so those keep the text column
-                # (`continuation_indent`). The cap holds only
+                # (`continuation_indent`), except a #197 marker quote,
+                # which goes at the item's marker column (`len(indent)`).
+                # The cap holds only
                 # while Trac still has the list open: a line after an EMPTY
                 # line keeps `continuation_indent` (`_indent_text_lines`).
                 # For a bullet the bound IS the text column, so the `min` is
@@ -1304,6 +1337,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                         separator = _item_block_separator(
                             prev_kind, kind, list_seen, prev_text, ""
                         )
+                        quote_indent = continuation_indent
                         if separator == "blank":
                             parts.append("")
                             rendered = self._render_text_run(
@@ -1311,15 +1345,26 @@ class TracWikiRenderer(mistune.BaseRenderer):
                             ).strip("\n")
                             emitted_kind = "plain_quote"
                         else:
-                            if separator == "quote_gap":
-                                parts.append(continuation_indent + ">")
                             rendered = self._render_item_quote(
                                 run, state
                             ).strip("\n")
+                            if separator == "marker":
+                                # #197: directly after a nested list the
+                                # `>` goes at this item's MARKER column, no
+                                # blank line: that closes the nested
+                                # list(s) and the citation stays in this
+                                # item (measured). It is innermost again,
+                                # so `list_seen` resets; what follows is as
+                                # after any citation (a quote
+                                # `"quote_gap"` at the continuation indent,
+                                # text `"adjacent"`).
+                                quote_indent = " " * len(indent)
+                                list_seen = False
+                            elif separator == "quote_gap":
+                                parts.append(continuation_indent + ">")
                         parts.extend(
                             _indent_nonblank(
-                                rendered.split("\n"),
-                                continuation_indent,
+                                rendered.split("\n"), quote_indent
                             )
                         )
                     elif kind == "code":
@@ -1712,18 +1757,24 @@ def find_list_item_splits(
     in source order, so this shape converts faithfully and then renders
     split, with nothing to tell the author.
 
-    One form keeps the item whole (#176): a paragraph run directly after the
-    nested list, which the writer starts at a column between the item's marker
-    and the nested marker, with no blank line (`_item_block_separator`'s
-    ``"between"``). It is not a finding, and the walk resets as the writer's
-    does: the item is innermost again, so a block after it is the same as in
-    an item with no nested list. The runs are `_item_runs`, the writer's own
-    grouping, and the decision is the writer's too: the run is rendered by
-    the same renderer method (`_render_after_run`) and put through the same
-    `_item_block_separator` call. A run the writer refuses (a passthrough
-    line, a blank line of its own, a first line that starts a block in the
-    TracWiki, not in the Markdown) is still a finding, and so is any other
-    block directly after a nested list.
+    Two forms keep the item whole. A paragraph run directly after the
+    nested list (#176) is started by the writer at a column between the
+    item's marker and the nested marker, with no blank line
+    (`_item_block_separator`'s ``"between"``). A blockquote run directly
+    after it (#197) has its ``>`` lines at the item's marker column with no
+    blank line (``"marker"``), which closes the nested list. Neither is a
+    finding, and the walk resets as the writer's does: the item is innermost
+    again, so a block after it is the same as in an item with no nested
+    list. The runs are `_item_runs`, the writer's own grouping, and the
+    decision is the writer's too: a text run, and the nested list a quote
+    follows, are rendered by the same renderer method
+    (`_render_after_run`) and put through the same
+    `_item_block_separator` call. A quote the writer refuses (the nested
+    list's text holds a blank line or ends with a citation line) is a
+    finding. A text run the writer refuses (a
+    passthrough line, a blank line of its own, a first line that starts a
+    block in the TracWiki, not in the Markdown) is still a finding, and so
+    is any other block (code, table) directly after a nested list.
 
     Parses the same way `markdown_to_tracwiki` does (mistune's AST with
     the same `_MISTUNE_PLUGINS`, over the text after `_stash_bracket_syntax`), so
@@ -1758,6 +1809,7 @@ def find_list_item_splits(
             children = node.get("children", [])
             if kind == "list_item":
                 seen_list = False
+                list_text = ""
                 for run_kind, whole_run in _item_runs(children):
                     run = [
                         c
@@ -1769,7 +1821,28 @@ def find_list_item_splits(
                     child_type = run[0].get("type")
                     if run_kind == "list":
                         seen_list = True
+                        # The writer's text for this run, which its
+                        # separator reads for a quote after it (#197). Out
+                        # of depth context: the two refusals read only
+                        # whether it holds a blank line and what its last
+                        # line is.
+                        renderer._last_char = "\n"
+                        _, list_text = renderer._render_after_run(
+                            run_kind, whole_run, render_state
+                        )
                     elif seen_list:
+                        if (
+                            run_kind == "quote"
+                            and _item_block_separator(
+                                "list", "quote", True, list_text, ""
+                            )
+                            == "marker"
+                        ):
+                            # #197: the writer puts a quote directly after
+                            # a nested list at the marker column, which
+                            # keeps it in the item and closes the list.
+                            seen_list = False
+                            continue
                         if run_kind == "text":
                             renderer._last_char = "\n"
                             kind_after, rendered = (
