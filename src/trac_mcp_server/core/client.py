@@ -354,6 +354,20 @@ V = TypeVar("V")
 _SKIP = object()
 
 
+def _is_global_read_error(err: Exception) -> bool:
+    """True for a ``system.multicall`` failure that the single reads
+    would hit too, so ``_batched_multicall`` raises instead of falling
+    back (Trac /trac_mcp_server #238): a ``requests.ConnectionError``
+    (``ConnectTimeout`` included) or an ``HTTPError`` with status 401 or
+    403. A read ``Timeout`` or a 413/500/502 may be only the batch's
+    size or a passing fault, so those still fall back."""
+    if isinstance(err, requests.ConnectionError):
+        return True
+    return isinstance(err, requests.HTTPError) and (
+        getattr(err.response, "status_code", None) in (401, 403)
+    )
+
+
 def _multicall_value(entry: Any) -> tuple[bool, Any]:
     """``(True, value)`` for one ``system.multicall`` result entry that
     is a value (a one-element list), ``(False, None)`` for a fault (a
@@ -697,6 +711,12 @@ class TracClient:
         - Ids go in batches of ``TICKET_FETCH_BATCH``, one ``ticket.get``
           each; the batching and fallback rules are those of
           ``_batched_multicall``.
+
+        Raises:
+            requests.RequestException: A transport or HTTP error (a
+                connection error, an ``HTTPError``, a timeout of a
+                single read). A per-item failure only leaves that id
+                absent.
         """
         return self._batched_multicall(
             list(dict.fromkeys(ticket_ids)),
@@ -707,8 +727,9 @@ class TracClient:
         )
 
     def _fetch_tickets_singly(self, ids: list[int]) -> dict[int, Any]:
-        """``get_ticket`` per id, skipping an id only on a ``Fault``
-        (see ``_fetch_each``)."""
+        """``get_ticket`` per id; an id whose read fails is skipped,
+        except that a transport or HTTP error propagates (see
+        ``_fetch_each``)."""
         return self._fetch_each(ids, self.get_ticket)
 
     def _fetch_each(
@@ -718,21 +739,26 @@ class TracClient:
         single-read fallback of ``_batched_multicall`` (Trac
         /trac_mcp_server #238).
 
-        An item is skipped only when ``read_one`` raises
-        ``xmlrpc.client.Fault``: a ticket, milestone or page that is
-        missing or not viewable is a per-item fault. Every other
-        exception propagates -- a ``requests.RequestException`` (a
-        refused connection, a timeout, an ``HTTPError`` such as a
-        401/403/5xx) or an ``ElementTree.ParseError`` from an
-        unparseable reply says the read cannot work for any item, and
-        skipping it would make N calls, each waiting out
+        Only transport and HTTP errors propagate: a
+        ``requests.RequestException`` (a refused or dropped connection,
+        a timeout, an ``HTTPError`` such as a 401/403/5xx) says the
+        server cannot be reached, or refuses the session, for every
+        item. Skipping it would make N calls, each waiting out
         ``rpc_timeout``, and report every item absent as success.
+        Anything else -- a ``Fault`` (missing or not viewable), an
+        ``ElementTree.ParseError`` from a reply holding a character
+        XML cannot carry, an ``IndexError`` or ``ValueError`` from
+        decoding one value -- is treated as that item's problem: the
+        item is left out and the others are still read.
         """
         out: dict[K, V] = {}
         for item in items:
             try:
                 out[item] = read_one(item)
-            except xmlrpc.client.Fault:
+            except requests.RequestException:
+                # Not about this item: the read cannot work for any.
+                raise
+            except Exception:
                 continue
         return out
 
@@ -760,9 +786,9 @@ class TracClient:
           drop it; any other return, ``None`` included, is the value.
           It runs only when every entry of the item is a value.
         - ``fetch_singly(items)`` is the one-call-per-item read. It
-          skips an item only on a per-item ``Fault`` (see
-          ``_fetch_each``); a transport or HTTP error from it
-          propagates.
+          skips an item whose read fails, but a transport or HTTP
+          error (``requests.RequestException``) from it propagates
+          (see ``_fetch_each``).
 
         No items makes no RPC. While the server has ``system.multicall``
         the items go in batches of ``batch_size``:
@@ -774,18 +800,23 @@ class TracClient:
         - a ``Fault`` that says ``system.multicall`` is missing is
           remembered (``self._multicall``, shared by every caller) and
           the rest, that batch included, goes to ``fetch_singly``;
-        - any other ``Fault``, or any other exception (a timeout, a
-          dropped connection, an unparseable reply), sends just that
-          batch to ``fetch_singly`` -- one batch failing must not fail
-          the whole read -- and batching goes on.
+        - a ``requests.ConnectionError`` (``ConnectTimeout`` included)
+          or a ``requests.HTTPError`` with status 401 or 403 raises at
+          once: the server is unreachable, or refuses the session, for
+          the single reads too, so they would only wait out another
+          timeout each;
+        - any other ``Fault``, or any other exception (a read
+          ``Timeout`` on a big batch, an ``HTTPError`` such as 413,
+          500 or 502, an unparseable reply), sends just that batch to
+          ``fetch_singly`` -- one batch failing must not fail the
+          whole read -- and batching goes on.
 
         ``fetch_singly`` runs outside the ``try``: an error it raises
-        (a connection error or timeout, an ``HTTPError``, an
-        unparseable reply) propagates, and never triggers a second
-        single read. So a read whose batch failed because the server
-        is unreachable, or the session lost its login, fails after one
-        single call instead of making one per item and returning
-        nothing (Trac /trac_mcp_server #238).
+        (a connection error or timeout, an ``HTTPError``) propagates,
+        and never triggers a second single read. So a read whose batch
+        timed out and whose single reads then find the server
+        unreachable fails after one single call instead of making one
+        per item and returning nothing (Trac /trac_mcp_server #238).
         """
         out: dict[K, V] = {}
         done = 0
@@ -805,7 +836,9 @@ class TracClient:
                     if self._multicall.note_fault(err):
                         break  # no multicall: the rest goes singly
                     fallback = True
-                except Exception:
+                except Exception as err:
+                    if _is_global_read_error(err):
+                        raise
                     fallback = True
                 if fallback:
                     out.update(fetch_singly(batch))
@@ -1566,8 +1599,10 @@ class TracClient:
             on a cut end.
 
         Raises:
-            xmlrpc.client.Fault: If listing the pages fails. A page that
-                cannot be read is skipped.
+            xmlrpc.client.Fault: If listing the pages fails.
+            requests.RequestException: A transport or HTTP error, from
+                the listing or from reading the pages. A page that
+                cannot be read for its own reasons is skipped.
         """
         scope = prefix or ""
         with self._wiki_cache_lock:
@@ -1632,21 +1667,29 @@ class TracClient:
             if held is None or (held.version, held.modified) != key:
                 stale.append(name)
 
-        fetched = self._fetch_wiki_pages(stale)
-        for name in stale:
-            record = fetched.get(name)
-            if record is None:
-                # Unreadable: skipped. Dropping a cached copy is right
-                # too -- it is either stale or no longer readable.
-                changed |= self._wiki_cache.pop(name, None) is not None
-                continue
-            version, modified, text = record
-            self._wiki_cache[name] = _CachedWikiPage(
-                version, modified, split_sections(name, text)
-            )
-            changed = True
-        if changed:
-            self._wiki_scope_index.clear()
+        try:
+            fetched = self._fetch_wiki_pages(stale)
+            for name in stale:
+                record = fetched.get(name)
+                if record is None:
+                    # Unreadable: skipped. Dropping a cached copy is
+                    # right too -- it is either stale or no longer
+                    # readable.
+                    changed |= (
+                        self._wiki_cache.pop(name, None) is not None
+                    )
+                    continue
+                version, modified, text = record
+                self._wiki_cache[name] = _CachedWikiPage(
+                    version, modified, split_sections(name, text)
+                )
+                changed = True
+        finally:
+            # Also when the fetch raises (a transport error): the pages
+            # dropped above are gone for good, and an index kept from
+            # before would go on returning them.
+            if changed:
+                self._wiki_scope_index.clear()
 
     def _fetch_wiki_pages(
         self, names: list[str]
@@ -1656,6 +1699,10 @@ class TracClient:
         Pages go in batches of ``WIKI_FETCH_BATCH_PAGES``; the batching
         and fallback rules are those of ``_batched_multicall``. A page
         that cannot be read is left out of the result.
+
+        Raises:
+            requests.RequestException: A transport or HTTP error. A
+                per-page failure only leaves that page out.
         """
         # Each page is a getPageInfo then a getPage (in that order, so a
         # page edited in between is cached under the older version and
@@ -1675,10 +1722,10 @@ class TracClient:
         self, names: list[str]
     ) -> dict[str, tuple[int | None, str | None, str]]:
         """Read ``names`` one call per page (``getPageInfo`` then
-        ``getPage``). A page whose read raises a ``Fault`` (missing, or
-        not viewable) or whose record fails ``_wiki_page_record``'s
-        shape check is left out; any other error propagates (see
-        ``_fetch_each``)."""
+        ``getPage``). A page whose read fails (a ``Fault``: missing or
+        not viewable; an unparseable reply) or whose record fails
+        ``_wiki_page_record``'s shape check is left out; a transport or
+        HTTP error propagates (see ``_fetch_each``)."""
         records = self._fetch_each(
             names,
             lambda name: _wiki_page_record(
@@ -2325,6 +2372,12 @@ class TracClient:
         - Names go in batches of ``MILESTONE_FETCH_BATCH``, one
           ``ticket.milestone.get`` each; the batching and fallback rules
           are those of ``_batched_multicall``.
+
+        Raises:
+            requests.RequestException: A transport or HTTP error (a
+                connection error, an ``HTTPError``, a timeout of a
+                single read). A per-item failure only leaves that name
+                absent.
         """
         return self._batched_multicall(
             list(dict.fromkeys(names)),
@@ -2339,8 +2392,9 @@ class TracClient:
     def _fetch_milestones_singly(
         self, names: list[str]
     ) -> dict[str, Any]:
-        """``get_milestone`` per name, skipping a name only on a
-        ``Fault`` (see ``_fetch_each``)."""
+        """``get_milestone`` per name; a name whose read fails is
+        skipped, except that a transport or HTTP error propagates (see
+        ``_fetch_each``)."""
         return self._fetch_each(names, self.get_milestone)
 
     def create_milestone(
