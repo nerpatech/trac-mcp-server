@@ -403,7 +403,7 @@ def test_a_page_whose_name_extends_the_documents_is_another_page():
 # Trac builds absolute hrefs from its own base URL, which can differ from the
 # daemon's TRAC_URL (a LAN address against the public name): only the path
 # names the page.
-_LAN = "http://10.0.0.5/auto_pm/wiki/P"
+_LAN = "http://192.0.2.5/auto_pm/wiki/P"
 _PUBLIC_RULE = {
     "https://trac.example/auto_pm/wiki/": "https://b.example/"
 }
@@ -431,7 +431,7 @@ def test_the_root_form_also_ignores_the_host():
     out = md(
         _anchor("https://trac.example/trac_test#Sec"),
         link_map={"https://trac.example/": "https://b.example/"},
-        document_url="http://10.0.0.5/trac_test",
+        document_url="http://192.0.2.5/trac_test",
     )
     assert out == "[x](#Sec)"
 
@@ -440,7 +440,7 @@ def test_the_path_match_still_unquotes_and_ignores_a_trailing_slash():
     out = md(
         _anchor("https://trac.example/auto_pm/wiki/Page%20Two/#Sec"),
         link_map=_PUBLIC_RULE,
-        document_url="http://10.0.0.5/auto_pm/wiki/Page Two",
+        document_url="http://192.0.2.5/auto_pm/wiki/Page Two",
     )
     assert out == "[x](#Sec)"
 

@@ -448,7 +448,7 @@ class TestResolveConfigPath:
         from unittest.mock import patch
 
         project_path = Path("/project/.trac_mcp/config.yml")
-        global_path = Path("/home/user/.config/trac_mcp/config.yml")
+        global_path = Path("/home/USER/.config/trac_mcp/config.yml")
 
         with patch(
             "trac_mcp_server.config_loader.discover_config_files",

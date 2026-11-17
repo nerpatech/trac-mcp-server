@@ -76,15 +76,15 @@ smoke = _load_smoke()
 @pytest.mark.parametrize(
     "given",
     [
-        "http://192.168.10.4:8092",
-        "http://192.168.10.4:8092/",
-        "http://192.168.10.4:8092/mcp",
-        "http://192.168.10.4:8092/mcp/",
-        "  http://192.168.10.4:8092/mcp  ",
+        "http://mcp.example.org:8092",
+        "http://mcp.example.org:8092/",
+        "http://mcp.example.org:8092/mcp",
+        "http://mcp.example.org:8092/mcp/",
+        "  http://mcp.example.org:8092/mcp  ",
     ],
 )
 def test_normalise_base_strips_mcp_and_slash(given):
-    assert smoke.normalise_base(given) == "http://192.168.10.4:8092"
+    assert smoke.normalise_base(given) == "http://mcp.example.org:8092"
 
 
 def test_normalise_base_keeps_scheme_and_a_path_prefix():
@@ -102,7 +102,7 @@ def test_normalise_base_keeps_scheme_and_a_path_prefix():
     [
         "",
         "not a url",
-        "192.168.10.4:8092",
+        "192.0.2.5:8092",
         "ftp://h:8092",
         "http://",
         "http://h:notaport",

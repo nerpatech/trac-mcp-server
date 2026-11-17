@@ -40,20 +40,20 @@ FIXTURES_DIR = (
 # `test_write_gate.py`'s captured `missing ticket` (no href).
 _TICKET_57_ANCHOR = (
     '<a class="closed ticket" '
-    'href="http://192.168.10.4:8000/trac_mcp_server/ticket/57" '
+    'href="https://trac.example.org/trac_mcp_server/ticket/57" '
     'title="#57: defect: convert_preview: unconfigured_intertrac_prefix '
     'misses the realm form, ... (closed: fixed)">#57</a>'
 )
 _TICKET_3_ANCHOR = (
     '<a class="closed ticket" '
-    'href="http://192.168.10.4:8000/trac_mcp_server/ticket/3" '
+    'href="https://trac.example.org/trac_mcp_server/ticket/3" '
     'title="#3: defect: Expand DEFAULT_TICKET_TYPE docstring comment in '
     'mcp/tools/constants.py (closed: fixed)">#3</a>'
 )
 _DEAD_TICKET_ANCHOR = '<a class="missing ticket">#99999</a>'
 MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 
-BASE_URL = "http://192.168.10.4:8000/trac_mcp_server"
+BASE_URL = "https://trac.example.org/trac_mcp_server"
 
 
 def _fixture_html_body(name: str) -> str:

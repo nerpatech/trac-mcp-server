@@ -254,7 +254,7 @@ async def test_main_serves_the_registry_its_config_builds(
         yield {
             "instances": InstanceRegistry(
                 Config(
-                    trac_url="http://192.168.10.4:8000/trac_test",
+                    trac_url="https://trac.example.org/trac_test",
                     username="agent_rpc",
                     password="secret",
                 ),

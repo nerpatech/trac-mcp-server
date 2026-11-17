@@ -18,7 +18,7 @@ from trac_mcp_server.mcp.tools.write_gate import write_gate_line
 
 def _default_config() -> Config:
     return Config(
-        trac_url="http://192.168.10.4:8000/trac_mcp_server",
+        trac_url="https://trac.example.org/trac_mcp_server",
         username="agent_rpc",
         password="secret",
     )
@@ -80,13 +80,13 @@ class TestListInstancesHandler(unittest.TestCase):
                 "path": "/trac_mcp_server",
                 "title": "Trac MCP Server",
                 "description": "",
-                "url": "http://192.168.10.4:8000/trac_mcp_server",
+                "url": "https://trac.example.org/trac_mcp_server",
             },
             {
                 "path": "/bcs",
                 "title": "BCS",
                 "description": "",
-                "url": "http://192.168.10.4:8000/bcs",
+                "url": "https://trac.example.org/bcs",
             },
         ]
 

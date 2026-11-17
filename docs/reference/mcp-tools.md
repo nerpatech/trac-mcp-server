@@ -1461,7 +1461,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 ```json
 {
   "type": "text",
-  "text": "File: /home/user/docs/design.md\nFormat: markdown\nEncoding: utf-8\nSize: 4521 bytes"
+  "text": "File: /home/USER/docs/design.md\nFormat: markdown\nEncoding: utf-8\nSize: 4521 bytes"
 }
 ```
 

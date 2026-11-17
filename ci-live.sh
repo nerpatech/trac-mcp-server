@@ -28,7 +28,7 @@
 # checkout listed, a wiki read, a wiki write with a byte-exact read-back,
 # and a ticket comment post/edit/history (the tracrpc_comment plugin) --
 # see that script's docstring. <url> is the daemon base, e.g.
-# http://192.168.10.4:8092 (a trailing /mcp or / is accepted). The bearer
+# http://mcp.example.org:8092 (a trailing /mcp or / is accepted). The bearer
 # token comes from $TRAC_MCP_AUTH_TOKEN_STAGE, or the variable --token-env
 # names, and is never printed. The exit code is the smoke script's: 0
 # passed, 1 a check failed (an unreachable daemon included), 2 not run (no

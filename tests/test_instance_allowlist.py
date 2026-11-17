@@ -58,7 +58,7 @@ from trac_mcp_server.preview.facts import extract_facts
 from trac_mcp_server.preview.gate import ADVISORY_CODES, is_blocking
 from trac_mcp_server.preview.targets import SKIPPED, probe_targets
 
-HOST = "http://192.168.10.4:8000"
+HOST = "https://trac.example.org"
 TRAC_TEST = f"{HOST}/trac_test"
 AUTO_PM = f"{HOST}/auto_pm"
 
