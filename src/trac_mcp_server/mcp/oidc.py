@@ -46,11 +46,14 @@ logger = logging.getLogger(__name__)
 _MAX_CACHED_CLIENTS = 256
 
 # Tokens Trac answered 401 to (Trac /trac_mcp_server #205). Only a digest
-# is kept. An entry outlives any access token a deployment would plausibly
-# issue, so it is dropped by age rather than held until eviction; FIFO
-# eviction bounds the list for a process that sees many distinct tokens.
+# is kept. The TTL is short on purpose: a 401 can also be transient (the
+# identity provider or a proxy in front of Trac having a bad moment), and
+# the token it hit is then locked out for at most this long. A token that
+# really is revoked or expired is marked again on its next refused call, so
+# a short TTL loses nothing for it. FIFO eviction bounds the list for a
+# process that sees many distinct tokens.
 _MAX_REJECTED_TOKENS = 1024
-_REJECTED_TTL_SECONDS = 3600
+_REJECTED_TTL_SECONDS = 300
 
 
 def extract_bearer_token(
@@ -118,9 +121,14 @@ class OidcClientCache:
             self._rejected[key] = self._clock()
             while len(self._rejected) > _MAX_REJECTED_TOKENS:
                 self._rejected.popitem(last=False)
+        # Drop the dead client so a request that still carries this token
+        # (after the TTL) is built a new one. Not closed: the tool call that
+        # got the 401 may still be using it.
+        with self._lock:
+            self._clients.pop(token, None)
 
     def is_rejected(self, token: str) -> bool:
-        """Whether ``token`` was marked within the last hour."""
+        """Whether ``token`` was marked within the last five minutes."""
         key = self._digest(token)
         with self._rejected_lock:
             recorded = self._rejected.get(key)

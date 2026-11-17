@@ -328,6 +328,23 @@ class TestRejectedTokens:
             assert token not in key
             assert token not in repr(value)
 
+    def test_marking_drops_the_cached_client_without_closing_it(
+        self, base_config
+    ):
+        cache = OidcClientCache(base_config, self._URL)
+        dead = cache.get_client("tokA")
+        other = cache.get_client("tokB")
+        with patch.object(TracClient, "close") as close:
+            cache.mark_rejected("tokA")
+        close.assert_not_called()
+        assert cache.get_client("tokA") is not dead
+        assert cache.get_client("tokB") is other
+
+    def test_marking_a_token_with_no_client_is_fine(self, base_config):
+        cache = OidcClientCache(base_config, self._URL)
+        cache.mark_rejected("never-seen")
+        assert cache.is_rejected("never-seen")
+
     def test_the_list_is_bounded_by_fifo_eviction(
         self, base_config, monkeypatch
     ):
@@ -367,35 +384,59 @@ class TestRejectedTokens:
         assert not cache.is_rejected("tokA")
 
 
-class _Always401(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
+class _Stub(http.server.BaseHTTPRequestHandler):
+    """Answers 401 to every request, except that ``/redirect/307`` and
+    ``/redirect/308`` answer a POST with that redirect to ``/denied``
+    (which answers 401, like the rest)."""
+
+    def _drain(self):
         length = int(self.headers.get("Content-Length") or 0)
         self.rfile.read(length)
+
+    def _deny(self):
         self.send_response(401)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def do_POST(self):
+        self._drain()
+        if self.path.startswith("/redirect/"):
+            self.send_response(int(self.path.rsplit("/", 1)[1]))
+            self.send_header("Location", "/denied")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self._deny()
+
+    def do_GET(self):
+        self._deny()
 
     def log_message(self, *_args):
         pass
 
 
 @pytest.fixture
-def always_401_url():
-    server = http.server.ThreadingHTTPServer(
-        ("127.0.0.1", 0), _Always401
-    )
+def stub_origin():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Stub)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/rpc"
+        yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
         server.server_close()
 
 
-class TestUnauthorizedHook:
-    """TracClient reports a 401 to ``on_unauthorized``, against a real
-    HTTP server."""
+@pytest.fixture
+def always_401_url(stub_origin):
+    return f"{stub_origin}/rpc"
+
+
+class TestUnauthorizedCallback:
+    """TracClient reports a 401 from its RPC endpoint to
+    ``on_unauthorized``, against a real HTTP server. Only that: a 401 on
+    any other request the session makes is not a statement about the
+    token."""
 
     def _bearer_config(self, url: str) -> Config:
         return Config(
@@ -419,7 +460,9 @@ class TestUnauthorizedHook:
             client.get_ticket(1)
         assert calls == [1]
 
-    def test_basic_auth_client_gets_no_hook(self, always_401_url):
+    def test_basic_auth_client_does_not_fire_the_callback(
+        self, always_401_url
+    ):
         calls = []
         client = TracClient(
             Config(
@@ -447,13 +490,12 @@ class TestUnauthorizedHook:
                 client.get_ticket(1)
         assert "bookkeeping failed" in caplog.text
 
-    def test_no_callback_no_hook(self, always_401_url):
+    def test_no_callback_still_raises(self, always_401_url):
         client = TracClient(self._bearer_config(always_401_url))
-        assert client.session.hooks["response"] == []
         with pytest.raises(requests.HTTPError):
             client.get_ticket(1)
 
-    def test_the_hook_is_on_every_threads_session(self, always_401_url):
+    def test_every_thread_reports(self, always_401_url):
         calls = []
         client = TracClient(
             self._bearer_config(always_401_url),
@@ -464,24 +506,44 @@ class TestUnauthorizedHook:
             with pytest.raises(requests.HTTPError):
                 client.get_ticket(1)
 
+        call()
         worker = threading.Thread(target=call)
         worker.start()
         worker.join()
-        assert calls == [1]
+        assert calls == [1, 1]
 
-    def test_the_hook_survives_close(self, always_401_url):
-        """close() leaves the session usable; the hook stays on it."""
+    def test_a_401_on_a_non_rpc_get_does_not_fire_the_callback(
+        self, stub_origin
+    ):
+        """The link probes and the render fetch GET pages on the session;
+        this host answers a permission denial there with 401."""
         calls = []
         client = TracClient(
-            self._bearer_config(always_401_url),
+            self._bearer_config(f"{stub_origin}/rpc"),
             on_unauthorized=lambda: calls.append(1),
         )
-        with pytest.raises(requests.HTTPError):
+        response = client.session.get(
+            f"{stub_origin}/ticket/1", timeout=5
+        )
+        assert response.status_code == 401
+        assert calls == []
+
+    @pytest.mark.parametrize("code", [307, 308])
+    def test_a_401_after_a_redirect_does_not_fire_the_callback(
+        self, stub_origin, code
+    ):
+        """The 401 came from the redirect's target, not from the RPC
+        URL."""
+        calls = []
+        client = TracClient(
+            self._bearer_config(f"{stub_origin}/redirect/{code}"),
+            on_unauthorized=lambda: calls.append(1),
+        )
+        with pytest.raises(requests.HTTPError) as raised:
             client.get_ticket(1)
-        client.close()
-        with pytest.raises(requests.HTTPError):
-            client.get_ticket(1)
-        assert calls == [1, 1]
+        assert raised.value.response.history
+        assert raised.value.response.url == f"{stub_origin}/denied"
+        assert calls == []
 
     def test_a_cached_client_marks_its_own_token(self, always_401_url):
         cache = OidcClientCache(

@@ -431,11 +431,15 @@ class TracClient:
     ):
         """Build a client for ``config``.
 
-        ``on_unauthorized`` is called, with no arguments, each time Trac
-        answers a bearer-token request with 401 (Trac /trac_mcp_server
-        #205). It is never used with Basic auth, and an exception it
-        raises is logged at DEBUG and dropped, so it cannot replace the
-        error the caller is about to get.
+        ``on_unauthorized`` is called, with no arguments, each time the
+        RPC endpoint answers a bearer-token call with 401 (Trac
+        /trac_mcp_server #205). Only ``_rpc_call`` reports it, and only
+        for a 401 that came straight from ``rpc_url``: a 401 on a page
+        the session fetches for the link probes or the render check, or
+        after a redirect, says nothing about the token. It is never used
+        with Basic auth, and an exception it raises is logged at DEBUG
+        and dropped, so it cannot replace the error the caller is about
+        to get.
         """
         self.config = config
         self._on_unauthorized = on_unauthorized
@@ -534,11 +538,6 @@ class TracClient:
         else:
             session.auth = (self.config.username, self.config.password)
         session.verify = not self.config.insecure
-        if (
-            self.config.bearer_token
-            and self._on_unauthorized is not None
-        ):
-            session.hooks["response"].append(self._report_unauthorized)
 
         # Keep pooled connections alive at the TCP level. Without this a
         # long-lived server that goes idle between calls silently accumulates
@@ -549,22 +548,18 @@ class TracClient:
         session.mount("https://", adapter)
         return session
 
-    def _report_unauthorized(
-        self, response: requests.Response, *_args: Any, **_kwargs: Any
-    ) -> None:
-        """``requests`` response hook: tell ``on_unauthorized`` of a 401.
+    @staticmethod
+    def _report_unauthorized(callback: Callable[[], None]) -> None:
+        """Tell ``callback`` the RPC endpoint refused the token.
 
-        Returns None so ``requests`` keeps the response as it is.
+        Never raises: a failure in the callback is logged at DEBUG.
         """
-        if response.status_code != 401 or self._on_unauthorized is None:
-            return None
         try:
-            self._on_unauthorized()
+            callback()
         except Exception:
             logger.debug(
                 "on_unauthorized callback failed", exc_info=True
             )
-        return None
 
     def _rpc_call(
         self, service: str, method: str, *params
@@ -587,6 +582,16 @@ class TracClient:
             headers=headers,
             timeout=(10, self.config.rpc_timeout),
         )
+        # Recorded before raise_for_status(), so a caller that swallows
+        # the HTTPError cannot hide the rejection. A redirect's target
+        # answering 401 is not the RPC endpoint refusing the token.
+        if (
+            self._on_unauthorized is not None
+            and self.config.bearer_token
+            and response.status_code == 401
+            and not response.history
+        ):
+            self._report_unauthorized(self._on_unauthorized)
         response.raise_for_status()
         return response
 
