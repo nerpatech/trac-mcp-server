@@ -144,6 +144,19 @@ _SINGLE_BRACKET_LINK_RE = re.compile(
 )
 
 
+# Trac's quoted-target bracket link: `['Page']` or `["Page"]`, with an
+# optional label after whitespace (`['Page' label]`). Measured on this
+# host: `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so
+# Markdown prose that subscripts with a string key would become one (and
+# the write gate refuses the push). `(?!\()` leaves a Markdown inline
+# link (`["T"](url)`) to mistune. There is no lookahead for `[`, so
+# chained subscripts (`x['a']['b']`) are both caught. A span with no
+# closing bracket (`y['k'`) is not a link and does not match (ticket #241).
+_QUOTED_BRACKET_LINK_RE = re.compile(
+    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[ \t][^\]\n]*)?\](?!\()"""
+)
+
+
 # The character references CommonMark decodes in text (spec section
 # "Entity and numeric character references"): a name ending in ";", or
 # "&#" with 1-7 decimal / "&#x" with 1-6 hex digits, ending in ";".
@@ -258,6 +271,11 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     ticket #44) is stashed last, after `[[...]]` is already out of the way,
     so a double-bracket span never has its own outer brackets mistaken for
     the single-bracket form's opening/closing pair.
+
+    Trac's quoted-target bracket link shape (`_QUOTED_BRACKET_LINK_RE`,
+    `x['KEY']`, `d["key"]`) is stashed right after it, as typed, so the
+    span reaches `text()` whole; `text()` adds Trac's `!` escape there,
+    and a code span or code block restores it unescaped (ticket #241).
     """
     placeholders: list[str] = []
 
@@ -272,6 +290,7 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
+    text = _QUOTED_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
 
 
@@ -711,11 +730,32 @@ class TracWikiRenderer(mistune.BaseRenderer):
         would make Trac render a blockquote and HTML collapses them
         there anyway. Decoding comes before the CamelCase escape, so a
         reference that spells a CamelCase word still gets its ``!``.
+
+        A stashed quoted-target bracket link (`_QUOTED_BRACKET_LINK_RE`,
+        ``x['KEY']``, ``d["key"]``) that reaches this method is prose, and
+        Trac would read it as a wiki link, so its placeholder gets Trac's
+        ``!`` escape here, unless a ``!`` already precedes it (ticket
+        #241). The escape is applied here, not stored in the placeholder,
+        because the same placeholder restored inside a code span or code
+        block must stay as typed: those never reach this method.
         """
         typed = text
         text = _decode_char_refs(text)
         if typed.startswith("&") and self._last_char == "\n":
             text = text.lstrip(" ")
+
+        def escape_quoted_bracket(m: re.Match[str]) -> str:
+            n = int(m.group(1))
+            if n >= len(self._placeholders):
+                return m.group(0)
+            stored = self._placeholders[n]
+            if not _QUOTED_BRACKET_LINK_RE.fullmatch(stored):
+                return m.group(0)
+            if m.start() > 0 and m.string[m.start() - 1] == "!":
+                return m.group(0)
+            return "!" + m.group(0)
+
+        text = _PLACEHOLDER_RE.sub(escape_quoted_bracket, text)
 
         def escape(segment: str) -> str:
             return _CAMELCASE_RE.sub(
