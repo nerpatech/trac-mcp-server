@@ -12,6 +12,7 @@ parser-rule rows read `markdown_to_tracwiki` (Markdown in, TracWiki out).
 import asyncio
 import importlib.util
 import sys
+import time
 import types
 from unittest.mock import MagicMock
 
@@ -895,50 +896,175 @@ def test_the_split_detector_parses_with_the_math_rules():
     assert [f["block"] for f in found] == ["code block"]
 
 
-# 5. Adversarial input stays linear (seconds before, a few hundredths now).
+# 5. Adversarial input grows linearly (the ratio check of #243).
+#
+# A wall-clock bound ("under one second") failed whenever the host was busy:
+# `many backtick runs` takes 0.68 s quiet, and with 12 busy processes on an
+# 8-core host even CPU time rose to 1.01 s. So the test compares an input
+# with the same input GROWTH_FACTOR times smaller, in CPU time
+# (`time.process_time`), and bounds the ratio of the two. Measured (minimum
+# of 3 runs), for all 12 cases below: linear growth gives a ratio of about 8
+# (6.9-8.9 quiet, 7.6-8.5 with 12 busy processes), and a deliberately
+# quadratic function gives about 62 (61-62 in both conditions). GROWTH_LIMIT
+# sits between the two, so load cannot fail a linear case and a quadratic
+# one cannot pass.
 
+GROWTH_FACTOR = 8
+GROWTH_LIMIT = 20
+
+
+def _openers(count):
+    return "\\(a " * count
+
+
+def _bracket_openers(count):
+    return "x \\[a " * count
+
+
+def _display_paragraphs(count):
+    return "\\[a\n\n" * count
+
+
+def _display_one_paragraph(count):
+    return "\\[a\n" * count
+
+
+def _doubled_openers(count):
+    return "\\\\(a " * count
+
+
+def _lone_languages(count):
+    return "python\n" * count
+
+
+def _languages_then_markers(count):
+    return "bash\nUse code with caution.\n" * count
+
+
+def _indented_lines(count):
+    return "para\n\n" + "    \u2022 x\n" * count
+
+
+def _url_starts(count):
+    return "https://" * count
+
+
+def _alternating_fences(count):
+    return "~~~\n```\n" * count
+
+
+def _urls_with_utm(count):
+    return "https://a.com/?utm_source=x&b=1 " * count
+
+
+def _backtick_runs(count):
+    return "".join("`" * (i % 40 + 1) + "a " for i in range(count))
+
+
+# name -> (flavor, build, n): build(count) returns the input, and build(n)
+# is the full-size input.
 ADVERSARIAL = {
-    "64KB of unclosed inline openers": ("chatgpt", "\\(a " * 16384),
-    "8000 unclosed bracket openers": ("chatgpt", "x \\[a " * 8000),
-    "8000 unclosed display paragraphs": ("chatgpt", "\\[a\n\n" * 8000),
+    "64KB of unclosed inline openers": ("chatgpt", _openers, 16384),
+    "8000 unclosed bracket openers": (
+        "chatgpt",
+        _bracket_openers,
+        8000,
+    ),
+    "8000 unclosed display paragraphs": (
+        "chatgpt",
+        _display_paragraphs,
+        8000,
+    ),
     "8000 display openers in one paragraph": (
         "chatgpt",
-        "\\[a\n" * 8000,
+        _display_one_paragraph,
+        8000,
     ),
-    "doubled openers": ("chatgpt", "\\\\(a " * 8000),
-    "10000 lone language lines": ("gemini", "python\n" * 10000),
+    "doubled openers": ("chatgpt", _doubled_openers, 8000),
+    "10000 lone language lines": ("gemini", _lone_languages, 10000),
     "10000 languages then markers": (
         "gemini",
-        "bash\nUse code with caution.\n" * 5000,
+        _languages_then_markers,
+        5000,
     ),
-    "10000 indented lines": (
-        "gemini",
-        "para\n\n" + "    \u2022 x\n" * 10000,
-    ),
-    "20000 URL starts": ("chatgpt", "https://" * 20000),
-    "5000 alternating fences": ("gemini", "~~~\n```\n" * 5000),
-    "5000 URLs with utm": (
-        "chatgpt",
-        "https://a.com/?utm_source=x&b=1 " * 5000,
-    ),
-    "many backtick runs": (
-        "chatgpt",
-        "".join("`" * (i % 40 + 1) + "a " for i in range(20000)),
-    ),
+    "10000 indented lines": ("gemini", _indented_lines, 10000),
+    "20000 URL starts": ("chatgpt", _url_starts, 20000),
+    "5000 alternating fences": ("gemini", _alternating_fences, 5000),
+    "5000 URLs with utm": ("chatgpt", _urls_with_utm, 5000),
+    "many backtick runs": ("chatgpt", _backtick_runs, 20000),
 }
 
 
+def _cpu_time(fn, source, repeats):
+    best = None
+    for _ in range(repeats):
+        started = time.process_time()
+        fn(source)
+        elapsed = time.process_time() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+def _growth_times(fn, build, n, k=GROWTH_FACTOR, repeats=3):
+    """Return (small, big): the least CPU time of `repeats` runs of
+    fn(build(n // k)) and of fn(build(n)). Inputs are built outside the
+    timed region."""
+    small_input = build(n // k)
+    big_input = build(n)
+    return (
+        _cpu_time(fn, small_input, repeats),
+        _cpu_time(fn, big_input, repeats),
+    )
+
+
+def _growth_ratio(fn, build, n, k=GROWTH_FACTOR, repeats=3):
+    """How much longer fn takes on build(n) than on build(n // k)."""
+    small, big = _growth_times(fn, build, n, k, repeats)
+    return big / small
+
+
 @pytest.mark.parametrize(
-    ("flavor", "source"),
+    ("flavor", "build", "n"),
     list(ADVERSARIAL.values()),
     ids=list(ADVERSARIAL),
 )
-def test_adversarial_input_finishes_quickly(flavor, source):
-    import time
+def test_adversarial_input_grows_linearly(flavor, build, n):
+    def convert(source):
+        return markdown_to_tracwiki(source, flavor=flavor)
 
-    started = time.perf_counter()
-    markdown_to_tracwiki(source, flavor=flavor)
-    assert time.perf_counter() - started < 1.0
+    small, big = _growth_times(convert, build, n)
+    ratio = big / small
+    assert ratio < GROWTH_LIMIT, (
+        f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
+        f"(limit {GROWTH_LIMIT}x): {small:.4f}s at n={n // GROWTH_FACTOR}, "
+        f"{big:.4f}s at n={n}"
+    )
+
+
+def _quadratic(source):
+    for i in range(0, len(source), 4):
+        source[:i].count("a")
+
+
+def _linear(source):
+    for _ in range(1000):
+        source.count("a")
+
+
+def _ab(count):
+    return "ab" * count
+
+
+def test_growth_ratio_flags_a_quadratic_function():
+    # The small size (4096 repetitions) takes about 5 ms, well above the
+    # timer's noise; the big one about 0.3 s.
+    ratio = _growth_ratio(_quadratic, _ab, 8 * 4096)
+    assert ratio >= GROWTH_LIMIT
+
+
+def test_growth_ratio_passes_a_linear_function():
+    ratio = _growth_ratio(_linear, _ab, 8 * 4096)
+    assert ratio < GROWTH_LIMIT
 
 
 def test_a_long_closed_formula_still_converts():
