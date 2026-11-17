@@ -707,12 +707,32 @@ class TracClient:
         )
 
     def _fetch_tickets_singly(self, ids: list[int]) -> dict[int, Any]:
-        """``get_ticket`` per id, skipping any that fail."""
-        out: dict[int, Any] = {}
-        for tid in ids:
+        """``get_ticket`` per id, skipping an id only on a ``Fault``
+        (see ``_fetch_each``)."""
+        return self._fetch_each(ids, self.get_ticket)
+
+    def _fetch_each(
+        self, items: list[K], read_one: Callable[[K], V]
+    ) -> dict[K, V]:
+        """``{item: read_one(item)}``, one call per item, for the
+        single-read fallback of ``_batched_multicall`` (Trac
+        /trac_mcp_server #238).
+
+        An item is skipped only when ``read_one`` raises
+        ``xmlrpc.client.Fault``: a ticket, milestone or page that is
+        missing or not viewable is a per-item fault. Every other
+        exception propagates -- a ``requests.RequestException`` (a
+        refused connection, a timeout, an ``HTTPError`` such as a
+        401/403/5xx) or an ``ElementTree.ParseError`` from an
+        unparseable reply says the read cannot work for any item, and
+        skipping it would make N calls, each waiting out
+        ``rpc_timeout``, and report every item absent as success.
+        """
+        out: dict[K, V] = {}
+        for item in items:
             try:
-                out[tid] = self.get_ticket(tid)
-            except Exception:
+                out[item] = read_one(item)
+            except xmlrpc.client.Fault:
                 continue
         return out
 
@@ -739,7 +759,10 @@ class TracClient:
           per entry, in order) into its value, or returns ``_SKIP`` to
           drop it; any other return, ``None`` included, is the value.
           It runs only when every entry of the item is a value.
-        - ``fetch_singly(items)`` is the one-call-per-item read.
+        - ``fetch_singly(items)`` is the one-call-per-item read. It
+          skips an item only on a per-item ``Fault`` (see
+          ``_fetch_each``); a transport or HTTP error from it
+          propagates.
 
         No items makes no RPC. While the server has ``system.multicall``
         the items go in batches of ``batch_size``:
@@ -757,7 +780,12 @@ class TracClient:
           the whole read -- and batching goes on.
 
         ``fetch_singly`` runs outside the ``try``: an error it raises
-        propagates, and never triggers a second single read.
+        (a connection error or timeout, an ``HTTPError``, an
+        unparseable reply) propagates, and never triggers a second
+        single read. So a read whose batch failed because the server
+        is unreachable, or the session lost its login, fails after one
+        single call instead of making one per item and returning
+        nothing (Trac /trac_mcp_server #238).
         """
         out: dict[K, V] = {}
         done = 0
@@ -1647,20 +1675,21 @@ class TracClient:
         self, names: list[str]
     ) -> dict[str, tuple[int | None, str | None, str]]:
         """Read ``names`` one call per page (``getPageInfo`` then
-        ``getPage``), skipping any that cannot be read."""
-        out: dict[str, tuple[int | None, str | None, str]] = {}
-        for name in names:
-            try:
-                record = _wiki_page_record(
-                    self.get_wiki_page_info(name),
-                    self.get_wiki_page(name),
-                )
-            except Exception:
-                # Skip pages that can't be read (permission denied, etc.)
-                continue
-            if record is not None:
-                out[name] = record
-        return out
+        ``getPage``). A page whose read raises a ``Fault`` (missing, or
+        not viewable) or whose record fails ``_wiki_page_record``'s
+        shape check is left out; any other error propagates (see
+        ``_fetch_each``)."""
+        records = self._fetch_each(
+            names,
+            lambda name: _wiki_page_record(
+                self.get_wiki_page_info(name), self.get_wiki_page(name)
+            ),
+        )
+        return {
+            name: record
+            for name, record in records.items()
+            if record is not None
+        }
 
     def put_wiki_page(
         self,
@@ -2310,14 +2339,9 @@ class TracClient:
     def _fetch_milestones_singly(
         self, names: list[str]
     ) -> dict[str, Any]:
-        """``get_milestone`` per name, skipping any that fail."""
-        out: dict[str, Any] = {}
-        for name in names:
-            try:
-                out[name] = self.get_milestone(name)
-            except Exception:
-                continue
-        return out
+        """``get_milestone`` per name, skipping a name only on a
+        ``Fault`` (see ``_fetch_each``)."""
+        return self._fetch_each(names, self.get_milestone)
 
     def create_milestone(
         self, name: str, attributes: dict[str, Any]
