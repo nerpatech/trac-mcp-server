@@ -7,7 +7,6 @@ from typing import Any, Literal, cast
 import mistune
 
 from .common import (
-    _LANG_ATTRIBUTE_RE,
     _LIST_MARKER_RE,
     SCHEME_RE,
     TRACLINK_SCHEMES,
@@ -662,10 +661,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # `block_quote()` then emits Trac citation lines, `> `-prefixed, at
         # every nesting level, instead of the two-space-indented form.
         self._citation = False
-        # Fence languages `block_code` wrote as `#!text lang=NAME` because
-        # Trac has no processor for them, in order of appearance, with
-        # repeats (ticket #240). `convert_with_warnings` reports them.
-        self.downgraded_fence_languages: list[str] = []
+        # (name, opener) of each code fence `block_code` wrote as a plain
+        # `#!text` block because Trac does not highlight the language, in
+        # order of appearance, with repeats (ticket #240). The name is as
+        # typed, so it may still hold placeholder sentinels.
+        self.downgraded_fences: list[tuple[str, str]] = []
 
     def text(self, text: str) -> str:
         """Render plain text.
@@ -932,7 +932,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
             # (ticket #240)
             opener, downgraded = fence_processor(info)
             if downgraded is not None:
-                self.downgraded_fence_languages.append(downgraded)
+                self.downgraded_fences.append((downgraded, opener))
             return f"{{{{{{{opener}\n{code}\n}}}}}}\n\n"
         else:
             return f"{{{{{{\n{code}\n}}}}}}\n\n"
@@ -1679,13 +1679,14 @@ def _render_markdown(
     *,
     heading_anchors: bool,
     flavor: str,
-    downgraded_fences: list[str] | None = None,
+    downgraded_fences: list[tuple[str, str]] | None = None,
 ) -> str:
     """Convert Markdown that has already been through the flavour's
     pre-normalisers (`apply_flavor`).
 
-    ``downgraded_fences``, when given, is extended with the language of
-    each code fence written as ``#!text lang=NAME`` (ticket #240)."""
+    ``downgraded_fences``, when given, is extended with the
+    ``(name, opener)`` of each code fence written as a plain ``#!text``
+    block, with placeholders resolved (ticket #240)."""
     # Stash code spans / [[...]] / single-bracket link
     # spans before mistune ever sees a "`" or a "[" (see
     # _stash_bracket_syntax for why this can't happen inside text()).
@@ -1709,7 +1710,13 @@ def _render_markdown(
     # Parse and render
     result: str = markdown(stashed_text)  # type: ignore[assignment]
     if downgraded_fences is not None:
-        downgraded_fences.extend(renderer.downgraded_fence_languages)
+        downgraded_fences.extend(
+            (
+                _restore_bracket_syntax(name, placeholders),
+                _restore_bracket_syntax(opener, placeholders),
+            )
+            for name, opener in renderer.downgraded_fences
+        )
 
     result = _restore_bracket_syntax(result, placeholders)
 
@@ -1812,7 +1819,7 @@ def convert_with_warnings(
         warnings.append(_GEMINI_HINT)
 
     # Convert the markdown
-    downgraded_fences: list[str] = []
+    downgraded_fences: list[tuple[str, str]] = []
     tracwiki = _render_markdown(
         markdown_text,
         heading_anchors=heading_anchors,
@@ -1820,16 +1827,17 @@ def convert_with_warnings(
         downgraded_fences=downgraded_fences,
     )
 
-    # Ticket #240: one warning per distinct name, in order of appearance.
-    for name in dict.fromkeys(downgraded_fences):
-        written = (
-            f"{{{{{{#!text lang={name}}}}}}}"
-            if _LANG_ATTRIBUTE_RE.fullmatch(name)
-            else "{{{#!text}}}"
-        )
+    # Ticket #240: one warning per distinct name, in order of appearance,
+    # naming the opener that was written.
+    seen: set[str] = set()
+    for name, opener in downgraded_fences:
+        if name in seen:
+            continue
+        seen.add(name)
         warnings.append(
-            f"Code fence language '{name}' has no Trac processor; "
-            f"written as a plain code block ({written})."
+            f"Code fence language '{name}' is not a language Trac "
+            f"highlights; written as a plain code block "
+            f"({{{{{{{opener}}}}}}})."
         )
 
     return ConversionResult(

@@ -102,26 +102,103 @@ def test_the_allow_list_has_no_trac_processor_names():
         assert name in TRAC_CODE_LANGUAGES, name
 
 
-FENCE_WARNING = "Code fence language '{name}' has no Trac processor"
+def _fence_warnings(md: str) -> list[str]:
+    return [
+        w
+        for w in convert_with_warnings(md).warnings
+        if w.startswith("Code fence language")
+    ]
 
 
 def test_one_warning_per_distinct_downgraded_name_in_order():
     md = _fence("pf") + "\n" + _fence("graphql") + "\n" + _fence("pf")
-    warnings = convert_with_warnings(md).warnings
-    fence = [w for w in warnings if w.startswith("Code fence language")]
-    assert fence == [
-        "Code fence language 'pf' has no Trac processor; written as a "
-        "plain code block ({{{#!text lang=pf}}}).",
-        "Code fence language 'graphql' has no Trac processor; written "
-        "as a plain code block ({{{#!text lang=graphql}}}).",
+    assert _fence_warnings(md) == [
+        "Code fence language 'pf' is not a language Trac highlights; "
+        "written as a plain code block ({{{#!text lang=pf}}}).",
+        "Code fence language 'graphql' is not a language Trac "
+        "highlights; written as a plain code block "
+        "({{{#!text lang=graphql}}}).",
     ]
 
 
 def test_the_warning_for_a_rejected_name_names_the_bare_form():
-    warnings = convert_with_warnings(_fence("p}}}f")).warnings
-    assert warnings == [
-        "Code fence language 'p}}}f' has no Trac processor; written as "
-        "a plain code block ({{{#!text}}})."
+    assert convert_with_warnings(_fence("p}}}f")).warnings == [
+        "Code fence language 'p}}}f' is not a language Trac "
+        "highlights; written as a plain code block ({{{#!text}}})."
+    ]
+
+
+# -- Trac's processor-name grammar: [\w+-][\w+/-]* --------------------------
+
+
+@pytest.mark.parametrize(
+    ("info", "opener"),
+    [
+        ("c#", "#!csharp"),
+        ("f#", "#!fsharp"),
+        ("python{1,3}", "#!python"),
+        ("python:file.py", "#!python"),
+        ("js{2}", "#!javascript"),
+        ("PYTHON{1}", "#!python"),
+    ],
+)
+def test_an_info_string_suffix_is_dropped_and_the_name_mapped(
+    info, opener
+):
+    assert markdown_to_tracwiki(_fence(info)) == (
+        f"{{{{{{{opener}\nx\n}}}}}}"
+    )
+    assert _fence_warnings(_fence(info)) == []
+
+
+@pytest.mark.parametrize("info", ["pf{1}", "pf:file", "{x", "div{1}"])
+def test_a_suffixed_name_that_is_not_highlighted_falls_back(info):
+    assert markdown_to_tracwiki(_fence(info)) == "{{{#!text\nx\n}}}"
+
+
+def test_a_prefix_that_trac_would_run_as_c_is_written_as_c():
+    # Trac reads `{{{#!c#x` as processor `c`, so that is what we emit.
+    assert markdown_to_tracwiki(_fence("c#x")) == "{{{#!c\nx\n}}}"
+
+
+def test_the_grammar_constant_is_trac_s_processor_name_grammar():
+    from trac_mcp_server.converters.common import PROCESSOR_NAME_RE
+
+    assert PROCESSOR_NAME_RE.pattern == r"[\w+-][\w+/-]*"
+    assert PROCESSOR_NAME_RE.fullmatch("text/html")
+    assert not PROCESSOR_NAME_RE.fullmatch("c#")
+
+
+def test_the_allow_list_holds_only_names_of_the_grammar():
+    from trac_mcp_server.converters.common import PROCESSOR_NAME_RE
+    from trac_mcp_server.converters.fence_languages import (
+        TRAC_CODE_LANGUAGES,
+    )
+
+    assert "csharp" in TRAC_CODE_LANGUAGES
+    assert "fsharp" in TRAC_CODE_LANGUAGES
+    for name in TRAC_CODE_LANGUAGES:
+        assert PROCESSOR_NAME_RE.fullmatch(name), name
+
+
+# -- Placeholders in the info string never reach the warning ------------------
+
+
+def test_a_bracket_macro_info_string_is_restored_in_the_warning():
+    result = convert_with_warnings("```[[x]]\ncode\n```\n")
+    assert result.text == "{{{#!text\ncode\n}}}"
+    assert result.warnings == [
+        "Code fence language '[[x]]' is not a language Trac "
+        "highlights; written as a plain code block ({{{#!text}}})."
+    ]
+
+
+def test_a_code_span_info_string_is_restored_in_the_warning():
+    result = convert_with_warnings("~~~`x`\ncode\n~~~\n")
+    assert result.text == "{{{#!text\ncode\n}}}"
+    assert result.warnings == [
+        "Code fence language '`x`' is not a language Trac "
+        "highlights; written as a plain code block ({{{#!text}}})."
     ]
 
 

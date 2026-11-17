@@ -81,6 +81,29 @@ def test_no_source_means_no_language_and_no_warning():
     assert r.warnings == []
 
 
+def test_a_text_block_with_lang_exports_that_language():
+    """`{{{#!text lang=pf` is what the writer emits for a fence Trac
+    cannot highlight (Trac /trac_mcp_server #240)."""
+    assert (
+        md(code("x\n"), "{{{#!text lang=pf\nx\n}}}") == "```pf\nx\n```"
+    )
+
+
+def test_a_text_lang_on_the_line_after_the_opener_counts():
+    src = "{{{\n#!text lang=pf\nx\n}}}"
+    assert md(code("x\n"), src) == "```pf\nx\n```"
+
+
+def test_text_html_exports_as_an_html_fence():
+    assert md(
+        code("&lt;p&gt;x&lt;/p&gt;\n"), "{{{#!text/html\n<p>x</p>\n}}}"
+    ) == ("```html\n<p>x</p>\n```")
+
+
+def test_a_plain_text_block_still_exports_as_text():
+    assert md(code("x\n"), "{{{#!text\nx\n}}}") == "```text\nx\n```"
+
+
 def test_languages_pair_in_document_order():
     html = code("a = 1\n") + code("ls\n")
     src = "{{{#!python\na = 1\n}}}\n\ntext\n\n{{{#!sh\nls\n}}}\n"
@@ -113,7 +136,7 @@ def test_processors_that_make_no_code_block_are_not_counted(name):
     assert md(code("x = 1\n"), src) == "```python\nx = 1\n```"
 
 
-@pytest.mark.parametrize("name", ["text/html", "rst", "markdown"])
+@pytest.mark.parametrize("name", ["rst", "markdown"])
 def test_other_names_do_make_a_code_block(name):
     src = f"{{{{{{#!{name}\nbody\n}}}}}}"
     assert md(code("body\n"), src).startswith(f"```{name}\n")

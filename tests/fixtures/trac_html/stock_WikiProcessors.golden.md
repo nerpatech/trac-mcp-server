@@ -148,7 +148,7 @@ Some examples:
 </pre></td><td><p>
 The result will be syntax highlighted HTML code:
 </p>
-<pre><code class="language-text/html">&lt;h1&gt;text&lt;/h1&gt;</code></pre><p>
+<pre><code class="language-html">&lt;h1&gt;text&lt;/h1&gt;</code></pre><p>
 The same is valid for all other <a href="https://trac.example.org/trac_mcp_server/wiki/TracSyntaxColoring#SyntaxColoringSupport">mime types supported</a>.
 </p>
 </td></tr><tr><td><pre>{{{#!diff

@@ -40,6 +40,10 @@ _MARKDOWN_TO_TRACWIKI_MAP: dict[str, str] = {
     "ts": "typescript",
     # C++ variants
     "c++": "cpp",
+    # `#` is outside Trac's processor-name grammar (PROCESSOR_NAME_RE), so
+    # `{{{#!c#` would run `c`: these two are mapped as whole words
+    "c#": "csharp",
+    "f#": "fsharp",
     # A Markdown fence means "show this code": `#!html` would render the
     # HTML, and is never emitted from Markdown (ticket #240)
     "html": "text/html",
@@ -60,10 +64,13 @@ _TRACWIKI_TO_MARKDOWN_CANONICAL: dict[str, str] = {
     "typescript": "typescript",
     "cpp": "cpp",
     "text": "text",
+    # What `markdown_to_tracwiki` writes for an `html` fence (ticket #240)
+    "text/html": "html",
 }
 
 # Languages that are identical in both formats (no mapping needed, but listed for documentation)
-# These pass through unchanged: python, java, c, ruby, go, rust, sql, html, css, xml, json, yaml, diff
+# These pass through unchanged: python, java, c, ruby, go, rust, sql, css, xml, json, yaml, diff
+# (not html: a Markdown `html` fence is written as `text/html`, ticket #240)
 _IDENTITY_LANGUAGES: frozenset[str] = frozenset(
     {
         "python",
@@ -73,7 +80,6 @@ _IDENTITY_LANGUAGES: frozenset[str] = frozenset(
         "go",
         "rust",
         "sql",
-        "html",
         "css",
         "xml",
         "json",
@@ -127,6 +133,14 @@ def markdown_to_tracwiki_lang(lang: str) -> str:
     return lang
 
 
+# Trac's grammar for a processor name: WikiParser reads `[\w+-][\w+/-]*`
+# after `{{{#!` and stops at the first other character, so `{{{#!c#` runs
+# `c` and `{{{#!python{1,3}` runs `python`. A name outside it cannot be
+# written as a processor, and an info-string suffix is not part of the name.
+PROCESSOR_NAME_RE = re.compile(r"[\w+-][\w+/-]*")
+
+# Characters allowed in the `lang=` attribute of a `#!text` opener; any
+# other word is not written there, because it could break the opener.
 _LANG_ATTRIBUTE_RE = re.compile(r"[A-Za-z0-9_+.#-]+")
 
 
@@ -134,17 +148,23 @@ def fence_processor(info: str) -> tuple[str, str | None]:
     """Return the opener text for a Markdown code fence's info string.
 
     Returns ``(text after "{{{" on the opening line, downgraded name)``.
-    Only the first whitespace-separated word of ``info`` counts. When its
-    mapped form (lowercased) is a language Trac highlights, the opener is
-    ``#!NAME`` and the second item is None. Otherwise Trac would show an
-    error box, or run one of its own processors (div, span, comment,
-    default), so the opener is ``#!text lang=WORD`` (``#!text`` alone when
-    the word has characters that could break the opener) and the second
-    item is the word as typed.
+    Only the first whitespace-separated word of ``info`` counts. The
+    language is that word when it is a key of the Markdown-to-TracWiki
+    map (``c#``), otherwise its leading run of Trac's processor-name
+    characters (``python{1,3}`` and ``python:file.py`` give ``python``;
+    the suffix is dropped). When the mapped, lowercased language is one
+    Trac highlights, the opener is ``#!NAME`` and the second item is None.
+    Otherwise Trac would show an error box, or run one of its own
+    processors (div, span, comment, default), so the opener is
+    ``#!text lang=WORD`` (``#!text`` alone when WORD has characters that
+    could break the opener) and the second item is the whole first word
+    as typed.
 
     Examples:
         >>> fence_processor("bash")
         ('#!sh', None)
+        >>> fence_processor("python{1,3}")
+        ('#!python', None)
         >>> fence_processor("pf")
         ('#!text lang=pf', 'pf')
         >>> fence_processor("p}}}f")
@@ -152,9 +172,14 @@ def fence_processor(info: str) -> tuple[str, str | None]:
     """
     words = info.split()
     word = words[0] if words else ""
-    mapped = markdown_to_tracwiki_lang(word)
-    if mapped.lower() in TRAC_CODE_LANGUAGES:
-        return f"#!{mapped.lower()}", None
+    if word.lower() in _MARKDOWN_TO_TRACWIKI_MAP:
+        language = word
+    else:
+        prefix = PROCESSOR_NAME_RE.match(word)
+        language = prefix.group(0) if prefix else ""
+    mapped = markdown_to_tracwiki_lang(language).lower()
+    if language and mapped in TRAC_CODE_LANGUAGES:
+        return f"#!{mapped}", None
     if _LANG_ATTRIBUTE_RE.fullmatch(word):
         return f"#!text lang={word}", word
     return "#!text", word

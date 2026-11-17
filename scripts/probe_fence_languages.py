@@ -57,13 +57,20 @@ EXTRA_NAMES = ("text/plain", "text/html", "svg")
 
 
 def candidate_names() -> list[str]:
-    """Every Pygments lexer alias, lowercased, plus the two MIME names."""
+    """Every Pygments lexer alias, lowercased, plus the extra names.
+
+    A candidate that does not fully match Trac's processor-name grammar
+    (``c#``, ``f#``) is dropped without probing: Trac would read only its
+    leading part as the processor name (``{{{#!c#`` runs ``c``).
+    """
     from pygments.lexers import get_all_lexers
+
+    from trac_mcp_server.converters.common import PROCESSOR_NAME_RE
 
     names = set(EXTRA_NAMES)
     for _name, aliases, _patterns, _mimes in get_all_lexers():
         names.update(alias.lower() for alias in aliases)
-    return sorted(names)
+    return sorted(n for n in names if PROCESSOR_NAME_RE.fullmatch(n))
 
 
 def accepted(html: str) -> bool:
@@ -137,7 +144,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"probed {len(names)}, accepted {len(kept)}")
     print(f"wrote {args.output}")
-    subprocess.run(["ruff", "format", str(args.output)], check=False)
+    command = [sys.executable, "-m", "ruff", "format", str(args.output)]
+    try:
+        formatted = subprocess.run(command, check=False).returncode == 0
+    except OSError:
+        formatted = False
+    if not formatted:
+        print(
+            f"ruff format failed: {args.output} is UNFORMATTED; install "
+            "ruff in this Python environment and run it on the file "
+            "before you use it.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

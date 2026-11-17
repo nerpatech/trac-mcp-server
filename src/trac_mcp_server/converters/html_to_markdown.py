@@ -52,9 +52,12 @@ __all__ = ["trac_html_to_markdown"]
 # `{{{#!/bin/sh` opens a plain block and keeps the line as content.
 
 _OPEN_RE = re.compile(
-    r"^\s*\{\{\{\s*(?:#!([\w+-][\w+/-]*)(?:\s.*)?|#!.*)?$"
+    r"^\s*\{\{\{\s*(?:#!([\w+-][\w+/-]*)(\s.*)?|#!.*)?$"
 )
-_PROC_LINE_RE = re.compile(r"^\s*#!([\w+-][\w+/-]*)(?:\s|$)")
+_PROC_LINE_RE = re.compile(r"^\s*#!([\w+-][\w+/-]*)(\s.*)?$")
+# `lang=NAME` among a `#!text` opener's arguments: the language a Markdown
+# fence had that Trac does not highlight (ticket #240).
+_TEXT_LANG_RE = re.compile(r"(?:^|\s)lang=(\S+)")
 _CLOSE_RE = re.compile(r"^\s*\}\}\}\s*$")
 
 #: Processors whose body is parsed as wiki markup: a block nested in one
@@ -68,6 +71,16 @@ _NO_CODE_PROCESSORS = _WIKI_PROCESSORS | {
     "default",
     "Workflow",
 }
+
+
+def _fence_language(block: dict) -> str:
+    """The processor name a Markdown fence should carry: for a ``#!text``
+    block with ``lang=NAME``, NAME (ticket #240), else the processor."""
+    if block["name"] == "text":
+        lang = _TEXT_LANG_RE.search(block["args"])
+        if lang:
+            return lang.group(1)
+    return block["name"]
 
 
 def _scan_code_blocks(source: str) -> list[tuple[str, str]]:
@@ -87,16 +100,19 @@ def _scan_code_blocks(source: str) -> list[tuple[str, str]]:
         opener = _OPEN_RE.match(line)
         if opener:
             name = opener.group(1)
+            args = opener.group(2) or ""
             if name is None and i + 1 < len(lines) and not literal:
                 proc = _PROC_LINE_RE.match(lines[i + 1])
                 if proc:
                     name = proc.group(1)
+                    args = proc.group(2) or ""
                     i += 1
             for b in stack:
                 if not b["wiki"]:
                     b["body"].append(line)
             block = {
                 "name": name or "",
+                "args": args,
                 "literal": literal,
                 "wiki": name in _WIKI_PROCESSORS and not literal,
                 "body": [],
@@ -112,7 +128,7 @@ def _scan_code_blocks(source: str) -> list[tuple[str, str]]:
                     b["body"].append(line)
         i += 1
     return [
-        (b["name"], textwrap.dedent("\n".join(b["body"])))
+        (_fence_language(b), textwrap.dedent("\n".join(b["body"])))
         for b in blocks
         if not b["literal"]
         and b["name"]
