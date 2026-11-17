@@ -973,7 +973,7 @@ Pass exactly one of `content_base64` and `file_path`. The path form is refused u
 ```json
 {
   "type": "text",
-  "text": "Uploaded attachment 'trace.log' to ticket #42 (2048 bytes, replace=False)"
+  "text": "Uploaded attachment 'trace.log' to ticket #42 (36 bytes, replace=False)"
 }
 ```
 ```json
@@ -984,7 +984,7 @@ Pass exactly one of `content_base64` and `file_path`. The path form is refused u
   "renamed_on_collision": false,
   "file_path": null,
   "source": "inline content",
-  "bytes_uploaded": 2048,
+  "bytes_uploaded": 36,
   "replace": false,
   "description": "Server trace from the failing login"
 }
@@ -1053,7 +1053,7 @@ With `file_access` `off` (the http default) the bytes come back inline:
 ```json
 {
   "type": "text",
-  "text": "Fetched attachment 'trace.log' from ticket #42 (2048 bytes); the bytes are base64 in structuredContent.content_base64"
+  "text": "Fetched attachment 'trace.log' from ticket #42 (36 bytes); the bytes are base64 in structuredContent.content_base64"
 }
 ```
 ```json
@@ -1061,7 +1061,7 @@ With `file_access` `off` (the http default) the bytes come back inline:
   "ticket_id": 42,
   "filename": "trace.log",
   "content_base64": "VHJhY2ViYWNrIChtb3N0IHJlY2VudCBjYWxsIGxhc3QpLi4u",
-  "bytes": 2048
+  "bytes": 36
 }
 ```
 
@@ -1069,7 +1069,7 @@ With `file_access` `local` the bytes are written to `output_path` and stay out o
 ```json
 {
   "type": "text",
-  "text": "Downloaded attachment 'trace.log' from ticket #42 to /tmp/trace.log (2048 bytes)"
+  "text": "Downloaded attachment 'trace.log' from ticket #42 to /tmp/trace.log (36 bytes)"
 }
 ```
 ```json
@@ -1077,7 +1077,7 @@ With `file_access` `local` the bytes are written to `output_path` and stay out o
   "ticket_id": 42,
   "filename": "trace.log",
   "output_path": "/tmp/trace.log",
-  "bytes_written": 2048
+  "bytes_written": 36
 }
 ```
 
@@ -1138,7 +1138,7 @@ An inline result over the server's `max_inline_bytes` is refused with a `validat
 ```json
 {
   "type": "text",
-  "text": "Ticket #42 has 2 attachment(s):\n- trace.log (2048 bytes) by alice\n- screenshot.png (48211 bytes) by bob"
+  "text": "Ticket #42 has 2 attachment(s):\n- trace.log (36 bytes) by alice\n- screenshot.png (48211 bytes) by bob"
 }
 ```
 ```json
@@ -1149,7 +1149,7 @@ An inline result over the server's `max_inline_bytes` is refused with a `validat
     {
       "filename": "trace.log",
       "description": "Server trace from the failing login",
-      "size": 2048,
+      "size": 36,
       "time": "20260116T08:12:00",
       "author": "alice"
     },
@@ -1176,13 +1176,7 @@ A ticket with none answers `Ticket #42 has no attachments.` with `count` `0` and
   }
   ```
 
-- **not_found:** Ticket does not exist
-  ```json
-  {
-    "type": "text",
-    "text": "Error (not_found): Ticket 999 does not exist.\n\nAction: Use ticket_search to verify ticket exists."
-  }
-  ```
+**Known failure:** a missing ticket (or the wrong `instance`) is not an error. Neither the handler nor TracXMLRPC's `ticket.listAttachments` checks that the ticket exists, so the call answers `Ticket #999 has no attachments.` with `count` `0`, exactly as for an existing ticket with none. Check the ticket with `ticket_get` first when that matters. Tracked as Trac /trac_mcp_server #253.
 
 **Example Call:**
 ```json
@@ -1492,7 +1486,7 @@ With `force=true` the text ends `Bundled field changes were reverted.` The tool 
 }
 ```
 
-The text only; the tool returns no `structuredContent`. A comment that does not exist (or whose number falls in a gap) is not an error: the text reads `No comment 3 on ticket #42. Comment numbering has gaps -- check ticket_changelog.`
+The text only; the tool returns no `structuredContent`. A comment that does not exist on an existing ticket (or whose number falls in a gap) is not an error: the text reads `No comment 3 on ticket #42. Comment numbering has gaps -- check ticket_changelog.` A ticket that does not exist is an error (below).
 
 **Error Responses:**
 
@@ -1509,6 +1503,14 @@ The text only; the tool returns no `structuredContent`. A comment that does not 
   {
     "type": "text",
     "text": "Error (validation_error): cnum is required\n\nAction: Provide cnum."
+  }
+  ```
+
+- **not_found:** The ticket does not exist (`getCommentHistory` loads the ticket first, and Trac's `ResourceNotFound` reaches the client as an XML-RPC fault with code 404, which the registry's fault translation reports as `not_found`)
+  ```json
+  {
+    "type": "text",
+    "text": "Error (not_found): Ticket 999 does not exist.\n\nAction: Use ticket_search to verify ticket exists."
   }
   ```
 
@@ -1707,6 +1709,8 @@ The text only; the tool returns no `structuredContent`.
 ```
 
 The text only; the tool returns no `structuredContent`.
+
+**Known failure:** creating a `version` currently fails with a `server_error`. `TracClient.create_enum` sends `(name, 0)` for every enum type, but TracXMLRPC's Version `create` takes `(name, attributes)` with a dict, so the call is rejected. The other four types work, and `ticket_enum_list` and `ticket_enum_delete` work for versions. Tracked as Trac /trac_mcp_server #251.
 
 **Error Responses:**
 
@@ -2277,7 +2281,7 @@ Revisions are newest first. A version whose metadata cannot be fetched (a gap, o
 ```json
 {
   "type": "text",
-  "text": "# DevelopmentGuide diff: v2 -> v3\n+2 -1 lines in 1 hunk(s)\nRevisions (oldest first):\n- v3 by alice at 2025-01-20 10:00: Add the release checklist\n----\n--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -4,3 +4,4 @@\n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n Done.\n"
+  "text": "# DevelopmentGuide diff: v2 -> v3\n+2 -1 lines in 1 hunk(s)\nRevisions (oldest first):\n- v3 by alice at 2025-01-20 10:00: Add the release checklist\n----\n--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -1,7 +1,8 @@\n = Release =\n \n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n \n Done.\n See also\n"
 }
 ```
 ```json
@@ -2294,7 +2298,7 @@ Revisions are newest first. A version whose metadata cannot be fetched (a gap, o
   "truncated": false,
   "minimal": true,
   "line_endings_normalized": false,
-  "diff": "--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -4,3 +4,4 @@\n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n Done.\n",
+  "diff": "--- DevelopmentGuide@v2\n+++ DevelopmentGuide@v3\n@@ -1,7 +1,8 @@\n = Release =\n \n Steps:\n-1. Tag the release\n+1. Run the full test suite\n+2. Tag the release\n \n Done.\n See also\n",
   "revisions": [
     {
       "version": 3,
@@ -2678,7 +2682,7 @@ Pass exactly one of `content_base64` and `file_path`. The path form is refused u
 ```json
 {
   "type": "text",
-  "text": "Uploaded attachment 'diagram.png' to wiki page 'DevelopmentGuide' (48211 bytes, replace=False)"
+  "text": "Uploaded attachment 'diagram.png' to wiki page 'DevelopmentGuide' (70 bytes, replace=False)"
 }
 ```
 ```json
@@ -2690,7 +2694,7 @@ Pass exactly one of `content_base64` and `file_path`. The path form is refused u
   "page_path": "DevelopmentGuide/diagram.png",
   "file_path": null,
   "source": "inline content",
-  "bytes_uploaded": 48211,
+  "bytes_uploaded": 70,
   "replace": false,
   "description": "Architecture overview"
 }
@@ -2759,7 +2763,7 @@ With `file_access` `off` (the http default) the bytes come back inline:
 ```json
 {
   "type": "text",
-  "text": "Fetched attachment 'diagram.png' from wiki page 'DevelopmentGuide' (48211 bytes); the bytes are base64 in structuredContent.content_base64"
+  "text": "Fetched attachment 'diagram.png' from wiki page 'DevelopmentGuide' (70 bytes); the bytes are base64 in structuredContent.content_base64"
 }
 ```
 ```json
@@ -2768,7 +2772,7 @@ With `file_access` `off` (the http default) the bytes come back inline:
   "filename": "diagram.png",
   "page_path": "DevelopmentGuide/diagram.png",
   "content_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAHbyWPQAAAABJRU5ErkJggg==",
-  "bytes": 48211
+  "bytes": 70
 }
 ```
 
@@ -2776,7 +2780,7 @@ With `file_access` `local` the bytes are written to `output_path` and stay out o
 ```json
 {
   "type": "text",
-  "text": "Downloaded attachment 'diagram.png' from wiki page 'DevelopmentGuide' to /tmp/diagram.png (48211 bytes)"
+  "text": "Downloaded attachment 'diagram.png' from wiki page 'DevelopmentGuide' to /tmp/diagram.png (70 bytes)"
 }
 ```
 ```json
@@ -2785,7 +2789,7 @@ With `file_access` `local` the bytes are written to `output_path` and stay out o
   "filename": "diagram.png",
   "page_path": "DevelopmentGuide/diagram.png",
   "output_path": "/tmp/diagram.png",
-  "bytes_written": 48211
+  "bytes_written": 70
 }
 ```
 
@@ -2872,13 +2876,7 @@ An inline result over the server's `max_inline_bytes` is refused with a `validat
   }
   ```
 
-- **not_found:** Page does not exist
-  ```json
-  {
-    "type": "text",
-    "text": "Error (not_found): [error details]\n\nAction: Use wiki_search to find pages similar to 'NoSuchPage'."
-  }
-  ```
+**Known failure:** a missing page (or the wrong `instance`) is not an error. Neither the handler nor TracXMLRPC's `wiki.listAttachments` checks that the page exists, so the call answers `Wiki page 'NoSuchPage' has no attachments.` with `count` `0`, exactly as for an existing page with none. Check the page with `wiki_get` first when that matters. Tracked as Trac /trac_mcp_server #253.
 
 **Example Call:**
 ```json
@@ -3216,7 +3214,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 ```json
 {
   "type": "text",
-  "text": "2 timeline event(s), newest first:\n\n- [ticket] 20260116T09:05:00 alice: Ticket #42 (defect): Fix login timeout issue closed (/ticket/42#comment:4)\n- [wiki] 20260115T17:20:00 bob: DevelopmentGuide edited (/wiki/DevelopmentGuide?version=3)"
+  "text": "2 timeline event(s), newest first:\n\n- [ticket] 20260116T09:05:00 alice: Ticket #42 (defect): Fix login timeout issue closed (http://trac.example.com/project/ticket/42#comment:4)\n- [wiki] 20260115T17:20:00 bob: DevelopmentGuide edited (http://trac.example.com/project/wiki/DevelopmentGuide?version=3)"
 }
 ```
 ```json
@@ -3228,7 +3226,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
       "author": "alice",
       "title": "Ticket #42 (defect): Fix login timeout issue closed",
       "description": "Fixed in the session middleware.",
-      "url": "/ticket/42#comment:4"
+      "url": "http://trac.example.com/project/ticket/42#comment:4"
     },
     {
       "kind": "wiki",
@@ -3236,7 +3234,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
       "author": "bob",
       "title": "DevelopmentGuide edited",
       "description": "Add the release checklist",
-      "url": "/wiki/DevelopmentGuide?version=3"
+      "url": "http://trac.example.com/project/wiki/DevelopmentGuide?version=3"
     }
   ],
   "total": 2,
@@ -3244,7 +3242,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 }
 ```
 
-`title`, `description` and `url` are rendered server-side as plain text, not TracWiki or Markdown, and passed through unconverted. `date` is Trac's compact `YYYYMMDDTHH:MM:SS` string. `total` and `showing` are both the number of events returned. An empty range answers `No timeline events in the given range.` with `{"events": [], "total": 0, "showing": 0}`.
+`title`, `description` and `url` are rendered server-side as plain text, not TracWiki or Markdown, and passed through unconverted. `url` is absolute (the plugin renders with `absurls=True`), so it carries the Trac instance's base URL. `date` is Trac's compact `YYYYMMDDTHH:MM:SS` string. `total` and `showing` are both the number of events returned. An empty range answers `No timeline events in the given range.` with `{"events": [], "total": 0, "showing": 0}`.
 
 **Error Responses:**
 
