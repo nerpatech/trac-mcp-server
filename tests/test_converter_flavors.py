@@ -904,123 +904,101 @@ def test_the_split_detector_parses_with_the_math_rules():
 # with the same input GROWTH_FACTOR times smaller, in CPU time
 # (`time.process_time`), and bounds the ratio of the two. Measured (minimum
 # of 3 runs), for all 12 cases below: linear growth gives a ratio of about 8
-# (6.9-8.9 quiet, 7.6-8.5 with 12 busy processes), and a deliberately
-# quadratic function gives about 62 (61-62 in both conditions). GROWTH_LIMIT
-# sits between the two, so load cannot fail a linear case and a quadratic
-# one cannot pass.
+# (6.8-9.0, quiet and with 12 busy processes), and a deliberately quadratic
+# function gives about 62 (61-62 in both conditions).
+#
+# GROWTH_LIMIT = 16 keeps a margin of about 1.8x over the linear ratios. A
+# time of linear + quadratic parts, where the quadratic part is the share r
+# of the time at n // 8, has a ratio of (8 + 64 * r) / (1 + r); that stays
+# under 16 only while r < 1/6, so a quadratic share of more than about 17%
+# at the small size fails, and so does growth faster than about n**1.33
+# (8 ** 1.33 = 16). A quadratic term smaller than that is not caught: a
+# `s[:i].count("a")` every 50 characters added to `many backtick runs`
+# gave a ratio of 17.0, which failed at 16 and passed at the first limit of
+# 20.
+#
+# The ratio cannot see a constant-factor slowdown, so each full-size run
+# also has an absolute CPU ceiling. CPU_CEILING_S = 5.0 is about 5 times the
+# slowest full-size run measured, 1.01 s for `many backtick runs` with 12
+# busy processes, so load stays under it and a slowdown of 5x or more does
+# not. A run over the ceiling also ends the repeats of that size.
 
 GROWTH_FACTOR = 8
-GROWTH_LIMIT = 20
-
-
-def _openers(count):
-    return "\\(a " * count
-
-
-def _bracket_openers(count):
-    return "x \\[a " * count
-
-
-def _display_paragraphs(count):
-    return "\\[a\n\n" * count
-
-
-def _display_one_paragraph(count):
-    return "\\[a\n" * count
-
-
-def _doubled_openers(count):
-    return "\\\\(a " * count
-
-
-def _lone_languages(count):
-    return "python\n" * count
-
-
-def _languages_then_markers(count):
-    return "bash\nUse code with caution.\n" * count
+GROWTH_LIMIT = 16
+CPU_CEILING_S = 5.0
 
 
 def _indented_lines(count):
     return "para\n\n" + "    \u2022 x\n" * count
 
 
-def _url_starts(count):
-    return "https://" * count
-
-
-def _alternating_fences(count):
-    return "~~~\n```\n" * count
-
-
-def _urls_with_utm(count):
-    return "https://a.com/?utm_source=x&b=1 " * count
-
-
 def _backtick_runs(count):
     return "".join("`" * (i % 40 + 1) + "a " for i in range(count))
 
 
-# name -> (flavor, build, n): build(count) returns the input, and build(n)
-# is the full-size input.
+# name -> (flavor, build, n). `build` is a function of the repetition count,
+# or a string repeated that many times; build(n) is the full-size input.
 ADVERSARIAL = {
-    "64KB of unclosed inline openers": ("chatgpt", _openers, 16384),
-    "8000 unclosed bracket openers": (
-        "chatgpt",
-        _bracket_openers,
-        8000,
-    ),
-    "8000 unclosed display paragraphs": (
-        "chatgpt",
-        _display_paragraphs,
-        8000,
-    ),
+    "64KB of unclosed inline openers": ("chatgpt", "\\(a ", 16384),
+    "8000 unclosed bracket openers": ("chatgpt", "x \\[a ", 8000),
+    "8000 unclosed display paragraphs": ("chatgpt", "\\[a\n\n", 8000),
     "8000 display openers in one paragraph": (
         "chatgpt",
-        _display_one_paragraph,
+        "\\[a\n",
         8000,
     ),
-    "doubled openers": ("chatgpt", _doubled_openers, 8000),
-    "10000 lone language lines": ("gemini", _lone_languages, 10000),
+    "doubled openers": ("chatgpt", "\\\\(a ", 8000),
+    "10000 lone language lines": ("gemini", "python\n", 10000),
     "10000 languages then markers": (
         "gemini",
-        _languages_then_markers,
+        "bash\nUse code with caution.\n",
         5000,
     ),
     "10000 indented lines": ("gemini", _indented_lines, 10000),
-    "20000 URL starts": ("chatgpt", _url_starts, 20000),
-    "5000 alternating fences": ("gemini", _alternating_fences, 5000),
-    "5000 URLs with utm": ("chatgpt", _urls_with_utm, 5000),
+    "20000 URL starts": ("chatgpt", "https://", 20000),
+    "5000 alternating fences": ("gemini", "~~~\n```\n", 5000),
+    "5000 URLs with utm": (
+        "chatgpt",
+        "https://a.com/?utm_source=x&b=1 ",
+        5000,
+    ),
     "many backtick runs": ("chatgpt", _backtick_runs, 20000),
 }
 
 
-def _cpu_time(fn, source, repeats):
+def _as_build(build):
+    if callable(build):
+        return build
+    return lambda count: build * count
+
+
+def _cpu_time(fn, source, repeats, stop_over=None):
+    """Least CPU time of `repeats` runs of fn(source); with `stop_over`,
+    stop repeating as soon as one run takes longer than that."""
     best = None
     for _ in range(repeats):
         started = time.process_time()
         fn(source)
         elapsed = time.process_time() - started
         best = elapsed if best is None else min(best, elapsed)
+        if stop_over is not None and elapsed > stop_over:
+            break
     return best
 
 
-def _growth_times(fn, build, n, k=GROWTH_FACTOR, repeats=3):
-    """Return (small, big): the least CPU time of `repeats` runs of
-    fn(build(n // k)) and of fn(build(n)). Inputs are built outside the
-    timed region."""
+def _growth(fn, build, n, k=GROWTH_FACTOR, repeats=3):
+    """Return (ratio, small, big): the least CPU time of `repeats` runs of
+    fn(build(n // k)) and of fn(build(n)), and big / small. Inputs are built
+    outside the timed region; the big runs stop at one over CPU_CEILING_S."""
     small_input = build(n // k)
     big_input = build(n)
-    return (
-        _cpu_time(fn, small_input, repeats),
-        _cpu_time(fn, big_input, repeats),
+    small = _cpu_time(fn, small_input, repeats)
+    big = _cpu_time(fn, big_input, repeats, stop_over=CPU_CEILING_S)
+    assert small > 0, (
+        f"the small input (repetitions={n // k}) took no measurable CPU "
+        "time, so no ratio can be taken; use a larger input"
     )
-
-
-def _growth_ratio(fn, build, n, k=GROWTH_FACTOR, repeats=3):
-    """How much longer fn takes on build(n) than on build(n // k)."""
-    small, big = _growth_times(fn, build, n, k, repeats)
-    return big / small
+    return big / small, small, big
 
 
 @pytest.mark.parametrize(
@@ -1032,12 +1010,15 @@ def test_adversarial_input_grows_linearly(flavor, build, n):
     def convert(source):
         return markdown_to_tracwiki(source, flavor=flavor)
 
-    small, big = _growth_times(convert, build, n)
-    ratio = big / small
+    ratio, small, big = _growth(convert, _as_build(build), n)
     assert ratio < GROWTH_LIMIT, (
         f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
-        f"(limit {GROWTH_LIMIT}x): {small:.4f}s at n={n // GROWTH_FACTOR}, "
-        f"{big:.4f}s at n={n}"
+        f"(limit {GROWTH_LIMIT}x): {small:.4f}s at {n // GROWTH_FACTOR} "
+        f"repetitions, {big:.4f}s at {n} repetitions"
+    )
+    assert big < CPU_CEILING_S, (
+        f"the full-size run ({n} repetitions) took {big:.2f}s of CPU time "
+        f"(ceiling {CPU_CEILING_S}s); growth was {ratio:.1f}x"
     )
 
 
@@ -1058,13 +1039,32 @@ def _ab(count):
 def test_growth_ratio_flags_a_quadratic_function():
     # The small size (4096 repetitions) takes about 5 ms, well above the
     # timer's noise; the big one about 0.3 s.
-    ratio = _growth_ratio(_quadratic, _ab, 8 * 4096)
+    ratio, _, _ = _growth(_quadratic, _ab, 8 * 4096)
     assert ratio >= GROWTH_LIMIT
 
 
 def test_growth_ratio_passes_a_linear_function():
-    ratio = _growth_ratio(_linear, _ab, 8 * 4096)
+    ratio, _, _ = _growth(_linear, _ab, 8 * 4096)
     assert ratio < GROWTH_LIMIT
+
+
+def test_growth_refuses_a_ratio_of_an_unmeasurable_input(monkeypatch):
+    monkeypatch.setattr(time, "process_time", lambda: 1.0)
+    with pytest.raises(AssertionError, match="no measurable CPU time"):
+        _growth(lambda source: None, _ab, 80)
+
+
+def test_growth_stops_repeating_a_run_over_the_ceiling(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "CPU_CEILING_S", 0.0)
+    calls = []
+
+    def fn(source):
+        calls.append(len(source))
+        sum(range(1000))
+
+    _growth(fn, _ab, 80, k=8, repeats=3)
+    # three small runs, one big run
+    assert calls == [20] * 3 + [160]
 
 
 def test_a_long_closed_formula_still_converts():
