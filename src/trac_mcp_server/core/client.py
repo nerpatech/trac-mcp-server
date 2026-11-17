@@ -1,5 +1,6 @@
 import base64
 import calendar
+import logging
 import re
 import socket
 import threading
@@ -27,6 +28,8 @@ from .faults import (
 )
 from .scope import ScopedSession, scope_for
 from .wiki_search import BM25, Section, search_pages, split_sections
+
+logger = logging.getLogger(__name__)
 
 # Seconds a pooled connection may sit idle before the kernel sends a TCP
 # keepalive probe. Deliberately far below the idle timeout of any plausible
@@ -420,8 +423,26 @@ class WikiPageStoredReadbackFailed(Exception):
 
 
 class TracClient:
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        on_unauthorized: Callable[[], None] | None = None,
+    ):
+        """Build a client for ``config``.
+
+        ``on_unauthorized`` is called, with no arguments, each time the
+        RPC endpoint answers a bearer-token call with 401 (Trac
+        /trac_mcp_server #205). Only ``_rpc_call`` reports it, and only
+        for a 401 that came straight from ``rpc_url``: a 401 on a page
+        the session fetches for the link probes or the render check, or
+        after a redirect, says nothing about the token. It is never used
+        with Basic auth, and an exception it raises is logged at DEBUG
+        and dropped, so it cannot replace the error the caller is about
+        to get.
+        """
         self.config = config
+        self._on_unauthorized = on_unauthorized
         self._thread_local = threading.local()
         self._sessions: weakref.WeakSet[requests.Session] = (
             weakref.WeakSet()
@@ -527,6 +548,19 @@ class TracClient:
         session.mount("https://", adapter)
         return session
 
+    @staticmethod
+    def _report_unauthorized(callback: Callable[[], None]) -> None:
+        """Tell ``callback`` the RPC endpoint refused the token.
+
+        Never raises: a failure in the callback is logged at DEBUG.
+        """
+        try:
+            callback()
+        except Exception:
+            logger.debug(
+                "on_unauthorized callback failed", exc_info=True
+            )
+
     def _rpc_call(
         self, service: str, method: str, *params
     ) -> requests.Response:
@@ -548,6 +582,16 @@ class TracClient:
             headers=headers,
             timeout=(10, self.config.rpc_timeout),
         )
+        # Recorded before raise_for_status(), so a caller that swallows
+        # the HTTPError cannot hide the rejection. A redirect's target
+        # answering 401 is not the RPC endpoint refusing the token.
+        if (
+            self._on_unauthorized is not None
+            and self.config.bearer_token
+            and response.status_code == 401
+            and not response.history
+        ):
+            self._report_unauthorized(self._on_unauthorized)
         response.raise_for_status()
         return response
 
