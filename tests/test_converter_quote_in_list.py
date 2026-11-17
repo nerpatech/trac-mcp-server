@@ -28,10 +28,14 @@ run kind and renders as citation lines at the item's continuation indent
 paragraph). Two sibling quotes join with a lone ``>`` line: Trac shows one
 blockquote with two paragraphs (a documented loss). Unchanged, with the
 bytes ``master`` (8702a5c) produced: a quote that is the item's first child
-(no Trac form exists), a quote after a nested list (Trac attaches an
-adjacent block to the innermost nested item, #112/#125), a quote after a
-run with a passed-through TracWiki line (#143 review F1), and a top-level
-blockquote.
+(no Trac form exists), a quote after a run with a passed-through
+TracWiki line (#143 review F1), and a top-level blockquote.
+
+**#197.** A quote directly after a nested list used to keep that
+pre-#145 form (Trac attaches an adjacent block to the innermost nested
+item, #112/#125). A ``>`` at the item's MARKER column closes every deeper
+nested list and the citation stays in the item (measured on /trac_test),
+so that is now the form.
 """
 
 import re
@@ -220,21 +224,22 @@ def test_quote_in_a_nested_item_then_the_next_nested_item():
 # -- Write leg: unchanged output (bytes from master 8702a5c) ----------------
 
 
-def test_quote_after_a_nested_list_is_unchanged():
-    """A Trac limit (#112/#125): an adjacent block attaches to the
-    innermost nested item, so the blank line and the indent stay."""
+def test_quote_after_a_nested_list_closes_it_at_the_marker_column():
+    """#197 (lifts #145's limit): the `>` goes at the item's marker column,
+    which closes the nested list and keeps the quote in the outer item."""
     md = "- a\n  - b\n\n  > q\n- d\n"
-    assert markdown_to_tracwiki(md) == " * a\n   * b\n\n     q\n * d"
-    assert find_list_item_splits(md) == [
-        {"item": "a", "block": "blockquote", "depth": 0}
-    ]
+    assert markdown_to_tracwiki(md) == " * a\n   * b\n > q\n * d"
+    assert find_list_item_splits(md) == []
 
 
-def test_second_quote_after_a_nested_list_is_unchanged():
+def test_second_quote_after_a_nested_list_joins_with_a_gt_gap_line():
+    """#197: the second quote is a sibling at the continuation indent, one
+    blockquote with two paragraphs, inside the outer item."""
     md = "- a\n  - b\n\n  > q\n\n  > r\n- d\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   * b\n\n     q\n\n     r\n * d"
+        " * a\n   * b\n > q\n   >\n   > r\n * d"
     )
+    assert find_list_item_splits(md) == []
 
 
 def test_quote_after_a_passthrough_line_is_unchanged():
@@ -260,11 +265,99 @@ def test_text_and_quotes_after_a_plain_quote_are_unchanged():
     )
 
 
-def test_text_after_a_quote_after_a_nested_list_is_unchanged():
+def test_text_after_a_quote_after_a_nested_list_stays_in_the_item():
+    """#197: the quote reset the nested list, so the text goes at the
+    item's text column, directly after it."""
     md = "- a\n  - b\n\n  > q\n\n  more\n- d\n"
     assert markdown_to_tracwiki(md) == (
-        " * a\n   * b\n\n     q\n\n   more\n * d"
+        " * a\n   * b\n > q\n   more\n * d"
     )
+    assert find_list_item_splits(md) == []
+
+
+# -- Write leg: a quote directly after a nested list (#197) ----------------
+
+
+@pytest.mark.parametrize(
+    ("md", "wiki"),
+    [
+        # the ticket's tight shape
+        ("- a\n  - b\n  > q\n", " * a\n   * b\n > q"),
+        # several lines
+        (
+            "- a\n  - b\n  > q1\n  > q2\n- c\n",
+            " * a\n   * b\n > q1\n > q2\n * c",
+        ),
+        # a nested quote and an empty `>` line inside the quote
+        (
+            "- a\n  - b\n  > q\n  >\n  > > r\n- d\n",
+            " * a\n   * b\n > q\n >\n > > r\n * d",
+        ),
+        # an ordered parent
+        (
+            "1. a\n   - b\n   > q\n2. c\n",
+            " 1. a\n   * b\n > q\n 2. c",
+        ),
+        # depth 1: the quote goes in `b`, after `c`'s list
+        (
+            " - a\n   - b\n     - c\n     > q\n",
+            " * a\n   * b\n     * c\n   > q",
+        ),
+        # after two sibling nested lists
+        (
+            "- a\n  - b\n\n  1. c\n\n  > q\n- d\n",
+            " * a\n   * b\n   1. c\n > q\n * d",
+        ),
+        # an ordered item numbered 10: the `>` stays at the marker column
+        # (`len(indent)`, 1), not the text column
+        (
+            "10. a\n    - b\n    > q\n11. c\n",
+            " 10. a\n   * b\n > q\n 11. c",
+        ),
+    ],
+)
+def test_quote_directly_after_a_nested_list_goes_at_the_marker_column(
+    md, wiki
+):
+    """#197: measured on /trac_test, a `>` at the item's marker column
+    closes every deeper nested list and the citation stays in the item."""
+    assert markdown_to_tracwiki(md) == wiki
+    assert find_list_item_splits(md) == []
+
+
+def test_quote_text_quote_after_a_nested_list_all_stay_in_the_item():
+    """#197: after the first quote the item is innermost again, so text is
+    adjacent at the text column and a later quote is a citation again."""
+    md = "- a\n  - b\n  > q\n\n  t\n\n  > r\n- c\n"
+    assert markdown_to_tracwiki(md) == (
+        " * a\n   * b\n > q\n   t\n   > r\n * c"
+    )
+    assert find_list_item_splits(md) == []
+
+
+@pytest.mark.parametrize(
+    ("md", "wiki"),
+    [
+        # the quote's predecessor is a code block (attached to `b`), not
+        # the nested list
+        (
+            "- a\n  - b\n\n  ```\n  c\n  ```\n\n  > q\n- d\n",
+            " * a\n   * b\n   {{{\n   c\n   }}}\n\n     q\n * d",
+        ),
+        # a passed-through line before the quote
+        (
+            "- a\n  - b\n\n  = H =\n\n  > q\n- d\n",
+            " * a\n   * b\n\n   = H =\n\n     q\n * d",
+        ),
+    ],
+)
+def test_quote_not_directly_after_a_nested_list_keeps_the_blank_line(
+    md, wiki
+):
+    """#197 leaves these as on master (0ae6529): the quote is not directly
+    after the nested list, so `_item_block_separator` still answers
+    "blank"."""
+    assert markdown_to_tracwiki(md) == wiki
 
 
 def test_item_starting_with_a_quote_is_unchanged():
@@ -439,6 +532,14 @@ LIVE = {
     "paragraph then quote": "- a\n\n  para\n\n  > q\n- d\n",
     "quote then nested list": "- a\n  > q\n\n  - sub\n- d\n",
     "two sibling quotes": "- a\n  > q\n\n  > r\n- d\n",
+    "quote after nested list": "- a\n  - b\n  > q\n- d\n",
+    "quote after nested list then text": (
+        "- a\n  - b\n  > q\n\n  t\n- d\n"
+    ),
+    "two quotes after nested list": (
+        "- a\n  - b\n  > q\n\n  > r\n- d\n"
+    ),
+    "ordered quote after nested list": "1. a\n   - b\n   > q\n2. d\n",
 }
 
 
@@ -462,7 +563,19 @@ def test_live_quote_renders_inside_the_list_item(name):
     # One top-level list; a quote item also opens sub-lists (the
     # nested-list and in-quote list cases), a list split by a blank line
     # would add a further top-level one.
-    sub_lists = 1 if name in ("list", "quote then nested list") else 0
+    sub_lists = (
+        1
+        if name
+        in (
+            "list",
+            "quote then nested list",
+            "quote after nested list",
+            "quote after nested list then text",
+            "two quotes after nested list",
+            "ordered quote after nested list",
+        )
+        else 0
+    )
     assert len(re.findall(r"<(?:ul|ol)[\s>]", html)) == 1 + sub_lists, (
         html
     )
@@ -472,6 +585,32 @@ def test_live_quote_renders_inside_the_list_item(name):
     # The last item `d` is a sibling after the first item, not inside it.
     assert re.search(r"\bd\b", rest), html
     assert not re.search(r"\bd\b", first_li), html
-    for word in ("q", "r", "p1", "p2", "x", "l1", "tail", "para"):
+    for word in ("q", "r", "p1", "p2", "x", "l1", "tail", "para", "t"):
         if re.search(rf"\b{word}\b", LIVE[name]):
             assert re.search(rf"\b{word}\b", first_li), html
+
+
+@pytest.mark.live
+def test_live_quote_after_a_nested_list_at_depth_one_is_inside_b():
+    """#197: the quote goes in `b`, after `c`'s list, not in `a` or `c`."""
+    from tests.live_helpers import TEST_INSTANCE, trac_test_registry
+    from trac_mcp_server.config_bootstrap import bootstrap_config
+    from trac_mcp_server.core.client import TracClient
+
+    config, _ = bootstrap_config()
+    client = TracClient(
+        trac_test_registry(config).resolve(TEST_INSTANCE)
+    )
+    md = " - a\n   - b\n     - c\n     > q\n"
+    html = client.wiki_to_html(markdown_to_tracwiki(md))
+
+    outer, _rest = _first_top_level_li(html)
+    assert outer is not None, html
+    # inside `a`'s <li>, `b`'s <li> is the first top-level one
+    b_li, _ = _first_top_level_li(outer[len("<li>") :])
+    assert b_li is not None, html
+    assert "<blockquote" in b_li, html
+    # the blockquote comes after the close of `c`'s nested list
+    tail = b_li.rsplit("</ul>", 1)[1]
+    assert "<blockquote" in tail, html
+    assert re.search(r"\bq\b", tail), html

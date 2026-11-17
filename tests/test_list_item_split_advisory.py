@@ -247,3 +247,11 @@ def test_second_sibling_sublist_is_not_a_split():
     # item a (<ul><li>a<ul>..</ul><ol>..</ol></li><li>d</li></ul>), so the
     # list is not split and the detector must stay silent.
     assert find_list_item_splits("- a\n  - b\n\n  1. c\n- d\n") == []
+
+
+def test_quote_directly_after_a_sublist_then_code_is_not_a_split():
+    """#197: the quote resets the walk the way the writer does (it closes
+    the nested list), so the code block after it is not directly after a
+    nested list and there is no finding."""
+    text = "- a\n  - b\n  > q\n\n  ```\n  c\n  ```\n- d\n"
+    assert find_list_item_splits(text) == []
