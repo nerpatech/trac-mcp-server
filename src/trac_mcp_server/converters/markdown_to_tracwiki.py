@@ -148,28 +148,72 @@ _SINGLE_BRACKET_LINK_RE = re.compile(
 # "Entity and numeric character references"): a name ending in ";", or
 # "&#" with 1-7 decimal / "&#x" with 1-6 hex digits, ending in ";".
 # mistune 3.2 leaves them raw in text tokens, and Trac would show them
-# literally (ticket #239). Matched here rather than handed to
-# `html.unescape` whole, which also decodes semicolon-less legacy names
-# (`&copy 2020`) that CommonMark keeps literal. A name is decoded only when
-# `name;` is in HTML5's entity table: `html.unescape` would decode the
-# legacy prefix of an unknown name (`&notanentity;` -> `¬anentity;`).
+# literally (ticket #239). `html.unescape` is not used: it also decodes
+# semicolon-less legacy names (`&copy 2020`) that CommonMark keeps literal,
+# and the legacy prefix of an unknown name (`&notanentity;` ->
+# `¬anentity;`). A name is decoded only when `name;` is a key of HTML5's
+# entity table; a number follows CommonMark (code point 0, above U+10FFFF
+# or a surrogate gives U+FFFD, no windows-1252 remapping). The decoded
+# text goes into TracWiki as typed, so it is used only when every
+# character in it is Trac-safe (`_is_trac_safe`); otherwise the reference
+# stays as typed, which Trac shows literally.
 _CHAR_REF_RE = re.compile(
     r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});"
 )
 
+# ASCII characters a decoded reference may produce. Every other ASCII
+# character (# ' ` | { } [ ] ! = * - ^ , ~ _ / : and so on) can form
+# TracWiki markup, and every control or line-breaking character can break
+# Trac's line-based syntax (a heading, a table row, a list item) or vanish,
+# so a reference to one stays literal, exactly as it rendered before #239.
+# `&`, `<`, `>` and `"` are safe because Trac escapes them in text.
+_TRAC_SAFE_ASCII = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    ' &<>"'
+)
+
+
+def _is_trac_safe(decoded: str) -> bool:
+    """True when every character of `decoded` is safe in TracWiki text.
+
+    Code points from U+00A0 up are safe, except the line and paragraph
+    separators U+2028 and U+2029; below that only `_TRAC_SAFE_ASCII` is.
+    """
+    for ch in decoded:
+        cp = ord(ch)
+        if cp < 0xA0:
+            if ch not in _TRAC_SAFE_ASCII:
+                return False
+        elif cp in (0x2028, 0x2029):
+            return False
+    return True
+
+
+def _decode_char_ref(m: re.Match[str]) -> str:
+    """Replacement for one `_CHAR_REF_RE` match (see the comments there)."""
+    ref = m.group(0)
+    if ref[1] == "#":
+        digits = ref[2:-1]
+        if digits[0] in "xX":
+            cp = int(digits[1:], 16)
+        else:
+            cp = int(digits)
+        if cp == 0 or cp > 0x10FFFF or 0xD800 <= cp <= 0xDFFF:
+            cp = 0xFFFD
+        decoded = chr(cp)
+    else:
+        named = html.entities.html5.get(ref[1:])
+        if named is None:
+            return ref
+        decoded = named
+    return decoded if _is_trac_safe(decoded) else ref
+
 
 def _decode_char_refs(text: str) -> str:
     """Decode CommonMark entity and numeric references in a text token."""
-
-    def decode(m: re.Match[str]) -> str:
-        ref = m.group(0)
-        if ref[1] == "#":
-            return html.unescape(ref)
-        if ref[1:] in html.entities.html5:
-            return html.unescape(ref)
-        return ref
-
-    return _CHAR_REF_RE.sub(decode, text)
+    if "&" not in text:
+        return text
+    return _CHAR_REF_RE.sub(_decode_char_ref, text)
 
 
 def _unescape_camelcase(text: str) -> str:
@@ -654,10 +698,19 @@ class TracWikiRenderer(mistune.BaseRenderer):
         Entity and numeric character references (``&amp;``, ``&#x20;``)
         are decoded first, as CommonMark does in text; code spans and
         code blocks never reach this method, so theirs stay as typed
-        (ticket #239). Decoding comes before the CamelCase escape, so a
+        (ticket #239). A reference is decoded only when the result is
+        Trac-safe (`_is_trac_safe`): one that would decode to markup
+        (``&#35;``, ``&#124;``) or to a control or line break stays as
+        typed. A token that began with a reference at the start of a
+        line has its leading spaces stripped after decoding, since two
+        would make Trac render a blockquote and HTML collapses them
+        there anyway. Decoding comes before the CamelCase escape, so a
         reference that spells a CamelCase word still gets its ``!``.
         """
+        typed = text
         text = _decode_char_refs(text)
+        if typed.startswith("&") and self._last_char == "\n":
+            text = text.lstrip(" ")
 
         def escape(segment: str) -> str:
             return _CAMELCASE_RE.sub(
