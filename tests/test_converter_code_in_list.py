@@ -35,7 +35,7 @@ FENCED_ITEMS = {
         " - a\n   ```python\n   x = 1\n   ```\n - d",
     ),
     "bare div": (
-        " * a\n   {{{#!div\n   hello\n   }}}\n * d",
+        " * a\n   {{{#!text lang=div\n   hello\n   }}}\n * d",
         " - a\n   ```div\n   hello\n   ```\n - d",
     ),
     "nested item": (
