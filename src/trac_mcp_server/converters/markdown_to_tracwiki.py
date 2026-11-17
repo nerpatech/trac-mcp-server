@@ -321,6 +321,114 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # #17).
 
 
+# Trac's quoted-target bracket link: `['Page']` or `["Page"]`, with an
+# optional label (`['Page' label]`). Measured on this host:
+# `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so Markdown
+# prose that subscripts with a string key would become one (and the write
+# gate refuses the push). The label is whitespace other than a newline (NBSP
+# and U+3000 included) and then at least one character that is not `]`,
+# which backtracks as Trac does: `x['a' ] y` is plain text, `x['a'  ] y`
+# (two spaces) is a link with an empty label. There is no lookahead for `[`
+# or `(`: whether the span is a Markdown link is decided by mistune's link
+# parser (`_parse_quoted_bracket`), so chained subscripts (`x['a']['b']`)
+# are all caught and `handlers['get'](req, resp)` is too. A span with no
+# closing bracket (`y['k'`) is not a link and does not match (ticket #241).
+_QUOTED_BRACKET_LINK_RE = re.compile(
+    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[^\S\n]+[^\]\n]+)?\]"""
+)
+
+# mistune's own link-opening pattern (`!?\[`), compiled once: the position
+# of a quoted bracket is handed to `InlineParser.parse_link` through a match
+# of it.
+_LINK_OPEN_RE = re.compile(
+    mistune.inline_parser.InlineParser.SPECIFICATION["link"]
+)
+
+# The whitespace-delimited token before a quoted bracket, when it is a Trac
+# shref-shaped run: `scheme:...` (after optional opening `(<"'`) that no
+# `)`, `>` or `]` closes. Trac never forms a bracket link after one
+# (measured: `https://e.com/a['b']` links `https://e.com/a['b`, while
+# `HTTPS://E.COM/['a'] y` and `ftps://h/p['a'] y` render as plain text), so
+# an escape there would only add a visible `!`.
+_SCHEME_RUN_RE = re.compile(
+    r"""[(<"']*[A-Za-z][\w.+-]*:[^\s<>()\[\]]*\Z"""
+)
+
+# A token longer than this is not scanned: bounds the backwards scan so a
+# long unbroken run of text costs a constant per quoted bracket.
+_SCHEME_RUN_MAX = 2048
+
+
+def _after_scheme_run(src: str, end: int) -> bool:
+    """Whether the whitespace-delimited token ending at `end` is a scheme
+    run (`_SCHEME_RUN_RE`). Scans backwards from `end` to the previous
+    whitespace, and gives up at once on a character the pattern never
+    allows (`[`, `]`, `>`, `)`)."""
+    i = end
+    floor = max(0, end - _SCHEME_RUN_MAX)
+    while i > floor:
+        c = src[i - 1]
+        if c.isspace():
+            break
+        if c in "[]>)":
+            return False
+        i -= 1
+    else:
+        if i > 0 and not src[i - 1].isspace():
+            return False
+    return _SCHEME_RUN_RE.match(src, i, end) is not None
+
+
+def _parse_quoted_bracket(
+    inline: Any, m: re.Match[str], state: Any
+) -> int | None:
+    """Inline rule: a quoted-target bracket link shape in prose becomes a
+    `quoted_bracket` token, which the renderer writes with Trac's `!`
+    escape (ticket #241).
+
+    Registered `before="link"`: mistune tries rules at the leftmost
+    position in rule order, and a rule after `link` never sees a `[` that
+    `link` gave up as text. Because it is an inline rule it fires only
+    where mistune sees prose: a link or image destination, a reference
+    definition, a link title, an autolink, a code span and a
+    backslash-escaped bracket are all consumed by their own rules first.
+
+    Real links first: the position is handed to mistune's own link parser
+    (`inline.parse_link`), so an inline link (`["T"](url)`) or a reference
+    link the document defines (`["T"][id]`, `["T"]`, `["T"][]`) is
+    converted as before. `parse_link` leaves `state` untouched when it
+    returns None (the tokens are appended only on its success paths), so
+    anything else falls through to the token. Inside a link label
+    (`state.in_link`) `parse_link` would only emit the bracket as text, so
+    it is skipped there and the shape is escaped like any other prose.
+
+    Returns None, so the `[` is text as before, when the token just before
+    the match is a scheme run (`_after_scheme_run`): Trac's URL pattern
+    already takes the characters after it.
+    """
+    if _after_scheme_run(state.src, m.start()):
+        return None
+    if not state.in_link:
+        link_m = _LINK_OPEN_RE.match(state.src, m.start())
+        assert link_m is not None
+        pos = inline.parse_link(link_m, state)
+        if pos is not None:
+            return pos
+    state.append_token({"type": "quoted_bracket", "raw": m.group(0)})
+    return m.end()
+
+
+def _quoted_bracket_links(md: Any) -> None:
+    """mistune plugin: `_parse_quoted_bracket` as an inline rule before
+    `link`."""
+    md.inline.register(
+        "quoted_bracket",
+        _QUOTED_BRACKET_LINK_RE.pattern,
+        _parse_quoted_bracket,
+        before="link",
+    )
+
+
 # The mistune plugin set for every parse of Markdown in this module. The
 # converter and the `list_item_split` detector (#125) must agree on what is
 # a table, so both read this one list (ticket #142). `table_in_list` and
@@ -331,6 +439,7 @@ _MISTUNE_PLUGINS = [
     "table",
     "mistune.plugins.table.table_in_list",
     "mistune.plugins.table.table_in_quote",
+    _quoted_bracket_links,
 ]
 
 
@@ -738,6 +847,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
     def strong(self, text: str) -> str:
         """Render bold text (double emphasis)."""
         return f"'''{text}'''"
+
+    def quoted_bracket(self, text: str) -> str:
+        """Render a quoted-target bracket link shape found in prose
+        (`_parse_quoted_bracket`, ticket #241) with Trac's `!` escape, so
+        Trac shows ``x['KEY']`` as text instead of a wiki link. A `!`
+        typed in Markdown is a literal character, so it is not an escape
+        already: ``Wow!['a']`` gives ``Wow!!['a']``."""
+        return f"!{text}"
 
     def codespan(self, text: str) -> str:
         """Render inline code."""
