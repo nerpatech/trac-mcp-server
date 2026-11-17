@@ -16,8 +16,8 @@
     "tracwiki": "[auto_pm:wiki:Page label]"
   },
   "row04_md_link_absolute": {
-    "markdown_input": "[label](http://192.168.10.4:8000/trac_mcp_server/wiki/Page)",
-    "tracwiki": "[http://192.168.10.4:8000/trac_mcp_server/wiki/Page label]"
+    "markdown_input": "[label](https://trac.example.org/trac_mcp_server/wiki/Page)",
+    "tracwiki": "[https://trac.example.org/trac_mcp_server/wiki/Page label]"
   },
   "row05_intertrac_index": {
     "markdown_input": "auto_pm:wiki:Index",
@@ -84,8 +84,8 @@
     "tracwiki": "note:see:Below"
   },
   "row21_url_with_port": {
-    "markdown_input": "http://192.168.10.4:8000/some/path",
-    "tracwiki": "http://192.168.10.4:8000/some/path"
+    "markdown_input": "https://trac.example.org/some/path",
+    "tracwiki": "https://trac.example.org/some/path"
   },
   "row22_typo_ticket_alone": {
     "markdown_input": "auto-pm:#87",

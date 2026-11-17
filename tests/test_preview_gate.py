@@ -47,7 +47,7 @@ MANIFEST = json.loads((FIXTURES_DIR / "manifest.json").read_text())
 # realm-less/slashed InterTrac anchor whose dispatcher base is this one --
 # supplying it here is what lets `missing_intertrac_realm` actually reach
 # the corpus below, rather than sitting untested next to the codes that do.
-_LOCAL_INTERTRAC_BASES = frozenset({"http://192.168.10.4:8000/auto_pm"})
+_LOCAL_INTERTRAC_BASES = frozenset({"https://trac.example.org/auto_pm"})
 
 
 def _warning(code, severity, message="m", evidence=None):

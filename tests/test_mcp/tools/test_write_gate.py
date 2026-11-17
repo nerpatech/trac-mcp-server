@@ -72,7 +72,7 @@ from trac_mcp_server.mcp.tools.write_gate import (
 # which is the only signal distinguishing it from a live link.
 BROKEN_HTML = (
     '<p>\nSee <a class="missing wiki" '
-    'href="http://192.168.10.4:8000/trac_mcp_server/wiki/'
+    'href="https://trac.example.org/trac_mcp_server/wiki/'
     'NoSuchPageHereAtAll" rel="nofollow">NoSuchPageHereAtAll</a> '
     "for detail.\n</p>\n"
 )
@@ -108,7 +108,7 @@ DEAD_TICKET_SOURCE = "See #99999 for context."
 # ticket 99999, not bcs's.
 SHADOW_HTML = (
     '<p>\nSee <a class="ext-link" '
-    'href="http://192.168.10.4:8000/bcs/intertrac/%2399999" '
+    'href="https://trac.example.org/bcs/intertrac/%2399999" '
     'title="#99999 in Backyard Control System (b-node)">'
     '<span class="icon">​</span>bcs:#99999</a> and also '
     '<a class="missing ticket">#99999</a> in the same paragraph.'
@@ -143,7 +143,7 @@ DANGLING_COMMENT_SOURCE = "See comment:99 for context."
 # ticket being written.
 SCOPED_COMMENT_HTML = (
     '<p>\nSee <a class="closed ticket" '
-    'href="http://192.168.10.4:8000/trac_test/ticket/1#comment:5" '
+    'href="https://trac.example.org/trac_test/ticket/1#comment:5" '
     'title="Comment 5 for #1: task: Update CLI reference to document '
     '--json flag behavior (closed: fixed)">comment:5:ticket:1</a> '
     "for context.\n</p>\n"
@@ -414,7 +414,7 @@ def test_bare_ref_shadows_prefixed_refuses_and_a_lone_bare_ref_passes():
     # also fire and muddy what this assertion is isolating.
     lone_html = (
         '<p>\nSee <a class="ticket" '
-        'href="http://192.168.10.4:8000/trac_test/ticket/1" '
+        'href="https://trac.example.org/trac_test/ticket/1" '
         'title="#1: task: something">#1</a> alone.\n</p>\n'
     )
     lone = asyncio.run(
@@ -461,7 +461,7 @@ def test_self_intertrac_prefix_refuses_and_clean_configured_ref_passes():
     host. The shape itself (an unconfigured prefix renders as bare
     text) is not new; only which prefix counts as "self" is."""
     client = _client(SELF_PREFIX_HTML)
-    client.config.trac_url = "http://192.168.10.4:8000/auto_pm"
+    client.config.trac_url = "https://trac.example.org/auto_pm"
 
     outcome = asyncio.run(
         check_write(
@@ -475,7 +475,7 @@ def test_self_intertrac_prefix_refuses_and_clean_configured_ref_passes():
     assert "self_intertrac_prefix" in outcome.refusal_text
 
     clean_client = _client(CLEAN_HTML)
-    clean_client.config.trac_url = "http://192.168.10.4:8000/auto_pm"
+    clean_client.config.trac_url = "https://trac.example.org/auto_pm"
     clean = asyncio.run(
         check_write(
             clean_client,
@@ -538,8 +538,8 @@ def test_dangling_comment_ref_does_not_run_without_ticket_context():
         "See [comment:5:ticket:1 the fifth one] for context.",
         # An absolute URL's fragment is not a TracLinks reference --
         # shape from auto_pm:#71's description, found by #108's sweep.
-        "See http://192.168.10.4:8000/trac_test/ticket/1#comment:5 too.",
-        "See [http://192.168.10.4:8000/trac_test/ticket/1#comment:5 it].",
+        "See https://trac.example.org/trac_test/ticket/1#comment:5 too.",
+        "See [https://trac.example.org/trac_test/ticket/1#comment:5 it].",
     ],
 )
 def test_comment_scoped_to_another_ticket_is_not_dangling(source):

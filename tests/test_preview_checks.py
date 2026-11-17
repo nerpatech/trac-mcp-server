@@ -1441,8 +1441,8 @@ def test_no_pre_existing_row_is_downgraded(name):
 # not reach the instance -- and they want different answers from ticket
 # #64's blocking gate, so no single severity was right for it.
 
-_TICKET_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2387"
-_OTHER_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2388"
+_TICKET_HREF = "https://trac.example.org/auto_pm/intertrac/%2387"
+_OTHER_HREF = "https://trac.example.org/auto_pm/intertrac/%2388"
 
 _TWO_TARGETS_HTML = (
     '<p><a class="ext-link" href="' + _TICKET_HREF + '"'
@@ -1551,7 +1551,7 @@ def test_the_merged_code_is_gone():
 # correctly and must never be flagged just because it LOOKS the same.
 # ---------------------------------------------------------------------
 
-_LOCAL_BASE = frozenset({"http://192.168.10.4:8000/auto_pm"})
+_LOCAL_BASE = frozenset({"https://trac.example.org/auto_pm"})
 
 
 def _row86_warnings(local_intertrac_bases=frozenset()):

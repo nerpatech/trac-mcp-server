@@ -35,10 +35,10 @@ MISSING_PAGE_STUB = (
 )
 
 EXISTING_HREF = (
-    "http://192.168.10.4:8000/auto_pm/intertrac/wiki%3ARenderVerify"
+    "https://trac.example.org/auto_pm/intertrac/wiki%3ARenderVerify"
 )
 MISSING_HREF = (
-    "http://192.168.10.4:8000/auto_pm/intertrac/wiki%3ADoesNotExist"
+    "https://trac.example.org/auto_pm/intertrac/wiki%3ADoesNotExist"
 )
 
 # Ticket realm, both dispatcher shapes. Measured against the live
@@ -46,15 +46,15 @@ MISSING_HREF = (
 # to /ticket/N; one that does not answers a bare 500. Same on
 # trac.edgewall.org, whose body differs (9 KB error page vs empty) --
 # which is why the classification is on STATUS.
-TICKET_HREF = "http://192.168.10.4:8000/auto_pm/intertrac/%2387"
+TICKET_HREF = "https://trac.example.org/auto_pm/intertrac/%2387"
 REALM_TICKET_HREF = (
-    "http://192.168.10.4:8000/auto_pm/intertrac/ticket%3A87"
+    "https://trac.example.org/auto_pm/intertrac/ticket%3A87"
 )
 DEAD_TICKET_HREF = (
-    "http://192.168.10.4:8000/auto_pm/intertrac/%23999999"
+    "https://trac.example.org/auto_pm/intertrac/%23999999"
 )
 CONTROL_URL = (
-    "http://192.168.10.4:8000/auto_pm"
+    "https://trac.example.org/auto_pm"
     "/intertrac/wiki%3ATracMcpServerProbeLivenessControl"
 )
 
@@ -328,7 +328,7 @@ class TestProbeTargets(unittest.TestCase):
         be able to report the target it was actually redirected to, not
         just the dispatcher href it started from."""
         real_target = (
-            "http://192.168.10.4:8000/auto_pm/wiki/RenderVerify"
+            "https://trac.example.org/auto_pm/wiki/RenderVerify"
         )
         client = _mock_client(
             {EXISTING_HREF: (200, EXISTING_PAGE_STUB)},
@@ -489,14 +489,14 @@ class TestTicketRealmProbe(unittest.TestCase):
         client = _mock_client(
             {TICKET_HREF: (200, "<html>a ticket page</html>")},
             resolved={
-                TICKET_HREF: "http://192.168.10.4:8000/auto_pm/ticket/87"
+                TICKET_HREF: "https://trac.example.org/auto_pm/ticket/87"
             },
         )
         results = probe_targets(client, [TICKET_HREF])
         self.assertEqual(results[TICKET_HREF]["status"], EXISTS)
         self.assertEqual(
             results[TICKET_HREF]["resolved_url"],
-            "http://192.168.10.4:8000/auto_pm/ticket/87",
+            "https://trac.example.org/auto_pm/ticket/87",
         )
 
     def test_realm_form_classified_like_the_short_link(self):
@@ -576,7 +576,7 @@ class TestTicketRealmProbe(unittest.TestCase):
         self.assertEqual(urls, [TICKET_HREF])
 
     def test_one_control_per_instance_not_per_target(self):
-        dead_b = "http://192.168.10.4:8000/auto_pm/intertrac/%23999998"
+        dead_b = "https://trac.example.org/auto_pm/intertrac/%23999998"
         client = _mock_client(
             {
                 DEAD_TICKET_HREF: (500, ""),

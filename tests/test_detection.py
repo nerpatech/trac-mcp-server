@@ -301,16 +301,16 @@ class TestProjectIndexScraping:
         mock_get.return_value = mock_response
 
         result = scrape_project_index(
-            "http://192.168.10.4:8000", ("user", "pass")
+            "https://trac.example.org", ("user", "pass")
         )
 
         assert len(result) == 2
         bcs = next(e for e in result if e["path"] == "/bcs")
         assert bcs["title"] == "BCS"
         assert bcs["description"] == "BCS project"
-        assert bcs["url"] == "http://192.168.10.4:8000/bcs"
+        assert bcs["url"] == "https://trac.example.org/bcs"
         mock_get.assert_called_once_with(
-            "http://192.168.10.4:8000",
+            "https://trac.example.org",
             auth=("user", "pass"),
             timeout=10,
         )
@@ -327,11 +327,11 @@ class TestProjectIndexScraping:
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
 
-        result = scrape_project_index("http://192.168.10.4:8000")
+        result = scrape_project_index("https://trac.example.org")
 
         assert len(result) == 2
         mock_get.assert_called_once_with(
-            "http://192.168.10.4:8000", auth=None, timeout=10
+            "https://trac.example.org", auth=None, timeout=10
         )
 
     @patch("trac_mcp_server.detection.web_scraper.requests.get")
@@ -348,7 +348,7 @@ class TestProjectIndexScraping:
             "Connection refused"
         )
 
-        result = scrape_project_index("http://192.168.10.4:8000")
+        result = scrape_project_index("https://trac.example.org")
 
         assert result == []
 
@@ -367,7 +367,7 @@ class TestProjectIndexScraping:
         )
         mock_get.return_value = mock_response
 
-        result = scrape_project_index("http://192.168.10.4:8000")
+        result = scrape_project_index("https://trac.example.org")
 
         assert result == []
 
@@ -385,7 +385,7 @@ class TestProjectIndexScraping:
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
 
-        result = scrape_project_index("http://192.168.10.4:8000")
+        result = scrape_project_index("https://trac.example.org")
 
         assert len(result) == 1
         assert result[0]["path"] == "/bcs"

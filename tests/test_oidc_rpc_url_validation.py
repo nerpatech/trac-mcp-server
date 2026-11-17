@@ -47,7 +47,7 @@ def test_https_and_loopback_are_accepted(url):
 
 @pytest.mark.parametrize(
     "url",
-    ["http://trac.example.com/trac-api", "http://10.0.0.5/trac-api"],
+    ["http://trac.example.com/trac-api", "http://192.0.2.5/trac-api"],
 )
 def test_plain_http_is_refused(url):
     with pytest.raises(ValueError, match="unencrypted"):

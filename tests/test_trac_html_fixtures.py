@@ -8,32 +8,13 @@ committed. This test keeps it that way for any fixture added later.
 """
 
 import json
-import re
 from pathlib import Path
 
 import pytest
 
+from tests.internal_names import internal_hits
+
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "trac_html"
-
-#: An internal address or name. Private IPv4 ranges, the internal Trac
-#: and daemon ports, hostnames, home-directory paths and mail addresses.
-#: ``user@example.org`` is the scrub's own placeholder.
-INTERNAL_RE = re.compile(
-    r"192\.168\.|\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|\b172\.(?:1[6-9]|2\d|3[01])\."
-    r"|\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b"
-    r"|\bfd[0-9a-f]{2}:[0-9a-f]{0,4}:"
-    r"|(?i:kpoxa|fr-tun|mazurov|nerpa\.)|/home/(?!USER\b)[A-Za-z]|/Users/[A-Za-z]"
-    r"|/root/|\.lan\b|\.home\.arpa\b|:809\d\b|:8000\b"
-    r"|[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\b",
-)
-
-
-def internal_hits(text: str) -> list[str]:
-    return [
-        m.group(0)
-        for m in INTERNAL_RE.finditer(text)
-        if m.group(0) != "user@example.org"
-    ]
 
 
 def _manifest() -> dict:

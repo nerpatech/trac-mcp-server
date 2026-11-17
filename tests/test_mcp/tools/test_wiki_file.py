@@ -2382,7 +2382,7 @@ class TestPullInPageAnchors:
         # The daemon reaches Trac at a LAN address; Trac builds its
         # hrefs from its own public base URL. Only the path is compared.
         client = self._client(
-            "http://10.0.0.5/auto_pm", "TestPage", "TestPage"
+            "http://192.0.2.5/auto_pm", "TestPage", "TestPage"
         )
         client.get_wiki_page_html.return_value = (
             '<p><a href="https://trac.example/auto_pm/wiki/TestPage'

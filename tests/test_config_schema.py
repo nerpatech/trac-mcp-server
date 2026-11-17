@@ -384,7 +384,7 @@ class TestInstanceConfig:
             {
                 "instances": {
                     "bcs": {
-                        "url": "http://192.168.10.4:8000/bcs",
+                        "url": "https://trac.example.org/bcs",
                         "username": "bcsuser",
                         "password": "bcspass",
                         "insecure": True,
@@ -393,7 +393,7 @@ class TestInstanceConfig:
             }
         )
         inst = config.instances["bcs"]
-        assert inst.url == "http://192.168.10.4:8000/bcs"
+        assert inst.url == "https://trac.example.org/bcs"
         assert inst.username == "bcsuser"
         assert inst.password == "bcspass"
         assert inst.insecure is True

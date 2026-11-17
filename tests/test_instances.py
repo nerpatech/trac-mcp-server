@@ -29,7 +29,7 @@ from trac_mcp_server.instances import (
 
 def _default_config(**overrides) -> Config:
     defaults = dict(
-        trac_url="http://192.168.10.4:8000/trac_mcp_server",
+        trac_url="https://trac.example.org/trac_mcp_server",
         username="agent_rpc",
         password="secret",
         insecure=False,
@@ -83,7 +83,7 @@ class TestResolveNamed:
 
         config = registry.resolve("bcs")
 
-        assert config.trac_url == "http://192.168.10.4:8000/bcs"
+        assert config.trac_url == "https://trac.example.org/bcs"
         assert config.username == "agent_rpc"
         assert config.password == "secret"
 
@@ -92,7 +92,7 @@ class TestResolveNamed:
         declared = {
             "other": InstanceSpec(
                 name="other",
-                url="http://192.168.10.4:8000/other",
+                url="https://trac.example.org/other",
                 username="otheruser",
                 password="otherpass",
             )
@@ -133,7 +133,7 @@ class TestResolveAdHoc:
 
         config = registry.resolve("/auto_pm")
 
-        assert config.trac_url == "http://192.168.10.4:8000/auto_pm"
+        assert config.trac_url == "https://trac.example.org/auto_pm"
         assert config.username == default.username
         assert config.password == default.password
 
@@ -141,9 +141,9 @@ class TestResolveAdHoc:
         default = _default_config()
         registry = InstanceRegistry(default, {})
 
-        config = registry.resolve("http://192.168.10.4:8000/core")
+        config = registry.resolve("https://trac.example.org/core")
 
-        assert config.trac_url == "http://192.168.10.4:8000/core"
+        assert config.trac_url == "https://trac.example.org/core"
         assert config.username == default.username
 
     def test_cross_host_url_rejected(self):
@@ -243,7 +243,7 @@ class TestResolveIdentity:
         declared = {
             "other": InstanceSpec(
                 name="other",
-                url="http://192.168.10.4:8000/other",
+                url="https://trac.example.org/other",
                 username="otheruser",
                 password="otherpass",
             )
@@ -278,7 +278,7 @@ class TestResolveIdentity:
         registry = InstanceRegistry(default, {})
 
         config = registry.resolve(
-            "http://192.168.10.4:8000/core", self._IDENTITY
+            "https://trac.example.org/core", self._IDENTITY
         )
 
         assert config.username == "alice-trac"
@@ -313,7 +313,7 @@ _ENTRY_FORMS = {
     "default-literal": ("default", {}),
     "declared": ("bcs", {"bcs": InstanceSpec(name="bcs", url="/bcs")}),
     "adhoc-path": ("/trac_test", {}),
-    "adhoc-url": ("http://192.168.10.4:8000/trac_test", {}),
+    "adhoc-url": ("https://trac.example.org/trac_test", {}),
 }
 
 
@@ -384,7 +384,7 @@ class TestSynthesizedConfigInheritsDefault:
         Config must be unrestricted, not carry the default's list."""
         default = _default_config(
             allowed_instances=frozenset(
-                {"http://192.168.10.4:8000/trac_test"}
+                {"https://trac.example.org/trac_test"}
             )
         )
         registry = InstanceRegistry(default, {})
@@ -411,7 +411,7 @@ class TestClientCache:
         registry = InstanceRegistry(default, {})
 
         client_a = registry.get_client("/bcs")
-        client_b = registry.get_client("http://192.168.10.4:8000/bcs")
+        client_b = registry.get_client("https://trac.example.org/bcs")
 
         assert client_a is client_b
 
