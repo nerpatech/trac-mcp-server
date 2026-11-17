@@ -1,4 +1,5 @@
-"""README's "Available Tools" section must match the registered tools.
+"""README's "Available Tools" section and the tool reference page must
+match the registered tools.
 
 The names come from the built registry (``build_registry`` over
 ``[PING_SPEC] + ALL_SPECS`` with the page alias and strict schema, the way
@@ -16,6 +17,15 @@ list so a duplicate registration shows. The checks:
 
 Parsing is scoped to that one section (parsed once): other README tables
 also start rows with a backticked name (environment variables).
+
+``docs/reference/mcp-tools.md`` is held to the same registry (Trac
+/trac_mcp_server #242):
+
+- every registered tool has a heading line exactly ``## <name>``;
+- every ``## `` heading whose whole text is one snake_case identifier names
+  a registered tool, so a removed or renamed tool leaves no stale section.
+  Prose headings ("Instance Routing", "Write Gate Status") are not
+  identifiers and are skipped.
 """
 
 import functools
@@ -32,10 +42,17 @@ from trac_mcp_server.mcp.tools.registry import (
 )
 
 README = Path(__file__).resolve().parent.parent / "README.md"
+TOOLS_PAGE = (
+    Path(__file__).resolve().parent.parent
+    / "docs"
+    / "reference"
+    / "mcp-tools.md"
+)
 
 HEADING = re.compile(r"^## Available Tools \((\d+)\)\s*$")
 SUBSECTION = re.compile(r"^### (.+) \((\d+)\)\s*$")
 ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|")
+TOOL_HEADING = re.compile(r"^([a-z][a-z0-9]*(?:_[a-z0-9]+)*)$")
 
 
 def _registered() -> list[str]:
@@ -134,4 +151,34 @@ def test_subsection_counts_match_rows():
     total = sum(k for k, _ in counts.values())
     assert total == _heading_count(), (
         f"subsection counts sum to {total}, heading says {_heading_count()}"
+    )
+
+
+def _page_headings() -> list[str]:
+    """The text of every ``## `` heading of the tool reference page."""
+    return [
+        line[3:].strip()
+        for line in TOOLS_PAGE.read_text(encoding="utf-8").splitlines()
+        if line.startswith("## ")
+    ]
+
+
+def test_tool_reference_has_a_section_per_registered_tool():
+    headings = set(_page_headings())
+    missing = sorted(set(_registered()) - headings)
+    assert not missing, (
+        f"{TOOLS_PAGE.name} has no '## <name>' section for "
+        f"{len(missing)} registered tool(s): {missing}"
+    )
+
+
+def test_tool_reference_sections_name_registered_tools():
+    registered = set(_registered())
+    named = [h for h in _page_headings() if TOOL_HEADING.match(h)]
+    extra = sorted(set(named) - registered)
+    assert not extra, (
+        f"{TOOLS_PAGE.name} has sections for unregistered tools: {extra}"
+    )
+    assert len(named) == len(set(named)), (
+        f"{TOOLS_PAGE.name} has a section twice: {_duplicates(named)}"
     )
