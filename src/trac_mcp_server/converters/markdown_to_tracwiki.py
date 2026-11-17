@@ -1,5 +1,6 @@
 """Markdown to TracWiki conversion using mistune AST rendering."""
 
+import html.entities
 import re
 from typing import Any, Literal, cast
 
@@ -141,6 +142,34 @@ _ESCAPE_SKIP_RE = re.compile(
 _SINGLE_BRACKET_LINK_RE = re.compile(
     r"\[(?:[A-Za-z][\w+.-]*:)+[^\s\]]+(?:[ \t]+[^\]\n]+)?\](?!\()"
 )
+
+
+# The character references CommonMark decodes in text (spec section
+# "Entity and numeric character references"): a name ending in ";", or
+# "&#" with 1-7 decimal / "&#x" with 1-6 hex digits, ending in ";".
+# mistune 3.2 leaves them raw in text tokens, and Trac would show them
+# literally (ticket #239). Matched here rather than handed to
+# `html.unescape` whole, which also decodes semicolon-less legacy names
+# (`&copy 2020`) that CommonMark keeps literal. A name is decoded only when
+# `name;` is in HTML5's entity table: `html.unescape` would decode the
+# legacy prefix of an unknown name (`&notanentity;` -> `¬anentity;`).
+_CHAR_REF_RE = re.compile(
+    r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});"
+)
+
+
+def _decode_char_refs(text: str) -> str:
+    """Decode CommonMark entity and numeric references in a text token."""
+
+    def decode(m: re.Match[str]) -> str:
+        ref = m.group(0)
+        if ref[1] == "#":
+            return html.unescape(ref)
+        if ref[1:] in html.entities.html5:
+            return html.unescape(ref)
+        return ref
+
+    return _CHAR_REF_RE.sub(decode, text)
 
 
 def _unescape_camelcase(text: str) -> str:
@@ -621,7 +650,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
         here -- mistune splits an unresolved "[...]" into separate
         text() calls (the "[" on its own), so this method never sees
         that span whole.
+
+        Entity and numeric character references (``&amp;``, ``&#x20;``)
+        are decoded first, as CommonMark does in text; code spans and
+        code blocks never reach this method, so theirs stay as typed
+        (ticket #239). Decoding comes before the CamelCase escape, so a
+        reference that spells a CamelCase word still gets its ``!``.
         """
+        text = _decode_char_refs(text)
 
         def escape(segment: str) -> str:
             return _CAMELCASE_RE.sub(
