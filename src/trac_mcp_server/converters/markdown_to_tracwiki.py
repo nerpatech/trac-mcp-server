@@ -1,7 +1,7 @@
 """Markdown to TracWiki conversion using mistune AST rendering."""
 
 import re
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import mistune
 
@@ -1796,7 +1796,8 @@ def find_list_item_splits(
         renderer=None,
         plugins=[*_MISTUNE_PLUGINS, *flavor_plugins(flavor)],
     )
-    tokens = parse(stashed)
+    # renderer=None makes mistune return its AST: a list of token dicts.
+    tokens = cast("list[dict[str, Any]]", parse(stashed))
     findings: list[dict] = []
     # Renders a run as the writer would (#176); the placeholders stay
     # stashed, as they are when the writer's separator reads the text.
@@ -1818,7 +1819,7 @@ def find_list_item_splits(
                     ]
                     if not run:
                         continue
-                    child_type = run[0].get("type")
+                    child_type = str(run[0].get("type"))
                     if run_kind == "list":
                         seen_list = True
                         # The writer's text for this run, which its
@@ -1884,7 +1885,7 @@ def find_list_item_splits(
                                     :_SPLIT_ITEM_MAX_CHARS
                                 ],
                                 "block": _SPLIT_BLOCK_LABELS.get(
-                                    child_type, str(child_type)
+                                    child_type, child_type
                                 ),
                                 "depth": depth,
                             }

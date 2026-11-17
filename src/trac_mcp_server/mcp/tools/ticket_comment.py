@@ -24,6 +24,7 @@ lost for thirty seconds before the operator noticed and restored it). See
 """
 
 import xmlrpc.client
+from typing import Any
 
 import mcp.types as types
 
@@ -210,11 +211,17 @@ TICKET_COMMENT_TOOLS = [
 ]
 
 
-def _require(args: dict, *names: str):
-    """Return the named args, or an error result if any is missing."""
+def _require(
+    args: dict, *names: str
+) -> tuple[list[Any], types.CallToolResult | None]:
+    """Return the named args, or an error result if any is missing.
+
+    On an error the values list is empty and must not be used; callers
+    return the error before unpacking.
+    """
     missing = [n for n in names if args.get(n) is None]
     if missing:
-        return None, build_error_response(
+        return [], build_error_response(
             "validation_error",
             "%s is required" % ", ".join(missing),
             "Provide %s." % ", ".join(missing),

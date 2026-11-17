@@ -8,8 +8,8 @@ caller is what lets both tools share it.
 
 from dataclasses import dataclass, field
 
-from lxml import etree
 from lxml import html as lxml_html
+from lxml.etree import strip_elements
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +138,7 @@ def extract_facts(rendered_html: str) -> PreviewFacts:
     # plain `parent.remove(el)` discards the tail along with the element
     # and silently eats that adjacent prose (found live: text right
     # after an empty `<code></code>` vanished from prose_text entirely).
-    etree.strip_elements(prose_tree, "pre", "code", with_tail=False)
+    strip_elements(prose_tree, "pre", "code", with_tail=False)
     prose_text = prose_tree.text_content()
 
     return PreviewFacts(

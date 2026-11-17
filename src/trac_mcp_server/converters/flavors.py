@@ -23,6 +23,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import unquote
 
+from mistune.plugins import Plugin
+
 from .common import (
     blank_fenced_code,
     blank_inline_code_spans,
@@ -675,7 +677,7 @@ _NORMALISERS: dict[str, tuple[Normaliser, ...]] = {
     "gemini": (_gemini_code_blocks, _gemini_bullets, _gemini_citations),
 }
 
-_PLUGINS: dict[str, tuple[Callable[[Any], None], ...]] = {
+_PLUGINS: dict[str, tuple[Plugin, ...]] = {
     "commonmark": (),
     "chatgpt": (chatgpt_math,),
     "gemini": (),
@@ -701,7 +703,7 @@ def apply_flavor(text: str, flavor: str) -> tuple[str, list[str]]:
     return text, warnings
 
 
-def flavor_plugins(flavor: str) -> list[Callable[[Any], None]]:
+def flavor_plugins(flavor: str) -> list[Plugin]:
     """The extra mistune plugins of a flavour (none for the default)."""
     check_flavor(flavor)
     return list(_PLUGINS[flavor])

@@ -417,7 +417,7 @@ async def _handle_push(
         # every other inline write -- unless the caller says otherwise
         # with format= or a filename (ticket #111).
         source_format = "tracwiki"
-    elif fmt == "auto":
+    elif fmt == "auto" and name is not None:
         source_format = detect_file_format(name, content)
     else:
         source_format = fmt

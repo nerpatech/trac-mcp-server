@@ -258,6 +258,9 @@ async def _handle_put(
     binary = xmlrpc.client.Binary(data)
 
     filename = args.get("filename") or default_name
+    # read_binary_input names the file on the path form and refuses an
+    # inline upload without a filename, so one of the two is always set.
+    assert filename, "read_binary_input guarantees a filename"
 
     stored_raw = await run_sync(
         client.put_wiki_attachment,

@@ -634,7 +634,9 @@ async def _handle_update(
         None if comment_number is None else comment_mismatch is None
     )
     comment_folded: bool | None = (
-        None if comment_number is None else posted.folded
+        None
+        if posted is None or comment_number is None
+        else posted.folded
     )
 
     # Build summary of changes
@@ -942,7 +944,11 @@ async def _find_posted_comment(
             candidates.append(entry)
 
     if not candidates:
-        who = f" by {username.strip()}" if author is not None else ""
+        who = (
+            f" by {username.strip()}"
+            if isinstance(username, str) and author is not None
+            else ""
+        )
         return _PostedComment(
             failure=f"no comment entry{who} at the update's time"
         )

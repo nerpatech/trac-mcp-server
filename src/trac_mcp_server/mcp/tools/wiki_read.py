@@ -11,6 +11,7 @@ import difflib
 import json
 import time
 import xmlrpc.client
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 import mcp.types as types
@@ -667,6 +668,10 @@ class _MyersMatcher(difflib.SequenceMatcher):
     # False once get_matching_blocks has hit _MYERS_MAX_EDITS.
     minimal = True
 
+    # Set by SequenceMatcher.set_seqs; typeshed does not declare them.
+    a: Sequence[str]
+    b: Sequence[str]
+
     def get_matching_blocks(self):
         a, b = self.a, self.b
         prefix = 0
@@ -716,7 +721,7 @@ class _MyersMatcher(difflib.SequenceMatcher):
 
     @staticmethod
     def _myers_pairs(
-        x: list[str], y: list[str]
+        x: Sequence[str], y: Sequence[str]
     ) -> list[tuple[int, int]] | None:
         """Matched (i, j) line pairs of a shortest edit script, in order,
         or None when it needs more than _MYERS_MAX_EDITS edits."""
