@@ -851,7 +851,6 @@ class TestCodeBlockLanguageMapping(unittest.TestCase):
             "go",
             "rust",
             "sql",
-            "html",
             "css",
             "xml",
             "json",
@@ -860,6 +859,11 @@ class TestCodeBlockLanguageMapping(unittest.TestCase):
         ]
         for lang in identity_langs:
             self.assertEqual(markdown_to_tracwiki_lang(lang), lang)
+
+    def test_md_to_tw_lang_html_is_shown_as_code(self):
+        """A Markdown html fence shows code; `#!html` would render it
+        (ticket #240)."""
+        self.assertEqual(markdown_to_tracwiki_lang("html"), "text/html")
 
     def test_md_to_tw_lang_unknown_passthrough(self):
         """Test unknown languages pass through unchanged."""
@@ -2123,14 +2127,15 @@ class TestLegacyExportFenceRefused(unittest.TestCase):
 
     def test_ordinary_unknown_language_is_unchanged(self):
         self.assertEqual(
-            markdown_to_tracwiki("```foo\nx\n```\n"), "{{{#!foo\nx\n}}}"
+            markdown_to_tracwiki("```foo\nx\n```\n"),
+            "{{{#!text lang=foo\nx\n}}}",
         )
 
     def test_language_that_only_starts_with_the_name_is_unchanged(self):
         """Exactly the info string, not a prefix of it."""
         self.assertEqual(
             markdown_to_tracwiki("```tracwiki\nx\n```\n"),
-            "{{{#!tracwiki\nx\n}}}",
+            "{{{#!text lang=tracwiki\nx\n}}}",
         )
 
 

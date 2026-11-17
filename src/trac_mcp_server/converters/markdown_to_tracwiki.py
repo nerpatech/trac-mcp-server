@@ -7,11 +7,12 @@ from typing import Any, Literal, cast
 import mistune
 
 from .common import (
+    _LANG_ATTRIBUTE_RE,
     _LIST_MARKER_RE,
     SCHEME_RE,
     TRACLINK_SCHEMES,
     ConversionResult,
-    markdown_to_tracwiki_lang,
+    fence_processor,
     trac_continuation_bound,
 )
 from .flavors import (
@@ -661,6 +662,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         # `block_quote()` then emits Trac citation lines, `> `-prefixed, at
         # every nesting level, instead of the two-space-indented form.
         self._citation = False
+        # Fence languages `block_code` wrote as `#!text lang=NAME` because
+        # Trac has no processor for them, in order of appearance, with
+        # repeats (ticket #240). `convert_with_warnings` reports them.
+        self.downgraded_fence_languages: list[str] = []
 
     def text(self, text: str) -> str:
         """Render plain text.
@@ -886,7 +891,10 @@ class TracWikiRenderer(mistune.BaseRenderer):
         }}}
 
         Language identifiers are mapped from Markdown to TracWiki equivalents
-        (e.g., 'bash' -> 'sh').
+        (e.g., 'bash' -> 'sh'). A language Trac does not highlight is
+        written as `{{{#!text lang=NAME`, never as a processor Trac lacks
+        (error box) or owns (div, span, comment, default); see
+        `common.fence_processor` (ticket #240).
 
         A {{{ }}} block nested inside another arrives here as one
         `block_code` call whose `code` still contains the inner block's
@@ -918,10 +926,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 "`trac-mcp wiki-pull PAGE FILE --format tracwiki`)."
             )
         code = code.rstrip("\n")
-        if info:
-            # Map Markdown language to TracWiki processor directive
-            tracwiki_lang = markdown_to_tracwiki_lang(info)
-            return f"{{{{{{#!{tracwiki_lang}\n{code}\n}}}}}}\n\n"
+        if info and info.split():
+            # Map Markdown language to TracWiki processor directive, or
+            # to a plain `#!text lang=NAME` block when Trac has none
+            # (ticket #240)
+            opener, downgraded = fence_processor(info)
+            if downgraded is not None:
+                self.downgraded_fence_languages.append(downgraded)
+            return f"{{{{{{{opener}\n{code}\n}}}}}}\n\n"
         else:
             return f"{{{{{{\n{code}\n}}}}}}\n\n"
 
@@ -1663,10 +1675,17 @@ def _reject_unrepresentable_footnotes(markdown_text: str) -> None:
 
 
 def _render_markdown(
-    markdown_text: str, *, heading_anchors: bool, flavor: str
+    markdown_text: str,
+    *,
+    heading_anchors: bool,
+    flavor: str,
+    downgraded_fences: list[str] | None = None,
 ) -> str:
     """Convert Markdown that has already been through the flavour's
-    pre-normalisers (`apply_flavor`)."""
+    pre-normalisers (`apply_flavor`).
+
+    ``downgraded_fences``, when given, is extended with the language of
+    each code fence written as ``#!text lang=NAME`` (ticket #240)."""
     # Stash code spans / [[...]] / single-bracket link
     # spans before mistune ever sees a "`" or a "[" (see
     # _stash_bracket_syntax for why this can't happen inside text()).
@@ -1689,6 +1708,8 @@ def _render_markdown(
 
     # Parse and render
     result: str = markdown(stashed_text)  # type: ignore[assignment]
+    if downgraded_fences is not None:
+        downgraded_fences.extend(renderer.downgraded_fence_languages)
 
     result = _restore_bracket_syntax(result, placeholders)
 
@@ -1791,9 +1812,25 @@ def convert_with_warnings(
         warnings.append(_GEMINI_HINT)
 
     # Convert the markdown
+    downgraded_fences: list[str] = []
     tracwiki = _render_markdown(
-        markdown_text, heading_anchors=heading_anchors, flavor=flavor
+        markdown_text,
+        heading_anchors=heading_anchors,
+        flavor=flavor,
+        downgraded_fences=downgraded_fences,
     )
+
+    # Ticket #240: one warning per distinct name, in order of appearance.
+    for name in dict.fromkeys(downgraded_fences):
+        written = (
+            f"{{{{{{#!text lang={name}}}}}}}"
+            if _LANG_ATTRIBUTE_RE.fullmatch(name)
+            else "{{{#!text}}}"
+        )
+        warnings.append(
+            f"Code fence language '{name}' has no Trac processor; "
+            f"written as a plain code block ({written})."
+        )
 
     return ConversionResult(
         text=tracwiki,
