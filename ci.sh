@@ -13,6 +13,16 @@ ruff check src/ tests/ scripts/
 ruff format --check src/ tests/ scripts/
 
 echo ""
+echo "=== Type check ==="
+# src/ only, zero errors (Trac #236): pyright exits non-zero on any error,
+# so there is no script to keep. --pythonpath names the interpreter that
+# has the dependencies (the venv first on PATH here, setup-python's in
+# Actions); pyrightconfig.json hard-codes no venv. The ignore-warnings
+# variable stops the pip wrapper's newer-version check calling PyPI, which
+# this script must not need.
+PYRIGHT_PYTHON_IGNORE_WARNINGS=1 pyright --pythonpath "$(command -v python)" src/
+
+echo ""
 echo "=== Unit Tests (no credentials, like GitHub Actions) ==="
 # Two channels, both closed. conftest.py disables .env loading process-wide
 # without --run-live (bootstrap_config() reads .env itself, so skipping only

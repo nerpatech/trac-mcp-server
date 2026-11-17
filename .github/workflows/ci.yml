@@ -19,6 +19,19 @@ jobs:
       - run: ruff check src/ tests/ scripts/
       - run: ruff format --check src/ tests/ scripts/
 
+  typecheck:
+    runs-on: ubuntu-latest
+    env:
+      PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev]"
+      - run: pyright --pythonpath "$(command -v python)" src/
+
   test:
     runs-on: ubuntu-latest
     steps:
