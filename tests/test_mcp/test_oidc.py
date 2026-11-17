@@ -9,7 +9,9 @@ test_http_app.py::TestOidcTokenRequired.
 
 import asyncio
 import calendar
+import hashlib
 import http.server
+import logging
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,8 @@ import pytest
 import requests
 
 from trac_mcp_server.config import Config
+from trac_mcp_server.core.client import TracClient
+from trac_mcp_server.mcp import oidc as oidc_module
 from trac_mcp_server.mcp.oidc import (
     MissingOidcTokenError,
     OidcClientCache,
@@ -293,3 +297,200 @@ class TestCommentLookup:
             ]
         )
         assert posted.number == 4
+
+
+class TestRejectedTokens:
+    """The reject list: tokens Trac answered 401 to (Trac /trac_mcp_server
+    #205). Only a digest is kept, the list is bounded, and an entry
+    expires."""
+
+    _URL = "https://trac.example.com/trac-api/login/xmlrpc"
+
+    def test_a_marked_token_is_rejected(self, base_config):
+        cache = OidcClientCache(base_config, self._URL)
+        assert not cache.is_rejected("tokA")
+        cache.mark_rejected("tokA")
+        assert cache.is_rejected("tokA")
+
+    def test_an_unrelated_token_is_unaffected(self, base_config):
+        cache = OidcClientCache(base_config, self._URL)
+        cache.mark_rejected("tokA")
+        assert not cache.is_rejected("tokB")
+
+    def test_only_the_digest_is_stored(self, base_config):
+        token = "secret-opaque-token-value"
+        cache = OidcClientCache(base_config, self._URL)
+        cache.mark_rejected(token)
+        assert list(cache._rejected) == [
+            hashlib.sha256(token.encode()).hexdigest()
+        ]
+        for key, value in cache._rejected.items():
+            assert token not in key
+            assert token not in repr(value)
+
+    def test_the_list_is_bounded_by_fifo_eviction(
+        self, base_config, monkeypatch
+    ):
+        monkeypatch.setattr(oidc_module, "_MAX_REJECTED_TOKENS", 3)
+        cache = OidcClientCache(base_config, self._URL)
+        for i in range(5):
+            cache.mark_rejected(f"token-{i}")
+        assert len(cache._rejected) == 3
+        assert not cache.is_rejected("token-0")
+        assert not cache.is_rejected("token-1")
+        assert cache.is_rejected("token-2")
+        assert cache.is_rejected("token-4")
+
+    def test_an_entry_expires_after_the_ttl(self, base_config):
+        now = [1000.0]
+        cache = OidcClientCache(
+            base_config, self._URL, clock=lambda: now[0]
+        )
+        cache.mark_rejected("tokA")
+        now[0] += oidc_module._REJECTED_TTL_SECONDS - 1
+        assert cache.is_rejected("tokA")
+        now[0] += 1
+        assert not cache.is_rejected("tokA")
+        assert cache._rejected == {}
+
+    def test_marking_again_refreshes_the_timestamp(self, base_config):
+        now = [1000.0]
+        cache = OidcClientCache(
+            base_config, self._URL, clock=lambda: now[0]
+        )
+        cache.mark_rejected("tokA")
+        now[0] += oidc_module._REJECTED_TTL_SECONDS - 10
+        cache.mark_rejected("tokA")
+        now[0] += oidc_module._REJECTED_TTL_SECONDS - 10
+        assert cache.is_rejected("tokA")
+        now[0] += 10
+        assert not cache.is_rejected("tokA")
+
+
+class _Always401(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self.send_response(401)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture
+def always_401_url():
+    server = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), _Always401
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/rpc"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestUnauthorizedHook:
+    """TracClient reports a 401 to ``on_unauthorized``, against a real
+    HTTP server."""
+
+    def _bearer_config(self, url: str) -> Config:
+        return Config(
+            trac_url=url,
+            username="",
+            password="",
+            bearer_token="tokA",
+            rpc_url_override=url,
+            oidc_only=True,
+        )
+
+    def test_a_401_fires_the_callback_once_and_still_raises(
+        self, always_401_url
+    ):
+        calls = []
+        client = TracClient(
+            self._bearer_config(always_401_url),
+            on_unauthorized=lambda: calls.append(1),
+        )
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+        assert calls == [1]
+
+    def test_basic_auth_client_gets_no_hook(self, always_401_url):
+        calls = []
+        client = TracClient(
+            Config(
+                trac_url=always_401_url,
+                username="user",
+                password="pass",
+            ),
+            on_unauthorized=lambda: calls.append(1),
+        )
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+        assert calls == []
+
+    def test_a_raising_callback_does_not_replace_the_error(
+        self, always_401_url, caplog
+    ):
+        def boom():
+            raise RuntimeError("bookkeeping failed")
+
+        client = TracClient(
+            self._bearer_config(always_401_url), on_unauthorized=boom
+        )
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(requests.HTTPError):
+                client.get_ticket(1)
+        assert "bookkeeping failed" in caplog.text
+
+    def test_no_callback_no_hook(self, always_401_url):
+        client = TracClient(self._bearer_config(always_401_url))
+        assert client.session.hooks["response"] == []
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+
+    def test_the_hook_is_on_every_threads_session(self, always_401_url):
+        calls = []
+        client = TracClient(
+            self._bearer_config(always_401_url),
+            on_unauthorized=lambda: calls.append(1),
+        )
+
+        def call():
+            with pytest.raises(requests.HTTPError):
+                client.get_ticket(1)
+
+        worker = threading.Thread(target=call)
+        worker.start()
+        worker.join()
+        assert calls == [1]
+
+    def test_the_hook_survives_close(self, always_401_url):
+        """close() leaves the session usable; the hook stays on it."""
+        calls = []
+        client = TracClient(
+            self._bearer_config(always_401_url),
+            on_unauthorized=lambda: calls.append(1),
+        )
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+        client.close()
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+        assert calls == [1, 1]
+
+    def test_a_cached_client_marks_its_own_token(self, always_401_url):
+        cache = OidcClientCache(
+            Config(trac_url=always_401_url, username="", password=""),
+            always_401_url,
+        )
+        client = cache.get_client("tokA")
+        cache.get_client("tokB")
+        with pytest.raises(requests.HTTPError):
+            client.get_ticket(1)
+        assert cache.is_rejected("tokA")
+        assert not cache.is_rejected("tokB")

@@ -220,6 +220,16 @@ def set_oidc_cache(cache: OidcClientCache | None) -> None:
     _oidc_cache = cache
 
 
+def oidc_token_rejected(token: str) -> bool:
+    """Whether Trac answered 401 to ``token`` on an earlier request.
+
+    Always False when OIDC per-user auth is not active. Read by
+    ``OidcTokenRequiredMiddleware``, which answers such a token with 401
+    itself (Trac /trac_mcp_server #205).
+    """
+    return _oidc_cache is not None and _oidc_cache.is_rejected(token)
+
+
 async def _resolve_client(instance: str | None) -> TracClient:
     """Resolve the TracClient for the current tool/resource call.
 

@@ -238,6 +238,15 @@ class OidcTokenRequiredMiddleware:
     tool result, and an MCP client refreshes its token only on a 401 from
     the MCP endpoint itself.
 
+    A token Trac has rejected is answered the same way, with one
+    difference in timing. Trac's 401 (a revoked JWT, an opaque token that
+    expired, a token that lapsed while a tool ran) arrives while a tool
+    call is already streaming its response, so that request cannot become
+    a 401: the call reports the error as tool-result text with HTTP 200.
+    ``TracClient`` records the rejection in the ``OidcClientCache``, and
+    the NEXT request that carries the token is answered 401 here. See
+    ``server.oidc_token_rejected``.
+
     This reuses the standard ``Authorization`` header rather than a custom
     one: an MCP client's own OAuth flow per server (e.g. LibreChat's
     ``oauth:`` config) can only attach a normal bearer header, not a
@@ -294,6 +303,24 @@ class OidcTokenRequiredMiddleware:
                 headers={
                     "WWW-Authenticate": 'Bearer error="invalid_token", '
                     'error_description="The access token expired"'
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        # Imported here: server.py imports this module at load time.
+        from .server import oidc_token_rejected
+
+        if oidc_token_rejected(token):
+            logger.info(
+                "OIDC access token was rejected by Trac; answering 401"
+            )
+            response = Response(
+                "Unauthorized: Trac rejected the access token.",
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": 'Bearer error="invalid_token", '
+                    'error_description="Trac rejected the access token"'
                 },
             )
             await response(scope, receive, send)
