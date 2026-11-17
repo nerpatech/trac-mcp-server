@@ -144,19 +144,6 @@ _SINGLE_BRACKET_LINK_RE = re.compile(
 )
 
 
-# Trac's quoted-target bracket link: `['Page']` or `["Page"]`, with an
-# optional label after whitespace (`['Page' label]`). Measured on this
-# host: `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so
-# Markdown prose that subscripts with a string key would become one (and
-# the write gate refuses the push). `(?!\()` leaves a Markdown inline
-# link (`["T"](url)`) to mistune. There is no lookahead for `[`, so
-# chained subscripts (`x['a']['b']`) are both caught. A span with no
-# closing bracket (`y['k'`) is not a link and does not match (ticket #241).
-_QUOTED_BRACKET_LINK_RE = re.compile(
-    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[ \t][^\]\n]*)?\](?!\()"""
-)
-
-
 # The character references CommonMark decodes in text (spec section
 # "Entity and numeric character references"): a name ending in ";", or
 # "&#" with 1-7 decimal / "&#x" with 1-6 hex digits, ending in ";".
@@ -271,11 +258,6 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     ticket #44) is stashed last, after `[[...]]` is already out of the way,
     so a double-bracket span never has its own outer brackets mistaken for
     the single-bracket form's opening/closing pair.
-
-    Trac's quoted-target bracket link shape (`_QUOTED_BRACKET_LINK_RE`,
-    `x['KEY']`, `d["key"]`) is stashed right after it, as typed, so the
-    span reaches `text()` whole; `text()` adds Trac's `!` escape there,
-    and a code span or code block restores it unescaped (ticket #241).
     """
     placeholders: list[str] = []
 
@@ -290,7 +272,6 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
     text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
     text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
-    text = _QUOTED_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
 
 
@@ -340,6 +321,83 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 # #17).
 
 
+# Trac's quoted-target bracket link: `['Page']` or `["Page"]`, with an
+# optional label after whitespace (`['Page' label]`). Measured on this
+# host: `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so
+# Markdown prose that subscripts with a string key would become one (and
+# the write gate refuses the push). `(?!\()` leaves a Markdown inline link
+# (`["T"](url)`) to mistune. There is no lookahead for `[`, so chained
+# subscripts (`x['a']['b']`) are all caught. A span with no closing
+# bracket (`y['k'`) is not a link and does not match (ticket #241).
+_QUOTED_BRACKET_LINK_RE = re.compile(
+    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[ \t][^\]\n]*)?\](?!\()"""
+)
+
+# A bare URL run that ends where a quoted bracket starts. Trac's URL
+# pattern already takes the characters after it (measured:
+# `https://e.com/a['b']` links `https://e.com/a['b`, with or without an
+# escape), so the shape is left alone there.
+_URL_RUN_BEFORE_RE = re.compile(r"(?:https?|ftp)://\S*$")
+
+# What follows a candidate span, read as a reference label: `["T"][id]`.
+_REF_LABEL_AFTER_RE = re.compile(r"\[([^\]\n]*)\]")
+
+
+def _parse_quoted_bracket(
+    inline: Any, m: re.Match[str], state: Any
+) -> int | None:
+    """Inline rule: a quoted-target bracket link shape in prose becomes a
+    `quoted_bracket` token, which the renderer writes with Trac's `!`
+    escape (ticket #241).
+
+    Registered `before="link"`: mistune tries rules at the leftmost
+    position in rule order, and a rule after `link` never sees a `[` that
+    `link` gave up as text. Because it is an inline rule it fires only
+    where mistune sees prose: a link or image destination, a reference
+    definition, a link title, an autolink, a code span and a
+    backslash-escaped bracket are all consumed by their own rules first.
+
+    Leaves the span to mistune when:
+
+    - the text just before the match ends in a bare URL (`_URL_RUN_BEFORE_RE`):
+      returns None, so the `[` is text, as before;
+    - the span is a reference link of the document: `["T"]` or `["T"][]`
+      with `["T"]: url` defined, or `["T"][id]` with `[id]: url` defined
+      (the `[` after a span cannot tell a full reference link from a
+      chained subscript, so the document's own definitions decide): the
+      position is handed to `inline.parse_link`, because returning None
+      would make the `[` text and the link rule would never see it.
+    """
+    if _URL_RUN_BEFORE_RE.search(state.src[: m.start()]):
+        return None
+    ref_links = state.env.get("ref_links")
+    if ref_links:
+        inner = m.group(0)[1:-1]
+        after = _REF_LABEL_AFTER_RE.match(state.src, m.end())
+        label = (after.group(1) or inner) if after else inner
+        if mistune.util.unikey(label) in ref_links:
+            # Not None: that would make the `[` text, and the link rule
+            # never sees it. Hand the position to the link rule itself.
+            link_m = re.compile(inline.specification["link"]).match(
+                state.src, m.start()
+            )
+            assert link_m is not None
+            return inline.parse_link(link_m, state)
+    state.append_token({"type": "quoted_bracket", "raw": m.group(0)})
+    return m.end()
+
+
+def _quoted_bracket_links(md: Any) -> None:
+    """mistune plugin: `_parse_quoted_bracket` as an inline rule before
+    `link`."""
+    md.inline.register(
+        "quoted_bracket",
+        _QUOTED_BRACKET_LINK_RE.pattern,
+        _parse_quoted_bracket,
+        before="link",
+    )
+
+
 # The mistune plugin set for every parse of Markdown in this module. The
 # converter and the `list_item_split` detector (#125) must agree on what is
 # a table, so both read this one list (ticket #142). `table_in_list` and
@@ -350,6 +408,7 @@ _MISTUNE_PLUGINS = [
     "table",
     "mistune.plugins.table.table_in_list",
     "mistune.plugins.table.table_in_quote",
+    _quoted_bracket_links,
 ]
 
 
@@ -730,32 +789,11 @@ class TracWikiRenderer(mistune.BaseRenderer):
         would make Trac render a blockquote and HTML collapses them
         there anyway. Decoding comes before the CamelCase escape, so a
         reference that spells a CamelCase word still gets its ``!``.
-
-        A stashed quoted-target bracket link (`_QUOTED_BRACKET_LINK_RE`,
-        ``x['KEY']``, ``d["key"]``) that reaches this method is prose, and
-        Trac would read it as a wiki link, so its placeholder gets Trac's
-        ``!`` escape here, unless a ``!`` already precedes it (ticket
-        #241). The escape is applied here, not stored in the placeholder,
-        because the same placeholder restored inside a code span or code
-        block must stay as typed: those never reach this method.
         """
         typed = text
         text = _decode_char_refs(text)
         if typed.startswith("&") and self._last_char == "\n":
             text = text.lstrip(" ")
-
-        def escape_quoted_bracket(m: re.Match[str]) -> str:
-            n = int(m.group(1))
-            if n >= len(self._placeholders):
-                return m.group(0)
-            stored = self._placeholders[n]
-            if not _QUOTED_BRACKET_LINK_RE.fullmatch(stored):
-                return m.group(0)
-            if m.start() > 0 and m.string[m.start() - 1] == "!":
-                return m.group(0)
-            return "!" + m.group(0)
-
-        text = _PLACEHOLDER_RE.sub(escape_quoted_bracket, text)
 
         def escape(segment: str) -> str:
             return _CAMELCASE_RE.sub(
@@ -778,6 +816,14 @@ class TracWikiRenderer(mistune.BaseRenderer):
     def strong(self, text: str) -> str:
         """Render bold text (double emphasis)."""
         return f"'''{text}'''"
+
+    def quoted_bracket(self, text: str) -> str:
+        """Render a quoted-target bracket link shape found in prose
+        (`_parse_quoted_bracket`, ticket #241) with Trac's `!` escape, so
+        Trac shows ``x['KEY']`` as text instead of a wiki link. A `!`
+        typed in Markdown is a literal character, so it is not an escape
+        already: ``Wow!['a']`` gives ``Wow!!['a']``."""
+        return f"!{text}"
 
     def codespan(self, text: str) -> str:
         """Render inline code."""
