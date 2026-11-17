@@ -259,8 +259,14 @@ async def _handle_put(
 
     filename = args.get("filename") or default_name
     # read_binary_input names the file on the path form and refuses an
-    # inline upload without a filename, so one of the two is always set.
-    assert filename, "read_binary_input guarantees a filename"
+    # inline upload without a filename, so one of the two is always set;
+    # the check keeps that true under `python -O` and for pyright.
+    if not filename:
+        return build_error_response(
+            "validation_error",
+            "filename is required",
+            "Provide filename parameter.",
+        )
 
     stored_raw = await run_sync(
         client.put_wiki_attachment,

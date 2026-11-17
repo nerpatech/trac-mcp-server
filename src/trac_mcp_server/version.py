@@ -53,7 +53,7 @@ def _frozen_release_sha() -> str | None:
         text = (Path(meipass) / FROZEN_SHA_FILE).read_text(
             encoding="ascii"
         )
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError):
         return None
     sha = text.strip()
     return sha if _STAMP.match(sha) else None

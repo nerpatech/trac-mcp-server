@@ -1,5 +1,7 @@
 {
   "include": ["src"],
+  "venvPath": ".",
+  "venv": ".venv",
   "pythonVersion": "3.12",
   "extraPaths": ["src"],
   "reportMissingModuleSource": "none"

@@ -29,7 +29,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: "pip"
-      - run: pip install -e ".[dev]"
+      # Constrained to the shipped versions so the dependency stubs pyright
+      # reads are the deployed ones, not whatever is newest (drift, Trac #184).
+      - run: pip install -e ".[dev]" -c constraints/deploy.txt
       - run: pyright --pythonpath "$(command -v python)" src/
 
   test:

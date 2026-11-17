@@ -17,19 +17,24 @@ The default, `commonmark`, is neither: its output is today's, byte for
 byte (Trac /trac_mcp_server #216).
 """
 
+from __future__ import annotations
+
 import re
 import string
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
-
-from mistune.plugins import Plugin
 
 from .common import (
     blank_fenced_code,
     blank_inline_code_spans,
     indent_columns,
 )
+
+if TYPE_CHECKING:
+    # Annotations only: `Plugin` exists from mistune 3.1.0 and pyproject
+    # allows 3.0.x, so it must never be imported at runtime.
+    from mistune.plugins import Plugin
 
 FLAVORS: tuple[str, ...] = ("commonmark", "chatgpt", "gemini")
 DEFAULT_FLAVOR = "commonmark"

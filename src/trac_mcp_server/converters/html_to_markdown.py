@@ -350,10 +350,10 @@ _TRANSPARENT_INLINE = frozenset({"span", "small"})
 _LETTERED_LISTS = frozenset(
     {"loweralpha", "upperalpha", "lowerroman", "upperroman"}
 )
-_ANY = None
+# None means any class is allowed on the tag.
 _ALLOWED_CLASSES: dict[str, frozenset[str] | None] = {
-    "a": _ANY,  # status classes (closed ticket, ext-link, ...)
-    "li": _ANY,  # active / False in a TOC, entry
+    "a": None,  # status classes (closed ticket, ext-link, ...)
+    "li": None,  # active / False in a TOC, entry
     "ol": _LETTERED_LISTS,
     "blockquote": frozenset({"citation"}),
     "pre": frozenset({"wiki"}),
@@ -384,7 +384,7 @@ _ALLOWED_CLASSES: dict[str, frozenset[str] | None] = {
     ),
 }
 for _tag in _TABLE_TAGS:  # Trac's row/column/macro chrome
-    _ALLOWED_CLASSES[_tag] = _ANY
+    _ALLOWED_CLASSES[_tag] = None
 for _level in range(1, 7):
     _ALLOWED_CLASSES[f"h{_level}"] = frozenset(
         {"section", "report-result"}
@@ -766,8 +766,7 @@ class _TracConverter(MarkdownifyBase):
         classes = _classes(el)
         if (
             classes
-            and allowed
-            is not None  # i.e. not _ANY (narrows for pyright)
+            and allowed is not None  # None: any class is allowed
             and not set(classes) <= allowed
         ):
             return _describe(el)
@@ -938,7 +937,7 @@ class _TracConverter(MarkdownifyBase):
         if "class" not in tag.attrs:
             return
         allowed = _ALLOWED_CLASSES.get(tag.name, frozenset())
-        if allowed is None:  # i.e. _ANY (narrows for pyright)
+        if allowed is None:  # any class is allowed on this tag
             del tag["class"]
             return
         kept = [c for c in _classes(tag) if c not in allowed]

@@ -14,7 +14,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qs, urlsplit
 
 import mcp.server.stdio
@@ -22,7 +22,6 @@ import mcp.types as types
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from pydantic_core import Url
-from starlette.requests import Request
 
 from .. import __version__
 from ..config_bootstrap import bootstrap_server_config
@@ -66,6 +65,9 @@ from .tools.registry import (
     with_strict_schema,
 )
 from .tools.write_gate import gate_enabled, write_gate_line
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
 
