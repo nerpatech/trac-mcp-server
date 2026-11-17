@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import logging
 import sys
+from typing import TYPE_CHECKING, cast
 from urllib.parse import parse_qs, urlsplit
 
 import mcp.server.stdio
@@ -65,13 +66,14 @@ from .tools.registry import (
 )
 from .tools.write_gate import gate_enabled, write_gate_line
 
+if TYPE_CHECKING:
+    from starlette.requests import Request
+
 logger = logging.getLogger(__name__)
 
 # Initialize server instance
-server = Server(
-    "trac-mcp-server",
-    version=format_server_version(__version__, release_sha()),
-)
+_SERVER_VERSION = format_server_version(__version__, release_sha())
+server = Server("trac-mcp-server", version=_SERVER_VERSION)
 
 # Global instance registry (initialized in lifespan)
 _instances: InstanceRegistry | None = None
@@ -255,7 +257,11 @@ async def _resolve_client(instance: str | None) -> TracClient:
                 "serves only its single configured Trac endpoint."
             )
         try:
-            request = server.request_context.request
+            # The SDK types the request as a bare TypeVar; over HTTP it is
+            # the Starlette request, and over stdio it is None.
+            request = cast(
+                "Request | None", server.request_context.request
+            )
         except LookupError:
             request = None
         auth_header = (
@@ -696,7 +702,7 @@ async def _run_stdio() -> None:
     ):
         init_options = InitializationOptions(
             server_name="trac-mcp-server",
-            server_version=server.version,
+            server_version=_SERVER_VERSION,
             capabilities=server.get_capabilities(
                 notification_options=NotificationOptions(),
                 experimental_capabilities={},

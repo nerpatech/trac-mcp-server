@@ -17,10 +17,12 @@ The default, `commonmark`, is neither: its output is today's, byte for
 byte (Trac /trac_mcp_server #216).
 """
 
+from __future__ import annotations
+
 import re
 import string
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from .common import (
@@ -28,6 +30,11 @@ from .common import (
     blank_inline_code_spans,
     indent_columns,
 )
+
+if TYPE_CHECKING:
+    # Annotations only: `Plugin` exists from mistune 3.1.0 and pyproject
+    # allows 3.0.x, so it must never be imported at runtime.
+    from mistune.plugins import Plugin
 
 FLAVORS: tuple[str, ...] = ("commonmark", "chatgpt", "gemini")
 DEFAULT_FLAVOR = "commonmark"
@@ -675,7 +682,7 @@ _NORMALISERS: dict[str, tuple[Normaliser, ...]] = {
     "gemini": (_gemini_code_blocks, _gemini_bullets, _gemini_citations),
 }
 
-_PLUGINS: dict[str, tuple[Callable[[Any], None], ...]] = {
+_PLUGINS: dict[str, tuple[Plugin, ...]] = {
     "commonmark": (),
     "chatgpt": (chatgpt_math,),
     "gemini": (),
@@ -701,7 +708,7 @@ def apply_flavor(text: str, flavor: str) -> tuple[str, list[str]]:
     return text, warnings
 
 
-def flavor_plugins(flavor: str) -> list[Callable[[Any], None]]:
+def flavor_plugins(flavor: str) -> list[Plugin]:
     """The extra mistune plugins of a flavour (none for the default)."""
     check_flavor(flavor)
     return list(_PLUGINS[flavor])

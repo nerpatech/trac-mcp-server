@@ -28,16 +28,17 @@ import copy
 import re
 import string
 import textwrap
+from typing import Any, cast
 
-from bs4 import BeautifulSoup, NavigableString, Tag
-from markdownify import (
-    ATX,
-    BACKSLASH,
-    MarkdownConverter,
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
+from markdownify import ATX, BACKSLASH
+
+from ._markdownify_typing import (
+    MarkdownifyBase,
     abstract_inline_conversion,
     chomp,
 )
-
 from .common import ConversionResult, tracwiki_to_markdown_lang
 from .link_targets import LinkTargets
 
@@ -349,10 +350,10 @@ _TRANSPARENT_INLINE = frozenset({"span", "small"})
 _LETTERED_LISTS = frozenset(
     {"loweralpha", "upperalpha", "lowerroman", "upperroman"}
 )
-_ANY = None
+# None means any class is allowed on the tag.
 _ALLOWED_CLASSES: dict[str, frozenset[str] | None] = {
-    "a": _ANY,  # status classes (closed ticket, ext-link, ...)
-    "li": _ANY,  # active / False in a TOC, entry
+    "a": None,  # status classes (closed ticket, ext-link, ...)
+    "li": None,  # active / False in a TOC, entry
     "ol": _LETTERED_LISTS,
     "blockquote": frozenset({"citation"}),
     "pre": frozenset({"wiki"}),
@@ -383,7 +384,7 @@ _ALLOWED_CLASSES: dict[str, frozenset[str] | None] = {
     ),
 }
 for _tag in _TABLE_TAGS:  # Trac's row/column/macro chrome
-    _ALLOWED_CLASSES[_tag] = _ANY
+    _ALLOWED_CLASSES[_tag] = None
 for _level in range(1, 7):
     _ALLOWED_CLASSES[f"h{_level}"] = frozenset(
         {"section", "report-result"}
@@ -555,8 +556,8 @@ def _escape_text(text: str, serialised: bool = False) -> str:
 # =============================================================================
 
 
-class _TracConverter(MarkdownConverter):
-    class Options(MarkdownConverter.DefaultOptions):
+class _TracConverter(MarkdownifyBase):
+    class Options(MarkdownifyBase.DefaultOptions):
         bs4_options = "lxml"
         heading_style = ATX
         bullets = "-*+"
@@ -765,7 +766,7 @@ class _TracConverter(MarkdownConverter):
         classes = _classes(el)
         if (
             classes
-            and allowed is not _ANY
+            and allowed is not None  # None: any class is allowed
             and not set(classes) <= allowed
         ):
             return _describe(el)
@@ -872,8 +873,9 @@ class _TracConverter(MarkdownConverter):
             if "missing" in _classes(a):
                 a.unwrap()
         for tag in (el, *el.find_all(True)):
-            if tag.get("href"):
-                tag["href"] = self._targets.map(tag["href"])
+            href = tag.get("href")
+            if href and isinstance(href, str):
+                tag["href"] = self._targets.map(href)
             if tag.name == "a":
                 for attr in ("title", "rel"):
                     tag.attrs.pop(attr, None)
@@ -935,12 +937,14 @@ class _TracConverter(MarkdownConverter):
         if "class" not in tag.attrs:
             return
         allowed = _ALLOWED_CLASSES.get(tag.name, frozenset())
-        if allowed is _ANY:
+        if allowed is None:  # any class is allowed on this tag
             del tag["class"]
             return
         kept = [c for c in _classes(tag) if c not in allowed]
         if kept:
-            tag["class"] = kept
+            # bs4 types the value as str | AttributeValueList (a list
+            # subclass new in 4.13); a plain list is accepted by both.
+            tag["class"] = cast("Any", kept)
         else:
             del tag["class"]
 

@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass
 from html import escape, unescape
 from html.entities import html5
-from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant
+from html.parser import HTMLParser, attrfind_tolerant, tagfind_tolerant  # pyright: ignore[reportAttributeAccessIssue]  # stdlib private regexes, no stub
 from urllib.parse import unquote, urlsplit
 
 

@@ -60,13 +60,15 @@ def instance_label(url: str) -> str:
 
 
 def annotate(
-    result: types.CallToolResult, url: str, explicit: bool
+    result: types.CallToolResult, url: str | None, explicit: bool
 ) -> types.CallToolResult:
     """Record the resolved instance on ``result``, in place.
 
     Args:
         result: The handler's result, error or not.
-        url: Resolved instance URL the call was executed against.
+        url: Resolved instance URL the call was executed against; None
+            (no client resolved, e.g. ``list_instances``) leaves ``result``
+            unannotated.
         explicit: Whether the caller passed an ``instance`` argument.
 
     Returns:

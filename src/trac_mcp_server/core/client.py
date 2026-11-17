@@ -595,9 +595,13 @@ class TracClient:
         response.raise_for_status()
         return response
 
-    def _rpc_request(self, service: str, method: str, *params):
+    def _rpc_request(self, service: str, method: str, *params) -> Any:
         """
         Make an XML-RPC request to the Trac server.
+
+        The result is whatever the method returned on the wire (a list, a
+        dict, a scalar, ``Binary``), so it is typed ``Any``; each public
+        method below narrows it to the shape its RPC documents.
         """
         response = self._rpc_call(service, method, *params)
 
@@ -629,7 +633,7 @@ class TracClient:
         value_element = tree.find(".//param/value")
         return self._parse_xmlrpc_value(value_element)
 
-    def _parse_xmlrpc_value(self, element):
+    def _parse_xmlrpc_value(self, element) -> Any:
         """
         Recursively parse an XML-RPC value element.
         """

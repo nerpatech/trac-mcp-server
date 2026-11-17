@@ -52,6 +52,10 @@ dev = [
     # Exact: CI installs the newest release that matches, and two ruff
     # versions can format the same line differently (Trac #184).
     "ruff==0.17.4",
+    # Pinned exactly, like ruff, for the reason in Trac #184: a newer pyright
+    # adds checks and turns a green gate red. The wheel bundles the JS and
+    # nodejs-wheel-binaries supplies node, so it runs offline once installed.
+    "pyright[nodejs]==1.1.408",
 ]
 
 [project.scripts]

@@ -1560,9 +1560,11 @@ def _root_cause(exc: BaseException) -> BaseException:
     first leaf -- the exception that actually says what went wrong."""
     # Duck-typed: BaseExceptionGroup is builtin only from 3.11, and this
     # package supports 3.10 (where anyio raises the backport's class).
-    while getattr(exc, "exceptions", None):
-        exc = exc.exceptions[0]
-    return exc
+    while True:
+        inner = getattr(exc, "exceptions", None)
+        if not inner:
+            return exc
+        exc = inner[0]
 
 
 def _describe(exc: BaseException) -> str:
