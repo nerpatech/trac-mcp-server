@@ -172,6 +172,97 @@ def test_a_link_label_holding_a_quoted_bracket():
     )
 
 
+# -- Second review: real links first, Trac's label grammar, scheme runs ----------
+
+# A quoted bracket followed by `(` that is not a Markdown link is still a
+# Trac wiki link (measured: `handlers['get'](req, resp)` renders a link
+# `get`; `handlers!['get'](req, resp)` renders plain text), so it needs the
+# escape. A real inline link keeps mistune's conversion.
+LINKS_FIRST = {
+    "call on a subscript": (
+        "handlers['get'](req, resp)",
+        "handlers!['get'](req, resp)",
+    ),
+    "call with a space": ("f['k'](a b)", "f!['k'](a b)"),
+    "real inline link": ("['T'](https://e.com)", "[https://e.com 'T']"),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(LINKS_FIRST.values()),
+    ids=list(LINKS_FIRST),
+)
+def test_a_real_link_wins_and_anything_else_gets_the_escape(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+# Trac's label grammar, measured: whitespace other than a newline (NBSP and
+# U+3000 included), then at least one character that is not `]`. The match
+# backtracks as Trac does: `x['a' ] y` is plain text, `x['a'  ] y` (two
+# spaces) is a link with an empty label, `x!['a' lbl] y` is plain text.
+LABELS = {
+    "one space, empty label: not a link": ("x['a' ] y", "x['a' ] y"),
+    "two spaces: a link with an empty label": (
+        "x['a'  ] y",
+        "x!['a'  ] y",
+    ),
+    "plain label": ("x['a' lbl] y", "x!['a' lbl] y"),
+    "no-break space": ("x['a' lbl] y", "x!['a' lbl] y"),
+    "ideographic space": ("x['a'　lbl] y", "x!['a'　lbl] y"),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(LABELS.values()),
+    ids=list(LABELS),
+)
+def test_the_label_follows_tracs_grammar(markdown, wiki):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+# Trac never forms a bracket link after a scheme run (measured:
+# `https://e.com/a['b']` links `https://e.com/a['b`; `HTTPS://E.COM/['a'] y`
+# and `ftps://h/p['a'] y` render as plain text), so an escape there only
+# adds a visible `!`. A link or autolink that closes before the shape is
+# not a run, and neither is a line break.
+SCHEME_RUNS = {
+    "upper-case scheme": (
+        "HTTPS://E.COM/['a'] y",
+        "HTTPS://E.COM/['a'] y",
+    ),
+    "other scheme": ("ftps://h/p['a'] y", "ftps://h/p['a'] y"),
+    "http": (
+        "see https://e.com/a['b'] now",
+        "see https://e.com/a['b'] now",
+    ),
+    "after a Markdown link": (
+        "[l](http://e.com)['a']",
+        "[http://e.com l]!['a']",
+    ),
+    "after an autolink": (
+        "<http://e.com>['a']",
+        "[http://e.com http://e.com]!['a']",
+    ),
+    "url ends the line, shape starts the next": (
+        "https://e.com/\n['a']",
+        "https://e.com/\n!['a']",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(SCHEME_RUNS.values()),
+    ids=list(SCHEME_RUNS),
+)
+def test_a_scheme_run_before_the_shape_skips_the_escape(markdown, wiki):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
 # -- Live: the real renderer on /trac_test --------------------------------------
 
 
@@ -205,3 +296,13 @@ def test_live_quoted_brackets_render_as_text_not_wiki_links():
     bang = client.wiki_to_html(markdown_to_tracwiki("Wow!['a'] ok"))
     assert "<a " not in bang, bang
     assert "Wow!['a'] ok" in bang, bang
+
+    # A call on a subscript: Trac reads `handlers['get'](req, resp)` as a
+    # link `get`, so it is escaped; an NBSP label is a label.
+    call = client.wiki_to_html(
+        markdown_to_tracwiki(
+            "handlers['get'](req, resp) and x['a' b] y"
+        )
+    )
+    assert "<a " not in call, call
+    assert "handlers['get'](req, resp)" in call, call

@@ -322,25 +322,61 @@ def _restore_bracket_syntax(text: str, placeholders: list[str]) -> str:
 
 
 # Trac's quoted-target bracket link: `['Page']` or `["Page"]`, with an
-# optional label after whitespace (`['Page' label]`). Measured on this
-# host: `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so
-# Markdown prose that subscripts with a string key would become one (and
-# the write gate refuses the push). `(?!\()` leaves a Markdown inline link
-# (`["T"](url)`) to mistune. There is no lookahead for `[`, so chained
-# subscripts (`x['a']['b']`) are all caught. A span with no closing
-# bracket (`y['k'`) is not a link and does not match (ticket #241).
+# optional label (`['Page' label]`). Measured on this host:
+# `app.config['SERVER_NAME']` and `d["key"]` render wiki links, so Markdown
+# prose that subscripts with a string key would become one (and the write
+# gate refuses the push). The label is whitespace other than a newline (NBSP
+# and U+3000 included) and then at least one character that is not `]`,
+# which backtracks as Trac does: `x['a' ] y` is plain text, `x['a'  ] y`
+# (two spaces) is a link with an empty label. There is no lookahead for `[`
+# or `(`: whether the span is a Markdown link is decided by mistune's link
+# parser (`_parse_quoted_bracket`), so chained subscripts (`x['a']['b']`)
+# are all caught and `handlers['get'](req, resp)` is too. A span with no
+# closing bracket (`y['k'`) is not a link and does not match (ticket #241).
 _QUOTED_BRACKET_LINK_RE = re.compile(
-    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[ \t][^\]\n]*)?\](?!\()"""
+    r"""\[(?:"[^"\n]+"|'[^'\n]+')(?:[^\S\n]+[^\]\n]+)?\]"""
 )
 
-# A bare URL run that ends where a quoted bracket starts. Trac's URL
-# pattern already takes the characters after it (measured:
-# `https://e.com/a['b']` links `https://e.com/a['b`, with or without an
-# escape), so the shape is left alone there.
-_URL_RUN_BEFORE_RE = re.compile(r"(?:https?|ftp)://\S*$")
+# mistune's own link-opening pattern (`!?\[`), compiled once: the position
+# of a quoted bracket is handed to `InlineParser.parse_link` through a match
+# of it.
+_LINK_OPEN_RE = re.compile(
+    mistune.inline_parser.InlineParser.SPECIFICATION["link"]
+)
 
-# What follows a candidate span, read as a reference label: `["T"][id]`.
-_REF_LABEL_AFTER_RE = re.compile(r"\[([^\]\n]*)\]")
+# The whitespace-delimited token before a quoted bracket, when it is a Trac
+# shref-shaped run: `scheme:...` (after optional opening `(<"'`) that no
+# `)`, `>` or `]` closes. Trac never forms a bracket link after one
+# (measured: `https://e.com/a['b']` links `https://e.com/a['b`, while
+# `HTTPS://E.COM/['a'] y` and `ftps://h/p['a'] y` render as plain text), so
+# an escape there would only add a visible `!`.
+_SCHEME_RUN_RE = re.compile(
+    r"""[(<"']*[A-Za-z][\w.+-]*:[^\s<>()\[\]]*\Z"""
+)
+
+# A token longer than this is not scanned: bounds the backwards scan so a
+# long unbroken run of text costs a constant per quoted bracket.
+_SCHEME_RUN_MAX = 2048
+
+
+def _after_scheme_run(src: str, end: int) -> bool:
+    """Whether the whitespace-delimited token ending at `end` is a scheme
+    run (`_SCHEME_RUN_RE`). Scans backwards from `end` to the previous
+    whitespace, and gives up at once on a character the pattern never
+    allows (`[`, `]`, `>`, `)`)."""
+    i = end
+    floor = max(0, end - _SCHEME_RUN_MAX)
+    while i > floor:
+        c = src[i - 1]
+        if c.isspace():
+            break
+        if c in "[]>)":
+            return False
+        i -= 1
+    else:
+        if i > 0 and not src[i - 1].isspace():
+            return False
+    return _SCHEME_RUN_RE.match(src, i, end) is not None
 
 
 def _parse_quoted_bracket(
@@ -357,32 +393,27 @@ def _parse_quoted_bracket(
     definition, a link title, an autolink, a code span and a
     backslash-escaped bracket are all consumed by their own rules first.
 
-    Leaves the span to mistune when:
+    Real links first: the position is handed to mistune's own link parser
+    (`inline.parse_link`), so an inline link (`["T"](url)`) or a reference
+    link the document defines (`["T"][id]`, `["T"]`, `["T"][]`) is
+    converted as before. `parse_link` leaves `state` untouched when it
+    returns None (the tokens are appended only on its success paths), so
+    anything else falls through to the token. Inside a link label
+    (`state.in_link`) `parse_link` would only emit the bracket as text, so
+    it is skipped there and the shape is escaped like any other prose.
 
-    - the text just before the match ends in a bare URL (`_URL_RUN_BEFORE_RE`):
-      returns None, so the `[` is text, as before;
-    - the span is a reference link of the document: `["T"]` or `["T"][]`
-      with `["T"]: url` defined, or `["T"][id]` with `[id]: url` defined
-      (the `[` after a span cannot tell a full reference link from a
-      chained subscript, so the document's own definitions decide): the
-      position is handed to `inline.parse_link`, because returning None
-      would make the `[` text and the link rule would never see it.
+    Returns None, so the `[` is text as before, when the token just before
+    the match is a scheme run (`_after_scheme_run`): Trac's URL pattern
+    already takes the characters after it.
     """
-    if _URL_RUN_BEFORE_RE.search(state.src[: m.start()]):
+    if _after_scheme_run(state.src, m.start()):
         return None
-    ref_links = state.env.get("ref_links")
-    if ref_links:
-        inner = m.group(0)[1:-1]
-        after = _REF_LABEL_AFTER_RE.match(state.src, m.end())
-        label = (after.group(1) or inner) if after else inner
-        if mistune.util.unikey(label) in ref_links:
-            # Not None: that would make the `[` text, and the link rule
-            # never sees it. Hand the position to the link rule itself.
-            link_m = re.compile(inline.specification["link"]).match(
-                state.src, m.start()
-            )
-            assert link_m is not None
-            return inline.parse_link(link_m, state)
+    if not state.in_link:
+        link_m = _LINK_OPEN_RE.match(state.src, m.start())
+        assert link_m is not None
+        pos = inline.parse_link(link_m, state)
+        if pos is not None:
+            return pos
     state.append_token({"type": "quoted_bracket", "raw": m.group(0)})
     return m.end()
 
