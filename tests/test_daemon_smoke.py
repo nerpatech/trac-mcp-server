@@ -102,7 +102,7 @@ def test_normalise_base_keeps_scheme_and_a_path_prefix():
     [
         "",
         "not a url",
-        "mcp.example.org:8092",
+        "192.0.2.5:8092",
         "ftp://h:8092",
         "http://",
         "http://h:notaport",

@@ -84,8 +84,8 @@
     "tracwiki": "note:see:Below"
   },
   "row21_url_with_port": {
-    "markdown_input": "https://trac.example.org/some/path",
-    "tracwiki": "https://trac.example.org/some/path"
+    "markdown_input": "https://trac.example.org:8443/some/path",
+    "tracwiki": "https://trac.example.org:8443/some/path"
   },
   "row22_typo_ticket_alone": {
     "markdown_input": "auto-pm:#87",

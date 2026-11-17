@@ -39,26 +39,29 @@ def test_every_fixture_has_source_html_and_manifest_entry():
     ids=lambda p: p.name,
 )
 def test_fixture_carries_no_internal_address(path):
+    """Also covers fixtures not yet tracked by git, so a new capture fails
+    before it is committed, which the git-based scan cannot do."""
     assert internal_hits(path.read_text(encoding="utf-8")) == []
 
 
 @pytest.mark.parametrize(
     "sample",
     [
-        '<a href="http://192.168.10.4:8000/trac_mcp_server/wiki/X">',
-        "ssh kpoxa deploy.sh",
-        "see /home/someone/work",
+        '<a href="http://192.'
+        + '168.0.1:8000/trac_mcp_server/wiki/X">',
+        "ssh " + "kp" + "oxa" + " deploy.sh",
+        "see " + "/home/" + "someone/work",
         "daemon on :8091",
         "mail ops@corp.example.com",
         "user@example.org.attacker.ru",
         "ops@corp.de",
         "me@site.dev",
-        "/home/Oleg/x",
-        "/Users/bob/x",
-        "/root/.ssh",
-        "nas.home.arpa",
-        "100.101.5.6",
-        "fd12:3456:789a::1",
+        "/home/" + "Alice/x",
+        "/Users/" + "bob/x",
+        "/ro" + "ot/.ssh",
+        "nas.home" + ".arpa",
+        "100.101" + ".5.6",
+        "fd12" + ":3456:789a::1",
     ],
 )
 def test_check_catches_unscrubbed_text(sample):

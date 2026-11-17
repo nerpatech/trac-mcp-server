@@ -38,15 +38,22 @@ FIXTURE_RE = re.compile(
 )
 
 
-def internal_hits(
+def internal_matches(
     text: str, pattern: re.Pattern[str] = FIXTURE_RE
-) -> list[str]:
-    """The matched text of every internal address or name in ``text``.
+) -> list[re.Match[str]]:
+    """Every internal address or name in ``text``, as match objects.
 
     ``user@example.org`` is the scrub's own placeholder and never a hit.
     """
     return [
-        m.group(0)
+        m
         for m in pattern.finditer(text)
         if m.group(0) != "user@example.org"
     ]
+
+
+def internal_hits(
+    text: str, pattern: re.Pattern[str] = FIXTURE_RE
+) -> list[str]:
+    """The matched text of every internal address or name in ``text``."""
+    return [m.group(0) for m in internal_matches(text, pattern)]
