@@ -360,6 +360,57 @@ def test_quote_not_directly_after_a_nested_list_keeps_the_blank_line(
     assert markdown_to_tracwiki(md) == wiki
 
 
+@pytest.mark.parametrize(
+    ("md", "wiki", "finding"),
+    [
+        # Review fix: the nested list's rendered text holds a blank line
+        # (the passed-through heading after `c`'s list). Trac closed every
+        # list there, so a `>` at the marker column would render outside
+        # the item and `d` would start a new list (measured on
+        # /trac_test): master's bytes and master's finding for `a`.
+        (
+            "- a\n  - b\n    - c\n\n    = H =\n  > q\n- d\n",
+            " * a\n   * b\n     * c\n\n     = H =\n\n     q\n * d",
+            {"item": "a", "block": "blockquote", "depth": 0},
+        ),
+        # Review fix: the nested list ends with a citation line, so a `>`
+        # at the marker column joins b's blockquote (measured: one `<p>`
+        # "inner q" inside b's li): master's bytes and finding.
+        (
+            "- a\n  - b\n    > inner\n  > q\n- d\n",
+            " * a\n   * b\n     > inner\n\n     q\n * d",
+            {"item": "a", "block": "blockquote", "depth": 0},
+        ),
+    ],
+)
+def test_marker_quote_is_refused_where_the_list_cannot_take_it(
+    md, wiki, finding
+):
+    """The `"marker"` form needs a nested list whose rendering has no
+    blank line and does not end in a citation line; otherwise the pre-#197
+    blank-line form stays and the advisory still reports the item."""
+    assert markdown_to_tracwiki(md) == wiki
+    assert finding in find_list_item_splits(md)
+
+
+@pytest.mark.parametrize(
+    ("md", "wiki"),
+    [
+        # Measured on /trac_test: Trac keeps `q` inside the empty first
+        # `<li>`, after b's list, and `d` is a sibling.
+        ("-\n  - b\n  > q\n- d\n", " * \n   * b\n > q\n * d"),
+        # Measured: the `<pre>` stays in `a`, after the blockquote.
+        (
+            "- a\n  - b\n  > q\n  ```\n  c\n  ```\n- d\n",
+            " * a\n   * b\n > q\n   {{{\n   c\n   }}}\n * d",
+        ),
+    ],
+)
+def test_measured_marker_quote_shapes_are_pinned(md, wiki):
+    assert markdown_to_tracwiki(md) == wiki
+    assert find_list_item_splits(md) == []
+
+
 def test_item_starting_with_a_quote_is_unchanged():
     """No Trac form exists (' * > q' renders a literal '>'; ' *' alone is
     not an item): the quote stays in the text run."""
@@ -540,6 +591,12 @@ LIVE = {
         "- a\n  - b\n  > q\n\n  > r\n- d\n"
     ),
     "ordered quote after nested list": "1. a\n   - b\n   > q\n2. d\n",
+    "quote after nested list in an empty item": (
+        "-\n  - b\n  > q\n- d\n"
+    ),
+    "quote after nested list then code": (
+        "- a\n  - b\n  > q\n  ```\n  c\n  ```\n- d\n"
+    ),
 }
 
 
@@ -573,6 +630,8 @@ def test_live_quote_renders_inside_the_list_item(name):
             "quote after nested list then text",
             "two quotes after nested list",
             "ordered quote after nested list",
+            "quote after nested list in an empty item",
+            "quote after nested list then code",
         )
         else 0
     )
@@ -611,6 +670,7 @@ def test_live_quote_after_a_nested_list_at_depth_one_is_inside_b():
     assert b_li is not None, html
     assert "<blockquote" in b_li, html
     # the blockquote comes after the close of `c`'s nested list
+    assert "</ul>" in b_li, html
     tail = b_li.rsplit("</ul>", 1)[1]
     assert "<blockquote" in tail, html
     assert re.search(r"\bq\b", tail), html

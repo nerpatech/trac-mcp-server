@@ -182,6 +182,11 @@ def test_refused_runs_keep_the_blank_line_form(name):
         ("code", "para", False, "", "text", "adjacent"),  # unchanged
         ("code", "para", True, "", "text", "blank"),  # unchanged
         ("para", "para", False, "a", "b", "br"),  # unchanged
+        # #197: a quote directly after a nested list
+        ("list", "quote", True, " * b\n * c", "", "marker"),
+        ("code", "quote", True, "", "", "blank"),  # not the list itself
+        ("list", "quote", True, " * c\n\n = H =", "", "blank"),  # blank
+        ("list", "quote", True, " * c\n > inner", "", "blank"),  # cites
     ],
 )
 def test_item_block_separator_between(
