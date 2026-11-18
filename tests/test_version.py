@@ -4,16 +4,22 @@ Tests for version module.
 Covers __version__ attribute and check_version_consistency().
 """
 
+import importlib.metadata
+import json
 import re
+import shutil
+import subprocess
 import sys
 import types
-from unittest.mock import mock_open, patch
+import zipfile
+from pathlib import Path
 
 import pytest
-import tomllib
 
 import trac_mcp_server
 from trac_mcp_server.version import (
+    _compare_versions,
+    _installed_version,
     check_version_consistency,
     cli_version,
     format_cli_version,
@@ -39,101 +45,254 @@ class TestVersionAttribute:
         )
 
 
-class TestCheckVersionConsistency:
-    """Test check_version_consistency() function."""
+def _manifest(path, name="trac-mcp-server", version="3.0.0"):
+    """Write a pyproject.toml; ``name=None`` leaves ``[project].name``
+    out."""
+    lines = ["[project]"]
+    if name is not None:
+        lines.append(f'name = "{name}"')
+    lines.append(f'version = "{version}"')
+    path.write_text("\n".join(lines) + "\n")
+    return path
 
-    def test_consistency_success(self):
-        """Matching versions return (True, message)."""
-        runtime_version = trac_mcp_server.__version__
 
-        toml_content = f'[project]\nversion = "{runtime_version}"\n'
-        toml_data = {"project": {"version": runtime_version}}
+def _dist(version):
+    """A stand-in for the installed-metadata lookup."""
+    return lambda: version
 
-        with patch("trac_mcp_server.version.Path") as mock_path_cls:
-            mock_path = mock_path_cls.return_value.parent.parent.parent.__truediv__.return_value
-            mock_path.exists.return_value = True
 
-            with patch(
-                "builtins.open",
-                mock_open(read_data=toml_content.encode()),
-            ):
-                with patch.object(
-                    tomllib, "load", return_value=toml_data
-                ):
-                    is_consistent, message = check_version_consistency()
+class TestCompareVersions:
+    """``_compare_versions`` against real files: a source manifest
+    first, then the installed distribution's metadata, then nothing to
+    compare (Trac /trac_mcp_server #244)."""
 
-        assert is_consistent is True
-        assert (
-            "verified" in message.lower() or runtime_version in message
+    def test_manifest_match(self, tmp_path):
+        manifest = _manifest(tmp_path / "pyproject.toml")
+        ok, message = _compare_versions("3.0.0", manifest, _dist(None))
+        assert ok is True
+        assert message == "Version verified: 3.0.0"
+
+    def test_manifest_mismatch(self, tmp_path):
+        manifest = _manifest(
+            tmp_path / "pyproject.toml", version="9.9.9"
         )
-
-    def test_consistency_mismatch(self):
-        """Mismatched versions return (False, mismatch message)."""
-        runtime_version = trac_mcp_server.__version__
-        fake_source_version = "99.99.99"
-
-        toml_data = {"project": {"version": fake_source_version}}
-
-        with patch("trac_mcp_server.version.Path") as mock_path_cls:
-            mock_path = mock_path_cls.return_value.parent.parent.parent.__truediv__.return_value
-            mock_path.exists.return_value = True
-
-            with patch("builtins.open", mock_open(read_data=b"")):
-                with patch.object(
-                    tomllib, "load", return_value=toml_data
-                ):
-                    is_consistent, message = check_version_consistency()
-
-        assert is_consistent is False
+        ok, message = _compare_versions("3.0.0", manifest, _dist(None))
+        assert ok is False
         assert "mismatch" in message.lower()
-        assert runtime_version in message
-        assert fake_source_version in message
+        assert "Runtime: 3.0.0" in message
+        assert "Source: 9.9.9" in message
+        assert "pyinstaller" in message
 
-    def test_consistency_file_not_found(self):
-        """Missing pyproject.toml returns (False, message) without crashing."""
-        with patch("trac_mcp_server.version.Path") as mock_path_cls:
-            mock_path = mock_path_cls.return_value.parent.parent.parent.__truediv__.return_value
-            mock_path.exists.return_value = False
+    def test_manifest_wins_over_stale_metadata(self, tmp_path):
+        # an editable install's dist metadata keeps the install-time
+        # version; the manifest is the live source
+        manifest = _manifest(tmp_path / "pyproject.toml")
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("2.2.0")
+        )
+        assert ok is True
+        assert message == "Version verified: 3.0.0"
 
-            is_consistent, message = check_version_consistency()
+    def test_manifest_for_another_project_falls_through(self, tmp_path):
+        manifest = _manifest(
+            tmp_path / "pyproject.toml", name="other", version="9.9.9"
+        )
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("3.0.0")
+        )
+        assert ok is True
+        assert "installed package metadata" in message
 
-        assert is_consistent is False
-        assert (
-            "cannot find" in message.lower()
-            or "pyproject.toml" in message.lower()
+    def test_manifest_with_no_name_falls_through(self, tmp_path):
+        manifest = _manifest(
+            tmp_path / "pyproject.toml", name=None, version="9.9.9"
+        )
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("3.0.0")
+        )
+        assert ok is True
+        assert "installed package metadata" in message
+
+    def test_unparseable_manifest_is_a_read_failure(self, tmp_path):
+        manifest = tmp_path / "pyproject.toml"
+        manifest.write_text("[project\nname = \n")
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("3.0.0")
+        )
+        assert ok is False
+        assert message.startswith(
+            "Failed to read version from pyproject.toml: "
         )
 
-    def test_consistency_toml_read_error(self):
-        """Error reading pyproject.toml returns (False, message) gracefully."""
-        with patch("trac_mcp_server.version.Path") as mock_path_cls:
-            mock_path = mock_path_cls.return_value.parent.parent.parent.__truediv__.return_value
-            mock_path.exists.return_value = True
-
-            with patch(
-                "builtins.open",
-                side_effect=PermissionError("Access denied"),
-            ):
-                is_consistent, message = check_version_consistency()
-
-        assert is_consistent is False
-        assert (
-            "failed" in message.lower()
-            or "error" in message.lower()
-            or "access denied" in message.lower()
+    def test_unreadable_manifest_is_a_read_failure(self, tmp_path):
+        # a directory where the file should be: open() raises OSError
+        manifest = tmp_path / "pyproject.toml"
+        manifest.mkdir()
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("3.0.0")
+        )
+        assert ok is False
+        assert message.startswith(
+            "Failed to read version from pyproject.toml: "
         )
 
-    def test_consistency_import_error(self):
-        """Cannot import __version__ returns (False, message)."""
-        with patch(
-            "trac_mcp_server.version.check_version_consistency"
-        ) as _:
-            # We can't easily mock an ImportError in the from . import __version__
-            # line, but we can test the function directly by manipulating the module.
-            # Instead, test the actual function with a real import (should succeed).
-            is_consistent, message = check_version_consistency()
-            # With real install, this should either succeed or fail gracefully
-            assert isinstance(is_consistent, bool)
-            assert isinstance(message, str)
+    def test_no_manifest_metadata_match(self, tmp_path):
+        ok, message = _compare_versions(
+            "3.0.0", tmp_path / "pyproject.toml", _dist("3.0.0")
+        )
+        assert ok is True
+        assert (
+            message
+            == "Version verified: 3.0.0 (installed package metadata)"
+        )
+
+    def test_no_manifest_metadata_mismatch(self, tmp_path):
+        ok, message = _compare_versions(
+            "3.0.0", tmp_path / "pyproject.toml", _dist("2.2.0")
+        )
+        assert ok is False
+        assert "mismatch" in message.lower()
+        assert "3.0.0" in message
+        assert "2.2.0" in message
+        assert "metadata" in message
+        assert "reinstall" in message
+        assert "pyinstaller" not in message
+
+    def test_neither_source_is_consistent_and_says_so(self, tmp_path):
+        ok, message = _compare_versions(
+            "3.0.0", tmp_path / "pyproject.toml", _dist(None)
+        )
+        # True: the server logs it at info, not as a warning
+        assert ok is True
+        assert "3.0.0" in message
+        assert "no source manifest or package metadata" in message
+
+
+class TestInstalledVersion:
+    def test_is_the_distributions_version(self, monkeypatch):
+        monkeypatch.setattr(
+            importlib.metadata, "version", lambda name: "1.2.3"
+        )
+        assert _installed_version() == "1.2.3"
+
+    def test_none_when_there_is_no_metadata(self, monkeypatch):
+        def missing(name):
+            raise importlib.metadata.PackageNotFoundError(name)
+
+        monkeypatch.setattr(importlib.metadata, "version", missing)
+        assert _installed_version() is None
+
+
+class TestCheckVersionConsistency:
+    """``check_version_consistency()`` itself, as run from this
+    checkout (a manifest that names this project)."""
+
+    def test_the_checkout_is_consistent(self):
+        ok, message = check_version_consistency()
+        assert ok is True, message
+        assert (
+            message
+            == f"Version verified: {trac_mcp_server.__version__}"
+        )
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+#: What a wheel build prints when the interpreter lacks a build tool,
+#: not when the project is broken.
+_MISSING_BUILD_TOOL = (
+    "BackendUnavailable",
+    "No module named pip",
+    "No module named 'setuptools'",
+    "Cannot import 'setuptools.build_meta'",
+    "No matching distribution found",
+)
+
+
+@pytest.fixture
+def installed_site(tmp_path):
+    """This project built into a wheel and unpacked into a directory:
+    the layout of a non-editable install, where ``version.py`` sits
+    under ``site-packages`` and the parent-of-parent-of-parent path
+    names no manifest. The build runs in a copy, so parallel runs never
+    share ``build/`` or ``*.egg-info``."""
+    root = tmp_path / "project"
+    root.mkdir()
+    shutil.copytree(
+        REPO / "src",
+        root / "src",
+        ignore=shutil.ignore_patterns(
+            "__pycache__", "*.egg-info", "_release.py"
+        ),
+    )
+    for name in ("pyproject.toml", "setup.py", "README.md", "LICENSE"):
+        shutil.copy(REPO / name, root / name)
+    wheels = tmp_path / "whl"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "-q",
+            "--no-deps",
+            "--no-build-isolation",
+            "-w",
+            str(wheels),
+            str(root),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        if any(marker in output for marker in _MISSING_BUILD_TOOL):
+            pytest.skip(
+                "cannot build a wheel offline, a build dependency is "
+                f"missing: {output.strip()[-300:]}"
+            )
+        pytest.fail(f"wheel build failed:\n{output}")
+    (wheel,) = wheels.glob("trac_mcp_server-*.whl")
+    site = tmp_path / "site"
+    with zipfile.ZipFile(wheel) as zf:
+        zf.extractall(site)
+    return site
+
+
+def test_an_installed_copy_compares_against_its_package_metadata(
+    installed_site,
+):
+    """The installed layout, by subprocess against the real wheel
+    contents (``Rules/testing/RealSubstrateNotMocks``): before #244 this
+    reported ``Cannot find pyproject.toml`` and compared nothing."""
+    code = (
+        "import json, sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import trac_mcp_server.version as v\n"
+        "from trac_mcp_server import __version__\n"
+        "print(json.dumps([v.__file__, __version__,"
+        " list(v.check_version_consistency())]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code, str(installed_site)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    module_file, version, (ok, message) = json.loads(
+        result.stdout.strip().splitlines()[-1]
+    )
+    # the installed copy was imported, not the checkout's
+    assert (
+        Path(module_file)
+        .resolve()
+        .is_relative_to(installed_site.resolve())
+    ), module_file
+    assert ok is True, message
+    assert "installed package metadata" in message
+    assert version in message
 
 
 class TestReleaseSha:
