@@ -84,7 +84,13 @@ class TestHandleBatchCreate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [1, 2, 3]
+            # Items reach run_sync_limited in any order (check_write goes
+            # through a thread first), so answer by what was asked for.
+            # run_sync_limited(fn, summary, description, type, attributes)
+            ids = {"Ticket A": 1, "Ticket B": 2, "Ticket C": 3}
+            mock_rsl.side_effect = lambda _fn, summary, *_a: ids[
+                summary
+            ]
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -124,10 +130,13 @@ class TestHandleBatchCreate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                1,
-                xmlrpc.client.Fault(500, "Server error"),
-            ]
+
+            def create(_fn, summary, *_args):
+                if summary == "Ticket B":
+                    raise xmlrpc.client.Fault(500, "Server error")
+                return 1
+
+            mock_rsl.side_effect = create
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -155,6 +164,8 @@ class TestHandleBatchCreate(unittest.TestCase):
             self.assertEqual(sc["failed_count"], 1)
             self.assertEqual(len(sc["created"]), 1)
             self.assertEqual(len(sc["failed"]), 1)
+            self.assertEqual(sc["created"][0]["summary"], "Ticket A")
+            self.assertEqual(sc["failed"][0]["summary"], "Ticket B")
 
     def test_batch_create_missing_tickets(self):
         """Missing tickets key returns validation error."""
@@ -260,7 +271,10 @@ class TestHandleBatchCreate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [10, 11]
+            ids = {"A": 10, "B": 11}
+            mock_rsl.side_effect = lambda _fn, summary, *_a: ids[
+                summary
+            ]
 
             asyncio.run(
                 _handle_batch_create(
@@ -281,11 +295,14 @@ class TestHandleBatchCreate(unittest.TestCase):
             )
 
             self.assertEqual(mock_rsl.call_count, 2)
+            # Order-independent: (summary, description) of each call.
+            stored = {
+                (call[0][1], call[0][2])
+                for call in mock_rsl.call_args_list
+            }
             self.assertEqual(
-                mock_rsl.call_args_list[0][0][2], "'''bold'''"
-            )
-            self.assertEqual(
-                mock_rsl.call_args_list[1][0][2], "= heading ="
+                stored,
+                {("A", "'''bold'''"), ("B", "= heading =")},
             )
 
 
@@ -321,11 +338,13 @@ class TestHandleBatchDelete(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                True,
-                xmlrpc.client.Fault(403, "Permission denied"),
-                True,
-            ]
+            # run_sync_limited(client.delete_ticket, ticket_id)
+            def delete(_fn, ticket_id):
+                if ticket_id == 20:
+                    raise xmlrpc.client.Fault(403, "Permission denied")
+                return True
+
+            mock_rsl.side_effect = delete
 
             result = asyncio.run(
                 _handle_batch_delete(
@@ -409,10 +428,13 @@ class TestHandleBatchUpdate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                True,
-                RuntimeError("connection lost"),
-            ]
+            # run_sync_limited(client.update_ticket, id, comment, attrs)
+            def update(_fn, ticket_id, *_args):
+                if ticket_id == 6:
+                    raise RuntimeError("connection lost")
+                return True
+
+            mock_rsl.side_effect = update
 
             result = asyncio.run(
                 _handle_batch_update(
