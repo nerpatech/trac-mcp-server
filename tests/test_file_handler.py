@@ -246,6 +246,86 @@ class TestReadFileBom:
         assert encoding == "utf-8"
 
 
+class TestExactlyOneBom:
+    """Review of #245: one BOM comes off, on every decode path -- and not a
+    second one after a decoder that already consumed it."""
+
+    def test_utf16_explicit_consumes_one_bom_only(self, tmp_path):
+        f = tmp_path / "u16.txt"
+        f.write_bytes(b"\xff\xfe\xff\xfeA\x00")
+        content, encoding = read_file_with_encoding(
+            f, encoding="utf-16"
+        )
+        assert content == "\ufeffA"
+        assert encoding == "utf-16"
+
+    def test_utf8_sig_explicit_consumes_one_bom_only(self, tmp_path):
+        f = tmp_path / "sig.txt"
+        f.write_bytes(b"\xef\xbb\xbf\xef\xbb\xbfA")
+        content, encoding = read_file_with_encoding(
+            f, encoding="utf-8-sig"
+        )
+        assert content == "\ufeffA"
+        assert encoding == "utf-8-sig"
+
+    def test_utf32_explicit_consumes_one_bom_only(self, tmp_path):
+        f = tmp_path / "u32.txt"
+        bom = b"\xff\xfe\x00\x00"
+        f.write_bytes(bom + bom + "A".encode("utf-32-le"))
+        content, _ = read_file_with_encoding(f, encoding="utf-32")
+        assert content == "\ufeffA"
+
+    def test_alias_of_a_bom_consuming_codec_is_not_stripped_twice(
+        self, tmp_path
+    ):
+        f = tmp_path / "u16.txt"
+        f.write_bytes(b"\xff\xfe\xff\xfeA\x00")
+        content, encoding = read_file_with_encoding(f, encoding="U16")
+        assert content == "\ufeffA"
+        assert encoding == "utf-16"
+
+    def test_detection_strips_one_of_two_utf8_boms(self, tmp_path):
+        f = tmp_path / "two.txt"
+        f.write_bytes(b"\xef\xbb\xbf\xef\xbb\xbfA")
+        content, encoding = read_file_with_encoding(f)
+        assert content == "\ufeffA"
+        assert encoding == "utf-8"
+
+    def test_charset_normalizer_result_with_a_bom_is_not_stripped_again(
+        self, tmp_path
+    ):
+        """A non-UTF-8 file whose detector result reports a BOM: the
+        detector drops the BOM itself, so a U+FEFF that follows it is
+        content and stays."""
+        f = tmp_path / "u16.txt"
+        text = (
+            "\ufeff# Title\nSome body text, long enough to detect.\n"
+            * 5
+        )
+        f.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+        content, _ = read_file_with_encoding(f)
+        assert content == text
+
+    def test_explicit_non_bom_codec_strips_one(self, tmp_path):
+        f = tmp_path / "le.txt"
+        f.write_bytes(b"\xff\xfe\xff\xfeA\x00")
+        content, _ = read_file_with_encoding(f, encoding="utf-16-le")
+        assert content == "\ufeffA"
+
+
+class TestCodecValidationCatchesValueErrors:
+    @pytest.mark.parametrize("name", ["undefined", "utf-8\x00"])
+    def test_odd_names_get_the_unknown_encoding_message(
+        self, tmp_path, name
+    ):
+        f = tmp_path / "x.txt"
+        f.write_bytes(b"abc")
+        with pytest.raises(
+            ValueError, match="Unknown or non-text encoding"
+        ):
+            read_file_with_encoding(f, encoding=name)
+
+
 _CYRILLIC = "Привет, мир! Это страница вики."
 
 

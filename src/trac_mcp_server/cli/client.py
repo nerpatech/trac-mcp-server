@@ -52,12 +52,7 @@ from urllib.parse import urlsplit
 from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS
 from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
-from ..file_handler import (
-    decode_with_encoding,
-    detect_file_format,
-    read_file_with_encoding,
-    strip_bom,
-)
+from ..file_handler import decode_bytes, detect_file_format
 from ..link_rewrites import link_map_arg
 from ..version import cli_version
 from . import assets as export_assets
@@ -433,34 +428,33 @@ def _instance_line(text: str) -> str | None:
 
 
 def _read_text(
-    path: str, encoding: str | None = None
+    path: str, encoding: str | None = None, *, keep_bom: bool = False
 ) -> tuple[str, str, str | None]:
     """Return ``(text, encoding, filename)``; ``-`` reads stdin.
 
-    One leading U+FEFF (a byte-order mark) is dropped from the text, file
-    or stdin alike. With ``encoding`` (``wiki-push --encoding``, Trac
-    #245) the bytes are decoded strictly with that codec, stdin included;
-    an unknown codec or a decode failure is a usage error here, before
-    any network call.
+    The one local text read: a file and stdin both give BYTES to the one
+    decoder (``decode_bytes``), so stdin keeps CRLF and lone CR exactly as
+    a file does, and both drop exactly one leading U+FEFF (a byte-order
+    mark) unless ``keep_bom`` -- the text a ``--expect-file`` compares with
+    a stored body, which must be verbatim. With ``encoding``
+    (``wiki-push --encoding``, Trac #245) the bytes are decoded strictly
+    with that codec. An unknown codec or a decode failure is a usage
+    error here, before any network call.
     """
     if path == "-":
-        if encoding is not None:
-            try:
-                text, canonical = decode_with_encoding(
-                    sys.stdin.buffer.read(), encoding
-                )
-            except ValueError as e:
-                raise CliError(str(e), EXIT_USAGE_ERROR) from None
-            return text, canonical, None
-        return strip_bom(sys.stdin.read()), "utf-8", None
-    p = Path(path)
-    if not p.is_file():
-        raise CliError(f"not a file: {path}", EXIT_USAGE_ERROR)
+        raw, filename = sys.stdin.buffer.read(), None
+    else:
+        p = Path(path)
+        if not p.is_file():
+            raise CliError(f"not a file: {path}", EXIT_USAGE_ERROR)
+        raw, filename = p.read_bytes(), p.name
     try:
-        text, decoded_as = read_file_with_encoding(p, encoding)
+        text, decoded_as = decode_bytes(
+            raw, encoding, keep_bom=keep_bom
+        )
     except ValueError as e:
         raise CliError(str(e), EXIT_USAGE_ERROR) from None
-    return text, decoded_as, p.name
+    return text, decoded_as, filename
 
 
 def _read_bytes(path: str) -> bytes:
@@ -535,25 +529,19 @@ def _attach_target(args: argparse.Namespace) -> tuple[str, dict]:
 _CREATED_RE = re.compile(r"Created ticket #(\d+)")
 
 
-def _read_body(path: str, what: str, allow_empty: bool = False) -> str:
+def _read_body(
+    path: str,
+    what: str,
+    allow_empty: bool = False,
+    keep_bom: bool = False,
+) -> str:
     """The body file as text, sent verbatim. An empty one is refused here
     (the server would refuse it too) unless ``allow_empty`` (a body that is
     only compared, never sent), with the same non-UTF-8 warning as
-    wiki-push."""
-    if path == "-":
-        # Text-mode stdin translates CRLF and lone CR to LF, which a file
-        # path does not: read the bytes, so "verbatim" holds for both.
-        try:
-            text, encoding = (
-                strip_bom(sys.stdin.buffer.read().decode("utf-8")),
-                "utf-8",
-            )
-        except UnicodeDecodeError:
-            raise CliError(
-                "stdin is not valid UTF-8", EXIT_USAGE_ERROR
-            ) from None
-    else:
-        text, encoding, _ = _read_text(path)
+    wiki-push. ``keep_bom`` leaves a leading U+FEFF in the text: the
+    ``--expect-file`` body is compared with the stored comment, which a
+    legacy BOM'd post began with."""
+    text, encoding, _ = _read_text(path, keep_bom=keep_bom)
     if encoding != "utf-8":
         print(
             f"warning: {path} decoded as '{encoding}', not UTF-8 "
@@ -750,7 +738,10 @@ async def _ticket_comment_edit(
     text = _read_body(args.file, "comment")
     expected = (
         _read_body(
-            args.expect_file, "expected comment", allow_empty=True
+            args.expect_file,
+            "expected comment",
+            allow_empty=True,
+            keep_bom=True,
         )
         if args.expect_file is not None
         else None
