@@ -5,6 +5,7 @@ All sync functions are pure (no side effects besides file I/O).
 Async wrappers compose validation + I/O via run_sync().
 """
 
+import codecs
 from pathlib import Path
 
 from charset_normalizer import from_bytes
@@ -77,14 +78,68 @@ def validate_output_path(
 # =============================================================================
 
 
-def read_file_with_encoding(path: Path) -> tuple[str, str]:
-    """Read a file with automatic encoding detection.
+def strip_bom(text: str) -> str:
+    """Drop exactly one leading U+FEFF, the decoded form of a BOM.
 
-    Tries a strict UTF-8 decode first. A file that decodes cleanly as
-    UTF-8 *is* UTF-8 for our purposes -- there's no reason to let a
-    probabilistic detector overrule a successful strict decode. Only
-    when that fails does this fall back to charset-normalizer, since a
-    guess is only needed once the unambiguous answer has been ruled out.
+    A leading U+FEFF is a byte-order mark by Unicode convention, never
+    content, so it must not reach a stored page (ticket #245). Only the
+    first one goes; any other U+FEFF in the text is left alone.
+    """
+    if text.startswith("\ufeff"):
+        return text[1:]
+    return text
+
+
+def _validate_codec(encoding: str) -> str:
+    """Return the canonical name of a text codec, or raise ValueError.
+
+    ``"".encode(name)`` is the probe because it fails with LookupError
+    both for an unknown name and for a codec that is not a text codec
+    (``base64``, ``rot13``, ...), which ``codecs.lookup`` alone accepts.
+    ``b"".decode(name)`` is no probe: CPython returns early for empty
+    input without looking the codec up, so it passes any name.
+    """
+    try:
+        "".encode(encoding)
+        return codecs.lookup(encoding).name
+    except LookupError:
+        raise ValueError(
+            f"Unknown or non-text encoding '{encoding}': pass the name "
+            "of a Python text codec such as 'utf-8', 'cp1251' or "
+            "'latin-1'."
+        ) from None
+
+
+def decode_with_encoding(raw: bytes, encoding: str) -> tuple[str, str]:
+    """Strictly decode ``raw`` with a caller-stated codec (ticket #245).
+
+    Returns ``(text, canonical_codec_name)`` with one leading U+FEFF
+    removed. Raises ValueError for an unknown or non-text codec and for
+    bytes that do not decode, naming the codec and the byte offset and
+    never echoing the content. An empty ``raw`` decodes to ``""``.
+    """
+    canonical = _validate_codec(encoding)
+    try:
+        return (strip_bom(raw.decode(canonical)), canonical)
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Input is not valid {canonical}: cannot decode the byte "
+            f"at offset {e.start} with '{encoding}'. Check the "
+            "encoding, or omit it to have it detected."
+        ) from None
+
+
+def read_file_with_encoding(
+    path: Path, encoding: str | None = None
+) -> tuple[str, str]:
+    """Read a file, with automatic encoding detection or a stated one.
+
+    With ``encoding=None`` this tries a strict UTF-8 decode first. A file
+    that decodes cleanly as UTF-8 *is* UTF-8 for our purposes -- there's
+    no reason to let a probabilistic detector overrule a successful
+    strict decode. Only when that fails does this fall back to
+    charset-normalizer, since a guess is only needed once the
+    unambiguous answer has been ruled out.
 
     Falling straight to charset-normalizer let it override a correct
     UTF-8 decode with a wrong single-byte-codepage guess on some inputs
@@ -93,33 +148,51 @@ def read_file_with_encoding(path: Path) -> tuple[str, str]:
 
     Defaults to UTF-8 for empty files or when detection fails.
 
+    With ``encoding`` given (ticket #245) the caller has asserted what the
+    file is: it is validated, then the bytes are decoded strictly with it
+    and never handed to detection. The returned name is the codec's
+    canonical one (``latin-1`` -> ``iso8859-1``).
+
+    Whichever path decoded it, one leading U+FEFF (a byte-order mark) is
+    removed from the text; the reported encoding stays what the bytes
+    decoded as, so a BOM'd UTF-8 file is still ``utf-8``.
+
     Args:
         path: Path to the file to read.
+        encoding: Optional codec name the file is known to be in.
 
     Returns:
-        Tuple of (content_string, detected_encoding).
+        Tuple of (content_string, encoding).
+
+    Raises:
+        ValueError: ``encoding`` is not a text codec, or the bytes do not
+            decode with it. The message names the codec and the byte
+            offset, never the file's content.
     """
+    if encoding is not None:
+        return decode_with_encoding(path.read_bytes(), encoding)
+
     raw = path.read_bytes()
     if not raw:
         return ("", "utf-8")
 
     try:
-        return (raw.decode("utf-8"), "utf-8")
+        return (strip_bom(raw.decode("utf-8")), "utf-8")
     except UnicodeDecodeError:
         pass
 
     result = from_bytes(raw).best()
     if result is None:
         # Detection failed, fall back to utf-8
-        encoding = "utf-8"
-        content = raw.decode(encoding, errors="replace")
+        detected = "utf-8"
+        content = raw.decode(detected, errors="replace")
     else:
-        encoding = result.encoding
+        detected = result.encoding
         # Normalize ascii to utf-8 (ascii is a strict subset of utf-8)
-        if encoding == "ascii":
-            encoding = "utf-8"
+        if detected == "ascii":
+            detected = "utf-8"
         content = str(result)
-    return (content, encoding)
+    return (strip_bom(content), detected)
 
 
 def write_file(

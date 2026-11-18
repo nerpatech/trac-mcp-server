@@ -52,7 +52,12 @@ from urllib.parse import urlsplit
 from ..converters.flavors import DEFAULT_FLAVOR, FLAVORS
 from ..converters.front_matter import exported_from
 from ..core.client import MAX_COMMENT_CHARS, TracClient
-from ..file_handler import detect_file_format, read_file_with_encoding
+from ..file_handler import (
+    decode_with_encoding,
+    detect_file_format,
+    read_file_with_encoding,
+    strip_bom,
+)
 from ..link_rewrites import link_map_arg
 from ..version import cli_version
 from . import assets as export_assets
@@ -427,15 +432,35 @@ def _instance_line(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _read_text(path: str) -> tuple[str, str, str | None]:
-    """Return ``(text, encoding, filename)``; ``-`` reads stdin."""
+def _read_text(
+    path: str, encoding: str | None = None
+) -> tuple[str, str, str | None]:
+    """Return ``(text, encoding, filename)``; ``-`` reads stdin.
+
+    One leading U+FEFF (a byte-order mark) is dropped from the text, file
+    or stdin alike. With ``encoding`` (``wiki-push --encoding``, Trac
+    #245) the bytes are decoded strictly with that codec, stdin included;
+    an unknown codec or a decode failure is a usage error here, before
+    any network call.
+    """
     if path == "-":
-        return sys.stdin.read(), "utf-8", None
+        if encoding is not None:
+            try:
+                text, canonical = decode_with_encoding(
+                    sys.stdin.buffer.read(), encoding
+                )
+            except ValueError as e:
+                raise CliError(str(e), EXIT_USAGE_ERROR) from None
+            return text, canonical, None
+        return strip_bom(sys.stdin.read()), "utf-8", None
     p = Path(path)
     if not p.is_file():
         raise CliError(f"not a file: {path}", EXIT_USAGE_ERROR)
-    text, encoding = read_file_with_encoding(p)
-    return text, encoding, p.name
+    try:
+        text, decoded_as = read_file_with_encoding(p, encoding)
+    except ValueError as e:
+        raise CliError(str(e), EXIT_USAGE_ERROR) from None
+    return text, decoded_as, p.name
 
 
 def _read_bytes(path: str) -> bytes:
@@ -520,7 +545,7 @@ def _read_body(path: str, what: str, allow_empty: bool = False) -> str:
         # path does not: read the bytes, so "verbatim" holds for both.
         try:
             text, encoding = (
-                sys.stdin.buffer.read().decode("utf-8"),
+                strip_bom(sys.stdin.buffer.read().decode("utf-8")),
                 "utf-8",
             )
         except UnicodeDecodeError:
@@ -1197,8 +1222,10 @@ async def _run(
         return await _ticket_pull(args, url, token)
 
     if cmd == "wiki-push":
-        text, encoding, filename = _read_text(args.file)
-        if encoding != "utf-8":
+        text, encoding, filename = _read_text(args.file, args.encoding)
+        # An explicit --encoding is the caller's statement, not a guess,
+        # so it gets no "decoded as" warning (Trac #245).
+        if encoding != "utf-8" and args.encoding is None:
             print(
                 f"warning: {args.file} decoded as '{encoding}', not UTF-8 "
                 "-- check the pushed page",
@@ -1531,6 +1558,17 @@ def build_parser() -> argparse.ArgumentParser:
             "citations. Implies a Markdown source (--format auto is sent "
             "as markdown; --format tracwiki is a usage error). Sent only "
             "when not the default. Default: commonmark (no change)."
+        ),
+    )
+    p.add_argument(
+        "--encoding",
+        metavar="CODEC",
+        help=(
+            "Decode FILE (or stdin) strictly as this Python text codec, "
+            "e.g. cp1251, instead of detecting it; an unknown codec or "
+            "a decode failure is a usage error and nothing is sent. "
+            "The text is sent as UTF-8 content; a UTF-8 BOM is dropped "
+            "either way. Default: detected, UTF-8 first."
         ),
     )
     p.add_argument("--comment", help="Change comment")

@@ -190,6 +190,148 @@ class TestReadFileWithEncoding:
         assert encoding != "utf-8"
 
 
+class TestReadFileBom:
+    """Ticket #245: a leading U+FEFF is a byte-order mark, never content."""
+
+    def test_utf8_bom_is_stripped(self, tmp_path):
+        f = tmp_path / "bom.md"
+        f.write_bytes(b"\xef\xbb\xbf" + "# Title\n".encode("utf-8"))
+        content, encoding = read_file_with_encoding(f)
+        assert content == "# Title\n"
+        assert encoding == "utf-8"
+
+    def test_only_one_leading_feff_is_stripped(self, tmp_path):
+        f = tmp_path / "two.md"
+        f.write_bytes(("\ufeff\ufeff" + "x").encode("utf-8"))
+        content, _ = read_file_with_encoding(f)
+        assert content == "\ufeffx"
+
+    def test_interior_feff_survives(self, tmp_path):
+        f = tmp_path / "interior.md"
+        f.write_bytes(("\ufeffab\ufeffcd").encode("utf-8"))
+        content, _ = read_file_with_encoding(f)
+        assert content == "ab\ufeffcd"
+
+    def test_file_that_is_only_a_bom_is_empty(self, tmp_path):
+        f = tmp_path / "only.md"
+        f.write_bytes(b"\xef\xbb\xbf")
+        content, encoding = read_file_with_encoding(f)
+        assert content == ""
+        assert encoding == "utf-8"
+
+    def test_utf16_bom_through_detection_has_no_feff(self, tmp_path):
+        f = tmp_path / "u16.md"
+        text = "# Title\nSome body text, long enough to detect.\n" * 5
+        f.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+        content, _ = read_file_with_encoding(f)
+        assert not content.startswith("\ufeff")
+        assert content == text
+
+    def test_explicit_utf16le_bom_is_stripped(self, tmp_path):
+        """utf-16-le does not consume a BOM itself; the one-U+FEFF strip
+        does."""
+        f = tmp_path / "u16le.md"
+        f.write_bytes(b"\xff\xfe" + "abc".encode("utf-16-le"))
+        content, encoding = read_file_with_encoding(
+            f, encoding="utf-16-le"
+        )
+        assert content == "abc"
+        assert encoding == "utf-16-le"
+
+    def test_explicit_utf8_strips_bom(self, tmp_path):
+        f = tmp_path / "bom.md"
+        f.write_bytes(b"\xef\xbb\xbf" + b"hi")
+        content, encoding = read_file_with_encoding(f, encoding="utf-8")
+        assert content == "hi"
+        assert encoding == "utf-8"
+
+
+_CYRILLIC = "Привет, мир! Это страница вики."
+
+
+class TestReadFileExplicitEncoding:
+    """Ticket #245: the caller says what the file is encoded in."""
+
+    def test_cp1251_decodes_and_returns_canonical_name(self, tmp_path):
+        f = tmp_path / "ru.txt"
+        f.write_bytes(_CYRILLIC.encode("cp1251"))
+        content, encoding = read_file_with_encoding(
+            f, encoding="cp1251"
+        )
+        assert content == _CYRILLIC
+        assert encoding == "cp1251"
+
+    def test_alias_returns_canonical_name(self, tmp_path):
+        f = tmp_path / "l1.txt"
+        f.write_bytes("Café".encode("latin-1"))
+        content, encoding = read_file_with_encoding(
+            f, encoding="latin-1"
+        )
+        assert content == "Café"
+        assert encoding == "iso8859-1"
+
+    def test_no_fallback_to_detection(self, tmp_path):
+        """Valid UTF-8 bytes read as cp1251 are cp1251 mojibake: the
+        caller's assertion wins, nothing second-guesses it."""
+        f = tmp_path / "u.txt"
+        f.write_bytes("é".encode("utf-8"))
+        content, encoding = read_file_with_encoding(
+            f, encoding="latin-1"
+        )
+        assert content == "é".encode("utf-8").decode("latin-1")
+        assert encoding == "iso8859-1"
+
+    def test_empty_file_returns_canonical_name(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        assert read_file_with_encoding(f, encoding="cp1251") == (
+            "",
+            "cp1251",
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["no-such-codec", "base64", "rot13"]
+    )
+    def test_unknown_or_non_text_codec_is_a_value_error(
+        self, tmp_path, name
+    ):
+        f = tmp_path / "x.txt"
+        f.write_bytes(b"abc")
+        with pytest.raises(ValueError, match=name):
+            read_file_with_encoding(f, encoding=name)
+
+    def test_bad_codec_is_refused_even_for_an_empty_file(
+        self, tmp_path
+    ):
+        f = tmp_path / "x.txt"
+        f.write_bytes(b"")
+        with pytest.raises(ValueError, match="base64"):
+            read_file_with_encoding(f, encoding="base64")
+
+    def test_strict_decode_failure_names_codec_and_offset_only(
+        self, tmp_path
+    ):
+        f = tmp_path / "bad.txt"
+        f.write_bytes(b"SECRETPLANTED\xff\xfe tail")
+        with pytest.raises(ValueError) as excinfo:
+            read_file_with_encoding(f, encoding="utf-8")
+        message = str(excinfo.value)
+        assert "utf-8" in message
+        assert "13" in message
+        assert "SECRETPLANTED" not in message
+        assert "tail" not in message
+
+    def test_ascii_on_non_ascii_fails(self, tmp_path):
+        f = tmp_path / "bad.txt"
+        f.write_bytes("abcé".encode("utf-8"))
+        with pytest.raises(ValueError) as excinfo:
+            read_file_with_encoding(f, encoding="ascii")
+        message = str(excinfo.value)
+        assert "ascii" in message
+        assert "3" in message
+        assert "abc" not in message
+
+
 # =============================================================================
 # write_file
 # =============================================================================
