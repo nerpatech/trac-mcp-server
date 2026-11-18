@@ -78,6 +78,9 @@ class TestHandleBatchCreate(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
         self.mock_client.config.max_batch_size = 500
+        # Gate off: on a MagicMock config it defaults on, renders fail and
+        # check_write swallows them -- a dependency these tests must not have.
+        self.mock_client.config.write_gate = False
 
     def test_batch_create_success(self):
         """Batch create with 3 tickets returns all succeeded."""
@@ -396,6 +399,9 @@ class TestHandleBatchUpdate(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
         self.mock_client.config.max_batch_size = 500
+        # Gate off: on a MagicMock config it defaults on, renders fail and
+        # check_write swallows them -- a dependency these tests must not have.
+        self.mock_client.config.write_gate = False
 
     def test_batch_update_success(self):
         """Batch update all succeed."""
