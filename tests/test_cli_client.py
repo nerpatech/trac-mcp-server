@@ -215,7 +215,7 @@ class TestHeadersHelper:
             },
         )
         _, token, _ = cli.resolve_endpoint(
-            _ns(), tmp_path, {"TOKEN_A": "static-token", **os.environ}
+            _ns(), tmp_path, {**os.environ, "TOKEN_A": "static-token"}
         )
         assert token == "fake-helper-token"
 
@@ -235,7 +235,7 @@ class TestHeadersHelper:
             },
         )
         _, token, _ = cli.resolve_endpoint(
-            _ns(), tmp_path, {"TOKEN_A": "static-token", **os.environ}
+            _ns(), tmp_path, {**os.environ, "TOKEN_A": "static-token"}
         )
         assert token == "static-token"
 
@@ -259,7 +259,7 @@ class TestHeadersHelper:
         _, token, _ = cli.resolve_endpoint(
             _ns(token_env="TOKEN_B"),
             tmp_path,
-            {"TOKEN_B": "tok-b", **os.environ},
+            {**os.environ, "TOKEN_B": "tok-b"},
         )
         assert token == "tok-b"
         assert not marker.exists()
@@ -384,6 +384,178 @@ class TestHeadersHelper:
         assert time.monotonic() - start < 4
         assert exc.value.code == cli.EXIT_CONNECT_ERROR
         assert "timed out" in str(exc.value)
+
+    def test_helper_escaping_the_process_group_does_not_hang_the_reap(
+        self, tmp_path, monkeypatch
+    ):
+        # A descendant that called setsid escapes the group kill and
+        # keeps the pipes open for 8 s; the wait after a timeout must be
+        # bounded, not follow it.
+        monkeypatch.setattr(cli, "HEADERS_HELPER_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(cli, "_HELPER_REAP_TIMEOUT_S", 0.5)
+        _write_mcp_json(
+            tmp_path,
+            {"trac-http": _helper_entry("setsid sleep 8 & sleep 5")},
+        )
+        start = time.monotonic()
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert time.monotonic() - start < 3
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "timed out" in str(exc.value)
+
+    def test_empty_authorization_from_helper_never_falls_back(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path, 'print(\'{"Authorization": ""}\')\n'
+        )
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    command,
+                    headers={"Authorization": "Bearer static-token"},
+                )
+            },
+        )
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "printed an empty Authorization header" in str(exc.value)
+        assert "static-token" not in str(exc.value)
+
+    def test_whitespace_authorization_from_helper_is_empty(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path, 'print(\'{"authorization": "  "}\')\n'
+        )
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    command,
+                    headers={"Authorization": "Bearer static-token"},
+                )
+            },
+        )
+        with pytest.raises(
+            cli.CliError, match="printed an empty Authorization"
+        ):
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+
+    def test_helper_name_collision_is_case_insensitive(self, tmp_path):
+        command = _helper_script(
+            tmp_path,
+            'print(\'{"authorization": "Bearer fake-helper-token"}\')\n',
+        )
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    command,
+                    headers={"Authorization": "Bearer static-token"},
+                )
+            },
+        )
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, dict(os.environ)
+        )
+        assert token == "fake-helper-token"
+
+    @pytest.mark.parametrize(
+        "bad", [["pass", "show", "trac"], 7, {"cmd": "x"}, None]
+    )
+    def test_non_string_helper_is_a_connect_error(self, tmp_path, bad):
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    bad, headers={"Authorization": "Bearer static"}
+                )
+            },
+        )
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "headersHelper for server 'trac-http' in " in str(
+            exc.value
+        )
+        assert "must be a command string" in str(exc.value)
+
+    def test_whitespace_helper_string_counts_as_absent(self, tmp_path):
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    "  \t",
+                    headers={"Authorization": "Bearer ${TOKEN_A}"},
+                )
+            },
+        )
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {"TOKEN_A": "static-token"}
+        )
+        assert token == "static-token"
+
+    def test_control_characters_in_stderr_line_are_replaced(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path,
+            "import sys\n"
+            "sys.stderr.write('\\x1b[31mred\\x1b[0m\\ttab\\x07bell\\n')\n"
+            "sys.exit(3)\n",
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        msg = str(exc.value)
+        assert "?[31mred?[0m?tab?bell" in msg
+        assert all(c.isprintable() for c in msg)
+
+    def test_interrupt_kills_the_helper_and_reraises(
+        self, tmp_path, monkeypatch
+    ):
+        """Ctrl-C while the CLI waits must not orphan the helper: the
+        wait is interrupted by a real SIGINT sent to the main thread
+        from a timer thread, and the helper (which records its pid) must
+        be dead afterwards."""
+        import signal
+        import threading
+
+        main_thread = threading.get_ident()
+
+        pidfile = tmp_path / "pid"
+        command = _helper_script(
+            tmp_path,
+            "import os, time\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "time.sleep(30)\n",
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+
+        def _interrupt():
+            deadline = time.monotonic() + 10
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.3)
+            signal.pthread_kill(main_thread, signal.SIGINT)
+
+        threading.Thread(target=_interrupt, daemon=True).start()
+        with pytest.raises(KeyboardInterrupt):
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        pid = int(pidfile.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, 9)
+            pytest.fail("the helper outlived the interrupted CLI")
 
     def test_empty_helper_string_is_ignored(self, tmp_path):
         _write_mcp_json(

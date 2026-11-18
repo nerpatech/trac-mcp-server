@@ -75,6 +75,16 @@ DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN"
 # Claude Code gives a headersHelper 10 s; a module constant so a test can
 # shorten it.
 HEADERS_HELPER_TIMEOUT_S: float = 10
+# After a timeout kills the helper's process group, how long to wait for
+# its pipes to close. A descendant that called setsid escapes the group
+# kill and keeps them open, so the wait is bounded.
+_HELPER_REAP_TIMEOUT_S: float = 1
+
+# The ``where`` labels of the two environment-driven sources: the token
+# comes from the environment there, and main() words its "no token"
+# message by them.
+WHERE_URL_FLAG = "--url"
+WHERE_URL_ENV = "TRAC_MCP_URL"
 
 
 class CliError(Exception):
@@ -202,19 +212,29 @@ def _run_headers_helper(
             timeout=HEADERS_HELPER_TIMEOUT_S
         )
     except subprocess.TimeoutExpired:
-        if posix:
-            with contextlib.suppress(OSError):
-                os.killpg(proc.pid, signal.SIGKILL)
-        else:
-            proc.kill()
-        proc.communicate()
+        _kill_helper(proc)
+        try:
+            proc.communicate(timeout=_HELPER_REAP_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # A descendant outside the group still holds the pipes: stop
+            # waiting for it rather than for as long as it lives.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        pipe.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_HELPER_REAP_TIMEOUT_S)
         raise CliError(
             f"{label} timed out after {HEADERS_HELPER_TIMEOUT_S:g} s",
             EXIT_CONNECT_ERROR,
         ) from None
+    except BaseException:
+        # Ctrl-C (or any other interruption): do not orphan the helper.
+        _kill_helper(proc)
+        raise
     if proc.returncode != 0:
         lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
-        detail = f": {lines[-1][:200]}" if lines else ""
+        detail = f": {_printable(lines[-1])[:200]}" if lines else ""
         raise CliError(
             f"{label} exited {proc.returncode}{detail}",
             EXIT_CONNECT_ERROR,
@@ -235,12 +255,22 @@ def _run_headers_helper(
     return parsed
 
 
-def _header(headers: Mapping[str, str], name: str) -> str | None:
-    """A header's value, by case-insensitive name (HTTP's rule)."""
-    for key, value in headers.items():
-        if key.lower() == name.lower():
-            return value
-    return None
+def _kill_helper(proc: "subprocess.Popen[str]") -> None:
+    """Kill the helper: its whole process group on POSIX (it was started
+    in its own session), else just the process."""
+    if os.name == "posix":
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        with contextlib.suppress(OSError):
+            proc.kill()
+
+
+def _printable(text: str) -> str:
+    """``text`` with every control or non-printable character (ESC
+    included) replaced by ``?``, so a helper's stderr cannot drive the
+    operator's terminal through an error message."""
+    return "".join(c if c.isprintable() else "?" for c in text)
 
 
 def resolve_endpoint(
@@ -252,11 +282,14 @@ def resolve_endpoint(
     For an ``.mcp.json`` entry the token comes from ``--token-env`` if
     given; otherwise from the Authorization header of the entry's
     ``headersHelper`` command (run here, see :func:`_run_headers_helper`)
-    when it prints one, which overrides the entry's static ``headers``,
-    and failing that from the static header. Only Authorization is used.
+    when it prints one, which overrides the entry's static ``headers``
+    (an empty Authorization from the helper is an error, never a
+    fallback to the static one); else from the static header. A
+    ``headersHelper`` that is not a string is an error. Only
+    Authorization is used.
     """
     if args.url:
-        return args.url, _token_from_env(args, environ), "--url"
+        return args.url, _token_from_env(args, environ), WHERE_URL_FLAG
 
     mcp_json = find_mcp_json(cwd)
     if mcp_json is not None:
@@ -280,27 +313,46 @@ def resolve_endpoint(
             if args.token_env:
                 token = _token_from_env(args, environ)
             else:
-                helper = entry.get("headersHelper")
-                header = None
-                if isinstance(helper, str) and helper.strip():
-                    # Not expand_vars'd: the shell expands the command.
-                    header = _header(
-                        _run_headers_helper(
+                headers: dict[str, str] = {}
+                for key, value in (entry.get("headers") or {}).items():
+                    if key.lower() == "authorization":
+                        # Only Authorization is read, so only it is
+                        # expanded -- and only if the helper leaves it.
+                        headers["authorization"] = value
+                from_helper = False
+                if "headersHelper" in entry:
+                    helper = entry["headersHelper"]
+                    if not isinstance(helper, str):
+                        raise CliError(
+                            f"headersHelper for server '{args.server}' "
+                            f"in {mcp_json} must be a command string",
+                            EXIT_CONNECT_ERROR,
+                        )
+                    if helper.strip():
+                        # Not expand_vars'd: the shell expands it.
+                        printed = _run_headers_helper(
                             helper,
                             server=args.server,
                             url=url,
                             mcp_json=mcp_json,
                             environ=environ,
-                        ),
-                        "Authorization",
-                    )
-                if not header:
-                    static = _header(
-                        entry.get("headers") or {}, "Authorization"
-                    )
-                    header = (
-                        expand_vars(static, environ) if static else None
-                    )
+                        )
+                        # The helper's headers win a name collision.
+                        for key, value in printed.items():
+                            if key.lower() == "authorization":
+                                from_helper = True
+                                headers["authorization"] = value
+                header = headers.get("authorization")
+                if from_helper:
+                    if not (header or "").strip():
+                        raise CliError(
+                            f"headersHelper for server '{args.server}' "
+                            f"in {mcp_json} printed an empty "
+                            "Authorization header",
+                            EXIT_CONNECT_ERROR,
+                        )
+                elif header:
+                    header = expand_vars(header, environ)
                 token = _bearer(header) if header else None
             return url, token, f"{mcp_json} ({args.server})"
         if args.server != DEFAULT_SERVER:
@@ -311,7 +363,7 @@ def resolve_endpoint(
 
     url = environ.get("TRAC_MCP_URL")
     if url:
-        return url, _token_from_env(args, environ), "TRAC_MCP_URL"
+        return url, _token_from_env(args, environ), WHERE_URL_ENV
 
     raise CliError(
         "no server to connect to: pass --url, run from a project whose "
@@ -1727,7 +1779,7 @@ def main(
             # an .mcp.json entry takes it from its own headers.
             reason = (
                 f"{DEFAULT_TOKEN_ENV} is unset"
-                if where in ("--url", "TRAC_MCP_URL")
+                if where in (WHERE_URL_FLAG, WHERE_URL_ENV)
                 else f"{where} supplies no Authorization header"
             )
             print(
