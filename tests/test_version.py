@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import tomllib
 
 import trac_mcp_server
 from trac_mcp_server.version import (
@@ -43,6 +44,9 @@ class TestVersionAttribute:
         assert re.match(r"^\d+\.\d+\.\d+$", version), (
             f"Version '{version}' does not match X.Y.Z pattern"
         )
+
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _manifest(path, name="trac-mcp-server", version="3.0.0"):
@@ -81,7 +85,19 @@ class TestCompareVersions:
         assert "mismatch" in message.lower()
         assert "Runtime: 3.0.0" in message
         assert "Source: 9.9.9" in message
-        assert "pyinstaller" in message
+        assert "pyinstaller" not in message.lower()
+        assert "__version__" in message
+        assert "[project].version" in message
+        assert "bump both together" in message
+
+    def test_manifest_compares_normalized_versions(self, tmp_path):
+        manifest = _manifest(
+            tmp_path / "pyproject.toml", version="3.1.0rc1"
+        )
+        ok, message = _compare_versions(
+            "3.1.0-rc1", manifest, _dist(None)
+        )
+        assert ok is True, message
 
     def test_manifest_wins_over_stale_metadata(self, tmp_path):
         # an editable install's dist metadata keeps the install-time
@@ -113,28 +129,74 @@ class TestCompareVersions:
         assert ok is True
         assert "installed package metadata" in message
 
-    def test_unparseable_manifest_is_a_read_failure(self, tmp_path):
+    def test_unparseable_manifest_falls_through_with_a_note(
+        self, tmp_path
+    ):
         manifest = tmp_path / "pyproject.toml"
         manifest.write_text("[project\nname = \n")
         ok, message = _compare_versions(
             "3.0.0", manifest, _dist("3.0.0")
         )
-        assert ok is False
-        assert message.startswith(
-            "Failed to read version from pyproject.toml: "
+        # the verdict is the metadata branch's
+        assert ok is True
+        assert "installed package metadata" in message
+        assert (
+            f"; pyproject.toml at {manifest} could not be read: "
+            in (message)
         )
 
-    def test_unreadable_manifest_is_a_read_failure(self, tmp_path):
+    def test_unreadable_manifest_falls_through_with_a_note(
+        self, tmp_path
+    ):
         # a directory where the file should be: open() raises OSError
         manifest = tmp_path / "pyproject.toml"
         manifest.mkdir()
         ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("2.2.0")
+        )
+        # the verdict is the metadata branch's: a mismatch
+        assert ok is False
+        assert "Installed metadata: 2.2.0" in message
+        assert (
+            f"; pyproject.toml at {manifest} could not be read: "
+            in (message)
+        )
+
+    def test_unreadable_manifest_and_no_metadata_is_consistent(
+        self, tmp_path
+    ):
+        manifest = tmp_path / "pyproject.toml"
+        manifest.write_text("not = [toml")
+        ok, message = _compare_versions("3.0.0", manifest, _dist(None))
+        assert ok is True
+        assert "no source manifest or package metadata" in message
+        assert "could not be read" in message
+
+    def test_no_toml_reader_falls_through_with_a_note(
+        self, tmp_path, monkeypatch
+    ):
+        manifest = _manifest(tmp_path / "pyproject.toml")
+        # a None entry makes the import raise ImportError (Python 3.10
+        # with no tomli)
+        monkeypatch.setitem(sys.modules, "tomllib", None)
+        monkeypatch.setitem(sys.modules, "tomli", None)
+        ok, message = _compare_versions(
             "3.0.0", manifest, _dist("3.0.0")
         )
-        assert ok is False
-        assert message.startswith(
-            "Failed to read version from pyproject.toml: "
+        assert ok is True
+        assert "installed package metadata" in message
+        assert message.endswith(
+            f"; pyproject.toml at {manifest} could not be read: "
+            "tomllib/tomli not available"
         )
+
+    def test_a_foreign_manifest_gets_no_note(self, tmp_path):
+        manifest = _manifest(tmp_path / "pyproject.toml", name="other")
+        ok, message = _compare_versions(
+            "3.0.0", manifest, _dist("3.0.0")
+        )
+        assert ok is True
+        assert "could not be read" not in message
 
     def test_no_manifest_metadata_match(self, tmp_path):
         ok, message = _compare_versions(
@@ -155,8 +217,51 @@ class TestCompareVersions:
         assert "3.0.0" in message
         assert "2.2.0" in message
         assert "metadata" in message
-        assert "reinstall" in message
-        assert "pyinstaller" not in message
+        assert "mismatched version literals" in message
+        assert "reinstall" not in message
+        assert "pyinstaller" not in message.lower()
+
+    def test_metadata_is_compared_normalized(self, tmp_path):
+        # importlib.metadata reports 3.1.0rc1 for a 3.1.0-rc1 literal
+        ok, message = _compare_versions(
+            "3.1.0-rc1", tmp_path / "pyproject.toml", _dist("3.1.0rc1")
+        )
+        assert ok is True, message
+        assert "installed package metadata" in message
+
+    def test_different_releases_still_mismatch_when_normalized(
+        self, tmp_path
+    ):
+        ok, _ = _compare_versions(
+            "3.1.0-rc1", tmp_path / "pyproject.toml", _dist("3.1.0rc2")
+        )
+        assert ok is False
+
+    def test_raw_strings_are_compared_without_packaging(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setitem(sys.modules, "packaging", None)
+        monkeypatch.setitem(sys.modules, "packaging.version", None)
+        same = _compare_versions(
+            "3.0.0", tmp_path / "pyproject.toml", _dist("3.0.0")
+        )
+        assert same[0] is True
+        # normalization is unavailable, so the spellings differ
+        differ = _compare_versions(
+            "3.1.0-rc1", tmp_path / "pyproject.toml", _dist("3.1.0rc1")
+        )
+        assert differ[0] is False
+
+    def test_an_unparseable_version_is_compared_raw(self, tmp_path):
+        manifest = tmp_path / "pyproject.toml"
+        ok, _ = _compare_versions(
+            "not a version", manifest, _dist("not a version")
+        )
+        assert ok is True
+        ok, _ = _compare_versions(
+            "not a version", manifest, _dist("other")
+        )
+        assert ok is False
 
     def test_neither_source_is_consistent_and_says_so(self, tmp_path):
         ok, message = _compare_versions(
@@ -190,13 +295,18 @@ class TestCheckVersionConsistency:
     def test_the_checkout_is_consistent(self):
         ok, message = check_version_consistency()
         assert ok is True, message
-        assert (
-            message
-            == f"Version verified: {trac_mcp_server.__version__}"
-        )
+        version = trac_mcp_server.__version__
+        src = (REPO / "src").resolve()
+        if Path(trac_mcp_server.__file__).resolve().is_relative_to(src):
+            # imported from this checkout: its manifest is found
+            assert message == f"Version verified: {version}"
+        else:
+            # the suite imported an installed copy (pip install .)
+            assert (
+                f"Version verified: {version} "
+                "(installed package metadata)"
+            ) in message
 
-
-REPO = Path(__file__).resolve().parent.parent
 
 #: What a wheel build prints when the interpreter lacks a build tool,
 #: not when the project is broken.
@@ -207,6 +317,36 @@ _MISSING_BUILD_TOOL = (
     "Cannot import 'setuptools.build_meta'",
     "No matching distribution found",
 )
+
+
+def _setuptools_floor():
+    """The ``setuptools>=X`` floor in pyproject's ``[build-system]``
+    ``requires``, as a version, or None when it names none."""
+    try:
+        from packaging.version import Version
+    except ImportError:  # not a declared dependency: skip the check
+        return None
+
+    requires = tomllib.loads((REPO / "pyproject.toml").read_text())[
+        "build-system"
+    ]["requires"]
+    for req in requires:
+        match = re.match(r"setuptools\s*>=\s*([0-9][^,;\s]*)", req)
+        if match:
+            return Version(match.group(1))
+    return None
+
+
+def _setuptools_version():
+    try:
+        from packaging.version import Version
+    except ImportError:
+        return None
+
+    try:
+        return Version(importlib.metadata.version("setuptools"))
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 @pytest.fixture
@@ -227,6 +367,16 @@ def installed_site(tmp_path):
     )
     for name in ("pyproject.toml", "setup.py", "README.md", "LICENSE"):
         shutil.copy(REPO / name, root / name)
+    # --no-build-isolation does not enforce the [build-system] floor, and
+    # an older setuptools rejects the PEP 639 license fields with an
+    # error no marker below names: skip with the reason instead
+    floor = _setuptools_floor()
+    have = _setuptools_version()
+    if floor is not None and have is not None and have < floor:
+        pytest.skip(
+            f"installed setuptools {have} is older than the "
+            f"[build-system] floor {floor} in pyproject.toml"
+        )
     wheels = tmp_path / "whl"
     result = subprocess.run(
         [
@@ -237,6 +387,8 @@ def installed_site(tmp_path):
             "-q",
             "--no-deps",
             "--no-build-isolation",
+            "--disable-pip-version-check",
+            "--no-index",
             "-w",
             str(wheels),
             str(root),

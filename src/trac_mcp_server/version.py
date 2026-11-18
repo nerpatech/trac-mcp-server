@@ -109,6 +109,60 @@ def _installed_version() -> str | None:
         return None
 
 
+def _same_version(a: str, b: str) -> bool:
+    """Whether two version strings name the same release.
+
+    ``importlib.metadata`` reports the PEP 440-normalized form
+    (``3.1.0-rc1`` is ``3.1.0rc1``) while ``__version__`` is whatever
+    was typed, so when ``packaging`` is importable (it is not a declared
+    dependency) and both sides parse, ``Version`` objects are compared;
+    otherwise the raw strings are.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+    except ImportError:
+        return a == b
+    try:
+        return Version(a) == Version(b)
+    except InvalidVersion:
+        return a == b
+
+
+def _read_manifest(
+    manifest_path: Path,
+) -> tuple[dict | None, str | None]:
+    """``(project table, None)`` when ``manifest_path`` is a readable
+    manifest naming this package, ``(None, None)`` when there is no
+    manifest or it names another project, and ``(None, note)`` when it
+    exists but could not be read (``note`` says why)."""
+    if not manifest_path.exists():
+        return None, None
+    # tomllib is stdlib from 3.11; tomli is the fallback for 3.10
+    try:
+        import tomllib  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return None, (
+                f"pyproject.toml at {manifest_path} could not be read: "
+                f"tomllib/tomli not available"
+            )
+    try:
+        with open(manifest_path, "rb") as f:
+            project = tomllib.load(f).get("project", {})
+    except Exception as e:
+        return None, (
+            f"pyproject.toml at {manifest_path} could not be read: {e}"
+        )
+    if (
+        not isinstance(project, dict)
+        or project.get("name") != DIST_NAME
+    ):
+        return None, None
+    return project, None
+
+
 def _compare_versions(
     runtime_version: str,
     manifest_path: Path,
@@ -116,55 +170,40 @@ def _compare_versions(
 ) -> tuple[bool, str]:
     """``check_version_consistency`` with its inputs passed in, so tests
     can drive each source with real files and a stand-in lookup."""
-    if manifest_path.exists():
-        # tomllib is stdlib from 3.11; tomli is the fallback for 3.10
-        try:
-            import tomllib  # type: ignore[import-not-found]
-        except ImportError:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                return (
-                    False,
-                    "tomllib/tomli not available for version checking",
-                )
-        try:
-            with open(manifest_path, "rb") as f:
-                project = tomllib.load(f).get("project", {})
-            name = project.get("name")
-            source_version = project.get("version", "unknown")
-        except Exception as e:
-            return (
-                False,
-                f"Failed to read version from pyproject.toml: {e}",
+    project, note = _read_manifest(manifest_path)
+    if project is not None:
+        source_version = str(project.get("version", "unknown"))
+        if not _same_version(runtime_version, source_version):
+            return False, (
+                f"Version mismatch detected! "
+                f"Runtime: {runtime_version}, Source: {source_version}. "
+                f"__version__ in src/trac_mcp_server/__init__.py and "
+                f"[project].version in pyproject.toml disagree; bump "
+                f"both together"
             )
-        # A manifest for some other project (or none that names one) is
-        # not this package's source tree: look at the installed metadata.
-        if name == DIST_NAME:
-            if runtime_version != source_version:
-                return False, (
-                    f"Version mismatch detected! "
-                    f"Runtime: {runtime_version}, Source: {source_version}. "
-                    f"Binary is stale - rebuild with: pyinstaller trac-mcp-server.spec"
-                )
-            return True, f"Version verified: {runtime_version}"
+        return True, f"Version verified: {runtime_version}"
 
+    # No manifest of ours (absent, another project's, or unreadable):
+    # the installed metadata is the next source. An unreadable manifest
+    # is reported, but it does not decide the result.
+    suffix = f"; {note}" if note else ""
     installed = dist_version()
     if installed is None:
         return True, (
             f"Version {runtime_version}: no source manifest or package "
-            f"metadata to compare against"
+            f"metadata to compare against{suffix}"
         )
-    if installed != runtime_version:
+    if not _same_version(runtime_version, installed):
         return False, (
             f"Version mismatch detected! "
             f"Runtime: {runtime_version}, Installed metadata: {installed}. "
-            f"The installed package metadata disagrees with the code - "
-            f"reinstall the package"
+            f"The installed package's metadata and its __version__ "
+            f"disagree: the build it came from had mismatched version "
+            f"literals, or the install was modified{suffix}"
         )
-    return (
-        True,
-        f"Version verified: {runtime_version} (installed package metadata)",
+    return True, (
+        f"Version verified: {runtime_version} "
+        f"(installed package metadata){suffix}"
     )
 
 
@@ -175,24 +214,30 @@ def check_version_consistency() -> tuple[bool, str]:
     Returns:
         Tuple of (is_consistent, message) where:
         - is_consistent: True if versions match, or if there is nothing
-          to compare against; False on a mismatch or a read failure
+          to compare against; False on a mismatch
         - message: Descriptive message about version status
 
     The version is compared against the first of three sources that
-    exists:
+    exists; versions are compared in PEP 440-normalized form when
+    ``packaging`` is importable:
 
     1. The source manifest, ``pyproject.toml`` three levels above this
        file, when it names this project (``[project].name`` is
        ``trac-mcp-server``). That is a source checkout or an editable
        install, and it goes first because an editable install's dist
        metadata goes stale (it keeps the version from install time)
-       while the manifest is the live source. A mismatch means a stale
-       PyInstaller binary; a manifest that cannot be read is a failure.
+       while the manifest is the live source. A mismatch means
+       ``__version__`` and ``[project].version`` were not bumped
+       together. A manifest counts only if it can be read and names this
+       package: a missing one, another project's, or one that cannot be
+       read (no tomllib/tomli, a parse or read error) falls through to
+       source 2, and an unreadable one is noted on that result.
     2. The installed distribution's metadata
        (``importlib.metadata``), for any other install: a wheel in a
        venv or site-packages, where the path above names ``lib/pythonX.Y``
-       and there is no manifest. A mismatch means the package should be
-       reinstalled.
+       and there is no manifest. A mismatch means the build the install
+       came from had mismatched version literals, or the install was
+       modified; reinstalling cannot fix it.
     3. Neither (a PyInstaller binary with no bundled metadata): there is
        nothing to compare, which is consistent, so the caller logs it at
        info and not as a warning.
@@ -204,6 +249,7 @@ def check_version_consistency() -> tuple[bool, str]:
 
     return _compare_versions(
         runtime_version,
-        Path(__file__).parent.parent.parent / "pyproject.toml",
+        Path(__file__).resolve().parent.parent.parent
+        / "pyproject.toml",
         _installed_version,
     )
