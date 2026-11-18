@@ -2834,3 +2834,159 @@ class TestPullDocumentUrlIsPercentEncoded:
         else:
             assert "[h](#H)" in text
             assert "[o](http://localhost/trac/wiki/Other#H)" in text
+
+
+# =============================================================================
+# Ticket #245: explicit encoding for file_path, BOM stripped
+# =============================================================================
+
+_RU = "= Заголовок =\nПривет, мир! Это страница вики.\n"
+
+
+async def _encoded_push(**args):
+    """Push ``args`` (page_name defaulted); returns (client, result)."""
+    client = _make_client()
+    client.get_wiki_page_info.side_effect = xmlrpc.client.Fault(
+        1, "not found"
+    )
+    client.put_wiki_page.return_value = {"version": 1}
+    result = await _registry.call_tool(
+        "wiki_file_push", {"page_name": "TestPage", **args}, client
+    )
+    return client, result
+
+
+class TestPushEncoding:
+    def test_schema_lists_encoding(self):
+        push = next(
+            s.tool
+            for s in WIKI_FILE_SPECS
+            if s.tool.name == "wiki_file_push"
+        )
+        prop = push.inputSchema["properties"]["encoding"]
+        assert prop["type"] == "string"
+        assert "file_path" in prop["description"]
+
+    def test_detect_format_schema_does_not_gain_encoding(self):
+        detect = next(
+            s.tool
+            for s in WIKI_FILE_SPECS
+            if s.tool.name == "wiki_file_detect_format"
+        )
+        assert "encoding" not in detect.inputSchema["properties"]
+
+    async def test_explicit_encoding_pushes_the_right_text(
+        self, tmp_path
+    ):
+        f = tmp_path / "ru.wiki"
+        f.write_bytes(_RU.encode("cp1251"))
+        client, result = await _encoded_push(
+            file_path=str(f), encoding="cp1251"
+        )
+        assert not result.isError, result.content
+        assert client.put_wiki_page.call_args[0][1] == _RU
+
+    async def test_explicit_encoding_emits_no_not_utf8_warning(
+        self, tmp_path
+    ):
+        f = tmp_path / "ru.wiki"
+        f.write_bytes(_RU.encode("cp1251"))
+        _client, result = await _encoded_push(
+            file_path=str(f), encoding="cp1251"
+        )
+        assert result.structuredContent["warnings"] == []
+        assert "not UTF-8" not in result.content[0].text
+
+    async def test_detected_non_utf8_still_warns(self, tmp_path):
+        f = tmp_path / "ru.wiki"
+        f.write_bytes(_RU.encode("cp1251"))
+        _client, result = await _encoded_push(file_path=str(f))
+        assert not result.isError, result.content
+        assert any(
+            "not UTF-8" in w
+            for w in result.structuredContent["warnings"]
+        )
+
+    async def test_encoding_with_inline_content_is_refused(self):
+        client, result = await _encoded_push(
+            content="= T =\nx", encoding="cp1251"
+        )
+        assert result.isError
+        assert "Error (validation_error)" in result.content[0].text
+        assert "encoding" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+        client.get_wiki_page_info.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "name", ["no-such-codec", "base64", "rot13"]
+    )
+    async def test_unknown_or_non_text_codec_is_a_validation_error(
+        self, tmp_path, name
+    ):
+        f = tmp_path / "a.wiki"
+        f.write_bytes(b"= T =\nbody")
+        client, result = await _encoded_push(
+            file_path=str(f), encoding=name
+        )
+        assert result.isError
+        assert "Error (validation_error)" in result.content[0].text
+        assert name in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+        client.get_wiki_page_info.assert_not_called()
+
+    async def test_strict_decode_failure_names_codec_and_offset(
+        self, tmp_path
+    ):
+        f = tmp_path / "a.wiki"
+        f.write_bytes(b"SECRETPLANTED\xff tail")
+        client, result = await _encoded_push(
+            file_path=str(f), encoding="utf-8"
+        )
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (validation_error)" in text
+        assert "utf-8" in text
+        assert "13" in text
+        assert "SECRETPLANTED" not in text
+        client.put_wiki_page.assert_not_called()
+        client.get_wiki_page_info.assert_not_called()
+
+    async def test_encoding_with_file_access_off_is_still_refused(
+        self, tmp_path
+    ):
+        from trac_mcp_server.mcp.tools.file_io import set_file_access
+
+        f = tmp_path / "a.wiki"
+        f.write_bytes(b"= T =\nbody")
+        set_file_access("off")
+        try:
+            client, result = await _encoded_push(
+                file_path=str(f), encoding="utf-8"
+            )
+        finally:
+            set_file_access("local")
+        assert result.isError
+        assert "Error (permission_denied)" in result.content[0].text
+        client.put_wiki_page.assert_not_called()
+
+    async def test_bom_file_is_stored_without_feff(self, tmp_path):
+        f = tmp_path / "bom.wiki"
+        f.write_bytes(b"\xef\xbb\xbf" + b"= Title =\nbody\n")
+        client, result = await _encoded_push(file_path=str(f))
+        assert not result.isError, result.content
+        stored = client.put_wiki_page.call_args[0][1]
+        assert stored == "= Title =\nbody\n"
+        assert result.structuredContent["warnings"] == []
+
+    async def test_explicit_utf8_bom_file_is_stored_without_feff(
+        self, tmp_path
+    ):
+        f = tmp_path / "bom.wiki"
+        f.write_bytes(b"\xef\xbb\xbf" + b"= Title =\nbody\n")
+        client, result = await _encoded_push(
+            file_path=str(f), encoding="utf-8"
+        )
+        assert not result.isError, result.content
+        assert (
+            client.put_wiki_page.call_args[0][1] == "= Title =\nbody\n"
+        )

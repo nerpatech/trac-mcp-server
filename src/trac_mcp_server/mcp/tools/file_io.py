@@ -104,7 +104,10 @@ def _either_or(
 
 
 async def read_text_input(
-    args: dict[str, Any], cli_hint: str
+    args: dict[str, Any],
+    cli_hint: str,
+    *,
+    accept_encoding: bool = False,
 ) -> tuple[str, str, Path | None, str] | types.CallToolResult:
     """Resolve a text tool's input from ``file_path`` or ``content``.
 
@@ -113,19 +116,43 @@ async def read_text_input(
     caller's ``filename`` hint) or None, and ``source`` is what the result
     reports the bytes came from. Returns an error result instead when the
     arguments are unusable.
+
+    With ``accept_encoding`` the tool takes an ``encoding`` argument
+    (ticket #245): the codec of the server-side ``file_path``, decoded
+    strictly with no fallback to detection. It is refused with inline
+    ``content``, which is already text. A tool that does not accept it
+    never looks at the argument.
     """
     refusal = _either_or(args, "file_path", "content")
     if refusal is not None:
         return refusal
     file_path = args.get("file_path")
+    encoding = args.get("encoding") if accept_encoding else None
     if file_path is not None:
         if _file_access != "local":
             return _path_refused("file_path", cli_hint)
         resolved = await run_sync(validate_file_path, file_path)
-        text, encoding = await run_sync(
-            read_file_with_encoding, resolved
+        try:
+            text, decoded_as = await run_sync(
+                read_file_with_encoding, resolved, encoding
+            )
+        except ValueError as e:
+            if encoding is None:
+                raise
+            return build_error_response(
+                "validation_error",
+                str(e),
+                "Pass a Python text codec that matches the file, or "
+                "omit encoding to have it detected.",
+            )
+        return text, decoded_as, resolved, str(file_path)
+    if encoding is not None:
+        return build_error_response(
+            "validation_error",
+            "encoding applies to file_path only: inline content is "
+            "already text",
+            "Drop encoding, or push the file by file_path.",
         )
-        return text, encoding, resolved, str(file_path)
     content = args["content"]
     too_large = _over_cap(len(content.encode("utf-8")), "content")
     if too_large is not None:

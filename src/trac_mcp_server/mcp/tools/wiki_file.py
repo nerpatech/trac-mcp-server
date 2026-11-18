@@ -127,6 +127,16 @@ WIKI_FILE_TOOLS = [
                         "'local' (it is 'off' over http)."
                     ),
                 },
+                "encoding": {
+                    "type": "string",
+                    "description": (
+                        "The codec of the server-side file_path, a "
+                        "Python text codec name such as cp1251 or "
+                        "utf-8; the file is decoded strictly with it. "
+                        "Default: detected (strict UTF-8 first). "
+                        "Invalid with content, which is already text."
+                    ),
+                },
                 "page_name": {
                     "type": "string",
                     "description": "Target wiki page name",
@@ -372,7 +382,9 @@ async def _handle_push(
     if problem is not None:
         return build_error_response("validation_error", *problem)
 
-    source = await read_text_input(args, _PUSH_HINT)
+    source = await read_text_input(
+        args, _PUSH_HINT, accept_encoding=True
+    )
     if isinstance(source, types.CallToolResult):
         return source
     content, encoding, name, source_label = source
@@ -429,7 +441,9 @@ async def _handle_push(
     # here means detection genuinely disagrees with UTF-8. Surface that
     # instead of letting it stay silent (ticket #48) -- the guess can
     # still be wrong.
-    if encoding != "utf-8":
+    # An explicit encoding= is the caller's statement, not a guess, so it
+    # gets no such warning (ticket #245).
+    if encoding != "utf-8" and args.get("encoding") is None:
         warnings.append(
             f"File encoding detected as '{encoding}', not UTF-8 -- "
             "verify the pushed content isn't corrupted."

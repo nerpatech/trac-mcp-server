@@ -1060,6 +1060,257 @@ def test_inline_payloads_never_carry_a_path(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Ticket #245: --encoding and the BOM, file and stdin alike
+# ---------------------------------------------------------------------------
+
+_RU_PAGE = "= Заголовок =\nПривет, мир! Это страница вики.\n"
+
+
+def _recording_call_tool(monkeypatch):
+    sent = []
+
+    async def _record(url, token, name, arguments):
+        sent.append((name, arguments))
+        return SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(text="Created page P")],
+            structuredContent={},
+        )
+
+    monkeypatch.setattr(cli, "call_tool", _record)
+    return sent
+
+
+def _push_argv(*extra):
+    return ["--url", "http://x/mcp", "wiki-push", "P", *extra]
+
+
+_ENV = {"TRAC_MCP_AUTH_TOKEN": "t"}
+
+
+class TestWikiPushEncoding:
+    def test_encoding_decodes_the_file_and_sends_no_encoding_key(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        sent = _recording_call_tool(monkeypatch)
+        f = tmp_path / "ru.wiki"
+        f.write_bytes(_RU_PAGE.encode("cp1251"))
+        rc = cli.main(
+            _push_argv(str(f), "--encoding", "cp1251"),
+            cwd=tmp_path,
+            environ=_ENV,
+        )
+        assert rc == cli.EXIT_OK
+        ((name, arguments),) = sent
+        assert name == "wiki_file_push"
+        assert arguments["content"] == _RU_PAGE
+        assert "encoding" not in arguments
+        assert "not UTF-8" not in capsys.readouterr().err
+
+    def test_detected_non_utf8_still_warns(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _recording_call_tool(monkeypatch)
+        f = tmp_path / "ru.wiki"
+        f.write_bytes(_RU_PAGE.encode("cp1251"))
+        rc = cli.main(_push_argv(str(f)), cwd=tmp_path, environ=_ENV)
+        assert rc == cli.EXIT_OK
+        assert "not UTF-8" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        "name", ["no-such-codec", "base64", "rot13"]
+    )
+    def test_bad_codec_is_a_usage_error_before_any_network_call(
+        self, tmp_path, monkeypatch, capsys, name
+    ):
+        _no_network(monkeypatch)
+        f = tmp_path / "a.wiki"
+        f.write_bytes(b"abc")
+        rc = cli.main(
+            _push_argv(str(f), "--encoding", name),
+            cwd=tmp_path,
+            environ=_ENV,
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+        assert name in capsys.readouterr().err
+
+    def test_decode_failure_is_a_usage_error_that_hides_content(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _no_network(monkeypatch)
+        f = tmp_path / "a.wiki"
+        f.write_bytes(b"SECRETPLANTED\xff tail")
+        rc = cli.main(
+            _push_argv(str(f), "--encoding", "utf-8"),
+            cwd=tmp_path,
+            environ=_ENV,
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+        err = capsys.readouterr().err
+        assert "utf-8" in err
+        assert "13" in err
+        assert "SECRETPLANTED" not in err
+
+    def test_encoding_applies_to_stdin_bytes(
+        self, tmp_path, monkeypatch
+    ):
+        import io
+
+        sent = _recording_call_tool(monkeypatch)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(_RU_PAGE.encode("cp1251")), encoding="utf-8"
+            ),
+        )
+        rc = cli.main(
+            _push_argv("-", "--encoding", "cp1251"),
+            cwd=tmp_path,
+            environ=_ENV,
+        )
+        assert rc == cli.EXIT_OK
+        assert sent[0][1]["content"] == _RU_PAGE
+
+    def test_bad_codec_with_stdin_is_a_usage_error(
+        self, tmp_path, monkeypatch
+    ):
+        import io
+
+        _no_network(monkeypatch)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(io.BytesIO(b"abc"), encoding="utf-8"),
+        )
+        rc = cli.main(
+            _push_argv("-", "--encoding", "base64"),
+            cwd=tmp_path,
+            environ=_ENV,
+        )
+        assert rc == cli.EXIT_USAGE_ERROR
+
+    def test_bom_file_sends_content_without_feff(
+        self, tmp_path, monkeypatch
+    ):
+        sent = _recording_call_tool(monkeypatch)
+        f = tmp_path / "bom.wiki"
+        f.write_bytes(b"\xef\xbb\xbf= Title =\nbody\n")
+        rc = cli.main(_push_argv(str(f)), cwd=tmp_path, environ=_ENV)
+        assert rc == cli.EXIT_OK
+        assert sent[0][1]["content"] == "= Title =\nbody\n"
+
+    def test_bom_on_stdin_sends_content_without_feff(
+        self, tmp_path, monkeypatch
+    ):
+        import io
+
+        sent = _recording_call_tool(monkeypatch)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(b"\xef\xbb\xbf= Title =\nbody\n"),
+                encoding="utf-8",
+            ),
+        )
+        rc = cli.main(_push_argv("-"), cwd=tmp_path, environ=_ENV)
+        assert rc == cli.EXIT_OK
+        assert sent[0][1]["content"] == "= Title =\nbody\n"
+
+    def test_read_body_strips_bom_on_stdin(self, monkeypatch):
+        import io
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(b"\xef\xbb\xbfa comment\n"),
+                encoding="utf-8",
+            ),
+        )
+        assert cli._read_body("-", "comment") == "a comment\n"
+
+    def test_read_body_strips_bom_from_a_file(self, tmp_path):
+        f = tmp_path / "c.wiki"
+        f.write_bytes(b"\xef\xbb\xbfa comment\n")
+        assert cli._read_body(str(f), "comment") == "a comment\n"
+
+    @pytest.mark.parametrize("extra", [[], ["--encoding", "utf-8"]])
+    def test_stdin_keeps_crlf_like_a_file(
+        self, tmp_path, monkeypatch, extra
+    ):
+        import io
+
+        sent = _recording_call_tool(monkeypatch)
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(b"a\r\nb\rc"), encoding="utf-8"
+            ),
+        )
+        rc = cli.main(
+            _push_argv("-", *extra), cwd=tmp_path, environ=_ENV
+        )
+        assert rc == cli.EXIT_OK
+        assert sent[0][1]["content"] == "a\r\nb\rc"
+        f = tmp_path / "f.wiki"
+        f.write_bytes(b"a\r\nb\rc")
+        cli.main(_push_argv(str(f), *extra), cwd=tmp_path, environ=_ENV)
+        assert sent[1][1]["content"] == sent[0][1]["content"]
+
+    def test_detect_format_reads_stdin_as_bytes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import io
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(b"\xef\xbb\xbf= T =\r\n"), encoding="utf-8"
+            ),
+        )
+        rc = cli.main(["detect-format", "-"], cwd=tmp_path, environ={})
+        assert rc == 0
+        assert "Format: tracwiki" in capsys.readouterr().out
+
+    def test_read_body_stdin_that_is_not_utf8_is_detected_with_a_warning(
+        self, monkeypatch, capsys
+    ):
+        import io
+
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO(_RU_PAGE.encode("cp1251")), encoding="utf-8"
+            ),
+        )
+        text = cli._read_body("-", "comment")
+        assert "Привет" in text
+        assert "not UTF-8" in capsys.readouterr().err
+
+    def test_read_text_keep_bom_leaves_the_bom(self, tmp_path):
+        f = tmp_path / "c.wiki"
+        f.write_bytes(b"\xef\xbb\xbfx")
+        text, _enc, _name = cli._read_text(str(f), keep_bom=True)
+        assert text == "\ufeffx"
+
+    def test_only_wiki_push_takes_encoding(self):
+        parser = cli.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["wiki-pull", "P", "out", "--encoding", "cp1251"]
+            )
+        ns = parser.parse_args(
+            ["wiki-push", "P", "f", "--encoding", "cp1251"]
+        )
+        assert ns.encoding == "cp1251"
+
+
+# ---------------------------------------------------------------------------
 # Live: the same path end to end against real Trac (/trac_test)
 # ---------------------------------------------------------------------------
 
@@ -2392,6 +2643,62 @@ class TestTicketCommentEdit:
         assert str(len(expected.encode())) in err
         assert "nothing was edited" in err
         assert "SECRETSTORED" not in err and "SECRETEXPECT" not in err
+
+    def test_expect_file_is_not_bom_stripped(
+        self, tmp_path, monkeypatch
+    ):
+        # A legacy comment posted from a BOM'd file is stored starting
+        # with U+FEFF; ticket-pull writes it back out, and that file must
+        # still match as the next --expect-file.
+        sent = self._stub(
+            monkeypatch,
+            [
+                [self._row(3, "\ufeffold\n")],
+                [self._row(3, "new text\n")],
+            ],
+        )
+        pulled = _body_file(tmp_path, "\ufeffold\n", "pulled.wiki")
+        rc = self._run(tmp_path, "--expect-file", str(pulled))
+        assert rc == cli.EXIT_OK
+        assert "ticket_comment_edit" in self._names(sent)
+
+    def test_expect_file_from_stdin_is_not_bom_stripped(
+        self, tmp_path, monkeypatch
+    ):
+        import io
+
+        sent = self._stub(
+            monkeypatch,
+            [
+                [self._row(3, "\ufeffold\n")],
+                [self._row(3, "new text\n")],
+            ],
+        )
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            io.TextIOWrapper(
+                io.BytesIO("\ufeffold\n".encode("utf-8")),
+                encoding="utf-8",
+            ),
+        )
+        src = _body_file(tmp_path, "new text\n")
+        rc = cli.main(
+            [
+                "--url",
+                "http://x/mcp",
+                "ticket-comment-edit",
+                "7",
+                "3",
+                str(src),
+                "--expect-file",
+                "-",
+            ],
+            cwd=tmp_path,
+            environ={"TRAC_MCP_AUTH_TOKEN": "t"},
+        )
+        assert rc == cli.EXIT_OK
+        assert "ticket_comment_edit" in self._names(sent)
 
     def test_expect_file_crlf_matches_a_stored_lf_body(
         self, tmp_path, monkeypatch
