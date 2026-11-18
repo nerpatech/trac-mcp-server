@@ -12,6 +12,8 @@ the bytes "Trac" stored, and back.
 
 import base64
 import json
+import os
+import shlex
 import sys
 import time
 import xmlrpc.client
@@ -124,6 +126,278 @@ class TestResolveEndpoint:
             cli.CliError, match="no server to connect to"
         ):
             cli.resolve_endpoint(_ns(), tmp_path, {})
+
+
+def _helper_script(directory: Path, body: str) -> str:
+    """A real ``headersHelper`` command: a Python script, run by the
+    shell exactly as Claude Code runs the entry's string."""
+    script = directory / "helper.py"
+    script.write_text(body)
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+
+
+_PRINT_TOKEN = (
+    "import json\n"
+    'print(json.dumps({"Authorization": "Bearer fake-helper-token"}))\n'
+)
+
+
+def _helper_entry(command: str, **extra) -> dict:
+    return {
+        "type": "http",
+        "url": "http://192.0.2.1:8091/mcp",
+        "headersHelper": command,
+        **extra,
+    }
+
+
+class TestHeadersHelper:
+    """Claude Code's ``headersHelper`` key (Trac /trac_mcp_server #254):
+    a command that prints a JSON object of headers, run per connection.
+    Real commands throughout, no subprocess mocking."""
+
+    def test_helper_token_is_used_and_the_helper_sees_its_context(
+        self, tmp_path
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+        seen = tmp_path / "seen.json"
+        command = _helper_script(
+            tmp_path,
+            "import json, os\n"
+            f"open({str(seen)!r}, 'w').write(json.dumps({{\n"
+            '    "name": os.environ.get("CLAUDE_CODE_MCP_SERVER_NAME"),\n'
+            '    "url": os.environ.get("CLAUDE_CODE_MCP_SERVER_URL"),\n'
+            '    "cwd": os.getcwd(),\n'
+            '    "path": os.environ.get("MARKER_FROM_CALLER"),\n'
+            "}))\n" + _PRINT_TOKEN,
+        )
+        entry = _helper_entry(command)
+        entry["url"] = "http://${HOST_X:-192.0.2.1}:8091/mcp"
+        _write_mcp_json(project, {"trac-http": entry})
+        sub = project / "a"
+        sub.mkdir()
+        url, token, where = cli.resolve_endpoint(
+            _ns(), sub, {**os.environ, "MARKER_FROM_CALLER": "yes"}
+        )
+        assert url == "http://192.0.2.1:8091/mcp"
+        assert token == "fake-helper-token"
+        assert "fake-helper-token" not in where
+        info = json.loads(seen.read_text())
+        assert info["name"] == "trac-http"
+        assert info["url"] == "http://192.0.2.1:8091/mcp"
+        assert Path(info["cwd"]).resolve() == project.resolve()
+        assert info["path"] == "yes"
+
+    def test_helper_command_is_not_variable_expanded_by_the_cli(
+        self, tmp_path
+    ):
+        # The shell expands it; the CLI's expand_vars would raise on an
+        # unset ${VAR} here.
+        command = "printf '%s' '{\"Authorization\": \"Bearer '\"${HTOK}\"'\"}'"
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {**os.environ, "HTOK": "from-shell"}
+        )
+        assert token == "from-shell"
+
+    def test_helper_overrides_a_static_header_of_the_same_name(
+        self, tmp_path
+    ):
+        command = _helper_script(tmp_path, _PRINT_TOKEN)
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    command,
+                    headers={"Authorization": "Bearer ${TOKEN_A}"},
+                )
+            },
+        )
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {"TOKEN_A": "static-token", **os.environ}
+        )
+        assert token == "fake-helper-token"
+
+    def test_static_header_used_when_helper_has_no_authorization(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path, 'print(\'{"X-Other": "v"}\')\n'
+        )
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    command,
+                    headers={"Authorization": "Bearer ${TOKEN_A}"},
+                )
+            },
+        )
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {"TOKEN_A": "static-token", **os.environ}
+        )
+        assert token == "static-token"
+
+    def test_helper_without_authorization_and_no_static_is_none(
+        self, tmp_path
+    ):
+        command = _helper_script(tmp_path, "print('{}')\n")
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, dict(os.environ)
+        )
+        assert token is None
+
+    def test_token_env_means_the_helper_is_not_run(self, tmp_path):
+        marker = tmp_path / "ran"
+        command = _helper_script(
+            tmp_path,
+            f"open({str(marker)!r}, 'w').write('x')\n" + _PRINT_TOKEN,
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        _, token, _ = cli.resolve_endpoint(
+            _ns(token_env="TOKEN_B"),
+            tmp_path,
+            {"TOKEN_B": "tok-b", **os.environ},
+        )
+        assert token == "tok-b"
+        assert not marker.exists()
+
+    def test_non_bearer_authorization_from_helper_is_refused(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path, 'print(\'{"Authorization": "Basic c2VjcmV0"}\')\n'
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        with pytest.raises(cli.CliError, match="not 'Bearer") as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "c2VjcmV0" not in str(exc.value)
+
+    def test_failing_helper_reports_exit_and_stderr_never_stdout(
+        self, tmp_path
+    ):
+        command = _helper_script(
+            tmp_path,
+            "import sys\n"
+            "print('Bearer sk-SECRET-on-stdout')\n"
+            "sys.stderr.write('vault locked\\n')\n"
+            "sys.stderr.write('pass: entry not found\\n\\n')\n"
+            "sys.exit(7)\n",
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        msg = str(exc.value)
+        assert "exited 7" in msg
+        assert "trac-http" in msg
+        assert ".mcp.json" in msg
+        assert "pass: entry not found" in msg
+        assert "vault locked" not in msg  # only the last line
+        assert "SECRET" not in msg
+
+    def test_stderr_line_is_truncated(self, tmp_path):
+        command = _helper_script(
+            tmp_path,
+            "import sys\nsys.stderr.write('e' * 1000 + '\\n')\n"
+            "sys.exit(2)\n",
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert "e" * 200 in str(exc.value)
+        assert "e" * 201 not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "Bearer sk-SECRET-not-json",
+            '["sk-SECRET-a-list"]',
+            '"sk-SECRET-a-string"',
+            '{"Authorization": 12345, "X": "sk-SECRET"}',
+            '{"Authorization": {"v": "sk-SECRET"}}',
+            "",
+        ],
+        ids=[
+            "not json",
+            "array",
+            "string",
+            "non-string value",
+            "nested value",
+            "empty",
+        ],
+    )
+    def test_unusable_output_is_a_connect_error_without_content(
+        self, tmp_path, stdout
+    ):
+        command = _helper_script(
+            tmp_path, f"import sys\nsys.stdout.write({stdout!r})\n"
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        msg = str(exc.value)
+        assert "did not print a JSON object of headers" in msg
+        assert "SECRET" not in msg
+        assert "12345" not in msg
+
+    def test_helper_that_cannot_start_is_a_connect_error(
+        self, tmp_path
+    ):
+        _write_mcp_json(
+            tmp_path,
+            {"trac-http": _helper_entry("/no/such/helper-254")},
+        )
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        # Through a shell a missing command is exit 127, not OSError.
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "exited 127" in str(exc.value)
+
+    def test_oserror_on_start_is_a_connect_error(
+        self, tmp_path, monkeypatch
+    ):
+        # A shell that cannot be spawned (cwd vanished, EMFILE, ...).
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry("true")})
+
+        def _boom(*a, **k):
+            raise OSError("no fork for you")
+
+        monkeypatch.setattr(cli.subprocess, "Popen", _boom)
+        with pytest.raises(cli.CliError, match="no fork for you") as e:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert e.value.code == cli.EXIT_CONNECT_ERROR
+
+    def test_slow_helper_times_out(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(cli, "HEADERS_HELPER_TIMEOUT_S", 0.5)
+        command = _helper_script(
+            tmp_path, "import time\ntime.sleep(5)\n" + _PRINT_TOKEN
+        )
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        start = time.monotonic()
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert time.monotonic() - start < 4
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "timed out" in str(exc.value)
+
+    def test_empty_helper_string_is_ignored(self, tmp_path):
+        _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    "", headers={"Authorization": "Bearer ${TOKEN_A}"}
+                )
+            },
+        )
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {"TOKEN_A": "static-token"}
+        )
+        assert token == "static-token"
 
 
 def test_detect_format_runs_locally(tmp_path, capsys):
@@ -449,6 +723,89 @@ class TestRealSubstrate:
         assert "HTTP 401" in err
         assert "token" in err
         assert "ExceptionGroup" not in err
+
+    def test_headers_helper_token_reaches_the_server(
+        self, tmp_path, capsys
+    ):
+        """Through main(), with no --url: the entry's headersHelper
+        supplies the bearer token the real server checks (Trac
+        /trac_mcp_server #254)."""
+        src = tmp_path / "a.wiki"
+        src.write_text("= A =\n")
+        trac = FakeTrac()
+        with _served(trac) as url:
+            command = _helper_script(
+                tmp_path,
+                "import json\n"
+                f'print(json.dumps({{"Authorization": "Bearer {_TOKEN}"}}))\n',
+            )
+            project = tmp_path / "project"
+            project.mkdir()
+            _write_mcp_json(
+                project,
+                {
+                    "trac-http": {
+                        "type": "http",
+                        "url": url,
+                        "headersHelper": command,
+                    }
+                },
+            )
+            rc = cli.main(
+                ["wiki-push", "P", str(src)],
+                cwd=project,
+                environ=dict(os.environ),
+            )
+        assert rc == cli.EXIT_OK
+        assert trac.pages["P"] == ["= A =\n"]
+        assert "no bearer token" not in capsys.readouterr().err
+
+    def test_headers_helper_without_authorization_says_where(
+        self, tmp_path, capsys
+    ):
+        src = tmp_path / "a.wiki"
+        src.write_text("= A =\n")
+        trac = FakeTrac()
+        with _served(trac) as url:
+            command = _helper_script(tmp_path, "print('{}')\n")
+            _write_mcp_json(
+                tmp_path,
+                {
+                    "trac-http": {
+                        "type": "http",
+                        "url": url,
+                        "headersHelper": command,
+                    }
+                },
+            )
+            rc = cli.main(
+                ["wiki-push", "P", str(src)],
+                cwd=tmp_path,
+                environ=dict(os.environ),
+            )
+        assert rc == cli.EXIT_CONNECT_ERROR
+        err = capsys.readouterr().err
+        assert "supplies no Authorization header" in err
+        assert ".mcp.json (trac-http)" in err
+        assert "TRAC_MCP_AUTH_TOKEN is unset" not in err
+
+    def test_no_token_from_env_keeps_the_env_wording(
+        self, tmp_path, capsys
+    ):
+        src = tmp_path / "a.wiki"
+        src.write_text("= A =\n")
+        trac = FakeTrac()
+        with _served(trac) as url:
+            rc = cli.main(
+                ["--url", url, "wiki-push", "P", str(src)],
+                cwd=Path("/"),
+                environ={},
+            )
+        assert rc == cli.EXIT_CONNECT_ERROR
+        assert (
+            "no bearer token sent (TRAC_MCP_AUTH_TOKEN is unset)"
+            in capsys.readouterr().err
+        )
 
     def test_tool_error_is_reported_with_exit_1(self, tmp_path, capsys):
         trac = FakeTrac()

@@ -19,7 +19,13 @@ Where to connect, in order:
 2. the ``trac-http`` entry (or ``--server NAME``) of the nearest
    ``.mcp.json`` from the working directory up -- its ``url`` and its
    ``Authorization`` header, with ``${VAR}`` / ``${VAR:-default}``
-   expanded from the environment, exactly as Claude Code would;
+   expanded from the environment, exactly as Claude Code would. An entry
+   with a ``headersHelper`` command (Claude Code's dynamic headers) has
+   it run through a shell in the ``.mcp.json``'s directory, with
+   ``CLAUDE_CODE_MCP_SERVER_NAME`` and ``CLAUDE_CODE_MCP_SERVER_URL`` set;
+   it prints a JSON object of headers, and an ``Authorization`` it
+   returns overrides the entry's static one (``--token-env`` skips the
+   helper and overrides both);
 3. ``TRAC_MCP_URL`` and ``TRAC_MCP_AUTH_TOKEN`` from the environment.
 
 Using the project's own ``.mcp.json`` means a session's CLI calls run as
@@ -35,6 +41,8 @@ import json
 import logging
 import os
 import re
+import signal
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -64,6 +72,9 @@ EXIT_STORED_INCOMPLETE = 4
 
 DEFAULT_SERVER = "trac-http"
 DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN"
+# Claude Code gives a headersHelper 10 s; a module constant so a test can
+# shorten it.
+HEADERS_HELPER_TIMEOUT_S: float = 10
 
 
 class CliError(Exception):
@@ -141,11 +152,109 @@ def _token_from_env(
     return environ.get(DEFAULT_TOKEN_ENV) or None
 
 
+def _run_headers_helper(
+    command: str,
+    *,
+    server: str,
+    url: str,
+    mcp_json: Path,
+    environ: Mapping[str, str],
+) -> dict[str, str]:
+    """Run an entry's ``headersHelper`` the way Claude Code does and
+    return the headers it printed.
+
+    The command goes through a shell, in the ``.mcp.json``'s directory,
+    with the caller's environment plus ``CLAUDE_CODE_MCP_SERVER_NAME`` and
+    ``CLAUDE_CODE_MCP_SERVER_URL``, a timeout of
+    ``HEADERS_HELPER_TIMEOUT_S`` and no stdin. Its stdout is a credential,
+    so no message here ever carries it (nor a parser's quote of it); the
+    last line of its stderr may. Any failure is a :class:`CliError`.
+    """
+    label = f"headersHelper for server '{server}' in {mcp_json}"
+    env = {
+        **environ,
+        "CLAUDE_CODE_MCP_SERVER_NAME": server,
+        "CLAUDE_CODE_MCP_SERVER_URL": url,
+    }
+    posix = os.name == "posix"
+    try:
+        # Its own process group, so a timeout can kill what the shell
+        # started, not just the shell: a surviving child would hold the
+        # pipes open and the read after the kill would wait for it.
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=mcp_json.parent,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            start_new_session=posix,
+        )
+    except OSError as e:
+        raise CliError(
+            f"cannot start {label}: {e}", EXIT_CONNECT_ERROR
+        ) from None
+    try:
+        stdout, stderr = proc.communicate(
+            timeout=HEADERS_HELPER_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired:
+        if posix:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+        proc.communicate()
+        raise CliError(
+            f"{label} timed out after {HEADERS_HELPER_TIMEOUT_S:g} s",
+            EXIT_CONNECT_ERROR,
+        ) from None
+    if proc.returncode != 0:
+        lines = [ln.strip() for ln in stderr.splitlines() if ln.strip()]
+        detail = f": {lines[-1][:200]}" if lines else ""
+        raise CliError(
+            f"{label} exited {proc.returncode}{detail}",
+            EXIT_CONNECT_ERROR,
+        )
+    try:
+        parsed = json.loads(stdout)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str)
+        for k, v in parsed.items()
+    ):
+        raise CliError(
+            f"{label} did not print a JSON object of headers "
+            "(string names to string values)",
+            EXIT_CONNECT_ERROR,
+        )
+    return parsed
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    """A header's value, by case-insensitive name (HTTP's rule)."""
+    for key, value in headers.items():
+        if key.lower() == name.lower():
+            return value
+    return None
+
+
 def resolve_endpoint(
     args: argparse.Namespace, cwd: Path, environ: Mapping[str, str]
 ) -> tuple[str, str | None, str]:
     """Return ``(url, token, where)``; ``where`` says which source won,
-    for error messages. The token is never part of ``where``."""
+    for error messages. The token is never part of ``where``.
+
+    For an ``.mcp.json`` entry the token comes from ``--token-env`` if
+    given; otherwise from the Authorization header of the entry's
+    ``headersHelper`` command (run here, see :func:`_run_headers_helper`)
+    when it prints one, which overrides the entry's static ``headers``,
+    and failing that from the static header. Only Authorization is used.
+    """
     if args.url:
         return args.url, _token_from_env(args, environ), "--url"
 
@@ -171,14 +280,28 @@ def resolve_endpoint(
             if args.token_env:
                 token = _token_from_env(args, environ)
             else:
-                header = (entry.get("headers") or {}).get(
-                    "Authorization"
-                )
-                token = (
-                    _bearer(expand_vars(header, environ))
-                    if header
-                    else None
-                )
+                helper = entry.get("headersHelper")
+                header = None
+                if isinstance(helper, str) and helper.strip():
+                    # Not expand_vars'd: the shell expands the command.
+                    header = _header(
+                        _run_headers_helper(
+                            helper,
+                            server=args.server,
+                            url=url,
+                            mcp_json=mcp_json,
+                            environ=environ,
+                        ),
+                        "Authorization",
+                    )
+                if not header:
+                    static = _header(
+                        entry.get("headers") or {}, "Authorization"
+                    )
+                    header = (
+                        expand_vars(static, environ) if static else None
+                    )
+                token = _bearer(header) if header else None
             return url, token, f"{mcp_json} ({args.server})"
         if args.server != DEFAULT_SERVER:
             raise CliError(
@@ -1600,9 +1723,15 @@ def main(
             os.environ if environ is None else environ,
         )
         if token is None:
+            # --url and TRAC_MCP_URL take the token from the environment;
+            # an .mcp.json entry takes it from its own headers.
+            reason = (
+                f"{DEFAULT_TOKEN_ENV} is unset"
+                if where in ("--url", "TRAC_MCP_URL")
+                else f"{where} supplies no Authorization header"
+            )
             print(
-                f"trac-mcp: no bearer token sent ({DEFAULT_TOKEN_ENV} is "
-                "unset)",
+                f"trac-mcp: no bearer token sent ({reason})",
                 file=sys.stderr,
             )
         try:
