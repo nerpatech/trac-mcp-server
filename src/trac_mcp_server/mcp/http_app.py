@@ -23,13 +23,14 @@ from mcp.server.streamable_http_manager import (
     StreamableHTTPSessionManager,
 )
 from mcp.server.transport_security import TransportSecuritySettings
+from sse_starlette.sse import AppStatus
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import version as _version
 from ..config_schema import ServerConfig
@@ -348,6 +349,24 @@ class _SessionManagerASGIApp:
     class (same pattern as the SDK's own
     ``mcp.server.fastmcp.server.StreamableHTTPASGIApp``) makes ``Route``
     treat it as ASGI and dispatch every HTTP method (GET/POST/DELETE) to it.
+
+    It also closes the streams ``sse-starlette`` cuts on shutdown (Trac
+    /trac_mcp_server #248). ``sse-starlette`` 3.2.0 patches
+    ``uvicorn.Server.handle_exit``, so on SIGTERM
+    ``AppStatus.should_exit`` becomes True and every open
+    ``EventSourceResponse`` cancels its task group BEFORE it sends the
+    final empty ``more_body: False`` message; the response returns
+    started but incomplete and uvicorn logs ``ASGI callable returned
+    without completing response.`` at ERROR once per open stream, on
+    every deploy. When ``handle_request`` returns normally with a response
+    started and not completed while ``AppStatus.should_exit`` is True,
+    this sends that closing message itself. Outside shutdown an
+    unfinished response is a real bug and is left alone, so uvicorn's
+    ERROR for it stays; an exception from ``handle_request`` propagates
+    untouched.
+
+    Drop the completion once sse-starlette completes the response itself
+    on shutdown.
     """
 
     def __init__(
@@ -358,7 +377,39 @@ class _SessionManagerASGIApp:
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        await self._session_manager.handle_request(scope, receive, send)
+        if scope["type"] != "http":
+            await self._session_manager.handle_request(
+                scope, receive, send
+            )
+            return
+
+        started = False
+        completed = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started, completed
+            if message["type"] == "http.response.start":
+                started = True
+            elif message["type"] == "http.response.body" and not (
+                message.get("more_body", False)
+            ):
+                completed = True
+            await send(message)
+
+        await self._session_manager.handle_request(
+            scope, receive, tracking_send
+        )
+        if started and not completed and AppStatus.should_exit:
+            logger.debug(
+                "Completing a stream sse-starlette cut on shutdown"
+            )
+            await send(
+                {
+                    "type": "http.response.body",
+                    "body": b"",
+                    "more_body": False,
+                }
+            )
 
 
 def build_http_app(
