@@ -78,13 +78,23 @@ class TestHandleBatchCreate(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
         self.mock_client.config.max_batch_size = 500
+        # Gate off: on a MagicMock config it defaults on, renders fail and
+        # check_write swallows them -- a dependency these tests must not have.
+        self.mock_client.config.write_gate = False
 
     def test_batch_create_success(self):
         """Batch create with 3 tickets returns all succeeded."""
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [1, 2, 3]
+            # The mocks key on arguments so they do not depend on arrival
+            # order (which, with the gate on, the check_write thread hop
+            # can reorder), so answer by what was asked for.
+            # run_sync_limited(fn, summary, description, type, attributes)
+            ids = {"Ticket A": 1, "Ticket B": 2, "Ticket C": 3}
+            mock_rsl.side_effect = lambda _fn, summary, *_a: ids[
+                summary
+            ]
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -119,15 +129,74 @@ class TestHandleBatchCreate(unittest.TestCase):
             self.assertEqual(sc["created"][1]["id"], 2)
             self.assertEqual(sc["created"][2]["id"], 3)
 
+    def test_batch_create_pairs_ids_when_completions_reverse(self):
+        """Each created entry pairs its own id with its own summary even
+        when the calls finish in reverse input order (a positional
+        side_effect list would hand A the id meant for C)."""
+        ids = {"Ticket A": 1, "Ticket B": 2, "Ticket C": 3}
+        delays = {"Ticket A": 0.15, "Ticket B": 0.08, "Ticket C": 0.0}
+        arrived = []
+        completed = []
+
+        async def create(_fn, summary, *_args):
+            arrived.append(summary)
+            await asyncio.sleep(delays[summary])
+            completed.append(summary)
+            return ids[summary]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.side_effect = create
+
+            result = asyncio.run(
+                _handle_batch_create(
+                    self.mock_client,
+                    {
+                        "tickets": [
+                            {
+                                "summary": s,
+                                "description": f"Desc {s}",
+                            }
+                            for s in (
+                                "Ticket A",
+                                "Ticket B",
+                                "Ticket C",
+                            )
+                        ]
+                    },
+                )
+            )
+
+        # Prove the test exercised reordering: all three calls were in
+        # flight together and finished in the reverse of input order.
+        self.assertEqual(len(arrived), 3)
+        self.assertEqual(
+            completed, ["Ticket C", "Ticket B", "Ticket A"]
+        )
+        self.assertNotEqual(
+            completed, ["Ticket A", "Ticket B", "Ticket C"]
+        )
+
+        sc = result.structuredContent
+        self.assertEqual(sc["succeeded"], 3)
+        self.assertEqual(
+            [(c["summary"], c["id"]) for c in sc["created"]],
+            [("Ticket A", 1), ("Ticket B", 2), ("Ticket C", 3)],
+        )
+
     def test_batch_create_partial_failure(self):
         """Batch create with one xmlrpc fault reports partial failure."""
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                1,
-                xmlrpc.client.Fault(500, "Server error"),
-            ]
+
+            def create(_fn, summary, *_args):
+                if summary == "Ticket B":
+                    raise xmlrpc.client.Fault(500, "Server error")
+                return 1
+
+            mock_rsl.side_effect = create
 
             result = asyncio.run(
                 _handle_batch_create(
@@ -155,6 +224,8 @@ class TestHandleBatchCreate(unittest.TestCase):
             self.assertEqual(sc["failed_count"], 1)
             self.assertEqual(len(sc["created"]), 1)
             self.assertEqual(len(sc["failed"]), 1)
+            self.assertEqual(sc["created"][0]["summary"], "Ticket A")
+            self.assertEqual(sc["failed"][0]["summary"], "Ticket B")
 
     def test_batch_create_missing_tickets(self):
         """Missing tickets key returns validation error."""
@@ -260,7 +331,10 @@ class TestHandleBatchCreate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [10, 11]
+            ids = {"A": 10, "B": 11}
+            mock_rsl.side_effect = lambda _fn, summary, *_a: ids[
+                summary
+            ]
 
             asyncio.run(
                 _handle_batch_create(
@@ -281,11 +355,14 @@ class TestHandleBatchCreate(unittest.TestCase):
             )
 
             self.assertEqual(mock_rsl.call_count, 2)
+            # Order-independent: (summary, description) of each call.
+            stored = {
+                (call[0][1], call[0][2])
+                for call in mock_rsl.call_args_list
+            }
             self.assertEqual(
-                mock_rsl.call_args_list[0][0][2], "'''bold'''"
-            )
-            self.assertEqual(
-                mock_rsl.call_args_list[1][0][2], "= heading ="
+                stored,
+                {("A", "'''bold'''"), ("B", "= heading =")},
             )
 
 
@@ -321,11 +398,13 @@ class TestHandleBatchDelete(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                True,
-                xmlrpc.client.Fault(403, "Permission denied"),
-                True,
-            ]
+            # run_sync_limited(client.delete_ticket, ticket_id)
+            def delete(_fn, ticket_id):
+                if ticket_id == 20:
+                    raise xmlrpc.client.Fault(403, "Permission denied")
+                return True
+
+            mock_rsl.side_effect = delete
 
             result = asyncio.run(
                 _handle_batch_delete(
@@ -377,6 +456,9 @@ class TestHandleBatchUpdate(unittest.TestCase):
     def setUp(self):
         self.mock_client = MagicMock()
         self.mock_client.config.max_batch_size = 500
+        # Gate off: on a MagicMock config it defaults on, renders fail and
+        # check_write swallows them -- a dependency these tests must not have.
+        self.mock_client.config.write_gate = False
 
     def test_batch_update_success(self):
         """Batch update all succeed."""
@@ -409,10 +491,13 @@ class TestHandleBatchUpdate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            mock_rsl.side_effect = [
-                True,
-                RuntimeError("connection lost"),
-            ]
+            # run_sync_limited(client.update_ticket, id, comment, attrs)
+            def update(_fn, ticket_id, *_args):
+                if ticket_id == 6:
+                    raise RuntimeError("connection lost")
+                return True
+
+            mock_rsl.side_effect = update
 
             result = asyncio.run(
                 _handle_batch_update(
