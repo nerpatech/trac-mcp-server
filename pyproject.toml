@@ -37,6 +37,7 @@ dependencies = [
     "pyperclip>=1.8.2",
     "starlette>=0.40.0",
     "uvicorn>=0.30.0",
+    "sse-starlette>=1.6.1",
     "markdownify>=1.2",
     "beautifulsoup4>=4.12",
 ]
