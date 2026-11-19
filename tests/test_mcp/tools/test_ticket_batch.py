@@ -87,8 +87,9 @@ class TestHandleBatchCreate(unittest.TestCase):
         with patch(
             "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
         ) as mock_rsl:
-            # Items reach run_sync_limited in any order (check_write goes
-            # through a thread first), so answer by what was asked for.
+            # The mocks key on arguments so they do not depend on arrival
+            # order (which, with the gate on, the check_write thread hop
+            # can reorder), so answer by what was asked for.
             # run_sync_limited(fn, summary, description, type, attributes)
             ids = {"Ticket A": 1, "Ticket B": 2, "Ticket C": 3}
             mock_rsl.side_effect = lambda _fn, summary, *_a: ids[
@@ -127,6 +128,62 @@ class TestHandleBatchCreate(unittest.TestCase):
             self.assertEqual(sc["created"][0]["id"], 1)
             self.assertEqual(sc["created"][1]["id"], 2)
             self.assertEqual(sc["created"][2]["id"], 3)
+
+    def test_batch_create_pairs_ids_when_completions_reverse(self):
+        """Each created entry pairs its own id with its own summary even
+        when the calls finish in reverse input order (a positional
+        side_effect list would hand A the id meant for C)."""
+        ids = {"Ticket A": 1, "Ticket B": 2, "Ticket C": 3}
+        delays = {"Ticket A": 0.15, "Ticket B": 0.08, "Ticket C": 0.0}
+        arrived = []
+        completed = []
+
+        async def create(_fn, summary, *_args):
+            arrived.append(summary)
+            await asyncio.sleep(delays[summary])
+            completed.append(summary)
+            return ids[summary]
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.side_effect = create
+
+            result = asyncio.run(
+                _handle_batch_create(
+                    self.mock_client,
+                    {
+                        "tickets": [
+                            {
+                                "summary": s,
+                                "description": f"Desc {s}",
+                            }
+                            for s in (
+                                "Ticket A",
+                                "Ticket B",
+                                "Ticket C",
+                            )
+                        ]
+                    },
+                )
+            )
+
+        # Prove the test exercised reordering: all three calls were in
+        # flight together and finished in the reverse of input order.
+        self.assertEqual(len(arrived), 3)
+        self.assertEqual(
+            completed, ["Ticket C", "Ticket B", "Ticket A"]
+        )
+        self.assertNotEqual(
+            completed, ["Ticket A", "Ticket B", "Ticket C"]
+        )
+
+        sc = result.structuredContent
+        self.assertEqual(sc["succeeded"], 3)
+        self.assertEqual(
+            [(c["summary"], c["id"]) for c in sc["created"]],
+            [("Ticket A", 1), ("Ticket B", 2), ("Ticket C", 3)],
+        )
 
     def test_batch_create_partial_failure(self):
         """Batch create with one xmlrpc fault reports partial failure."""
