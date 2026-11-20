@@ -1740,6 +1740,17 @@ def _literal_markup_findings(html, tracwiki=""):
         # by `[`, not `(`. The source escapes that same span.
         ("x!['a']!['b'](c, d)", "x['a']['b'](c, d)"),
         ("rows_2![0](a b)", "rows_2[0](a b)"),
+        # The converter also escapes the inner `[0]`; Trac consumes that
+        # `!` too, so the render has none.
+        (
+            "handlers!['get'](req![0], resp)",
+            "handlers['get'](req[0], resp)",
+        ),
+        # Known accepted gap (#250): an image glued to a word has the
+        # same source shape as the escape of a subscript, so it is
+        # skipped. A rule that blocked it would block `x![0](a b)`.
+        ("diagram![d](x y.png)", "diagram[d](x y.png)"),
+        ("Wow![see](my page) ok", "Wow[see](my page) ok"),
     ],
     ids=[
         "converter-form",
@@ -1747,6 +1758,9 @@ def _literal_markup_findings(html, tracwiki=""):
         "after-paren",
         "chained-subscript",
         "digit-underscore",
+        "inner-escape-normalised",
+        "image-glued-to-word-known-gap",
+        "wow-glued-known-gap",
     ],
 )
 def test_escaped_code_like_link_shape_is_not_literal_markup(
@@ -1806,6 +1820,31 @@ def test_escaped_code_like_link_shape_is_not_literal_markup(
             "arr[i and [docs](http://x y)",
             "[i and [docs](http://x y)",
         ),
+        # An image that failed to convert: Trac eats the `!` and shows
+        # `[alt](img.png)`. The `!` follows a space, so it is not the
+        # escape of code-like prose.
+        (
+            "<p>see [alt](img.png)</p>",
+            "see ![alt](img.png)",
+            "[alt](img.png)",
+        ),
+        (
+            "<p>[alt](my image.png) and</p>",
+            "![alt](my image.png) and",
+            "[alt](my image.png)",
+        ),
+        # An escape inside an inline `{{{...}}}` span or a macro call is
+        # not an escape of prose, so it must not whitelist a real link.
+        (
+            "<p>a <code>x![t](u v)</code> b [t](u v)</p>",
+            "a {{{x![t](u v)}}} b [t](u v)",
+            "[t](u v)",
+        ),
+        (
+            "<p> b [t](u v)</p>",
+            "[[comment(x![t](u v))]] b [t](u v)",
+            "[t](u v)",
+        ),
     ],
     ids=[
         "after-space",
@@ -1818,6 +1857,10 @@ def test_escaped_code_like_link_shape_is_not_literal_markup(
         "table-cells",
         "tracwiki-glued-no-escape",
         "overlapping-label",
+        "pasted-image-valid-destination",
+        "image-after-space-at-start",
+        "escape-in-inline-braces",
+        "escape-in-macro-arguments",
     ],
 )
 def test_unescaped_link_shape_still_blocks(html, source, matched):
@@ -1869,6 +1912,61 @@ def test_one_escaped_occurrence_whitelists_one_render_match():
 def test_an_escape_in_code_does_not_whitelist_prose(source):
     found = _literal_markup_findings("<p>text [t](u v)</p>", source)
     assert len(found) == 1, found
+
+
+def test_markdown_image_that_did_not_convert_still_blocks():
+    """End to end: the converter stores `![alt](my image.png)` as typed,
+    Trac eats the `!` and shows `[alt](my image.png)` (recorded render),
+    and the gate refuses it."""
+    from trac_mcp_server.converters import markdown_to_tracwiki
+    from trac_mcp_server.preview.gate import classify
+
+    markdown = "![alt](my image.png) and"
+    tracwiki = markdown_to_tracwiki(markdown)
+    assert tracwiki == "![alt](my image.png) and"
+    warnings = build_warnings(
+        markdown,
+        tracwiki,
+        extract_facts("<p>[alt](my image.png) and</p>"),
+        probes={},
+        check_targets=False,
+        source_format="markdown",
+    )
+    blocking, _ = classify(warnings)
+    assert [w["code"] for w in blocking] == ["literal_markup_in_render"]
+
+
+def test_inner_escape_prose_converts_and_passes_the_gate():
+    """`handlers['get'](req[0], resp)` converts with an escape inside the
+    span too (`req![0]`), and Trac shows both as text."""
+    from trac_mcp_server.converters import markdown_to_tracwiki
+    from trac_mcp_server.preview.gate import classify
+
+    markdown = "handlers['get'](req[0], resp)"
+    tracwiki = markdown_to_tracwiki(markdown)
+    assert tracwiki == "handlers!['get'](req![0], resp)"
+    warnings = build_warnings(
+        markdown,
+        tracwiki,
+        extract_facts("<p>handlers['get'](req[0], resp)</p>"),
+        probes={},
+        check_targets=False,
+        source_format="markdown",
+    )
+    blocking, _ = classify(warnings)
+    assert blocking == [], blocking
+
+
+def test_first_literal_link_match_takes_prose_and_source():
+    """The entry point a store sweep replays: (prose, tracwiki)."""
+    from trac_mcp_server.preview.checks import first_literal_link_match
+
+    prose = "handlers['get'](req, resp) and [t](u v)"
+    source = "handlers!['get'](req, resp) and [t](u v)"
+    match = first_literal_link_match(prose, source)
+    assert match is not None and match.group(0) == "[t](u v)"
+    assert first_literal_link_match("no link here", "") is None
+    assert first_literal_link_match(prose, "") is not None
 
 
 def test_escaped_code_like_prose_converts_and_passes_the_gate():
