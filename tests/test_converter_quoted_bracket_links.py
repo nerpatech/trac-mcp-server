@@ -57,7 +57,6 @@ def test_a_quoted_bracket_in_prose_gets_the_escape(markdown, wiki):
 
 UNCHANGED = {
     "no closing bracket": "y['k'",
-    "index": "x[0]",
     "name index": "x[i]",
     "apostrophe and bracket": "it's ['",
     "code span": "`x['k']`",
@@ -185,6 +184,13 @@ LINKS_FIRST = {
     ),
     "call with a space": ("f['k'](a b)", "f!['k'](a b)"),
     "real inline link": ("['T'](https://e.com)", "[https://e.com 'T']"),
+    # Pinned to the converter before #241 (34eb0a9^1): a real link directly
+    # after a `word:` is converted, the scheme-run check applies only to
+    # the escape.
+    "real inline link after a colon": (
+        "Note:['a'](http://x)",
+        "Note:[http://x 'a']",
+    ),
 }
 
 

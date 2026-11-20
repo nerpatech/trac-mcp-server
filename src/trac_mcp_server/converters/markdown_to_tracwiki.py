@@ -2,6 +2,7 @@
 
 import html.entities
 import re
+from collections.abc import Callable
 from typing import Any, Literal, cast
 
 import mistune
@@ -379,12 +380,58 @@ def _after_scheme_run(src: str, end: int) -> bool:
     return _SCHEME_RUN_RE.match(src, i, end) is not None
 
 
-def _parse_quoted_bracket(
-    inline: Any, m: re.Match[str], state: Any
-) -> int | None:
-    """Inline rule: a quoted-target bracket link shape in prose becomes a
-    `quoted_bracket` token, which the renderer writes with Trac's `!`
-    escape (ticket #241).
+# Trac's numeric changeset and log bracket links, as one pattern (ticket
+# #249). Sources, Trac 1.6: trac/versioncontrol/web_ui/changeset.py
+#   !?\[(?P<it>[a-zA-Z.+-]*?\s*)(?:[0-9]+|[a-fA-F0-9]{8,})
+#       (?:/[^\]]*)?(?:\?[^\]]*)?(?:#[^\]]*)?\]
+# and log.py
+#   !?\[(?P<it>[a-zA-Z.+-]*?\s*)(?:RANGES|CSET(?:[:-]CSET)?)(?:[/?][^\]]*)?\]
+# with CSET `(?:[0-9]+|[a-fA-F0-9]{8,})` and RANGES (trac.util.Ranges.RE_STR)
+# `[0-9]+(?:[-:][0-9]+)?(?:,​?[0-9]+(?:[-:][0-9]+)?)*`. Line-local
+# adjustments: the prefix whitespace is `[^\S\n]*` and each `[^\]]*` is
+# `[^\]\n]*`. Measured on this host (render only): `x[0]`, `rows[12]`,
+# `x[1:3]`, `x[0,1]`, `x[1-3]`, `x[deadbeef]`, `x[12/path]`, `x[1:3/p]`,
+# `x[12?a]`, `x[12#b]` and `x[trac 12]` render as links; `x[0, 1]`,
+# `x[1.5]`, `x[0:]`, `x[:3]`, `x[cafe]` and `x[n-1:n]` do not match; `x[-1]`,
+# `x[i+1]`, `x[.5]` and an unknown prefix (`x[abc 12]`, `x[ 12]`, `x[abc12]`)
+# match but Trac's resolver yields text. Trac's `!` escape on every shape
+# that matches renders plain text with no visible `!`, so every match is
+# escaped and the pattern stays an exact mirror (no exclusion rule).
+#
+# Linear time (the first version took 49 s on `x[1/` + `?#` * 2000 and 32 s
+# on `x[` + `a` * 20000). Two changes, neither altering which brackets
+# match except for the prefix bound below:
+#   - the changeset alternative's three optional tails
+#     `(?:/..)?(?:\?..)?(?:#..)?` accept exactly the strings of one tail
+#     `(?:[/?#][^\]\n]*)?`, since each tail runs to the first `]`; the
+#     three-way split is what made the backtracking cubic. The log
+#     alternative keeps its own `[/?]` tail (`#` is not a log tail).
+#   - the InterTrac prefix is bounded to 32 characters. Only a KNOWN
+#     InterTrac prefix makes a link (measured: an unknown prefix renders as
+#     text) and known prefixes are short, so a longer run left bare still
+#     renders as text; the bound caps the lazy prefix against the hex run.
+# Possessive quantifiers would also work but need Python 3.11, and
+# pyproject allows 3.10; an id run is followed by a character that is
+# never part of an id, so backtracking into it fails at once.
+_NUMERIC_BRACKET_LINK_RE = re.compile(
+    r"\[[A-Za-z.+-]{0,32}?[^\S\n]*"
+    r"(?:"
+    r"(?:[0-9]+|[a-fA-F0-9]{8,})(?:[/?#][^\]\n]*)?\]"
+    r"|"
+    r"(?:[0-9]+(?:[-:][0-9]+)?(?:,​?[0-9]+(?:[-:][0-9]+)?)*"
+    r"|(?:[0-9]+|[a-fA-F0-9]{8,})"
+    r"(?:[:-](?:[0-9]+|[a-fA-F0-9]{8,}))?)"
+    r"(?:[/?][^\]\n]*)?\]"
+    r")"
+)
+
+
+def _bracket_rule(
+    token_type: str, *, escape_in_link: bool
+) -> Callable[[Any, re.Match[str], Any], int | None]:
+    """Build an inline rule: a Trac bracket-link shape in prose becomes a
+    `token_type` token, which the renderer writes with Trac's `!` escape
+    (tickets #241, #249).
 
     Registered `before="link"`: mistune tries rules at the leftmost
     position in rule order, and a rule after `link` never sees a `[` that
@@ -400,22 +447,44 @@ def _parse_quoted_bracket(
     returns None (the tokens are appended only on its success paths), so
     anything else falls through to the token. Inside a link label
     (`state.in_link`) `parse_link` would only emit the bracket as text, so
-    it is skipped there and the shape is escaped like any other prose.
+    it is skipped there. The label then gets the escape when
+    `escape_in_link` is true (a quoted bracket, #241) and is left as text
+    when it is false (a numeric bracket, #249: Trac does not consume the
+    `!` inside a bracket-link label, so it would show, and the bare form
+    links nothing there).
 
-    Returns None, so the `[` is text as before, when the token just before
-    the match is a scheme run (`_after_scheme_run`): Trac's URL pattern
-    already takes the characters after it.
+    Only the escape fallback is subject to the scheme-run check, after the
+    link parser: it returns None, so the `[` is text as before, when the
+    token just before the match is a scheme run (`_after_scheme_run`),
+    because Trac's URL pattern already takes the characters after it. A
+    real link directly after a `word:` (`Note:[1](http://x)`) is not
+    affected, as it was not before the rule existed.
     """
-    if _after_scheme_run(state.src, m.start()):
-        return None
-    if not state.in_link:
-        link_m = _LINK_OPEN_RE.match(state.src, m.start())
-        assert link_m is not None
-        pos = inline.parse_link(link_m, state)
-        if pos is not None:
-            return pos
-    state.append_token({"type": "quoted_bracket", "raw": m.group(0)})
-    return m.end()
+
+    def rule(inline: Any, m: re.Match[str], state: Any) -> int | None:
+        if state.in_link:
+            if not escape_in_link:
+                return None
+        else:
+            link_m = _LINK_OPEN_RE.match(state.src, m.start())
+            assert link_m is not None
+            pos = inline.parse_link(link_m, state)
+            if pos is not None:
+                return pos
+        if _after_scheme_run(state.src, m.start()):
+            return None
+        state.append_token({"type": token_type, "raw": m.group(0)})
+        return m.end()
+
+    return rule
+
+
+_parse_quoted_bracket = _bracket_rule(
+    "quoted_bracket", escape_in_link=True
+)
+_parse_numeric_bracket = _bracket_rule(
+    "numeric_bracket", escape_in_link=False
+)
 
 
 def _quoted_bracket_links(md: Any) -> None:
@@ -425,6 +494,17 @@ def _quoted_bracket_links(md: Any) -> None:
         "quoted_bracket",
         _QUOTED_BRACKET_LINK_RE.pattern,
         _parse_quoted_bracket,
+        before="link",
+    )
+
+
+def _numeric_bracket_links(md: Any) -> None:
+    """mistune plugin: `_parse_numeric_bracket` as an inline rule before
+    `link`."""
+    md.inline.register(
+        "numeric_bracket",
+        _NUMERIC_BRACKET_LINK_RE.pattern,
+        _parse_numeric_bracket,
         before="link",
     )
 
@@ -440,6 +520,7 @@ _MISTUNE_PLUGINS = [
     "mistune.plugins.table.table_in_list",
     "mistune.plugins.table.table_in_quote",
     _quoted_bracket_links,
+    _numeric_bracket_links,
 ]
 
 
@@ -854,6 +935,12 @@ class TracWikiRenderer(mistune.BaseRenderer):
         Trac shows ``x['KEY']`` as text instead of a wiki link. A `!`
         typed in Markdown is a literal character, so it is not an escape
         already: ``Wow!['a']`` gives ``Wow!!['a']``."""
+        return f"!{text}"
+
+    def numeric_bracket(self, text: str) -> str:
+        """Render a numeric changeset or log bracket shape found in prose
+        (`_parse_numeric_bracket`, ticket #249) with Trac's `!` escape, so
+        Trac shows ``x[0]`` as text instead of a changeset link."""
         return f"!{text}"
 
     def codespan(self, text: str) -> str:

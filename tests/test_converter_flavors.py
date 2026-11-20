@@ -606,9 +606,11 @@ def test_a_spaced_citation_becomes_a_link():
         )
         == "see [https://example.com/a 1] now"
     )
+    # Default flavour: no citation rewrite, and the bare `[1]` is a Trac
+    # changeset link, so it gets the escape (#249).
     assert markdown_to_tracwiki(
         "see [1] (https://example.com/a) now"
-    ) == ("see [1] (https://example.com/a) now")
+    ) == ("see ![1] (https://example.com/a) now")
 
 
 @pytest.mark.parametrize(
