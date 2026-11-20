@@ -28,6 +28,7 @@ from .ticket_list import TICKET_LIST_SPECS, TICKET_LIST_TOOLS
 from .ticket_read import TICKET_READ_SPECS, TICKET_READ_TOOLS
 from .ticket_write import TICKET_WRITE_SPECS, TICKET_WRITE_TOOLS
 from .timeline_read import TIMELINE_SPECS, TIMELINE_TOOLS
+from .user_activity import USER_ACTIVITY_SPECS, USER_ACTIVITY_TOOLS
 from .wiki_attachment import (
     WIKI_ATTACHMENT_SPECS,
     WIKI_ATTACHMENT_TOOLS,
@@ -83,6 +84,7 @@ ALL_SPECS: list[ToolSpec] = (
     + CONVERT_PREVIEW_SPECS
     + RENDER_CHECK_SPECS
     + TIMELINE_SPECS
+    + USER_ACTIVITY_SPECS
 )
 
 __all__ = [
@@ -113,6 +115,7 @@ __all__ = [
     "CONVERT_PREVIEW_SPECS",
     "RENDER_CHECK_SPECS",
     "TIMELINE_SPECS",
+    "USER_ACTIVITY_SPECS",
     # Tool lists (backward compat)
     "TICKET_TOOLS",
     "TICKET_READ_TOOLS",
@@ -134,4 +137,5 @@ __all__ = [
     "CONVERT_PREVIEW_TOOLS",
     "RENDER_CHECK_TOOLS",
     "TIMELINE_TOOLS",
+    "USER_ACTIVITY_TOOLS",
 ]

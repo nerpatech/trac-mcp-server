@@ -159,7 +159,7 @@ trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment)
 
 It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, a `ticket-comment-edit`'s stored text, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
-## Available Tools (54)
+## Available Tools (55)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances) -- except over HTTP with OIDC per-user auth (`TRAC_MCP_OIDC_RPC_URL`), where calls go only to the configured endpoint and the argument is not offered.
 
@@ -252,13 +252,14 @@ These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/RE
 | `milestone_update` | Update existing milestones |
 | `milestone_delete` | Delete milestones |
 
-### Timeline (1)
+### Timeline (2)
 
-`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call returns a `method_not_available` error that says to install the plugin.
+`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call returns a `method_not_available` error that says to install the plugin. `user_activity` works with stock XmlRpcPlugin: it reads the change logs of every ticket changed since the first day.
 
 | Tool | Description |
 |------|-------------|
 | `timeline_search` | Search the Trac timeline (tickets, wiki edits, changesets, milestones), author-attributed, as plain text |
+| `user_activity` | What one account did in a period: tickets created, ticket changes and comments, wiki edits; no plugin needed |
 
 ### System (2)
 | Tool | Description |
