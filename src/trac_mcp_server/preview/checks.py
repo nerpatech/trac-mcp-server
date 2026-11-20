@@ -19,6 +19,8 @@ from ..converters.common import (
     find_code_block_indentation_loss,
 )
 from ..converters.markdown_to_tracwiki import (
+    _NUMERIC_BRACKET_LINK_RE,
+    _QUOTED_BRACKET_LINK_RE,
     describe_list_item_split,
     find_list_item_splits,
 )
@@ -1532,86 +1534,92 @@ def _check_unconfigured_intertrac_prefix(
     return warnings
 
 
-# `!` + a Markdown-link span, where the `!` is itself directly preceded by
-# an ASCII identifier character, `]` or `)` (#250). That is the shape of
-# the converter's escape on code-like prose (`handlers!['get']`, `x![0]`,
-# `f(x)!['k']`, `x!['a']!['b']`) and of a hand-escaped TracWiki subscript.
-# A Markdown image `![alt](...)` follows a space, a line start or
-# punctuation, so it is not counted and a failed one keeps blocking.
-# Known accepted gap: an image glued to a word (`diagram![d](x y.png)`)
-# has the same shape as a subscript escape and is skipped. ASCII only: it
-# is applied to the SOURCE, where `\w` would also take CJK.
-_ESCAPED_LINK_RE = re.compile(
-    r"(?<=[A-Za-z0-9_\])])!(" + _MARKDOWN_LINK_RE.pattern + ")"
-)
 # Inline `{{{...}}}` anywhere on a line (`blank_code_fences` blanks only
 # line-start fences). Over-blanking is the safe direction here: it only
-# lowers the set of skippable spans.
+# lowers the set of skippable shapes.
 _INLINE_BRACES_RE = re.compile(r"\{\{\{.*?\}\}\}", re.DOTALL)
-_INNER_ESCAPE_RE = re.compile(r"!(?=\[)")
 
 
-def _escaped_link_spans(tracwiki: str) -> Counter[str]:
-    """The `[...](...)` spans the source escapes with Trac's `!`, counted
-    and keyed as Trac renders them (ticket #250).
+def _escaped_bracket_shapes(tracwiki: str) -> Counter[str]:
+    """The bracket shapes the source escapes with Trac's `!`, counted
+    (ticket #250).
 
-    The converter writes code-like prose as ``handlers!['get'](req, resp)``
-    and ``x![0](a, b)`` (#241, #249). Trac consumes the ``!`` and shows
-    ``handlers['get'](req, resp)`` as text, which the Markdown-link
-    pattern then matches in the render. A match equal to a span the
-    source escaped is text the author (or the converter) kept as text.
-    The escape counts only when glued to code (see `_ESCAPED_LINK_RE`):
-    a Markdown image that failed to convert is stored as ``![alt](x y)``
-    and Trac eats its ``!`` too, so a bare ``!`` proves nothing. A
-    hand-written TracWiki write that escapes the subscript is treated
-    the same way, deliberately: stored pages are edited back as TracWiki.
+    The converter escapes exactly a quoted-bracket shape (#241,
+    `_QUOTED_BRACKET_LINK_RE`: `handlers!['get'](req, resp)`) or a numeric
+    changeset/log shape (#249, `_NUMERIC_BRACKET_LINK_RE`: `x![0](a, b)`),
+    and Trac renders an escaped shape byte for byte: it consumes the `!`
+    and shows the text, which the Markdown-link pattern then matches in
+    the render. A hand-written TracWiki write that escapes such a shape
+    is treated the same way, deliberately: stored pages are edited back
+    as TracWiki.
+
+    Every `!` position is scanned, with the converter's own compiled
+    regexes matched right after it, so adjacent and nested escapes
+    (`x!['a']!['b']`, `arr![0]` inside another span's destination) are
+    all counted, and what follows the shape is never compared: a
+    CamelCase escape, emphasis or code in the parenthesised part cannot
+    break the match. An escaped `[alt]` of a Markdown image is neither
+    shape, so an image that failed to convert (stored as typed, Trac
+    eats its `!`) keeps blocking wherever it sits. Remaining accepted
+    gap: an image whose alt text is itself a shape (`![1](x y.png)`) is
+    skipped.
 
     Blanked first, same length: fences, inline code spans, inline
     ``{{{...}}}`` and ``[[...]]`` macro calls, since a ``!`` in code or
     in a macro's arguments is not an escape of prose and must not
-    whitelist a prose match. Each key has the escapes that Trac also
-    consumes inside the span removed (``req![0]`` renders ``req[0]``).
+    whitelist a prose match.
 
     A Counter, not a set: one escaped occurrence whitelists one render
     match, so an unescaped copy of the same text still blocks.
 
-    Measured over 3,158 cached documents of both stores with the rule
-    before its second review round (a superset of this one, except for
-    the inner-escape normalisation): 0 matches skipped, the same 5
-    documents firing before and after; the final rule is replayed with
-    `first_literal_link_match`. One known remaining false positive: the `Project`
-    page, where ``handlers['get'](req, resp)`` is a TicketQuery macro's
-    output (a ticket summary) and is not in the page source.
+    Known remaining false positive: the `Project` page, where
+    ``handlers['get'](req, resp)`` is a TicketQuery macro's output (a
+    ticket summary) and is not in the page source.
     """
     scan = blank_inline_code_spans(blank_code_fences(tracwiki))
     for pattern in (_INLINE_BRACES_RE, _MACRO_LINK_RE):
         scan = pattern.sub(_blank_preserving_layout, scan)
-    return Counter(
-        _INNER_ESCAPE_RE.sub("", m.group(1))
-        for m in _ESCAPED_LINK_RE.finditer(scan)
-    )
+    shapes: Counter[str] = Counter()
+    pos = scan.find("!")
+    while pos != -1:
+        for shape_re in (
+            _QUOTED_BRACKET_LINK_RE,
+            _NUMERIC_BRACKET_LINK_RE,
+        ):
+            shape = shape_re.match(scan, pos + 1)
+            if shape is not None:
+                shapes[shape.group(0)] += 1
+                break
+        pos = scan.find("!", pos + 1)
+    return shapes
 
 
 def first_literal_link_match(
     prose: str, tracwiki: str
 ) -> re.Match[str] | None:
     """The first Markdown-link match in ``prose`` that ``tracwiki`` did
-    not escape, consuming one escaped occurrence per skipped match.
+    not escape, consuming one escaped shape per skipped match.
 
-    Resumes one character after a skipped match, not at its end: the
-    label class accepts `[`, so a skipped `[i and [docs](x y)` contains
-    a real link that must still be tested. This is the whole decision
-    `literal_markup_in_render` makes for its Markdown-link pattern, taking
-    plain strings so a sweep over stored documents can replay it.
+    A match is skipped iff its leading bracket part (from its `[` up to
+    and including the first `]`) equals an escaped shape with a count
+    left (see `_escaped_bracket_shapes`); nothing after the bracket is
+    compared. Resumes one character after a skipped match, not at its
+    end: the label class accepts `[`, so a skipped `['a' and [docs](x y)`
+    contains a real link that must still be tested. This is the whole
+    decision `literal_markup_in_render` makes for its Markdown-link
+    pattern, taking plain strings so a sweep over stored documents can
+    replay it.
     """
-    escaped = _escaped_link_spans(tracwiki)
+    escaped = _escaped_bracket_shapes(tracwiki)
     pos = 0
     while True:
         match = _MARKDOWN_LINK_RE.search(prose, pos)
         if match is None:
             return None
-        if escaped[match.group(0)] > 0:
-            escaped[match.group(0)] -= 1
+        text = match.group(0)
+        bracket = text[: text.index("]") + 1]
+        if escaped[bracket] > 0:
+            escaped[bracket] -= 1
             pos = match.start() + 1
             continue
         return match
@@ -1637,8 +1645,9 @@ def _check_literal_markup_in_render(
 
     Ticket #250: a Markdown-link match in the render that equals a span
     the stored ``tracwiki`` escaped with Trac's ``!`` is skipped, once
-    per escaped occurrence, and only when the ``!`` is glued to code (see
-    `_escaped_link_spans`). Pass ``""`` and nothing is skipped.
+    per escaped occurrence, and only when the match's bracket part is a
+    shape the converter escapes (see `_escaped_bracket_shapes`). Pass
+    ``""`` and nothing is skipped.
     """
     warnings = []
     for pattern, label in (

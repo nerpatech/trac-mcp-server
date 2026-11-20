@@ -1746,11 +1746,6 @@ def _literal_markup_findings(html, tracwiki=""):
             "handlers!['get'](req![0], resp)",
             "handlers['get'](req[0], resp)",
         ),
-        # Known accepted gap (#250): an image glued to a word has the
-        # same source shape as the escape of a subscript, so it is
-        # skipped. A rule that blocked it would block `x![0](a b)`.
-        ("diagram![d](x y.png)", "diagram[d](x y.png)"),
-        ("Wow![see](my page) ok", "Wow[see](my page) ok"),
     ],
     ids=[
         "converter-form",
@@ -1758,9 +1753,7 @@ def _literal_markup_findings(html, tracwiki=""):
         "after-paren",
         "chained-subscript",
         "digit-underscore",
-        "inner-escape-normalised",
-        "image-glued-to-word-known-gap",
-        "wow-glued-known-gap",
+        "inner-escape",
     ],
 )
 def test_escaped_code_like_link_shape_is_not_literal_markup(
@@ -1836,14 +1829,45 @@ def test_escaped_code_like_link_shape_is_not_literal_markup(
         # An escape inside an inline `{{{...}}}` span or a macro call is
         # not an escape of prose, so it must not whitelist a real link.
         (
-            "<p>a <code>x![t](u v)</code> b [t](u v)</p>",
-            "a {{{x![t](u v)}}} b [t](u v)",
-            "[t](u v)",
+            "<p>a <code>x![0](u v)</code> b [0](u v)</p>",
+            "a {{{x![0](u v)}}} b [0](u v)",
+            "[0](u v)",
         ),
         (
-            "<p> b [t](u v)</p>",
-            "[[comment(x![t](u v))]] b [t](u v)",
-            "[t](u v)",
+            "<p> b [0](u v)</p>",
+            "[[comment(x![0](u v))]] b [0](u v)",
+            "[0](u v)",
+        ),
+        # An image's escaped `[alt]` is neither converter shape, so a
+        # failed image blocks wherever it sits: after a word (formerly
+        # the accepted gap), after a converted link, after an element.
+        (
+            "<p>Wow[see](my page) ok</p>",
+            "Wow![see](my page) ok",
+            "[see](my page)",
+        ),
+        (
+            "<p>diagram[d](x y.png)</p>",
+            "diagram![d](x y.png)",
+            "[d](x y.png)",
+        ),
+        (
+            '<p><a class="ext-link" href="http://x">text</a>'
+            "[b](bad url.png)</p>",
+            "[http://x text]![b](bad url.png)",
+            "[b](bad url.png)",
+        ),
+        (
+            '<p><a href="/wiki/l"><img src="u" /></a>[cov](bad u)</p>',
+            "[wiki:l [[Image(u)]]]![cov](bad u)",
+            "[cov](bad u)",
+        ),
+        # An escaped shape whitelists only a render match whose bracket
+        # part equals it.
+        (
+            "<p>x[0](a b) and [1](c d)</p>",
+            "x![0](a b) and [1](c d)",
+            "[1](c d)",
         ),
     ],
     ids=[
@@ -1861,6 +1885,11 @@ def test_escaped_code_like_link_shape_is_not_literal_markup(
         "image-after-space-at-start",
         "escape-in-inline-braces",
         "escape-in-macro-arguments",
+        "image-after-word",
+        "image-after-word-2",
+        "image-after-converted-link",
+        "image-after-linked-image",
+        "other-shape-not-whitelisted",
     ],
 )
 def test_unescaped_link_shape_still_blocks(html, source, matched):
@@ -1883,10 +1912,12 @@ def test_an_escaped_match_does_not_hide_a_later_real_link():
 
 def test_an_escaped_match_does_not_hide_an_overlapping_real_link():
     """The scan resumes one character after a skipped match, not at its
-    end: the skipped `[i and [docs](http://x y)` contains a real link."""
+    end: the skipped `['a' and [docs](http://x y)` (its label class
+    accepts `[`, and the source escapes that whole bracket shape)
+    contains a real link."""
     found = _literal_markup_findings(
-        "<p>arr[i and [docs](http://x y)</p>",
-        "arr![i and [docs](http://x y)",
+        "<p>x['a' and [docs](http://x y)</p>",
+        "x!['a' and [docs](http://x y)",
     )
     assert len(found) == 1, found
     assert found[0]["evidence"]["matched"] == "[docs](http://x y)"
@@ -1894,24 +1925,131 @@ def test_an_escaped_match_does_not_hide_an_overlapping_real_link():
 
 def test_one_escaped_occurrence_whitelists_one_render_match():
     found = _literal_markup_findings(
-        "<p>a [t](u v) b [t](u v)</p>", "a![t](u v) b [t](u v)"
+        "<p>a [0](u v) b [0](u v)</p>", "a![0](u v) b [0](u v)"
     )
     assert len(found) == 1, found
-    assert found[0]["evidence"]["matched"] == "[t](u v)"
+    assert found[0]["evidence"]["matched"] == "[0](u v)"
 
 
 @pytest.mark.parametrize(
     "source",
     [
-        "{{{\nx![t](u v)\n}}}\ntext [t](u v)",
-        "`x![t](u v)` text [t](u v)",
-        "```\nx![t](u v)\n```\ntext [t](u v)",
+        "{{{\nx![0](u v)\n}}}\ntext [0](u v)",
+        "`x![0](u v)` text [0](u v)",
+        "```\nx![0](u v)\n```\ntext [0](u v)",
     ],
     ids=["tracwiki-block", "backtick-span", "markdown-fence"],
 )
 def test_an_escape_in_code_does_not_whitelist_prose(source):
-    found = _literal_markup_findings("<p>text [t](u v)</p>", source)
+    found = _literal_markup_findings("<p>text [0](u v)</p>", source)
     assert len(found) == 1, found
+
+
+@pytest.mark.parametrize(
+    "markdown, tracwiki, rendered",
+    [
+        # Each recorded render applies Trac's escape semantics: the `!`
+        # before a shape (or before CamelCase) is removed, `\x27\x27\x27x\x27\x27\x27` is
+        # `<strong>`, a backtick span is `<code>`.
+        (
+            "obj['k'](arr[0](x y))",
+            "obj!['k'](arr![0](x y))",
+            "<p>obj['k'](arr[0](x y))</p>",
+        ),
+        (
+            "x[0](a, FooBar)",
+            "x![0](a, !FooBar)",
+            "<p>x[0](a, FooBar)</p>",
+        ),
+        (
+            "`obj`['k'](a b)",
+            "`obj`!['k'](a b)",
+            "<p><code>obj</code>['k'](a b)</p>",
+        ),
+        (
+            "**x**[0](a b)",
+            "\x27\x27\x27x\x27\x27\x27![0](a b)",
+            "<p><strong>x</strong>[0](a b)</p>",
+        ),
+        (
+            "caf\u00e9[0](a b)",
+            "caf\u00e9![0](a b)",
+            "<p>caf\u00e9[0](a b)</p>",
+        ),
+        # Trac keeps an inner `!` before a non-shape bracket.
+        (
+            "x['a'](b ![c] d)",
+            "x!['a'](b ![c] d)",
+            "<p>x['a'](b ![c] d)</p>",
+        ),
+    ],
+    ids=[
+        "nested-call",
+        "camelcase-in-destination",
+        "after-code-span",
+        "after-strong",
+        "after-non-ascii",
+        "inner-bang-kept",
+    ],
+)
+def test_converter_escaped_shapes_pass_the_gate(
+    markdown, tracwiki, rendered
+):
+    """End to end: the converter's output is the expected stored form,
+    and with Trac's render of it the gate has nothing to block."""
+    from trac_mcp_server.converters import markdown_to_tracwiki
+    from trac_mcp_server.preview.gate import classify
+
+    assert markdown_to_tracwiki(markdown) == tracwiki
+    warnings = build_warnings(
+        markdown,
+        tracwiki,
+        extract_facts(rendered),
+        probes={},
+        check_targets=False,
+        source_format="markdown",
+    )
+    blocking, _ = classify(warnings)
+    assert blocking == [], blocking
+
+
+@pytest.mark.parametrize(
+    "markdown, tracwiki, rendered",
+    [
+        (
+            "[text](http://x)![b](bad url.png)",
+            "[http://x text]![b](bad url.png)",
+            '<p><a class="ext-link" href="http://x">text</a>'
+            "[b](bad url.png)</p>",
+        ),
+        # What the converter makes of a linked badge followed by a
+        # failed image: the image's `[cov](bad u)` still reaches the
+        # check, and blocks.
+        (
+            "[![CI](u)](l)![cov](bad u)",
+            "[wiki:l [[Image(u)]]]![cov](bad u)",
+            '<p><a href="/wiki/l"><img src="u" /></a>[cov](bad u)</p>',
+        ),
+    ],
+    ids=["after-converted-link", "after-linked-badge"],
+)
+def test_failed_image_after_a_link_still_blocks_end_to_end(
+    markdown, tracwiki, rendered
+):
+    from trac_mcp_server.converters import markdown_to_tracwiki
+    from trac_mcp_server.preview.gate import classify
+
+    assert markdown_to_tracwiki(markdown) == tracwiki
+    warnings = build_warnings(
+        markdown,
+        tracwiki,
+        extract_facts(rendered),
+        probes={},
+        check_targets=False,
+        source_format="markdown",
+    )
+    blocking, _ = classify(warnings)
+    assert [w["code"] for w in blocking] == ["literal_markup_in_render"]
 
 
 def test_markdown_image_that_did_not_convert_still_blocks():
