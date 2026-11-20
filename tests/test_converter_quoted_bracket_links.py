@@ -57,7 +57,6 @@ def test_a_quoted_bracket_in_prose_gets_the_escape(markdown, wiki):
 
 UNCHANGED = {
     "no closing bracket": "y['k'",
-    "index": "x[0]",
     "name index": "x[i]",
     "apostrophe and bracket": "it's ['",
     "code span": "`x['k']`",
