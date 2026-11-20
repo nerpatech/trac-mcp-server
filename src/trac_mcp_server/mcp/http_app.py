@@ -29,14 +29,30 @@ from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import version as _version
 from ..config_schema import ServerConfig
 from ..instances import Identity
 from .oidc import extract_bearer_token
 
+# sse-starlette's shutdown flag. If a future release moves or drops
+# ``AppStatus`` the shutdown check below is treated as False, so the
+# stream completion (Trac /trac_mcp_server #248) goes inert instead of
+# failing daemon startup. The real-substrate test in
+# tests/test_mcp/test_http_shutdown_streams.py is what catches it going
+# inert: it expects no ``returned without completing response`` for GET
+# streams on SIGTERM.
+try:
+    from sse_starlette.sse import AppStatus
+except ImportError:  # pragma: no cover
+    AppStatus = None
+
 logger = logging.getLogger(__name__)
+
+# Upper bound on the closing send of a stream cut on shutdown; see
+# ``_SessionManagerASGIApp``.
+_SHUTDOWN_CLOSE_TIMEOUT = 1.0
 
 _SDK_TRANSPORT_LOGGER = "mcp.server.streamable_http"
 
@@ -348,6 +364,47 @@ class _SessionManagerASGIApp:
     class (same pattern as the SDK's own
     ``mcp.server.fastmcp.server.StreamableHTTPASGIApp``) makes ``Route``
     treat it as ASGI and dispatch every HTTP method (GET/POST/DELETE) to it.
+
+    It also completes the standalone GET stream that ``sse-starlette``
+    cuts on shutdown (Trac /trac_mcp_server #248). ``sse-starlette``
+    3.2.0 patches ``uvicorn.Server.handle_exit``, so on SIGTERM
+    ``AppStatus.should_exit`` becomes True and every open
+    ``EventSourceResponse`` cancels its task group BEFORE it sends the
+    final empty ``more_body: False`` message; the response returns
+    started but incomplete and uvicorn logs ``ASGI callable returned
+    without completing response.`` at ERROR once per open stream, on
+    every deploy. This sends that closing message itself, only when ALL
+    of these hold:
+
+    * the request is a GET: the standalone notification stream, where a
+      clean end loses nothing. A POST's SSE stream carries a tool call's
+      result; the SDK returns normally after the cut, so completing it
+      would turn an aborted request into a clean 200 with no JSON-RPC
+      result and the client could wait until its own timeout. A POST cut
+      on shutdown keeps uvicorn's ERROR, an honest signal that a request
+      was aborted;
+    * ``handle_request`` returned (an exception from it propagates);
+    * a response started and was not completed;
+    * ``AppStatus.should_exit`` is True (and ``AppStatus`` imported).
+
+    The SDK catches exceptions from the response on its SSE paths
+    (``logger.exception("Error in standalone SSE response")`` for GET,
+    ``"SSE response error"`` for POST) and returns normally, so a GET
+    stream that died of a send error during shutdown also reaches this
+    point started and not completed: the SDK has already logged the
+    error, and the closing message is attempted on the same connection,
+    which uvicorn drops silently once it has disconnected. Outside
+    shutdown an unfinished response is a real bug and is left alone.
+
+    The closing send runs after sse-starlette's task group has finished,
+    so nothing cancels it, and a stalled client would block uvicorn's
+    ``send`` in its flow-control drain until TCP gives up. It is bounded
+    by ``_SHUTDOWN_CLOSE_TIMEOUT``; on timeout the response is left
+    incomplete, uvicorn logs its ERROR for that one stuck stream and
+    closes the transport, as before the fix.
+
+    Drop the completion once sse-starlette completes the response itself
+    on shutdown.
     """
 
     def __init__(
@@ -358,7 +415,54 @@ class _SessionManagerASGIApp:
     async def __call__(
         self, scope: Scope, receive: Receive, send: Send
     ) -> None:
-        await self._session_manager.handle_request(scope, receive, send)
+        if scope["type"] != "http":
+            await self._session_manager.handle_request(
+                scope, receive, send
+            )
+            return
+
+        started = False
+        completed = False
+
+        async def tracking_send(message: Message) -> None:
+            nonlocal started, completed
+            if message["type"] == "http.response.start":
+                started = True
+            elif message["type"] == "http.response.body" and not (
+                message.get("more_body", False)
+            ):
+                completed = True
+            await send(message)
+
+        await self._session_manager.handle_request(
+            scope, receive, tracking_send
+        )
+        if (
+            scope.get("method") == "GET"
+            and started
+            and not completed
+            and AppStatus is not None
+            and AppStatus.should_exit
+        ):
+            logger.debug(
+                "Completing a stream sse-starlette cut on shutdown"
+            )
+            with anyio.move_on_after(
+                _SHUTDOWN_CLOSE_TIMEOUT
+            ) as cancel_scope:
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b"",
+                        "more_body": False,
+                    }
+                )
+            if cancel_scope.cancelled_caught:
+                logger.debug(
+                    "Closing a cut stream timed out after %s s; "
+                    "leaving it incomplete",
+                    _SHUTDOWN_CLOSE_TIMEOUT,
+                )
 
 
 def build_http_app(
