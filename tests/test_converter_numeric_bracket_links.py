@@ -26,6 +26,8 @@ with the ``!``. Real links come first; a scheme run before the shape and a
 link label are left as they were.
 """
 
+import time
+
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
@@ -58,6 +60,8 @@ ESCAPED = {
         "x![i+1] y",
     ),
     "match that resolves to text: dot five": ("x[.5] y", "x![.5] y"),
+    # Trac's RANGES allow a zero-width space after a comma (U+200B).
+    "comma, zero-width space": ("x[0,\u200b1] y", "x![0,\u200b1] y"),
     "chained": ("m[0][1]", "m![0]![1]"),
     # A `!` in Markdown is a literal character, and Trac reads `!` before a
     # bracket as its escape, so a typed one is not an escape.
@@ -117,6 +121,16 @@ REAL_LINKS = {
         "see [http://x 1].",
     ),
     "image": ("![1](x.png)", "[[Image(x.png)]]"),
+    # A real link directly after a `word:` is not a scheme-run escape: the
+    # rule tries mistune's link parser before the scheme-run check.
+    "inline link after a colon": (
+        "Note:[1](http://x)",
+        "Note:[http://x 1]",
+    ),
+    "shortcut reference link after a colon": (
+        "see:[1].\n\n[1]: http://x",
+        "see:[http://x 1].",
+    ),
 }
 
 
@@ -135,3 +149,27 @@ def test_a_link_label_holding_a_numeric_bracket_gets_no_escape():
     assert markdown_to_tracwiki("[a [0] b](http://x)") == (
         "[http://x a [0] b]"
     )
+
+
+# -- Linear time: the regex must not backtrack catastrophically ---------------
+
+# Sized so that the first version of the regex (three optional tails, an
+# unbounded lazy prefix) took well over a minute on each: cubic in the
+# `?#` run (49 s at 4000 characters), quadratic in the `a` runs (32 s at
+# 20000). The bound is generous; a linear-time regex takes milliseconds.
+PATHOLOGICAL = {
+    "tails": "x[1/" + "?#" * 5000,
+    "unclosed hex run": "x[" + "a" * 40000,
+    "closed hex run": "x[" + "a" * 40000 + "z]",
+    "comma list": "x[" + "1," * 20000,
+    "range list": "x[" + "1-1," * 10000,
+}
+
+
+@pytest.mark.parametrize(
+    "markdown", list(PATHOLOGICAL.values()), ids=list(PATHOLOGICAL)
+)
+def test_a_pathological_bracket_converts_in_linear_time(markdown):
+    start = time.perf_counter()
+    markdown_to_tracwiki(markdown)
+    assert time.perf_counter() - start < 2.0

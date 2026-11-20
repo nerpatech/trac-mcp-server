@@ -397,11 +397,26 @@ def _after_scheme_run(src: str, end: int) -> bool:
 # match but Trac's resolver yields text. Trac's `!` escape on every shape
 # that matches renders plain text with no visible `!`, so every match is
 # escaped and the pattern stays an exact mirror (no exclusion rule).
+#
+# Linear time (the first version took 49 s on `x[1/` + `?#` * 2000 and 32 s
+# on `x[` + `a` * 20000). Two changes, neither altering which brackets
+# match except for the prefix bound below:
+#   - the changeset alternative's three optional tails
+#     `(?:/..)?(?:\?..)?(?:#..)?` accept exactly the strings of one tail
+#     `(?:[/?#][^\]\n]*)?`, since each tail runs to the first `]`; the
+#     three-way split is what made the backtracking cubic. The log
+#     alternative keeps its own `[/?]` tail (`#` is not a log tail).
+#   - the InterTrac prefix is bounded to 32 characters. Only a KNOWN
+#     InterTrac prefix makes a link (measured: an unknown prefix renders as
+#     text) and known prefixes are short, so a longer run left bare still
+#     renders as text; the bound caps the lazy prefix against the hex run.
+# Possessive quantifiers would also work but need Python 3.11, and
+# pyproject allows 3.10; an id run is followed by a character that is
+# never part of an id, so backtracking into it fails at once.
 _NUMERIC_BRACKET_LINK_RE = re.compile(
-    r"\[[a-zA-Z.+-]*?[^\S\n]*"
+    r"\[[A-Za-z.+-]{0,32}?[^\S\n]*"
     r"(?:"
-    r"(?:[0-9]+|[a-fA-F0-9]{8,})"
-    r"(?:/[^\]\n]*)?(?:\?[^\]\n]*)?(?:#[^\]\n]*)?\]"
+    r"(?:[0-9]+|[a-fA-F0-9]{8,})(?:[/?#][^\]\n]*)?\]"
     r"|"
     r"(?:[0-9]+(?:[-:][0-9]+)?(?:,​?[0-9]+(?:[-:][0-9]+)?)*"
     r"|(?:[0-9]+|[a-fA-F0-9]{8,})"
@@ -438,14 +453,15 @@ def _bracket_rule(
     `!` inside a bracket-link label, so it would show, and the bare form
     links nothing there).
 
-    Returns None, so the `[` is text as before, when the token just before
-    the match is a scheme run (`_after_scheme_run`): Trac's URL pattern
-    already takes the characters after it.
+    Only the escape fallback is subject to the scheme-run check, after the
+    link parser: it returns None, so the `[` is text as before, when the
+    token just before the match is a scheme run (`_after_scheme_run`),
+    because Trac's URL pattern already takes the characters after it. A
+    real link directly after a `word:` (`Note:[1](http://x)`) is not
+    affected, as it was not before the rule existed.
     """
 
     def rule(inline: Any, m: re.Match[str], state: Any) -> int | None:
-        if _after_scheme_run(state.src, m.start()):
-            return None
         if state.in_link:
             if not escape_in_link:
                 return None
@@ -455,6 +471,8 @@ def _bracket_rule(
             pos = inline.parse_link(link_m, state)
             if pos is not None:
                 return pos
+        if _after_scheme_run(state.src, m.start()):
+            return None
         state.append_token({"type": token_type, "raw": m.group(0)})
         return m.end()
 
