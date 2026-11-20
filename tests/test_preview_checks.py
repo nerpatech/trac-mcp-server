@@ -1706,79 +1706,172 @@ def test_non_link_literal_markup_carries_no_suggestion():
 
 
 # ---------------------------------------------------------------------
-# Ticket #250: a `[...](...)` glued to an identifier, `]` or `)` is
-# code-like prose the converter declined, not an unconverted link.
+# Ticket #250: a render match equal to a span the SOURCE escaped with
+# Trac's `!` is text the author (or the converter, #241/#249) chose to
+# keep as text, not a Markdown link that failed to convert.
 # ---------------------------------------------------------------------
 
 
-def _literal_markup_findings(html):
+def _literal_markup_findings(html, tracwiki=""):
     return [
         w
         for w in build_warnings(
             None,
-            "",
+            tracwiki,
             extract_facts(html),
             probes={},
             check_targets=False,
+            source_format="tracwiki",
         )
         if w["code"] == "literal_markup_in_render"
     ]
 
 
 @pytest.mark.parametrize(
-    "prose",
+    "source, rendered",
     [
-        "handlers['get'](req, resp)",
-        "x[0](a, b)",
-        "f(x)['k'](a b)",
-        "x['a']['b'](c, d)",
-        "rows_2[0](a b)",
+        (
+            "handlers!['get'](req, resp) ok.",
+            "handlers['get'](req, resp) ok.",
+        ),
+        ("x![0](a, b)", "x[0](a, b)"),
+        ("f(x)!['k'](a b)", "f(x)['k'](a b)"),
+        # The render's only match is `['b'](c, d)`: `['a']` is followed
+        # by `[`, not `(`. The source escapes that same span.
+        ("x!['a']!['b'](c, d)", "x['a']['b'](c, d)"),
+        ("rows_2![0](a b)", "rows_2[0](a b)"),
     ],
     ids=[
-        "after-letter",
-        "after-letter-numeric",
+        "converter-form",
+        "numeric-index",
         "after-paren",
-        "after-bracket",
-        "after-digit-underscore",
+        "chained-subscript",
+        "digit-underscore",
     ],
 )
-def test_code_like_link_shape_is_not_literal_markup(prose):
-    assert _literal_markup_findings(f"<p>{prose}</p>") == []
+def test_escaped_code_like_link_shape_is_not_literal_markup(
+    source, rendered
+):
+    assert _literal_markup_findings(f"<p>{rendered}</p>", source) == []
 
 
 @pytest.mark.parametrize(
-    "prose, matched",
+    "html, source, matched",
     [
-        ("see [text](url with space)", "[text](url with space)"),
-        ("[text](url with space)", "[text](url with space)"),
-        ("([docs](http://x y))", "[docs](http://x y)"),
-        # Python's \w matches CJK; CJK prose glues a real link to the
-        # preceding character, so it must keep blocking.
         (
+            "<p>see [text](url with space)</p>",
+            "see [text](url with space)",
+            "[text](url with space)",
+        ),
+        (
+            "<p>[text](url with space)</p>",
+            "[text](url with space)",
+            "[text](url with space)",
+        ),
+        (
+            "<p>([docs](http://x y))</p>",
+            "([docs](http://x y))",
+            "[docs](http://x y)",
+        ),
+        # Python's \w matches CJK; CJK prose glues a real link to the
+        # preceding character, so no glue rule may skip it.
+        (
+            "<p>\u53c2\u89c1[\u6587\u6863](http://x y)</p>",
             "\u53c2\u89c1[\u6587\u6863](http://x y)",
             "[\u6587\u6863](http://x y)",
         ),
+        # `prose_text` joins text across elements with no separator, so
+        # the character before the match can belong to another element.
+        ("<p><a>a</a>[b](c d)</p>", "[wiki:a a][b](c d)", "[b](c d)"),
+        (
+            "<p><strong>Note</strong>[text](url with space)</p>",
+            "\x27\x27\x27Note\x27\x27\x27[text](url with space)",
+            "[text](url with space)",
+        ),
+        ("<p>x<br />[a](b c)</p>", "x[[br]][a](b c)", "[a](b c)"),
+        (
+            "<table><tr><td>abc</td><td>[x](y z)</td></tr></table>",
+            "||abc||[x](y z)||",
+            "[x](y z)",
+        ),
+        # A TracWiki write with no escape is never skipped, whatever
+        # precedes the match.
+        (
+            "<p>see the docs[here](http://x/a b)</p>",
+            "see the docs[here](http://x/a b)",
+            "[here](http://x/a b)",
+        ),
+        (
+            "<p>arr[i and [docs](http://x y)</p>",
+            "arr[i and [docs](http://x y)",
+            "[i and [docs](http://x y)",
+        ),
     ],
-    ids=["after-space", "at-start", "after-open-paren", "after-cjk"],
+    ids=[
+        "after-space",
+        "at-start",
+        "after-open-paren",
+        "after-cjk",
+        "after-anchor-element",
+        "after-strong-element",
+        "after-br",
+        "table-cells",
+        "tracwiki-glued-no-escape",
+        "overlapping-label",
+    ],
 )
-def test_real_unconverted_link_still_blocks(prose, matched):
-    found = _literal_markup_findings(f"<p>{prose}</p>")
+def test_unescaped_link_shape_still_blocks(html, source, matched):
+    found = _literal_markup_findings(html, source)
     assert len(found) == 1, found
     assert found[0]["severity"] == "error"
     assert found[0]["evidence"]["matched"] == matched
 
 
-def test_a_skipped_match_does_not_hide_a_later_real_link():
+def test_an_escaped_match_does_not_hide_a_later_real_link():
     found = _literal_markup_findings(
         "<p>handlers['get'](req, resp) and then "
-        "[text](url with space) here.</p>"
+        "[text](url with space) here.</p>",
+        "handlers!['get'](req, resp) and then "
+        "[text](url with space) here.",
     )
     assert len(found) == 1, found
-    assert found[0]["severity"] == "error"
     assert found[0]["evidence"]["matched"] == "[text](url with space)"
 
 
-def test_code_like_prose_converts_and_passes_the_gate():
+def test_an_escaped_match_does_not_hide_an_overlapping_real_link():
+    """The scan resumes one character after a skipped match, not at its
+    end: the skipped `[i and [docs](http://x y)` contains a real link."""
+    found = _literal_markup_findings(
+        "<p>arr[i and [docs](http://x y)</p>",
+        "arr![i and [docs](http://x y)",
+    )
+    assert len(found) == 1, found
+    assert found[0]["evidence"]["matched"] == "[docs](http://x y)"
+
+
+def test_one_escaped_occurrence_whitelists_one_render_match():
+    found = _literal_markup_findings(
+        "<p>a [t](u v) b [t](u v)</p>", "a![t](u v) b [t](u v)"
+    )
+    assert len(found) == 1, found
+    assert found[0]["evidence"]["matched"] == "[t](u v)"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{{\nx![t](u v)\n}}}\ntext [t](u v)",
+        "`x![t](u v)` text [t](u v)",
+        "```\nx![t](u v)\n```\ntext [t](u v)",
+    ],
+    ids=["tracwiki-block", "backtick-span", "markdown-fence"],
+)
+def test_an_escape_in_code_does_not_whitelist_prose(source):
+    found = _literal_markup_findings("<p>text [t](u v)</p>", source)
+    assert len(found) == 1, found
+
+
+def test_escaped_code_like_prose_converts_and_passes_the_gate():
     """End to end: the converter escapes the shape (#241), Trac renders
     it as plain text (recorded render below), and the gate lets it by."""
     from trac_mcp_server.converters import markdown_to_tracwiki

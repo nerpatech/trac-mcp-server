@@ -7,6 +7,7 @@ without a server. Warning codes map one-to-one onto ticket #56 comment 1's
 """
 
 import re
+from collections import Counter
 from typing import Any
 from urllib.parse import unquote
 
@@ -73,17 +74,13 @@ _RENDER_TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{|\}\}\}")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
 _MARKDOWN_FENCE_RE = re.compile(r"```")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
-# Characters that, directly before a Markdown-link match, make it code-like
-# prose rather than a link (#250): ASCII identifier characters, `]`, `)`.
-_CODE_LIKE_LINK_PREFIX = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_])"
-)
 
 # The same shape with its halves named, for the fix suggestion (ticket
 # #64 section 5). Kept separate from `_MARKDOWN_LINK_RE` rather than
-# adding groups to it: that one is used with `.search` against a whole
-# render and its job is detection, this one is used with `.fullmatch`
-# against a single already-matched token and its job is rewriting.
+# adding groups to it: that one is used with `.search` against the
+# prose of a whole render (resuming after a skipped match, #250) and its
+# job is detection, this one is used with `.fullmatch` against a single
+# already-matched token and its job is rewriting.
 _MARKDOWN_LINK_PARTS_RE = re.compile(
     r"\[(?P<label>[^\]\n]+)\]\((?P<target>[^)\n]+)\)"
 )
@@ -1535,7 +1532,65 @@ def _check_unconfigured_intertrac_prefix(
     return warnings
 
 
-def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
+_ESCAPED_LINK_RE = re.compile("!(" + _MARKDOWN_LINK_RE.pattern + ")")
+
+
+def _escaped_link_spans(tracwiki: str) -> Counter[str]:
+    """The `[...](...)` spans the source escapes with Trac's `!`, counted
+    (ticket #250).
+
+    The converter writes code-like prose as ``handlers!['get'](req, resp)``
+    and ``x![0](a, b)`` (#241, #249). Trac consumes the ``!`` and shows
+    ``handlers['get'](req, resp)`` as text, which the Markdown-link
+    pattern then matches in the render. A match equal to a span the
+    source escaped is text the author (or the converter) explicitly kept
+    as text; a Markdown link that failed to convert never carries the
+    ``!``. A hand-written TracWiki write that escapes the bracket works
+    the same way. Code is blanked first (fences, then inline code
+    spans, same length), because a ``!`` inside code is not an escape
+    and must not whitelist a prose match.
+
+    A Counter, not a set: one escaped occurrence whitelists one render
+    match, so an unescaped copy of the same text still blocks.
+
+    Measured over 3,158 cached documents of both stores, the rule skips
+    0 matches and the same 5 documents fire before and after. One known
+    remaining false positive: the `Project` page, where
+    ``handlers['get'](req, resp)`` is a TicketQuery macro's output (a
+    ticket summary) and is not in the page source.
+    """
+    blanked = blank_inline_code_spans(blank_code_fences(tracwiki))
+    return Counter(
+        m.group(1) for m in _ESCAPED_LINK_RE.finditer(blanked)
+    )
+
+
+def _first_unescaped_link_match(
+    prose: str, escaped: Counter[str]
+) -> re.Match[str] | None:
+    """The first Markdown-link match in ``prose`` that the source did not
+    escape, consuming one escaped occurrence per skipped match.
+
+    Resumes one character after a skipped match, not at its end: the
+    label class accepts `[`, so a skipped `[i and [docs](x y)` contains
+    a real link that must still be tested.
+    """
+    escaped = Counter(escaped)
+    pos = 0
+    while True:
+        match = _MARKDOWN_LINK_RE.search(prose, pos)
+        if match is None:
+            return None
+        if escaped[match.group(0)] > 0:
+            escaped[match.group(0)] -= 1
+            pos = match.start() + 1
+            continue
+        return match
+
+
+def _check_literal_markup_in_render(
+    facts: PreviewFacts, tracwiki: str = ""
+) -> list[dict]:
     """Markup that should have been converted but survived as literal
     text in the rendered page -- scoped to ``facts.prose_text`` (NOT
     ``facts.plain_text``), which excludes ``<pre>``/``<code>`` subtrees.
@@ -1550,8 +1605,14 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
     ``facts``, which every caller of `build_warnings` already has, so it
     lives in the shared assembly with a single call site. Two call sites
     is precisely how the blind spot arose.
+
+    Ticket #250: a Markdown-link match in the render that equals a span
+    the stored ``tracwiki`` escaped with Trac's ``!`` is skipped, once
+    per escaped occurrence (see `_escaped_link_spans`). Pass ``""`` and
+    nothing is skipped.
     """
     warnings = []
+    escaped_links = _escaped_link_spans(tracwiki)
     for pattern, label in (
         (_RENDER_TRACWIKI_TABLE_RE, "TracWiki table"),
         (_RENDER_TRACWIKI_BLOCK_RE, "TracWiki code-block delimiter"),
@@ -1560,31 +1621,8 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
         (_MARKDOWN_LINK_RE, "Markdown link"),
     ):
         if pattern is _MARKDOWN_LINK_RE:
-            # A Markdown link is recognised by the converter whatever
-            # precedes it (`rows[0](x)` converts to a real link), so a
-            # `[...](...)` that survives glued to an identifier
-            # character, `]` or `)` is code-like prose the parser
-            # declined (a destination with a space, e.g.
-            # `handlers['get'](req, resp)`, which #241 and #249 write
-            # with a `!` escape and Trac shows as text), not a link that
-            # failed to convert. ASCII only, on purpose: `\w` matches
-            # CJK, and CJK prose glues a real link to the preceding
-            # character with no space, so that link must keep blocking.
-            # Report the first match that is not skipped, so a real
-            # unconverted link after a code-like one still blocks.
-            # Measured over 3,158 cached documents of both stores: 5
-            # render a Markdown-link match; the rule skips exactly 1
-            # (#250's own summary on the `Project` page) and keeps the
-            # 9 others, each preceded by a space or `(`.
-            text = facts.prose_text
-            match = next(
-                (
-                    m
-                    for m in pattern.finditer(text)
-                    if m.start() == 0
-                    or text[m.start() - 1] not in _CODE_LIKE_LINK_PREFIX
-                ),
-                None,
+            match = _first_unescaped_link_match(
+                facts.prose_text, escaped_links
             )
         else:
             match = pattern.search(facts.prose_text)
@@ -2071,7 +2109,7 @@ def build_warnings(
     # Last (ticket #77), so the verify path's warning ordering stays
     # byte-identical to what `build_verify_warnings` produced when it
     # appended this itself.
-    warnings.extend(_check_literal_markup_in_render(facts))
+    warnings.extend(_check_literal_markup_in_render(facts, tracwiki))
     warnings.extend(_check_broken_inline_markup_in_render(facts))
 
     allowed = _allowed_codes(markdown_source, tracwiki)
