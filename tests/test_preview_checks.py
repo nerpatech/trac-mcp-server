@@ -1706,6 +1706,100 @@ def test_non_link_literal_markup_carries_no_suggestion():
 
 
 # ---------------------------------------------------------------------
+# Ticket #250: a `[...](...)` glued to an identifier, `]` or `)` is
+# code-like prose the converter declined, not an unconverted link.
+# ---------------------------------------------------------------------
+
+
+def _literal_markup_findings(html):
+    return [
+        w
+        for w in build_warnings(
+            None,
+            "",
+            extract_facts(html),
+            probes={},
+            check_targets=False,
+        )
+        if w["code"] == "literal_markup_in_render"
+    ]
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "handlers['get'](req, resp)",
+        "x[0](a, b)",
+        "f(x)['k'](a b)",
+        "x['a']['b'](c, d)",
+        "rows_2[0](a b)",
+    ],
+    ids=[
+        "after-letter",
+        "after-letter-numeric",
+        "after-paren",
+        "after-bracket",
+        "after-digit-underscore",
+    ],
+)
+def test_code_like_link_shape_is_not_literal_markup(prose):
+    assert _literal_markup_findings(f"<p>{prose}</p>") == []
+
+
+@pytest.mark.parametrize(
+    "prose, matched",
+    [
+        ("see [text](url with space)", "[text](url with space)"),
+        ("[text](url with space)", "[text](url with space)"),
+        ("([docs](http://x y))", "[docs](http://x y)"),
+        # Python's \w matches CJK; CJK prose glues a real link to the
+        # preceding character, so it must keep blocking.
+        (
+            "\u53c2\u89c1[\u6587\u6863](http://x y)",
+            "[\u6587\u6863](http://x y)",
+        ),
+    ],
+    ids=["after-space", "at-start", "after-open-paren", "after-cjk"],
+)
+def test_real_unconverted_link_still_blocks(prose, matched):
+    found = _literal_markup_findings(f"<p>{prose}</p>")
+    assert len(found) == 1, found
+    assert found[0]["severity"] == "error"
+    assert found[0]["evidence"]["matched"] == matched
+
+
+def test_a_skipped_match_does_not_hide_a_later_real_link():
+    found = _literal_markup_findings(
+        "<p>handlers['get'](req, resp) and then "
+        "[text](url with space) here.</p>"
+    )
+    assert len(found) == 1, found
+    assert found[0]["severity"] == "error"
+    assert found[0]["evidence"]["matched"] == "[text](url with space)"
+
+
+def test_code_like_prose_converts_and_passes_the_gate():
+    """End to end: the converter escapes the shape (#241), Trac renders
+    it as plain text (recorded render below), and the gate lets it by."""
+    from trac_mcp_server.converters import markdown_to_tracwiki
+    from trac_mcp_server.preview.gate import classify
+
+    tracwiki = markdown_to_tracwiki("handlers['get'](req, resp) ok.")
+    assert tracwiki == "handlers!['get'](req, resp) ok."
+    rendered = "<p>\nhandlers['get'](req, resp) ok.\n</p>\n"
+    warnings = build_warnings(
+        "handlers['get'](req, resp) ok.",
+        tracwiki,
+        extract_facts(rendered),
+        probes={},
+        check_targets=False,
+        source_format="markdown",
+    )
+    blocking, _ = classify(warnings)
+    assert blocking == [], blocking
+
+
+# ---------------------------------------------------------------------
 # Ticket #113: `attachment:` links in a pre-write render.
 #
 # Measured on the live server: `wiki.wikiToHtml` has no page/ticket

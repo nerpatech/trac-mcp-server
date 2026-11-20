@@ -73,6 +73,11 @@ _RENDER_TRACWIKI_BLOCK_RE = re.compile(r"\{\{\{|\}\}\}")
 _MARKDOWN_BOLD_RE = re.compile(r"\*\*[^*\n]+\*\*")
 _MARKDOWN_FENCE_RE = re.compile(r"```")
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]\n]+\]\([^)\n]+\)")
+# Characters that, directly before a Markdown-link match, make it code-like
+# prose rather than a link (#250): ASCII identifier characters, `]`, `)`.
+_CODE_LIKE_LINK_PREFIX = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_])"
+)
 
 # The same shape with its halves named, for the fix suggestion (ticket
 # #64 section 5). Kept separate from `_MARKDOWN_LINK_RE` rather than
@@ -1554,7 +1559,35 @@ def _check_literal_markup_in_render(facts: PreviewFacts) -> list[dict]:
         (_MARKDOWN_FENCE_RE, "Markdown code fence"),
         (_MARKDOWN_LINK_RE, "Markdown link"),
     ):
-        match = pattern.search(facts.prose_text)
+        if pattern is _MARKDOWN_LINK_RE:
+            # A Markdown link is recognised by the converter whatever
+            # precedes it (`rows[0](x)` converts to a real link), so a
+            # `[...](...)` that survives glued to an identifier
+            # character, `]` or `)` is code-like prose the parser
+            # declined (a destination with a space, e.g.
+            # `handlers['get'](req, resp)`, which #241 and #249 write
+            # with a `!` escape and Trac shows as text), not a link that
+            # failed to convert. ASCII only, on purpose: `\w` matches
+            # CJK, and CJK prose glues a real link to the preceding
+            # character with no space, so that link must keep blocking.
+            # Report the first match that is not skipped, so a real
+            # unconverted link after a code-like one still blocks.
+            # Measured over 3,158 cached documents of both stores: 5
+            # render a Markdown-link match; the rule skips exactly 1
+            # (#250's own summary on the `Project` page) and keeps the
+            # 9 others, each preceded by a space or `(`.
+            text = facts.prose_text
+            match = next(
+                (
+                    m
+                    for m in pattern.finditer(text)
+                    if m.start() == 0
+                    or text[m.start() - 1] not in _CODE_LIKE_LINK_PREFIX
+                ),
+                None,
+            )
+        else:
+            match = pattern.search(facts.prose_text)
         if match:
             evidence: dict[str, Any] = {"matched": match.group(0)}
             suggestion = _bracket_form_for_markdown_link(match.group(0))
