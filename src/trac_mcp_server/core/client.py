@@ -2553,8 +2553,11 @@ class TracClient:
             enum_type: One of "priority", "resolution", "severity", "type",
                 "version". Must be a valid Trac enum service name.
             name: New enum value name.
-            value: Sort-order integer (default: 0). Trac requires this
-                positional argument; passing 0 appends to the end.
+            value: Sort-order integer (default: 0) for the four enum
+                types (priority, resolution, severity, type); Trac requires
+                this positional argument and 0 appends to the end. Ignored
+                for "version", which Trac models as an object created from
+                an attributes dict.
 
         Raises:
             ValueError: If enum_type is not in the supported whitelist.
@@ -2572,7 +2575,12 @@ class TracClient:
                 f"Unsupported enum_type '{enum_type}'. "
                 "Expected one of: priority, resolution, severity, type, version."
             )
-        # Trac's enum.create requires both name and value (sort order).
+        if enum_type == "version":
+            # TracXMLRPC models Version with ticketModelFactory: create takes
+            # (name, attributes dict). An empty dict leaves Trac's defaults.
+            self._rpc_request("ticket.version", "create", name, {})
+            return
+        # The four real enums' create takes (name, value), value = sort order.
         self._rpc_request(f"ticket.{enum_type}", "create", name, value)
 
     def delete_enum(self, enum_type: str, name: str) -> None:

@@ -322,3 +322,45 @@ def test_specs_require_ticket_admin_for_deletes():
     assert specs_by_name["ticket_enum_delete"].permissions == frozenset(
         {"TICKET_ADMIN"}
     )
+
+
+# -- Live round-trip (create -> list -> delete a version) -------------------
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_live_version_create_list_delete():
+    """End-to-end on `/trac_test`: a version is created, listed, deleted.
+
+    Trac /trac_mcp_server #251. `create_enum` sent a sort-order integer to
+    TracXMLRPC's Version model, which wants an attributes dict, so creating
+    a version failed live with ``'int' object has no attribute 'items'``;
+    no mocked row could see that. The version is deleted in `finally`, so
+    a failed assertion does not leave it on the instance.
+    """
+    import uuid
+
+    from tests.live_helpers import trac_test_client
+
+    client = trac_test_client()
+    name = f"t251-{uuid.uuid4().hex[:8]}"
+
+    try:
+        created = await _handle_enum_create(
+            client, {"enum_type": "version", "name": name}
+        )
+        assert not created.isError, created.content[0].text
+
+        listed = await _handle_enum_list(
+            client, {"enum_type": "version"}
+        )
+        assert not listed.isError, listed.content[0].text
+        assert name in json.loads(listed.content[0].text)
+    finally:
+        deleted = await _handle_enum_delete(
+            client, {"enum_type": "version", "name": name}
+        )
+
+    assert not deleted.isError, deleted.content[0].text
+    after = await _handle_enum_list(client, {"enum_type": "version"})
+    assert name not in json.loads(after.content[0].text)
