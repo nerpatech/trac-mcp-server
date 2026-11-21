@@ -512,8 +512,8 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
   "arguments": {
     "ticket_id": 42,
     "comment": "Fixed in commit abc123. The issue was a missing timeout configuration.",
-    "status": "closed",
-    "resolution": "fixed"
+    "action": "resolve",
+    "action_resolve_resolve_resolution": "fixed"
   }
 }
 ```
@@ -2445,11 +2445,11 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **One of** | - | Target wiki page name |
+| `page_name` | string | **One of** | - | Target wiki page name; or pass its alias `page` |
 | `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
-| `content` | string | One of | - | The document text, in place of `file_path` |
+| `content` | string | One of | - | The document text, in place of `file_path`; pass this or `file_path` |
 | `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection. With neither `filename` nor `format`, inline content is stored as TracWiki, verbatim |
-| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local`; pass this or `content` |
 | `encoding` | string | No | detected | The codec of the server-side `file_path`, a Python text codec name such as `cp1251` or `utf-8`. The file is decoded strictly with it, with no fallback to detection, and no "not UTF-8" warning is added (you said what it is). Invalid with `content`, which is already text. An unknown or non-text codec (`base64`, `rot13`) or bytes that do not decode are a `validation_error` naming the codec and byte offset, never the file's content, and nothing is stored |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
@@ -2556,6 +2556,13 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 | `format` | string | No | `"markdown"` | Output format: `markdown` (Trac's render translated to Markdown), `html` (Trac's render as a complete minimal HTML document: `<!doctype html>`, `<meta charset="utf-8">`, `<title>` the escaped page name, the fragment as `<body>`; no CSS; only the `href` values of links are rewritten, as for `link_rewrites`, and every other byte is Trac's own) or `tracwiki` (the stored source). The `html` read is pinned to the page's current version the same way the `markdown` one is, and reads no source |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
 | `link_rewrites` | array of `{from, to}` | No | *(the server's configured map)* | Link-rewrite rules for `format=markdown` and `format=html`: a link target starting with `from` (non-empty string) has that prefix replaced by `to` (string), the longest `from` first. Replaces the configured map for this call; `[]` disables rewriting. Image sources are never rewritten, and an in-page anchor is written `#frag`, never mapped. The input schema refuses an empty `from`, a non-string value, a missing key and any extra key in a rule (before the handler runs, as an input validation error); the handler's own `validation_error`, returned before Trac is read, covers a duplicate `from`. For `format=tracwiki` the handler ignores the argument (it is not validated), though the schema still applies |
+
+Each link-rewrite object:
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `from` | string | **Yes** | - | URL prefix to replace (non-empty) |
+| `to` | string | **Yes** | - | Replacement prefix |
 
 **Success Response:**
 ```json
@@ -2692,11 +2699,11 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **One of** | - | Wiki page name to attach to. The page must already exist. |
+| `page_name` | string | **One of** | - | Wiki page name to attach to. The page must already exist; or pass its alias `page` |
 | `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `filename` | string | No | - | Attachment filename stored on the page. Defaults to the basename of file_path; required with content_base64. |
-| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. |
-| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). |
+| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. Pass this or `file_path`. |
+| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). Pass this or `content_base64`. |
 | `description` | string | No | `""` | Attachment description |
 | `replace` | boolean | No | `false` | If true, overwrite an existing attachment with the same filename. If false and a collision occurs, Trac stores the file under a renamed path; see attached_filename in the response. Default false. |
 
