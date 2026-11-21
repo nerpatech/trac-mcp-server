@@ -372,23 +372,30 @@ _SCHEME_RUN_MAX = 2048
 
 
 def _after_scheme_run(
-    src: str, end: int, *, skip_emphasis: bool = False
+    src: str, end: int, *, delimiters_end_token: bool = False
 ) -> bool:
-    """Whether the whitespace-delimited token ending at `end` is a scheme
-    run (`_SCHEME_RUN_RE`). Scans backwards from `end` to the previous
+    """Whether the token ending at `end` is a scheme run
+    (`_SCHEME_RUN_RE`). Scans backwards from `end` to the previous
     whitespace, and gives up at once on a character the pattern never
     allows (`[`, `]`, `>`, `)`).
 
-    `skip_emphasis` drops a leading run of the emphasis delimiters `*`, `_`
-    and `~` from the token first. mistune 3.4 parses emphasis over the
-    whole source, so `*x:['a']*` still has its `*` in `src` where the token
-    starts; 3.2 and 3.3 parse the emphasis content as a source of its own,
-    which starts at `x:`."""
+    With `delimiters_end_token` a `*` or `_` ends the token as whitespace
+    does. mistune 3.2 and 3.3 parse the content of an emphasis span as an
+    inline source of its own, so a real delimiter is a boundary there and
+    the token starts after it (`*x:['a']*` reads `x:`; `x:*['a']*` reads
+    nothing). mistune 3.4 parses emphasis over the whole source and leaves
+    the delimiters in `src`, so the 3.4 path asks for the same boundary.
+    `~` is not one: no strikethrough plugin is enabled, so it is text.
+    A `*` or `_` that is no delimiter is a boundary here too, where 3.2
+    reads the whole token: an unclosed one before a bare `word:` (`_x:[0]`,
+    a known residual: bare `word:` prefixes are being redesigned on #264)
+    and an intraword `_` that follows a non-scheme character
+    (`path/to_x:['a']`)."""
     i = end
     floor = max(0, end - _SCHEME_RUN_MAX)
     while i > floor:
         c = src[i - 1]
-        if c.isspace():
+        if c.isspace() or (delimiters_end_token and c in "*_"):
             break
         if c in "[]>)":
             return False
@@ -396,9 +403,6 @@ def _after_scheme_run(
     else:
         if i > 0 and not src[i - 1].isspace():
             return False
-    if skip_emphasis:
-        while i < end and src[i] in "*_~":
-            i += 1
     return _SCHEME_RUN_RE.match(src, i, end) is not None
 
 
@@ -594,7 +598,8 @@ def _bracket_rule(
     The opener of a link that does not form after all (an inner link
     deactivates it) survives as a `{token_type}_open` token, which the
     renderer writes like the shape. The scheme-run check skips emphasis
-    delimiters, which 3.4 leaves in the source (`skip_emphasis`).
+    delimiters as token boundaries, which 3.4 leaves in the source
+    (`delimiters_end_token`).
     """
 
     if _DEFERRED_LINK_CLOSE:
@@ -623,7 +628,7 @@ def _bracket_rule(
                 assert opener["type"] == "text" and opener["raw"] == "["
                 opener["type"] = f"{token_type}_open"
                 return pos
-            if _after_scheme_run(src, br, skip_emphasis=True):
+            if _after_scheme_run(src, br, delimiters_end_token=True):
                 return inline.parse_link(link_m, state)
             state.append_token({"type": token_type, "raw": raw})
             return m.end()

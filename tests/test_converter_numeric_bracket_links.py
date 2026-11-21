@@ -243,6 +243,13 @@ EMPHASIS_AND_HTML = {
         "**_x:[0]_**",
         "'''''x:[0]'''''",
     ),
+    "shape right after the opening delimiter": (
+        "x:_[0]_",
+        "x:''![0]''",
+    ),
+    # `~` is no delimiter (no strikethrough plugin), so `~~x:` is no scheme
+    # run and the shape is escaped.
+    "tildes are not delimiters": ("~~x:[0]~~", "~~x:![0]~~"),
     # `<a name=q>` sets `in_link` in mistune, but is no link label.
     "inside an inline-html anchor": (
         "<a name=q> y[0] z",
@@ -260,6 +267,17 @@ def test_a_numeric_bracket_beside_emphasis_or_inline_html(
     markdown, wiki
 ):
     assert markdown_to_tracwiki(markdown) == wiki
+
+
+def test_an_unclosed_delimiter_before_a_bare_scheme_run():
+    """KNOWN RESIDUAL (Trac #264). An unclosed `_` or `*` directly before
+    a bare `word:` is plain text on both versions, but on 3.4 it still
+    ends the scheme-run token, so the shape after `x:` is left bare where
+    3.2 escapes it. Bare `word:` prefixes are wrong both ways in Trac and
+    are being redesigned on #264, so the 3.4 output is pinned, not fixed."""
+    for md in ("_x:[0]", "*x:[0]"):
+        expected = md if _DEFERRED_LINK_CLOSE else md[:-3] + "![0]"
+        assert markdown_to_tracwiki(md) == expected
 
 
 # Unclosed openers make `[`-matching quadratic if every shape rescans to the
@@ -281,7 +299,10 @@ def test_a_numeric_bracket_beside_emphasis_or_inline_html(
 def test_many_open_brackets_and_shapes_convert_in_linear_time(markdown):
     start = time.perf_counter()
     markdown_to_tracwiki(markdown)
-    assert time.perf_counter() - start < 2.0
+    # 10 s, not tighter: the bracket map takes about 0.05 s at n=2000 and the
+    # per-shape rescan about 100 s or more, so the bound keeps a margin of
+    # 200x either way and cannot flake on a loaded runner.
+    assert time.perf_counter() - start < 10.0
 
 
 # -- Linear time: the regex must not backtrack catastrophically ---------------
