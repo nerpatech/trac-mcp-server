@@ -61,8 +61,10 @@ This installs the `trac-mcp-server` command and all dependencies.
 For development and testing, install in editable mode with dev dependencies:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]" -c constraints/deploy.txt
 ```
+
+Use the constraints file: it is the environment CI and `ci.sh` check against (Trac #262).
 
 ### pipx (Isolated Environment)
 

@@ -1,0 +1,31 @@
+# Reports upcoming breakage weekly without touching master's CI: the
+# suite runs against the NEWEST releases the pyproject ranges allow (what
+# a fresh `pip install` gets), with no constraints file, on the newest
+# CPython 3.12 patch. A red run here means a pin bump needs work first
+# (Trac #262). It runs no check_env.py: being unconstrained is the point.
+# Exact pins (ruff, pyright) and capped packages (mistune <3.4, Trac #263)
+# are NOT exercised here: pip installs those as pyproject says.
+name: Upstream (unconstrained)
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  upstream:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          # Deliberately NOT python-version-file: this is the one job on
+          # the newest CPython patch, so a stdlib change like the 3.12.12
+          # HTMLParser one (Trac #262) shows up here weekly while master's
+          # CI stays on the declared 3.12.8.
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -e ".[dev]"
+      - name: Installed versions
+        run: pip freeze
+      - run: pytest tests/

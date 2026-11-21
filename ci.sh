@@ -1,6 +1,7 @@
 #!/bin/bash
-# Local CI — mirrors GitHub Actions checks
-# Run before pushing to catch issues locally
+# Local CI — mirrors GitHub Actions checks: the same constraints
+# (constraints/deploy.txt) and Python (.python-version), verified first
+# by the Environment step. Run before pushing to catch issues locally
 #
 # This script is hermetic on purpose: no credentials, no daemon, no network,
 # so it can only fail for reasons belonging to the change under test. The
@@ -8,6 +9,12 @@
 # (ticket #81).
 set -e
 
+echo "=== Environment ==="
+# Refuses a stale or drifted venv, so a local pass means GitHub (same
+# constraints, same Python) passes (Trac #262).
+python scripts/check_env.py
+
+echo ""
 echo "=== Lint ==="
 ruff check src/ tests/ scripts/
 ruff format --check src/ tests/ scripts/

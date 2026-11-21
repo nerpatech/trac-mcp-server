@@ -435,12 +435,35 @@ def test_a_nameless_equals_attribute_does_not_hide_the_href():
     )
 
 
+def _reported_href(html):
+    """The href value html.parser reports for ``html`` on THIS
+    interpreter (the one the rewrite is specified against)."""
+    seen = []
+
+    class _Href(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            seen.extend(v for k, v in attrs if k == "href")
+
+    parser = _Href(convert_charrefs=False)
+    parser.feed(html)
+    parser.close()
+    return seen[0]
+
+
 def test_a_doubled_equals_yields_the_value_htmlparser_reports():
+    # What html.parser reports for `href==` depends on the CPython
+    # patch release: 3.12.11 and older report the URL after the second
+    # `=`, 3.12.12+ and 3.13 (HTML5) report `="URL"`, a value that is
+    # not a Trac URL. The rewrite maps whatever is reported, so the
+    # expectation is derived from the running interpreter (Trac #262).
     html = f'<a href=="{_T}A">x</a>'
-    assert (
-        rewrite_hrefs(html, _PUB, None)
-        == '<a href=="https://pub/A">x</a>'
-    )
+    reported = _reported_href(html)
+    if reported == f"{_T}A":
+        expected = '<a href=="https://pub/A">x</a>'
+    else:
+        assert reported == f'="{_T}A"'
+        expected = html
+    assert rewrite_hrefs(html, _PUB, None) == expected
 
 
 _ODD_TAGS = [

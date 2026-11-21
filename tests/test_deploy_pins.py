@@ -56,9 +56,11 @@ def test_every_runtime_dependency_is_pinned():
 
 
 def test_every_pin_satisfies_its_specifier():
-    # A pin pyproject.toml no longer accepts passes CI -- nothing there
-    # installs with the constraints -- and fails only on the deploy host,
-    # after deploy.sh has already pulled.
+    # Every GitHub job installs with `-c constraints/deploy.txt` (#262), so
+    # pip would refuse a pin pyproject.toml no longer accepts -- but only
+    # when a job runs a fresh install. This test names the offending pin
+    # and package up front, instead of failing on the deploy host after
+    # deploy.sh has already pulled.
     pins = _pins()
     rejected = [
         f"{r.name}: pinned {pins[_norm(r.name)]}, pyproject wants {r.specifier}"
