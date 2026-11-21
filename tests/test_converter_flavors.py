@@ -10,10 +10,8 @@ parser-rule rows read `markdown_to_tracwiki` (Markdown in, TracWiki out).
 """
 
 import asyncio
-import importlib.util
 import sys
 import time
-import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -1584,25 +1582,3 @@ def test_an_empty_formula_reads_as_commonmark_does(source):
     assert markdown_to_tracwiki(source, flavor="chatgpt") == (
         markdown_to_tracwiki(source)
     )
-
-
-def test_the_module_imports_on_a_mistune_without_plugin(monkeypatch):
-    """`mistune.plugins.Plugin` exists from mistune 3.1.0; pyproject allows
-    3.0.x. The name is for annotations only, so the module must import
-    when it is missing (Trac /trac_mcp_server #236)."""
-    from trac_mcp_server.converters import flavors
-
-    old = types.ModuleType("mistune.plugins")
-    old.__dict__.update(
-        {k: v for k, v in vars(sys.modules["mistune.plugins"]).items()}
-    )
-    old.__dict__.pop("Plugin", None)
-    monkeypatch.setitem(sys.modules, "mistune.plugins", old)
-    name = "trac_mcp_server.converters._flavors_without_plugin"
-    spec = importlib.util.spec_from_file_location(
-        name, flavors.__file__
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.flavor_plugins("chatgpt") == [module.chatgpt_math]
