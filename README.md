@@ -51,6 +51,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_AUTH_TOKEN` | No | -- | Bearer token required by the `http` transport |
 | `TRAC_MCP_OIDC_RPC_URL` | No | -- | OIDC-protected XML-RPC URL for per-user auth (shared/multi-tenant `http` deployments) -- see [HTTP Transport: OIDC Per-User Auth](docs/reference/http-transport.md#oidc-per-user-auth) |
 | `TRAC_MCP_OIDC_ALLOW_INSECURE_HTTP` | No | `false` | Accept a plain `http` `TRAC_MCP_OIDC_RPC_URL` on a non-loopback host, which sends users' access tokens unencrypted. Refused at startup otherwise |
+| `TRAC_MCP_ACTIVITY_TIMELINE` | No | (empty) | `true`: `user_activity` takes the tickets an account changed from Trac's timeline; needs `[timeline] ticket_show_details = enabled` on the Trac instance |
 | `TRAC_MCP_DISABLED_TOOLS` | No | (empty) | Comma-separated tool names to leave out, e.g. tools needing a Trac plugin the server lacks -- see [Tool Architecture: Disabling Individual Tools](docs/reference/tool-architecture.md#disabling-individual-tools) |
 | `TRAC_MCP_READ_ONLY` | No | `false` | Expose only read-only tools, regardless of transport -- see [Tool Architecture: Read-Only Filtering](docs/reference/tool-architecture.md#read-only-filtering---read-only) |
 | `TRAC_MCP_ALLOWED_HOSTS` | No | -- | Comma-separated `Host` headers the `http` transport accepts besides loopback and the bind address, e.g. `trac-mcp:8080` for a docker-compose service name; replaces YAML `allowed_hosts` |
@@ -159,7 +160,7 @@ trac-mcp ticket-pull 42 body.wiki [--comment N]   # description (or one comment)
 
 It connects with the nearest `.mcp.json` entry (or `--url`). Exit 1 means the server refused and nothing was stored; exit 4 means the write WAS stored but reading it back failed (a `ticket-comment`'s number, a `ticket-comment-edit`'s stored text, or a `wiki-push`'s new page version), so do not retry it. See [CLI Reference](docs/reference/cli.md#trac-mcp) and [File Access](docs/reference/http-transport.md#file-access-file_access).
 
-## Available Tools (54)
+## Available Tools (55)
 
 Every tool below also accepts an optional `instance` argument to route the call to another Trac project on the same host (or a named instance from config) instead of the default -- see [Multiple Instances](docs/reference/configuration.md#multiple-instances) -- except over HTTP with OIDC per-user auth (`TRAC_MCP_OIDC_RPC_URL`), where calls go only to the configured endpoint and the argument is not offered.
 
@@ -252,13 +253,14 @@ These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/RE
 | `milestone_update` | Update existing milestones |
 | `milestone_delete` | Delete milestones |
 
-### Timeline (1)
+### Timeline (2)
 
-`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call returns a `method_not_available` error that says to install the plugin.
+`timeline_search` needs the same `tracrpc_comment` plugin (see [plugins/README.md](plugins/README.md)); without it the call returns a `method_not_available` error that says to install the plugin. `user_activity` works with stock XmlRpcPlugin: it reads the change logs of every ticket changed since the first day. On a Trac that shows ticket updates in its timeline (`[timeline] ticket_show_details = enabled`), set `TRAC_MCP_ACTIVITY_TIMELINE=true`: the tool then takes the tickets the account changed from the timeline instead, which a long period with many changed tickets needs.
 
 | Tool | Description |
 |------|-------------|
 | `timeline_search` | Search the Trac timeline (tickets, wiki edits, changesets, milestones), author-attributed, as plain text |
+| `user_activity` | What one account did in a period: tickets created, ticket changes, comments and attachments, wiki edits; no plugin needed |
 
 ### System (2)
 | Tool | Description |
