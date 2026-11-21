@@ -3,8 +3,11 @@
 import asyncio
 import base64
 import json
+import sys
 import xmlrpc.client
 from types import SimpleNamespace
+
+import pytest
 
 from trac_mcp_server.mcp.tools.user_activity import (
     USER_ACTIVITY_SPECS,
@@ -14,8 +17,21 @@ from trac_mcp_server.mcp.tools.user_activity import (
 HANDLER = USER_ACTIVITY_SPECS[0].handler
 
 
+# TracClient hands dateTime.iso8601 values on as text; other clients give
+# xmlrpc DateTime objects. The fake client builds its data with `stamp`.
+STAMPS = {"text": str, "xmlrpc": xmlrpc.client.DateTime}
+stamp = STAMPS["text"]
+
+
 def dt(text):
-    return xmlrpc.client.DateTime(text)
+    return stamp(text)
+
+
+@pytest.fixture(params=sorted(STAMPS))
+def stamps(request, monkeypatch):
+    monkeypatch.setattr(
+        sys.modules[__name__], "stamp", STAMPS[request.param]
+    )
 
 
 def jwt(claims):
@@ -164,7 +180,7 @@ def call(client, **args):
     return result.structuredContent
 
 
-def test_activities_of_one_day():
+def test_activities_of_one_day(stamps):
     client = FakeClient()
     out = call(
         client,

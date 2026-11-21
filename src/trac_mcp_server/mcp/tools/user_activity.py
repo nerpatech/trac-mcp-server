@@ -114,11 +114,18 @@ def _bound(value: str, zone: zoneinfo.ZoneInfo, end: bool) -> datetime:
 
 
 def _to_utc(value: Any) -> datetime | None:
-    """A Trac timestamp (xmlrpc DateTime, datetime or unix seconds) in UTC.
+    """A Trac timestamp in UTC.
 
-    Trac's XML-RPC sends DateTime values in UTC without a zone.
+    Trac's XML-RPC sends DateTime values in UTC without a zone. TracClient
+    hands them on as text such as "20261105T08:30:00"; xmlrpc DateTime,
+    datetime and unix seconds are read as well.
     """
     match value:
+        case str():
+            seconds = TracClient._parse_trac_time(value.strip())
+            if seconds is None:
+                return None
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
         case xmlrpc.client.DateTime():
             try:
                 parsed = datetime.strptime(
