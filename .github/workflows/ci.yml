@@ -1,3 +1,9 @@
+# One declared environment (Trac #184, #262): every job installs against
+# constraints/deploy.txt on the Python in .python-version, prints what it
+# got, and runs scripts/check_env.py, which fails on any drift from those
+# two files. ci.sh does the same locally, so a local pass is a GitHub
+# pass. A runner image is pinned (ubuntu-24.04) so the OS does not move
+# either; newer upstream releases are watched by upstream.yml instead.
 name: CI
 
 on:
@@ -8,50 +14,60 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
           cache: "pip"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev]" -c constraints/deploy.txt
+      - name: Installed versions
+        run: pip freeze
+      - run: python scripts/check_env.py
       - run: ruff check src/ tests/ scripts/
       - run: ruff format --check src/ tests/ scripts/
 
   typecheck:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
           cache: "pip"
-      # Constrained to the shipped versions so the dependency stubs pyright
-      # reads are the deployed ones, not whatever is newest (drift, Trac #184).
       - run: pip install -e ".[dev]" -c constraints/deploy.txt
+      - name: Installed versions
+        run: pip freeze
+      - run: python scripts/check_env.py
       - run: pyright --pythonpath "$(command -v python)" src/
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
           cache: "pip"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev]" -c constraints/deploy.txt
+      - name: Installed versions
+        run: pip freeze
+      - run: python scripts/check_env.py
       - run: pytest tests/
 
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
           cache: "pip"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev]" -c constraints/deploy.txt
+      - name: Installed versions
+        run: pip freeze
+      - run: python scripts/check_env.py
       - run: bash build.sh
