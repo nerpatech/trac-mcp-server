@@ -399,6 +399,7 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `summary` | string | **Yes** | - | Ticket title |
 | `description` | string | **Yes** | - | Ticket body. TracWiki, stored verbatim |
 | `ticket_type` | string | No | `"defect"` | Ticket type: `defect`, `enhancement`, or `task` |
+| `type` | string | No | - | Alias for `ticket_type` (accepted since `ticket_update`'s own field is named `type`) |
 | `priority` | string | No | - | Priority level (e.g., `blocker`, `critical`, `major`, `minor`, `trivial`) |
 | `severity` | string | No | - | Severity level (e.g., `critical`, `major`, `minor`) |
 | `component` | string | No | - | Component name |
@@ -406,6 +407,7 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `owner` | string | No | - | Assignee username |
 | `cc` | string | No | - | CC email addresses |
 | `keywords` | string | No | - | Keywords/tags |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 
 **Success Response:**
 ```json
@@ -460,7 +462,11 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
 | `comment` | string | No | - | Comment body (optional, max 10000 chars). TracWiki, stored verbatim |
+| `summary` | string | No | - | New summary (ticket title) |
+| `description` | string | No | - | New description, replacing the ticket body. TracWiki, stored verbatim |
+| `type` | string | No | - | New ticket type (e.g., `defect`, `enhancement`, `task`) |
 | `status` | string | No | - | New status |
+| `action` | string | No | - | Trac workflow action to perform (e.g., `accept`, `resolve`, `reopen`, `reassign`); the canonical way to move a ticket through its workflow. Action-specific input fields are passed as `action_<action>_<action>_<field>` keys (e.g., `action_resolve_resolve_resolution='fixed'`) |
 | `priority` | string | No | - | New priority |
 | `severity` | string | No | - | New severity |
 | `component` | string | No | - | New component |
@@ -469,6 +475,9 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `resolution` | string | No | - | Resolution (when closing, e.g., `fixed`, `invalid`, `wontfix`) |
 | `cc` | string | No | - | CC email addresses |
 | `keywords` | string | No | - | Keywords/tags |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
+| `reply_to` | integer | No | - | Comment number to reply to. Prepends Trac's standard `Replying to [comment:N author]:` quote block (quoting that comment's own text) before the new comment. Requires `comment` (minimum: 1) |
+| `base_ts` | string | No | - | Change token from a prior `ticket_get` call's `_ts` field, or the new token a previous `ticket_update` on this ticket returned (a numeric string; pass it through as-is). When provided, the update is rejected with a `version_conflict` error naming what changed if the ticket was modified since that token was read. Strongly recommended: without it, this write silently overwrites any concurrent change |
 
 **Success Response:**
 ```json
@@ -503,8 +512,8 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
   "arguments": {
     "ticket_id": 42,
     "comment": "Fixed in commit abc123. The issue was a missing timeout configuration.",
-    "status": "closed",
-    "resolution": "fixed"
+    "action": "resolve",
+    "action_resolve_resolve_resolution": "fixed"
   }
 }
 ```
@@ -705,6 +714,7 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `tickets` | array | **Yes** | - | List of ticket objects to create |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 
 Each ticket object:
 
@@ -866,6 +876,7 @@ Each ticket object:
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `updates` | array | **Yes** | - | List of update objects with ticket_id and fields to change |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 
 Each update object:
 
@@ -1863,7 +1874,8 @@ The text only; the tool returns no `structuredContent`.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to retrieve |
+| `page_name` | string | **One of** | - | Wiki page name to retrieve |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `version` | integer | No | *(latest)* | Specific version to retrieve (minimum: 1) |
 
 **Success Response:**
@@ -1942,8 +1954,10 @@ Every page with a positive score is returned, best first (ties by page name), so
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to create |
+| `page_name` | string | **One of** | - | Wiki page name to create |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `content` | string | **Yes** | - | Page content. TracWiki, stored verbatim |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `comment` | string | No | - | Change comment |
 
 **Success Response:**
@@ -2003,9 +2017,11 @@ Every page with a positive score is returned, best first (ties by page name), so
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to update |
+| `page_name` | string | **One of** | - | Wiki page name to update |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `content` | string | **Yes** | - | Page content. TracWiki, stored verbatim |
 | `version` | integer | **Yes** | - | The version you read; checked against the page's current version before the write (minimum: 1) |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `comment` | string | No | - | Change comment |
 
 **Success Response:**
@@ -2076,7 +2092,8 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to delete |
+| `page_name` | string | **One of** | - | Wiki page name to delete |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 
 **Success Response:**
 ```json
@@ -2187,7 +2204,8 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to retrieve history for (required) |
+| `page_name` | string | **One of** | - | Wiki page name to retrieve history for |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `limit` | integer | No | - | Maximum revisions to return, newest first. Omit for all revisions. (minimum: 1) |
 
 **Success Response:**
@@ -2266,7 +2284,8 @@ Revisions are newest first. A version whose metadata cannot be fetched (a gap, o
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to diff (required) |
+| `page_name` | string | **One of** | - | Wiki page name to diff |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `to_version` | integer | No | - | End version (default: latest) (minimum: 1) |
 | `from_version` | integer | No | - | Start version, lower than to_version (default: to_version - 1). Not together with from_author. (minimum: 1) |
 | `from_author` | string | No | - | Start at the newest version by this Trac username at or before to_version. An error if that author has none -- never a fall-back to version 1. Not together with from_version. |
@@ -2426,14 +2445,16 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Target wiki page name |
-| `content` | string | One of | - | The document text, in place of `file_path` |
+| `page_name` | string | **One of** | - | Target wiki page name; or pass its alias `page` |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
+| `content` | string | One of | - | The document text, in place of `file_path`; pass this or `file_path` |
 | `filename` | string | No | - | With `content`: the source file's name (e.g. `notes.md`), used only for extension-based format detection. With neither `filename` nor `format`, inline content is stored as TracWiki, verbatim |
-| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local` |
+| `file_path` | string | One of | - | Absolute path on the **server's** filesystem; refused unless `file_access` is `local`; pass this or `content` |
 | `encoding` | string | No | detected | The codec of the server-side `file_path`, a Python text codec name such as `cp1251` or `utf-8`. The file is decoded strictly with it, with no fallback to detection, and no "not UTF-8" warning is added (you said what it is). Invalid with `content`, which is already text. An unknown or non-text codec (`base64`, `rot13`) or bytes that do not decode are a `validation_error` naming the codec and byte offset, never the file's content, and nothing is stored |
 | `comment` | string | No | `""` | Change comment |
 | `format` | string | No | `"auto"` | Source format override: `auto`, `markdown`, or `tracwiki`. Default auto-detects from extension then content |
 | `flavor` | string | No | `"commonmark"` | One of `commonmark`, `chatgpt`, `gemini`. Markdown flavour of the source: `chatgpt` converts ChatGPT's `\( \)` and `\[ \]` math (code spans and `{{{#!latex}}}` blocks), favicon citation residue and `utm_*` URL parameters; `gemini` rebuilds a copied Gemini page's code blocks (from the 'Use code with caution' marker), its bullet characters and `[N] (url)` citations; a flavour other than the default `commonmark` makes the source Markdown, so it conflicts with `format` `tracwiki`. With `format` `auto` a non-default flavour converts as Markdown even for inline content with no `filename`. See [Flavour profiles](format-conversion.md#flavour-profiles) |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `strip_frontmatter` | boolean | No | `true` | Strip YAML frontmatter from .md files before pushing |
 | `force` | boolean | No | `false` | Push Markdown whose front matter says it was exported from Trac (carries `trac_page`). Without it such a push is refused: the Markdown export is one-way |
 
@@ -2529,11 +2550,19 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to pull |
+| `page_name` | string | **One of** | - | Wiki page name to pull |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `file_path` | string | With `local` | - | Absolute output path on the **server's** filesystem: required where `file_access` is `local`, refused where it is `off` |
 | `format` | string | No | `"markdown"` | Output format: `markdown` (Trac's render translated to Markdown), `html` (Trac's render as a complete minimal HTML document: `<!doctype html>`, `<meta charset="utf-8">`, `<title>` the escaped page name, the fragment as `<body>`; no CSS; only the `href` values of links are rewritten, as for `link_rewrites`, and every other byte is Trac's own) or `tracwiki` (the stored source). The `html` read is pinned to the page's current version the same way the `markdown` one is, and reads no source |
 | `version` | integer | No | *(latest)* | Specific page version to pull (minimum: 1) |
 | `link_rewrites` | array of `{from, to}` | No | *(the server's configured map)* | Link-rewrite rules for `format=markdown` and `format=html`: a link target starting with `from` (non-empty string) has that prefix replaced by `to` (string), the longest `from` first. Replaces the configured map for this call; `[]` disables rewriting. Image sources are never rewritten, and an in-page anchor is written `#frag`, never mapped. The input schema refuses an empty `from`, a non-string value, a missing key and any extra key in a rule (before the handler runs, as an input validation error); the handler's own `validation_error`, returned before Trac is read, covers a duplicate `from`. For `format=tracwiki` the handler ignores the argument (it is not validated), though the schema still applies |
+
+Each link-rewrite object:
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `from` | string | **Yes** | - | URL prefix to replace (non-empty) |
+| `to` | string | **Yes** | - | Replacement prefix |
 
 **Success Response:**
 ```json
@@ -2670,10 +2699,11 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to attach to. The page must already exist. |
+| `page_name` | string | **One of** | - | Wiki page name to attach to. The page must already exist; or pass its alias `page` |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `filename` | string | No | - | Attachment filename stored on the page. Defaults to the basename of file_path; required with content_base64. |
-| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. |
-| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). |
+| `content_base64` | string | One of | - | The attachment bytes, standard base64, in place of file_path. Requires filename. Pass this or `file_path`. |
+| `file_path` | string | One of | - | Absolute path on the SERVER's filesystem. Refused unless the server's file_access is 'local' (it is 'off' over http). Pass this or `content_base64`. |
 | `description` | string | No | `""` | Attachment description |
 | `replace` | boolean | No | `false` | If true, overwrite an existing attachment with the same filename. If false and a collision occurs, Trac stores the file under a renamed path; see attached_filename in the response. Default false. |
 
@@ -2754,7 +2784,8 @@ Pass exactly one of `content_base64` and `file_path`. The path form is refused u
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name the attachment belongs to |
+| `page_name` | string | **One of** | - | Wiki page name the attachment belongs to |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `filename` | string | **Yes** | - | Attachment filename to download |
 | `output_path` | string | With `local` | - | Absolute path on the SERVER's filesystem; the parent directory must already exist. Refused unless the server's file_access is 'local', and required there. Where file_access is 'off', omit it to get the bytes inline. |
 
@@ -2845,7 +2876,8 @@ An inline result over the server's `max_inline_bytes` is refused with a `validat
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to list attachments for |
+| `page_name` | string | **One of** | - | Wiki page name to list attachments for |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 
 **Success Response:**
 ```json
@@ -2901,7 +2933,8 @@ An inline result over the server's `max_inline_bytes` is refused with a `validat
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name the attachment belongs to |
+| `page_name` | string | **One of** | - | Wiki page name the attachment belongs to |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `filename` | string | **Yes** | - | Attachment filename to delete |
 
 **Success Response:**
@@ -3060,6 +3093,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 |------|------|----------|---------|-------------|
 | `name` | string | **Yes** | - | Milestone name |
 | `attributes` | object | No | `{}` | Milestone attributes |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `attributes.due` | string | No | - | Due date in ISO 8601 format (e.g., `2026-12-31T23:59:59` or `2026-12-31`) |
 | `attributes.completed` | string/integer | No | - | Completion date in ISO 8601 format, or `0` for not completed |
 | `attributes.description` | string | No | - | Milestone description |
@@ -3116,6 +3150,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 |------|------|----------|---------|-------------|
 | `name` | string | **Yes** | - | Milestone name |
 | `attributes` | object | **Yes** | - | Milestone attributes to update |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `attributes.due` | string | No | - | Due date in ISO 8601 format |
 | `attributes.completed` | string/integer | No | - | Completion date in ISO 8601 format, or `0` for not completed |
 | `attributes.description` | string | No | - | Milestone description |
@@ -3412,6 +3447,7 @@ The lookups reuse the write gate's helpers and run only when the converted TracW
 | `include_comments` | boolean | No | `true` | Also render-check every comment on the ticket, not just the description |
 | `comment` | integer | No | - | Check only this one comment number instead of every comment (still includes the description); ignored when `include_comments` is false |
 | `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render (capped, short timeout) to catch a target that renders identically whether it exists or not |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets to probe (minimum: 1, maximum: 500). The cap keeps the FIRST N in document order; anything beyond it is reported as `target_check_capped` rather than checked |
 | `include_html` | boolean | No | `false` | Include each section's rendered HTML in the response (capped at 20KB per section, with `html_truncated` set if cut) -- off by default, since the structured links/warnings are the point of this tool |
 
 **Success Response:**
@@ -3493,9 +3529,11 @@ The structured result carries the same list as the top-level `ticket_refs` key (
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **Yes** | - | Wiki page name to render-check |
+| `page_name` | string | **One of** | - | Wiki page name to render-check |
+| `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `version` | integer | No | - | Specific version to check (defaults to latest) |
 | `check_targets` | boolean | No | `true` | Live-probe cross-instance wiki targets found in the render |
+| `target_cap` | integer | No | `50` | Maximum cross-instance targets to probe (minimum: 1, maximum: 500). The cap keeps the FIRST N in document order; anything beyond it is reported as `target_check_capped` rather than checked |
 | `include_html` | boolean | No | `false` | Include the rendered HTML in the response (capped at 20KB, with `html_truncated` set if cut) |
 
 **Success Response:** same shape as `ticket_render_check`, with a single `"kind": "page"` section and `"target": "wiki/<page_name>"`.
