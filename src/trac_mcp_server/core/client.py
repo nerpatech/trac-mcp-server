@@ -10,7 +10,7 @@ import xmlrpc.client
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 from xml.etree import ElementTree
@@ -296,12 +296,12 @@ def _utc_xmlrpc_datetime(ts: float) -> xmlrpc.client.DateTime:
     ``time.localtime()``, so on a non-UTC host a window comes out
     shifted by the host's UTC offset. The stdlib also treats a falsy
     value as "now", so ``DateTime(0)`` is the current time, not the
-    epoch. Passing the formatted string avoids both: 0 is
-    ``19700101T00:00:00``.
+    epoch. A ``time.struct_time`` avoids both: it is truthy, so 0 is
+    ``19700101T00:00:00``, and the stdlib formats it with ``%04d``, so
+    a year below 1000 is zero-padded (``time.strftime("%Y")`` does not
+    pad on glibc).
     """
-    return xmlrpc.client.DateTime(
-        time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(ts))
-    )
+    return xmlrpc.client.DateTime(time.gmtime(ts))
 
 
 @dataclass
@@ -1067,7 +1067,12 @@ class TracClient:
             raise RuntimeError(
                 "Trac server response did not include an HTTP Date header"
             )
-        return parsedate_to_datetime(date_header)
+        parsed = parsedate_to_datetime(date_header)
+        if parsed.tzinfo is None:
+            # A ``-0000`` offset means UTC with no local-time meaning,
+            # and parsedate_to_datetime returns it naive.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def list_methods(self) -> Any:
         """
@@ -2311,31 +2316,34 @@ class TracClient:
             # (Trac /trac_mcp_server #191).
             if is_missing_method_fault(e, "getRecentChanges"):
                 pages = self.list_wiki_pages()
-                changes = []
+                changes: list[dict[str, Any]] = []
                 for page in pages:
                     try:
                         info = self.get_wiki_page_info(page)
-                        # Filter by timestamp if provided
-                        last_modified = info.get("lastModified", 0)
-                        if isinstance(
-                            last_modified, xmlrpc.client.DateTime
-                        ):
-                            # Convert DateTime to timestamp; Trac's
-                            # DateTime is UTC, so not time.mktime.
-                            last_modified = calendar.timegm(
-                                last_modified.timetuple()
-                            )
-                        if (
-                            since_timestamp == 0
-                            or last_modified >= since_timestamp
-                        ):
-                            changes.append(info)
                     except Exception:
                         continue
-                # Sort by lastModified descending
-                changes.sort(
-                    key=lambda x: x.get("lastModified", 0), reverse=True
-                )
+                    # ``lastModified`` is a ``dateTime.iso8601`` on the
+                    # wire, which the client's parser returns as a
+                    # compact UTC string. ``info`` keeps that value.
+                    modified = self._parse_trac_time(
+                        info.get("lastModified")
+                    )
+                    if since_timestamp == 0 or (
+                        modified is not None
+                        and modified >= since_timestamp
+                    ):
+                        changes.append(info)
+
+                # Newest first; a page with no usable time sorts last.
+                def newest_first(info: dict[str, Any]) -> float:
+                    modified = self._parse_trac_time(
+                        info.get("lastModified")
+                    )
+                    return (
+                        float("-inf") if modified is None else modified
+                    )
+
+                changes.sort(key=newest_first, reverse=True)
                 return changes
             raise
 
