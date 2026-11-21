@@ -2553,11 +2553,15 @@ class TracClient:
             enum_type: One of "priority", "resolution", "severity", "type",
                 "version". Must be a valid Trac enum service name.
             name: New enum value name.
-            value: Sort-order integer (default: 0). Trac requires this
-                positional argument; passing 0 appends to the end.
+            value: Sort-order integer (default: 0) for the four enum
+                types (priority, resolution, severity, type); Trac requires
+                this positional argument and 0 appends to the end. Rejected
+                (non-zero) for "version", which Trac models as an object
+                created from an attributes dict and which has no sort order.
 
         Raises:
-            ValueError: If enum_type is not in the supported whitelist.
+            ValueError: If enum_type is not in the supported whitelist, or
+                if enum_type is "version" and value is not 0.
             xmlrpc.client.Fault: If value exists, validation fails, or
                 permissions denied (requires TICKET_ADMIN).
         """
@@ -2572,7 +2576,17 @@ class TracClient:
                 f"Unsupported enum_type '{enum_type}'. "
                 "Expected one of: priority, resolution, severity, type, version."
             )
-        # Trac's enum.create requires both name and value (sort order).
+        if enum_type == "version":
+            if value != 0:
+                raise ValueError(
+                    "value is not supported for enum_type 'version': "
+                    "Trac versions have no sort order."
+                )
+            # TracXMLRPC models Version with ticketModelFactory: create takes
+            # (name, attributes dict). An empty dict leaves Trac's defaults.
+            self._rpc_request("ticket.version", "create", name, {})
+            return
+        # The four real enums' create takes (name, value), value = sort order.
         self._rpc_request(f"ticket.{enum_type}", "create", name, value)
 
     def delete_enum(self, enum_type: str, name: str) -> None:

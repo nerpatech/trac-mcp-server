@@ -3803,6 +3803,56 @@ def test_create_enum_calls_xmlrpc_with_service_name_from_enum_type(
     assert call_log[0] == ("ticket.priority", "create", ("urgent", 0))
 
 
+def test_create_enum_version_sends_an_attributes_dict(mock_config):
+    """A version is created from (name, attributes dict), not (name, sort order).
+
+    TracXMLRPC models ``ticket.version`` with ticketModelFactory, so its
+    create takes ``(name, attributes)``; the int the four real enums take
+    fails live with ``'int' object has no attribute 'items'`` (#251).
+    """
+    client = TracClient(mock_config)
+
+    call_log: list[tuple] = []
+
+    def fake_rpc(service, method, *params):
+        call_log.append((service, method, params))
+        return None
+
+    client._rpc_request = fake_rpc
+    client.create_enum("version", "2.0")
+
+    assert len(call_log) == 1
+    assert call_log[0] == ("ticket.version", "create", ("2.0", {}))
+
+
+def test_create_enum_version_rejects_a_sort_order(mock_config):
+    """A non-zero ``value`` for a version raises, rather than being dropped.
+
+    Versions have no sort order; silently ignoring a caller's ``value``
+    would hide that it had no effect (#251). No RPC call is made.
+    """
+    client = TracClient(mock_config)
+
+    call_count = 0
+
+    def fake_rpc(service, method, *params):
+        nonlocal call_count
+        call_count += 1
+        return None
+
+    client._rpc_request = fake_rpc
+
+    with pytest.raises(
+        ValueError,
+        match="value is not supported for enum_type 'version'",
+    ):
+        client.create_enum("version", "2.0", 5)
+
+    assert call_count == 0, (
+        "No RPC call should be made for a version with a sort order"
+    )
+
+
 def test_create_enum_invalid_type_raises_value_error(mock_config):
     """Test create_enum raises ValueError for unsupported enum type."""
     client = TracClient(mock_config)

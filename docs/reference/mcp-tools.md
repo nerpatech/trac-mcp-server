@@ -1710,8 +1710,6 @@ The text only; the tool returns no `structuredContent`.
 
 The text only; the tool returns no `structuredContent`.
 
-**Known failure:** creating a `version` currently fails with a `server_error`. `TracClient.create_enum` sends `(name, 0)` for every enum type, but TracXMLRPC's Version `create` takes `(name, attributes)` with a dict, so the call is rejected. The other four types work, and `ticket_enum_list` and `ticket_enum_delete` work for versions. Tracked as Trac /trac_mcp_server #251.
-
 **Error Responses:**
 
 - **validation_error:** `enum_type` missing or not one of `priority`, `resolution`, `severity`, `type`, `version`; or `name` missing or empty
