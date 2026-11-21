@@ -366,6 +366,20 @@ EMPHASIS_BOUNDARY = {
         "a*x:['a']*",
         "a''x:['a']''",
     ),
+    # An intraword `_` is no delimiter (CommonMark), so it ends nothing: the
+    # whole token is read, and `path/to_x:` and `1_x:` are no scheme runs.
+    "intraword underscore after a path": (
+        "path/to_x:['a']",
+        "path/to_x:!['a']",
+    ),
+    "intraword underscore after a digit": (
+        "1_x:['a']",
+        "1_x:!['a']",
+    ),
+    "intraword underscore in a scheme run": (
+        "snake_x:['a']",
+        "snake_x:['a']",
+    ),
 }
 
 

@@ -371,6 +371,12 @@ _SCHEME_RUN_RE = re.compile(
 _SCHEME_RUN_MAX = 2048
 
 
+def _intraword(src: str, pos: int) -> bool:
+    """Whether the character at `pos` follows an alphanumeric one (Unicode
+    letters and digits included), as the `_` of `snake_case` does."""
+    return pos > 0 and src[pos - 1].isalnum()
+
+
 def _after_scheme_run(
     src: str, end: int, *, delimiters_end_token: bool = False
 ) -> bool:
@@ -379,23 +385,28 @@ def _after_scheme_run(
     whitespace, and gives up at once on a character the pattern never
     allows (`[`, `]`, `>`, `)`).
 
-    With `delimiters_end_token` a `*` or `_` ends the token as whitespace
-    does. mistune 3.2 and 3.3 parse the content of an emphasis span as an
-    inline source of its own, so a real delimiter is a boundary there and
-    the token starts after it (`*x:['a']*` reads `x:`; `x:*['a']*` reads
-    nothing). mistune 3.4 parses emphasis over the whole source and leaves
-    the delimiters in `src`, so the 3.4 path asks for the same boundary.
-    `~` is not one: no strikethrough plugin is enabled, so it is text.
-    A `*` or `_` that is no delimiter is a boundary here too, where 3.2
-    reads the whole token: an unclosed one before a bare `word:` (`_x:[0]`,
-    a known residual: bare `word:` prefixes are being redesigned on #264)
-    and an intraword `_` that follows a non-scheme character
-    (`path/to_x:['a']`)."""
+    With `delimiters_end_token` a `*` ends the token as whitespace does,
+    and so does a `_` unless the character before it is alphanumeric
+    (`str.isalnum()`, so Unicode letters and digits count): as in
+    CommonMark, an intraword `_` cannot open or close emphasis, while an
+    intraword `*` can (`a*x:['a']*`). mistune 3.2 and 3.3 parse the content
+    of an emphasis span as an inline source of its own, so a real delimiter
+    is a boundary there and the token starts after it (`*x:['a']*` reads
+    `x:`; `x:*['a']*` reads nothing). mistune 3.4 parses emphasis over the
+    whole source and leaves the delimiters in `src`, so the 3.4 path asks
+    for the same boundary. `~` is not one: no strikethrough plugin is
+    enabled, so it is text. Known residual: an unclosed `*` or `_`
+    directly before a bare `word:` (`_x:[0]`) is a boundary here, where 3.2
+    reads the whole token; bare `word:` prefixes are being redesigned on
+    #264."""
     i = end
     floor = max(0, end - _SCHEME_RUN_MAX)
     while i > floor:
         c = src[i - 1]
-        if c.isspace() or (delimiters_end_token and c in "*_"):
+        if c.isspace() or (
+            delimiters_end_token
+            and (c == "*" or (c == "_" and not _intraword(src, i - 1)))
+        ):
             break
         if c in "[]>)":
             return False
