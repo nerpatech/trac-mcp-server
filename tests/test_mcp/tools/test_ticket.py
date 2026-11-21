@@ -722,7 +722,7 @@ class TestHandleTicketUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "ticket_id": 42,
-                        "status": "accepted",
+                        "priority": "high",
                         "base_ts": "123",
                     },
                 )
@@ -748,7 +748,7 @@ class TestHandleTicketUpdate(unittest.TestCase):
                     {
                         "ticket_id": 10,
                         "comment": "Adding a note",
-                        "status": "assigned",
+                        "priority": "high",
                         "owner": "alice",
                         "milestone": "v2.0",
                     },
@@ -767,7 +767,7 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertEqual(
                 call_args[3],
                 {
-                    "status": "assigned",
+                    "priority": "high",
                     "owner": "alice",
                     "milestone": "v2.0",
                 },
@@ -877,6 +877,11 @@ class TestHandleTicketUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "ticket_id": 7,
+                        # status/resolution are only accepted with an
+                        # action (#261); the explicit action field keeps
+                        # the remap lookup out of this test.
+                        "action": "resolve",
+                        "action_resolve_resolve_resolution": "fixed",
                         "status": "closed",
                         "priority": "critical",
                         "component": "auth",
@@ -892,7 +897,7 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertIsInstance(result, types.CallToolResult)
             self.assertEqual(len(result.content), 1)
             self.assertIn("Updated ticket #7", result.content[0].text)
-            self.assertIn("updated 8 field(s)", result.content[0].text)
+            self.assertIn("updated 10 field(s)", result.content[0].text)
 
             call_args = mock_run_sync.call_args[0]
             attrs = call_args[3]
@@ -1083,25 +1088,97 @@ class TestHandleTicketUpdate(unittest.TestCase):
             )
             self.assertNotIn("resolution", attrs)
 
-    def test_update_resolution_alone_still_sets_bare_field(self):
-        """resolution with no action still sets the plain attribute,
-        as it did before ticket #32's fix -- no action means no
-        workflow field to look up or conflict with.
+    def test_update_bare_resolution_is_refused(self):
+        """resolution with no action is refused before any write: a bare
+        resolution would leave an open ticket carrying a resolution
+        (ticket #261; it used to be forwarded as a plain field).
         """
         with patch(
             "trac_mcp_server.mcp.tools.ticket_write.run_sync"
         ) as mock_run_sync:
             mock_run_sync.return_value = True
 
-            asyncio.run(
+            result = asyncio.run(
                 _handle_update(
                     self.mock_client,
                     {"ticket_id": 22, "resolution": "wontfix"},
                 )
             )
 
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("validation_error", text)
+            self.assertIn("'resolution'", text)
+            self.assertIn("action='resolve'", text)
+            mock_run_sync.assert_not_called()
+            self.mock_client.update_ticket.assert_not_called()
+
+    def test_update_bare_status_is_refused(self):
+        """status with no action is refused before any write: Trac's
+        workflow silently drops a direct status change (ticket #261).
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {"ticket_id": 22, "status": "closed"},
+                )
+            )
+
+            self.assertTrue(result.isError)
+            text = result.content[0].text
+            self.assertIn("validation_error", text)
+            self.assertIn("'status'", text)
+            self.assertNotIn("'resolution'", text)
+            self.assertIn("ticket_actions", text)
+            mock_run_sync.assert_not_called()
+            self.mock_client.update_ticket.assert_not_called()
+
+    def test_update_status_and_resolution_both_named(self):
+        """Both offending fields are named in one refusal."""
+        result = asyncio.run(
+            _handle_update(
+                self.mock_client,
+                {
+                    "ticket_id": 22,
+                    "status": "closed",
+                    "resolution": "fixed",
+                },
+            )
+        )
+        self.assertTrue(result.isError)
+        self.assertIn(
+            "'status' and 'resolution'", result.content[0].text
+        )
+
+    def test_update_status_with_action_still_forwarded(self):
+        """status alongside an action is not refused; it goes through as
+        before (ticket #261 only refuses the action-less shape).
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.return_value = True
+
+            result = asyncio.run(
+                _handle_update(
+                    self.mock_client,
+                    {
+                        "ticket_id": 22,
+                        "action": "accept",
+                        "status": "accepted",
+                    },
+                )
+            )
+
+            self.assertFalse(result.isError)
             attrs = mock_run_sync.call_args[0][3]
-            self.assertEqual(attrs, {"resolution": "wontfix"})
+            self.assertEqual(attrs["status"], "accepted")
+            self.assertEqual(attrs["action"], "accept")
 
     def test_update_resolve_action_no_matching_field_warns(self):
         """If no action input field ends in 'resolution', the bare
@@ -1193,14 +1270,14 @@ class TestHandleTicketUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "ticket_id": 16,
-                        "status": "accepted",
+                        "priority": "high",
                         "not_a_field": "should-be-dropped",
                         "act": "should-also-be-dropped",
                     },
                 )
             )
             attrs = mock_run_sync.call_args[0][3]
-            self.assertIn("status", attrs)
+            self.assertIn("priority", attrs)
             self.assertNotIn("not_a_field", attrs)
             self.assertNotIn("act", attrs)
 

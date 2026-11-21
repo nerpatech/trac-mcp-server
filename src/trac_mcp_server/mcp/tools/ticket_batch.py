@@ -19,6 +19,7 @@ from .constants import DEFAULT_TICKET_TYPE
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
+from .ticket_write import apply_workflow_fields, workflow_field_refusal
 from .write_gate import (
     NEW_TARGET_ATTACHMENT_NAMES,
     NEW_TICKET_COMMENT_NUMBERS,
@@ -93,7 +94,7 @@ TICKET_BATCH_TOOLS = [
     ),
     types.Tool(
         name="ticket_batch_update",
-        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte.",
+        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte. A status change needs `action` per item, like ticket_update (e.g. action='resolve' with resolution='fixed', or action='reopen'): an item with a status or resolution but no action is refused, and nothing is written for it.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -113,14 +114,34 @@ TICKET_BATCH_TOOLS = [
                                 "minimum": 1,
                             },
                             "comment": {"type": "string"},
-                            "status": {"type": "string"},
-                            "resolution": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "description": "New status. Refused without `action`: Trac's workflow drops a direct status write, so transition with `action` instead (e.g. action='accept').",
+                            },
+                            "action": {
+                                "type": "string",
+                                "description": "Trac workflow action to perform (e.g. 'accept', 'resolve', 'reopen', 'reassign'), as in ticket_update. Action-specific input fields are passed via 'action_<action>_<action>_<field>' keys.",
+                            },
+                            "resolution": {
+                                "type": "string",
+                                "description": "Resolution; requires action (e.g. action='resolve'), remapped onto the action's resolution field",
+                            },
                             "priority": {"type": "string"},
                             "component": {"type": "string"},
                             "milestone": {"type": "string"},
                             "owner": {"type": "string"},
                             "keywords": {"type": "string"},
                             "cc": {"type": "string"},
+                        },
+                        # Same dynamic action-input keys ticket_update
+                        # declares (ticket #99): the field name depends on
+                        # the chosen action, so it cannot be a static
+                        # property.
+                        "patternProperties": {
+                            r"^action_[A-Za-z0-9_]+$": {
+                                "type": "string",
+                                "description": "Action-specific input field, named action_<action>_<action>_<field> per the `action` property's own description.",
+                            },
                         },
                         "required": ["ticket_id"],
                     },
@@ -375,6 +396,13 @@ async def _handle_batch_update(
                 "error": "ticket_id is required",
             }
 
+        # A status or resolution without an action is refused for this
+        # item alone, before the gate's network work and before any
+        # write (#261) -- the same text ticket_update returns.
+        refusal_text = workflow_field_refusal(update_data)
+        if refusal_text is not None:
+            return {"id": ticket_id, "error": refusal_text}
+
         # Per item, for the reason spelled out in _create_one.
         if gate_enabled(client):
             comment_text = update_data.get("comment", "")
@@ -417,9 +445,17 @@ async def _handle_batch_update(
                 if field in update_data:
                     attributes[field] = update_data[field]
 
+            # `action` and action_* keys, plus the bare-resolution
+            # remap -- the helper ticket_update uses.
+            warning = await apply_workflow_fields(
+                client, ticket_id, update_data, attributes
+            )
+
             await run_sync_limited(
                 client.update_ticket, ticket_id, comment, attributes
             )
+            if warning:
+                return {"id": ticket_id, "warning": warning}
             return {"id": ticket_id}
         except Exception as e:
             return {
@@ -442,6 +478,8 @@ async def _handle_batch_update(
         lines.append("Updated:")
         for item in updated:
             lines.append(f"  - #{item['id']}")
+            if "warning" in item:
+                lines.append(f"    {item['warning']}")
     if failed:
         lines.append("")
         lines.append("Failed:")
@@ -456,6 +494,12 @@ async def _handle_batch_update(
         content=[types.TextContent(type="text", text="\n".join(lines))],
         structuredContent={
             "updated": [r["id"] for r in updated],
+            # Items that succeeded but carry a remap warning (#261).
+            "warnings": [
+                {"id": r["id"], "warning": r["warning"]}
+                for r in updated
+                if "warning" in r
+            ],
             "failed": failed,
             "total": total,
             "succeeded": len(updated),

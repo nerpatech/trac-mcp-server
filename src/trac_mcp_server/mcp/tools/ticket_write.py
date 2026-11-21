@@ -138,7 +138,7 @@ TICKET_WRITE_TOOLS = [
                 },
                 "status": {
                     "type": "string",
-                    "description": "New status. Note: Trac workflow gates direct status writes; prefer 'action' for transitions (e.g. action='accept' to move new->accepted).",
+                    "description": "New status. Refused without 'action': Trac's workflow drops a direct status write, so transition with 'action' instead (e.g. action='accept' to move new->accepted).",
                 },
                 "action": {
                     "type": "string",
@@ -163,7 +163,7 @@ TICKET_WRITE_TOOLS = [
                 "owner": {"type": "string", "description": "New owner"},
                 "resolution": {
                     "type": "string",
-                    "description": "Resolution (when closing)",
+                    "description": "Resolution; requires action (e.g. action='resolve'), remapped onto the action's resolution field",
                 },
                 "cc": {
                     "type": "string",
@@ -324,6 +324,120 @@ async def _handle_create(
     )
 
 
+def workflow_field_refusal(source: dict) -> str | None:
+    """Refuse a `status` or `resolution` that comes without an `action`.
+
+    Trac's ConfigurableTicketWorkflow drops a direct `status` write
+    without saying so, and a bare `resolution` is written as a plain
+    field -- an open ticket carrying a resolution. Either way the call
+    reported success while the ticket stayed as it was (Trac
+    /trac_mcp_server #261). Shared by ticket_update and
+    ticket_batch_update so the two cannot drift. Returns the refusal
+    text, or None when the write may go ahead.
+    """
+    if source.get("action"):
+        return None
+    present = [f for f in ("status", "resolution") if f in source]
+    if not present:
+        return None
+    names = " and ".join(f"'{f}'" for f in present)
+    return (
+        f"{names} given without 'action'. Trac's workflow silently "
+        f"drops a direct status change, and a bare resolution would "
+        f"leave an open ticket with a resolution. Use 'action' to "
+        f"transition the ticket (e.g. action='resolve' with "
+        f"resolution='fixed', or action='reopen' / 'accept'); "
+        f"ticket_actions lists what this ticket allows."
+    )
+
+
+async def apply_workflow_fields(
+    client: TracClient,
+    ticket_id: int,
+    source: dict,
+    attributes: dict[str, Any],
+) -> str | None:
+    """Copy the workflow `action` and its input fields into `attributes`.
+
+    Shared by ticket_update and ticket_batch_update. Returns the remap
+    warning when a bare `resolution` could not be placed on the
+    action's own resolution field, else None.
+    """
+    # Workflow action: trigger a Trac workflow transition (e.g. accept,
+    # resolve, reopen). Action-specific input fields follow Trac's
+    # ``action_<action>_<action>_<field>`` convention (e.g.
+    # ``action_resolve_resolve_resolution``) and are forwarded by pattern.
+    if "action" in source:
+        attributes["action"] = source["action"]
+    for key, value in source.items():
+        if key.startswith("action_"):
+            attributes[key] = value
+
+    # A plain `resolution` and a workflow `action` silently conflict:
+    # ConfigurableTicketWorkflow sets `resolution` from the action's own
+    # input field (e.g. `action_resolve_resolve_resolution`), and that
+    # assignment wins over the bare `resolution` attribute -- even though
+    # `resolution` is the documented, discoverable parameter. The call
+    # still reports success with the ticket closed but unresolved
+    # (ticket #32). If the caller already supplied the action's own
+    # field explicitly, leave it alone -- it already wins on the wire,
+    # so remapping would just overwrite an intentional value. Otherwise
+    # look up the action's real input fields via ticket_actions (rather
+    # than guessing the "resolve" name) and remap the bare `resolution`
+    # onto whichever field ends in "resolution", so the transition and
+    # the resolution land in one call.
+    action = source.get("action")
+    resolution_remap_warning = None
+    if action and "resolution" in attributes:
+        action_prefix = f"action_{action}_"
+        already_explicit = any(
+            key.startswith(action_prefix) and key.endswith("resolution")
+            for key in attributes
+        )
+        if not already_explicit:
+            try:
+                actions = await run_sync(
+                    client.get_ticket_actions, ticket_id
+                )
+            except Exception:
+                actions = []
+            remapped = False
+            for entry in actions or []:
+                if not isinstance(entry, (list, tuple)) or not entry:
+                    continue
+                if entry[0] != action:
+                    continue
+                input_fields = entry[3] if len(entry) > 3 else []
+                # Each entry in input_fields is [name, default, options],
+                # not a field name -- read the name out rather than
+                # stringifying the whole list (ticket #49). The name is
+                # already fully qualified (e.g.
+                # "action_resolve_resolve_resolution"), so it is used
+                # as-is rather than re-prefixed.
+                for field in input_fields or []:
+                    name = (
+                        field[0]
+                        if isinstance(field, (list, tuple)) and field
+                        else field
+                    )
+                    if str(name).endswith("resolution"):
+                        attributes[str(name)] = attributes.pop(
+                            "resolution"
+                        )
+                        remapped = True
+                        break
+                break
+            if not remapped and "resolution" in attributes:
+                resolution_remap_warning = (
+                    f"WARNING: could not find an input field for "
+                    f"action '{action}' ending in 'resolution' -- the "
+                    f"plain 'resolution' attribute was sent as-is and "
+                    f"may be silently overwritten by the workflow "
+                    f"action."
+                )
+    return resolution_remap_warning
+
+
 async def _handle_update(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -339,6 +453,18 @@ async def _handle_update(
     format_error = reject_removed_conversion_args(args)
     if format_error is not None:
         return format_error
+
+    # A status or resolution without an action is refused before any
+    # network work: the write would be dropped or half-applied while
+    # reporting success (#261).
+    workflow_refusal = workflow_field_refusal(args)
+    if workflow_refusal is not None:
+        return build_error_response(
+            "validation_error",
+            workflow_refusal,
+            f"Retry with an action; ticket_actions(ticket_id={ticket_id}) "
+            f"lists what this ticket allows.",
+        )
 
     # The comment and the description rewrite below are both stored as
     # written (#69). They used to convert at two separate call sites,
@@ -430,78 +556,9 @@ async def _handle_update(
     # the create-ticket description (#69).
     if "description" in args:
         attributes["description"] = args["description"]
-    # Workflow action: trigger a Trac workflow transition (e.g. accept,
-    # resolve, reopen). Action-specific input fields follow Trac's
-    # ``action_<action>_<action>_<field>`` convention (e.g.
-    # ``action_resolve_resolve_resolution``) and are forwarded by pattern.
-    if "action" in args:
-        attributes["action"] = args["action"]
-    for key, value in args.items():
-        if key.startswith("action_"):
-            attributes[key] = value
-
-    # A plain `resolution` and a workflow `action` silently conflict:
-    # ConfigurableTicketWorkflow sets `resolution` from the action's own
-    # input field (e.g. `action_resolve_resolve_resolution`), and that
-    # assignment wins over the bare `resolution` attribute -- even though
-    # `resolution` is the documented, discoverable parameter. The call
-    # still reports success with the ticket closed but unresolved
-    # (ticket #32). If the caller already supplied the action's own
-    # field explicitly, leave it alone -- it already wins on the wire,
-    # so remapping would just overwrite an intentional value. Otherwise
-    # look up the action's real input fields via ticket_actions (rather
-    # than guessing the "resolve" name) and remap the bare `resolution`
-    # onto whichever field ends in "resolution", so the transition and
-    # the resolution land in one call.
-    action = args.get("action")
-    resolution_remap_warning = None
-    if action and "resolution" in attributes:
-        action_prefix = f"action_{action}_"
-        already_explicit = any(
-            key.startswith(action_prefix) and key.endswith("resolution")
-            for key in attributes
-        )
-        if not already_explicit:
-            try:
-                actions = await run_sync(
-                    client.get_ticket_actions, ticket_id
-                )
-            except Exception:
-                actions = []
-            remapped = False
-            for entry in actions or []:
-                if not isinstance(entry, (list, tuple)) or not entry:
-                    continue
-                if entry[0] != action:
-                    continue
-                input_fields = entry[3] if len(entry) > 3 else []
-                # Each entry in input_fields is [name, default, options],
-                # not a field name -- read the name out rather than
-                # stringifying the whole list (ticket #49). The name is
-                # already fully qualified (e.g.
-                # "action_resolve_resolve_resolution"), so it is used
-                # as-is rather than re-prefixed.
-                for field in input_fields or []:
-                    name = (
-                        field[0]
-                        if isinstance(field, (list, tuple)) and field
-                        else field
-                    )
-                    if str(name).endswith("resolution"):
-                        attributes[str(name)] = attributes.pop(
-                            "resolution"
-                        )
-                        remapped = True
-                        break
-                break
-            if not remapped and "resolution" in attributes:
-                resolution_remap_warning = (
-                    f"WARNING: could not find an input field for "
-                    f"action '{action}' ending in 'resolution' -- the "
-                    f"plain 'resolution' attribute was sent as-is and "
-                    f"may be silently overwritten by the workflow "
-                    f"action."
-                )
+    resolution_remap_warning = await apply_workflow_fields(
+        client, ticket_id, args, attributes
+    )
 
     # The link gate (ticket #64), on the author's OWN text.
     #
