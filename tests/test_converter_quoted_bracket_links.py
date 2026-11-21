@@ -16,9 +16,12 @@ code span or block, a link destination or title, an autolink, a reference
 definition) the rule never fires.
 """
 
+import time
+
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
+    _DEFERRED_LINK_CLOSE,
     markdown_to_tracwiki,
 )
 
@@ -267,6 +270,168 @@ SCHEME_RUNS = {
 )
 def test_a_scheme_run_before_the_shape_skips_the_escape(markdown, wiki):
     assert markdown_to_tracwiki(markdown) == wiki
+
+
+# -- mistune 3.4 resolves a link at its `]` (ticket #263) ----------------------
+#
+# Under mistune 3.2/3.3 `parse_link` answered at the `[`; 3.4 pushes an
+# opener and decides at the `]`. These rows pin the shapes where the two
+# differ. Each expected value is what the 3.2 code gave, and both versions
+# must produce it.
+DEFERRED_CLOSE = {
+    "inside a real link label": (
+        "[x['a'] z](http://e.com)",
+        "[http://e.com x!['a'] z]",
+    ),
+    # The shape inside the label holds a nested bracket, so the label of
+    # the outer link is not a plain run of text.
+    "nested brackets in a real link label": (
+        "['a' [b]](http://e.com)",
+        "[http://e.com 'a' [b]]",
+    ),
+    "a real image after a bang": (
+        "![a['k']](http://e.com/i.png)",
+        "[[Image(http://e.com/i.png)]]",
+    ),
+    # `(` follows the shape but starts no destination.
+    "a paren that is not a destination": (
+        "x['a'](not a dest) y",
+        "x!['a'](not a dest) y",
+    ),
+    "an open paren at the end": ("x['a'](  y", "x!['a'](  y"),
+    # A reference definition exists, but not for this shape.
+    "a definition that does not match": (
+        "see ['a'] y\n\n[b]: http://x",
+        "see !['a'] y",
+    ),
+    "a shape in a bracketed run, no link": (
+        "[a ['k'] b]",
+        "[a !['k'] b]",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(DEFERRED_CLOSE.values()),
+    ids=list(DEFERRED_CLOSE),
+)
+def test_a_quoted_bracket_where_mistune_decides_at_the_close(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+def test_an_outer_opener_that_an_inner_link_deactivates_keeps_its_escape():
+    """The safety net. `['a' [b](http://u)](http://v)` reads as a link at
+    the outer `[` (a `(` destination follows the matching `]`), so the
+    rule lets mistune take the opener. mistune 3.4 then forms the inner
+    link `[b](http://u)` first and, per CommonMark, deactivates the outer
+    opener, so the outer `[` survives as text and Trac would read
+    `['a' ...]` as a wiki link: the surviving opener must carry the
+    escape. mistune 3.2/3.3 give the outer link the label as raw text, so
+    there is no surviving opener and nothing to escape."""
+    md = "['a' [b](http://u)](http://v)"
+    if _DEFERRED_LINK_CLOSE:
+        assert markdown_to_tracwiki(md) == (
+            "!['a' [http://u b]](http://v)"
+        )
+    else:
+        assert markdown_to_tracwiki(md) == (
+            "[http://v 'a' [b](http://u)]"
+        )
+
+
+# mistune 3.4 leaves the emphasis delimiter in the source that the scheme-run
+# scan reads; `x:` is a scheme run all the same (3.2 parses the emphasis
+# content as its own source).
+def test_a_scheme_run_inside_emphasis_skips_the_escape():
+    assert markdown_to_tracwiki("*x:['a']*") == "''x:['a']''"
+    assert markdown_to_tracwiki("_x:['a']_") == "''x:['a']''"
+
+
+# An emphasis delimiter ends the token the scheme-run check reads, as 3.2's
+# separate emphasis source does: the token before the shape is the text
+# after the delimiter, and empty when the shape follows it directly.
+EMPHASIS_BOUNDARY = {
+    "shape right after the opening delimiter": (
+        "x:*['a']*",
+        "x:''!['a']''",
+    ),
+    "scheme run inside a bracketed label": (
+        "[*x:['a']*](http://v)",
+        "[http://v ''x:['a']'']",
+    ),
+    "word before the opening delimiter": (
+        "a*x:['a']*",
+        "a''x:['a']''",
+    ),
+    # An intraword `_` is no delimiter (CommonMark), so it ends nothing: the
+    # whole token is read, and `path/to_x:` and `1_x:` are no scheme runs.
+    "intraword underscore after a path": (
+        "path/to_x:['a']",
+        "path/to_x:!['a']",
+    ),
+    "intraword underscore after a digit": (
+        "1_x:['a']",
+        "1_x:!['a']",
+    ),
+    "intraword underscore in a scheme run": (
+        "snake_x:['a']",
+        "snake_x:['a']",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(EMPHASIS_BOUNDARY.values()),
+    ids=list(EMPHASIS_BOUNDARY),
+)
+def test_an_emphasis_delimiter_ends_the_scheme_run_token(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+def test_a_quoted_bracket_beside_an_inner_link_keeps_its_escape():
+    """The shape is escaped inside a label either way; on 3.4 the inner
+    link deactivates the outer opener, which carries no escape of its own
+    here (it is not a shape)."""
+    md = "[x['a'] [b](http://u)](http://v)"
+    if _DEFERRED_LINK_CLOSE:
+        assert markdown_to_tracwiki(md) == (
+            "[x!['a'] [http://u b]](http://v)"
+        )
+    else:
+        assert markdown_to_tracwiki(md) == (
+            "[http://v x!['a'] [b](http://u)]"
+        )
+
+
+# Unclosed openers make `[`-matching quadratic if every shape rescans to the
+# end of the source (1.3 s at n=100 on mistune 3.4, 8x per doubling).
+@pytest.mark.skipif(
+    not _DEFERRED_LINK_CLOSE,
+    reason="mistune 3.2/3.3 rescan to the end of the source per `[` in "
+    "their own link parser (5 s here at n=2000, unchanged from before "
+    "#263); the bound is for the 3.4 path's bracket map",
+)
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "[" * 2000 + '["a"] ' * 2000,
+        "['a' [b] " * 2000,
+    ],
+    ids=["open run, then shapes", "unclosed nested label"],
+)
+def test_many_open_brackets_and_shapes_convert_in_linear_time(markdown):
+    start = time.perf_counter()
+    markdown_to_tracwiki(markdown)
+    # 10 s, not tighter: the bracket map takes about 0.05 s at n=2000 and the
+    # per-shape rescan about 100 s or more, so the bound keeps a margin of
+    # 200x either way and cannot flake on a loaded runner.
+    assert time.perf_counter() - start < 10.0
 
 
 # -- Live: the real renderer on /trac_test --------------------------------------

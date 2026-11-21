@@ -3,8 +3,8 @@
 # a fresh `pip install` gets), with no constraints file, on the newest
 # CPython 3.12 patch. A red run here means a pin bump needs work first
 # (Trac #262). It runs no check_env.py: being unconstrained is the point.
-# Exact pins (ruff, pyright) and capped packages (mistune <3.4, Trac #263)
-# are NOT exercised here: pip installs those as pyproject says.
+# Exact pins (ruff, pyright) are NOT exercised here: pip installs those as
+# pyproject says.
 name: Upstream (unconstrained)
 
 on:

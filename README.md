@@ -288,9 +288,8 @@ pin, edit the file, refresh the venv with the command above, run `ci.sh`
 and commit. A weekly `Upstream (unconstrained)` workflow runs the suite
 against the newest releases within `pyproject.toml`'s ranges (what a fresh
 `pip install` gets) on the newest CPython 3.12 patch, and reports breakage
-ahead of a bump. It does not exercise the exact pins (`ruff`, `pyright`) or
-capped packages (`mistune` below 3.4, tracked by Trac #263), which pip
-installs as `pyproject.toml` says.
+ahead of a bump. It does not exercise the exact pins (`ruff`, `pyright`),
+which pip installs as `pyproject.toml` says.
 
 ### The two CI halves
 
