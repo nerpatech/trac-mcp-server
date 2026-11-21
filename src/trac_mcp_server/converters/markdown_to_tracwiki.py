@@ -6,6 +6,12 @@ from collections.abc import Callable
 from typing import Any, Literal, cast
 
 import mistune
+from mistune.helpers import (
+    parse_link,
+    parse_link_label,
+    parse_link_text,
+)
+from mistune.util import unikey
 
 from .common import (
     _LIST_MARKER_RE,
@@ -345,6 +351,15 @@ _LINK_OPEN_RE = re.compile(
     mistune.inline_parser.InlineParser.SPECIFICATION["link"]
 )
 
+# mistune 3.4 resolves a link at its closing `]` (a delimiter stack, with a
+# `link_close` rule), where 3.2 and 3.3 answered at the `[`:
+# `InlineParser.parse_link` returned None when no link formed. `_bracket_rule`
+# keeps the 3.2/3.3 code on those versions and takes the 3.4 path when this is
+# true (ticket #263).
+_DEFERRED_LINK_CLOSE = (
+    "link_close" in mistune.inline_parser.InlineParser.SPECIFICATION
+)
+
 # The whitespace-delimited token before a quoted bracket, when it is a Trac
 # shref-shaped run: `scheme:...` (after optional opening `(<"'`) that no
 # `)`, `>` or `]` closes. Trac never forms a bracket link after one
@@ -378,6 +393,57 @@ def _after_scheme_run(src: str, end: int) -> bool:
         if i > 0 and not src[i - 1].isspace():
             return False
     return _SCHEME_RUN_RE.match(src, i, end) is not None
+
+
+def _link_forms_at(state: Any, open_pos: int) -> bool:
+    """Whether a link forms at the `[` at `open_pos` of `state.src`.
+
+    It decides at the `[` what mistune 3.4 decides at the `]`: a mirror of
+    its `_close_bracket` and `_parse_reference`, built from mistune's own
+    helpers. A `]` followed by a `(` destination `helpers.parse_link`
+    accepts is an inline link. Otherwise the reference table
+    (`state.env["ref_links"]`) is tried with the explicit `[label]` that
+    follows, or else with the bracket's own text, which counts only when it
+    holds no nested bracket and is not over-long (then `parse_link_label`
+    finds no label). Code spans, autolinks and inline HTML that cross the
+    `]` are not modelled; a wrong "yes" is caught by the escape on the
+    opener that survives (`_bracket_rule`).
+    """
+    src = state.src
+    label, end = parse_link_label(src, open_pos + 1)
+    if label is None:
+        text, end = parse_link_text(src, open_pos + 1)
+        if text is None:
+            return False
+    if (
+        src.startswith("(", end)
+        and parse_link(src, end + 1)[1] is not None
+    ):
+        return True
+    refs = state.env.get("ref_links")
+    if not refs:
+        return False
+    key_label = None
+    if src.startswith("[", end):
+        key_label, _ = parse_link_label(src, end + 1)
+    if not key_label:
+        key_label = label
+    return key_label is not None and unikey(key_label) in refs
+
+
+def _in_link_label(state: Any) -> bool:
+    """Whether mistune 3.4 is inside the label of a link, at the current
+    position of an inline parse: `state.in_link`, or an open, active
+    non-image bracket at which a link forms (`_link_forms_at`), innermost
+    first."""
+    if state.in_link:
+        return True
+    for bracket in reversed(state.brackets):
+        if bracket.image or not bracket.active:
+            continue
+        if _link_forms_at(state, bracket.start - 1):
+            return True
+    return False
 
 
 # Trac's numeric changeset and log bracket links, as one pattern (ticket
@@ -440,26 +506,74 @@ def _bracket_rule(
     definition, a link title, an autolink, a code span and a
     backslash-escaped bracket are all consumed by their own rules first.
 
-    Real links first: the position is handed to mistune's own link parser
-    (`inline.parse_link`), so an inline link (`["T"](url)`) or a reference
-    link the document defines (`["T"][id]`, `["T"]`, `["T"][]`) is
-    converted as before. `parse_link` leaves `state` untouched when it
-    returns None (the tokens are appended only on its success paths), so
-    anything else falls through to the token. Inside a link label
-    (`state.in_link`) `parse_link` would only emit the bracket as text, so
-    it is skipped there. The label then gets the escape when
-    `escape_in_link` is true (a quoted bracket, #241) and is left as text
-    when it is false (a numeric bracket, #249: Trac does not consume the
-    `!` inside a bracket-link label, so it would show, and the bare form
-    links nothing there).
+    Real links first: a link mistune would form at the `[` (an inline link
+    `["T"](url)`, or a reference link the document defines: `["T"][id]`,
+    `["T"]`, `["T"][]`) is converted as before. Inside a link label the
+    shape gets the escape when `escape_in_link` is true (a quoted bracket,
+    #241) and is left as text when it is false (a numeric bracket, #249:
+    Trac does not consume the `!` inside a bracket-link label, so it would
+    show, and the bare form links nothing there). The escape fallback is
+    subject to the scheme-run check (`_after_scheme_run`): the `[` is left
+    as text when the token just before the match is a scheme run, because
+    Trac's URL pattern already takes the characters after it. A real link
+    directly after a `word:` (`Note:[1](http://x)`) is not affected, as it
+    was not before the rule existed.
 
-    Only the escape fallback is subject to the scheme-run check, after the
-    link parser: it returns None, so the `[` is text as before, when the
-    token just before the match is a scheme run (`_after_scheme_run`),
-    because Trac's URL pattern already takes the characters after it. A
-    real link directly after a `word:` (`Note:[1](http://x)`) is not
-    affected, as it was not before the rule existed.
+    mistune 3.2 and 3.3 (`not _DEFERRED_LINK_CLOSE`): the position is
+    handed to `inline.parse_link`, which returns None, leaving `state`
+    untouched, when no link forms. Declining is returning None.
+
+    mistune 3.4+ (#263) decides a link at its `]`: `parse_link` always
+    pushes an opener and returns, so it cannot tell. The rule decides at
+    the `[` with `_link_forms_at`, and declining means letting mistune push
+    its own opener (`parse_link`), because returning None would leave a
+    later `]` to close an outer opener early. The rule is registered with a
+    leading `!?` so an image opener `![` does not take the `[` first: a
+    bang before a real image is the image's, and any other bang is text.
+    The opener of a link that does not form after all (an inner link
+    deactivates it) survives as a `{token_type}_open` token, which the
+    renderer writes with the escape.
     """
+
+    if _DEFERRED_LINK_CLOSE:
+
+        def deferred_rule(
+            inline: Any, m: re.Match[str], state: Any
+        ) -> int | None:
+            src = state.src
+            br = m.start()
+            raw = m.group(0)
+            if raw.startswith("!"):
+                br += 1
+                raw = raw[1:]
+                if _link_forms_at(state, br):
+                    # A real image: its opener takes the bang too.
+                    link_m = _LINK_OPEN_RE.match(src, m.start())
+                    assert link_m is not None
+                    return inline.parse_link(link_m, state)
+                inline.process_text("!", state)
+            end = m.end()
+            if _in_link_label(state):
+                if escape_in_link:
+                    state.append_token({"type": token_type, "raw": raw})
+                else:
+                    inline.process_text(raw, state)
+                return end
+            link_m = _LINK_OPEN_RE.match(src, br)
+            assert link_m is not None
+            if _link_forms_at(state, br):
+                index = len(state.tokens)
+                pos = inline.parse_link(link_m, state)
+                opener = state.tokens[index]
+                assert opener["type"] == "text" and opener["raw"] == "["
+                opener["type"] = f"{token_type}_open"
+                return pos
+            if _after_scheme_run(src, br):
+                return inline.parse_link(link_m, state)
+            state.append_token({"type": token_type, "raw": raw})
+            return end
+
+        return deferred_rule
 
     def rule(inline: Any, m: re.Match[str], state: Any) -> int | None:
         if state.in_link:
@@ -479,6 +593,9 @@ def _bracket_rule(
     return rule
 
 
+# Under mistune 3.4+ the rules also match a leading `!` (see `_bracket_rule`).
+_REGISTER_PREFIX = "!?" if _DEFERRED_LINK_CLOSE else ""
+
 _parse_quoted_bracket = _bracket_rule(
     "quoted_bracket", escape_in_link=True
 )
@@ -492,7 +609,7 @@ def _quoted_bracket_links(md: Any) -> None:
     `link`."""
     md.inline.register(
         "quoted_bracket",
-        _QUOTED_BRACKET_LINK_RE.pattern,
+        _REGISTER_PREFIX + _QUOTED_BRACKET_LINK_RE.pattern,
         _parse_quoted_bracket,
         before="link",
     )
@@ -503,7 +620,7 @@ def _numeric_bracket_links(md: Any) -> None:
     `link`."""
     md.inline.register(
         "numeric_bracket",
-        _NUMERIC_BRACKET_LINK_RE.pattern,
+        _REGISTER_PREFIX + _NUMERIC_BRACKET_LINK_RE.pattern,
         _parse_numeric_bracket,
         before="link",
     )
@@ -941,6 +1058,18 @@ class TracWikiRenderer(mistune.BaseRenderer):
         """Render a numeric changeset or log bracket shape found in prose
         (`_parse_numeric_bracket`, ticket #249) with Trac's `!` escape, so
         Trac shows ``x[0]`` as text instead of a changeset link."""
+        return f"!{text}"
+
+    def quoted_bracket_open(self, text: str) -> str:
+        """Render the `[` of a quoted bracket shape that mistune 3.4 left
+        as text (`_bracket_rule`, ticket #263): the rule let mistune open a
+        link there, and none formed, so the shape that follows is plain
+        text in the AST and the opener alone carries the escape."""
+        return f"!{text}"
+
+    def numeric_bracket_open(self, text: str) -> str:
+        """Render the `[` of a numeric bracket shape that mistune 3.4 left
+        as text (`_bracket_rule`, ticket #263); see `quoted_bracket_open`."""
         return f"!{text}"
 
     def codespan(self, text: str) -> str:

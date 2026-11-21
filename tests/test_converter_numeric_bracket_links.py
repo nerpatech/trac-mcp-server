@@ -151,6 +151,55 @@ def test_a_link_label_holding_a_numeric_bracket_gets_no_escape():
     )
 
 
+# -- mistune 3.4 resolves a link at its `]` (ticket #263) ----------------------
+#
+# Under mistune 3.2/3.3 `parse_link` answered at the `[`; 3.4 pushes an
+# opener and decides at the `]`. These rows pin the shapes where the two
+# differ, and every expected value below is what the 3.2 code gave (both
+# versions must produce it).
+DEFERRED_CLOSE = {
+    # A shape inside a real link label is plain text there, and must not
+    # close the link's own opener early.
+    "inside a real link label": (
+        "[x[0] docs](http://e.com)",
+        "[http://e.com x[0] docs]",
+    ),
+    "inside a real link label, then prose": (
+        "[x[0] z](http://e.com) and a[1]",
+        "[http://e.com x[0] z] and a![1]",
+    ),
+    # `!` before a shape is a typed literal, but before a real image it is
+    # the image marker.
+    "a real image after a bang": (
+        "![0](http://e.com/i.png)",
+        "[[Image(http://e.com/i.png)]]",
+    ),
+    "a typed bang before a shape": ("Wow![0]", "Wow!![0]"),
+    # `(` follows the shape but starts no destination.
+    "a paren that is not a destination": (
+        "x[0](a b) y",
+        "x![0](a b) y",
+    ),
+    "an open paren at the end": ("x[0](  y", "x![0](  y"),
+    # A reference definition exists, but not for this shape.
+    "a definition that does not match": (
+        "x[0] y\n\n[b]: http://x",
+        "x![0] y",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(DEFERRED_CLOSE.values()),
+    ids=list(DEFERRED_CLOSE),
+)
+def test_a_numeric_bracket_where_mistune_decides_at_the_close(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
 # -- Linear time: the regex must not backtrack catastrophically ---------------
 
 # Sized so that the first version of the regex (three optional tails, an

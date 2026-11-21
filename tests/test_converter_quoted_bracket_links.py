@@ -19,6 +19,7 @@ definition) the rule never fires.
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
+    _DEFERRED_LINK_CLOSE,
     markdown_to_tracwiki,
 )
 
@@ -267,6 +268,76 @@ SCHEME_RUNS = {
 )
 def test_a_scheme_run_before_the_shape_skips_the_escape(markdown, wiki):
     assert markdown_to_tracwiki(markdown) == wiki
+
+
+# -- mistune 3.4 resolves a link at its `]` (ticket #263) ----------------------
+#
+# Under mistune 3.2/3.3 `parse_link` answered at the `[`; 3.4 pushes an
+# opener and decides at the `]`. These rows pin the shapes where the two
+# differ. Each expected value is what the 3.2 code gave, and both versions
+# must produce it.
+DEFERRED_CLOSE = {
+    "inside a real link label": (
+        "[x['a'] z](http://e.com)",
+        "[http://e.com x!['a'] z]",
+    ),
+    # The shape inside the label holds a nested bracket, so the label of
+    # the outer link is not a plain run of text.
+    "nested brackets in a real link label": (
+        "['a' [b]](http://e.com)",
+        "[http://e.com 'a' [b]]",
+    ),
+    "a real image after a bang": (
+        "![a['k']](http://e.com/i.png)",
+        "[[Image(http://e.com/i.png)]]",
+    ),
+    # `(` follows the shape but starts no destination.
+    "a paren that is not a destination": (
+        "x['a'](not a dest) y",
+        "x!['a'](not a dest) y",
+    ),
+    "an open paren at the end": ("x['a'](  y", "x!['a'](  y"),
+    # A reference definition exists, but not for this shape.
+    "a definition that does not match": (
+        "see ['a'] y\n\n[b]: http://x",
+        "see !['a'] y",
+    ),
+    "a shape in a bracketed run, no link": (
+        "[a ['k'] b]",
+        "[a !['k'] b]",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(DEFERRED_CLOSE.values()),
+    ids=list(DEFERRED_CLOSE),
+)
+def test_a_quoted_bracket_where_mistune_decides_at_the_close(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+def test_an_outer_opener_that_an_inner_link_deactivates_keeps_its_escape():
+    """The safety net. `['a' [b](http://u)](http://v)` reads as a link at
+    the outer `[` (a `(` destination follows the matching `]`), so the
+    rule lets mistune take the opener. mistune 3.4 then forms the inner
+    link `[b](http://u)` first and, per CommonMark, deactivates the outer
+    opener, so the outer `[` survives as text and Trac would read
+    `['a' ...]` as a wiki link: the surviving opener must carry the
+    escape. mistune 3.2/3.3 give the outer link the label as raw text, so
+    there is no surviving opener and nothing to escape."""
+    md = "['a' [b](http://u)](http://v)"
+    if _DEFERRED_LINK_CLOSE:
+        assert markdown_to_tracwiki(md) == (
+            "!['a' [http://u b]](http://v)"
+        )
+    else:
+        assert markdown_to_tracwiki(md) == (
+            "[http://v 'a' [b](http://u)]"
+        )
 
 
 # -- Live: the real renderer on /trac_test --------------------------------------
