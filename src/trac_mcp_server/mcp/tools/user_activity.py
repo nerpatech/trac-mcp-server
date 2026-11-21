@@ -23,6 +23,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import mcp.types as types
+import requests
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
@@ -47,6 +48,16 @@ COMMENT_CHARS = 200
 USER_CLAIM_ENV = "TRAC_MCP_OIDC_USER_CLAIM"
 DEFAULT_USER_CLAIM = "preferred_username"
 
+# Set when the Trac instance shows ticket updates in its timeline
+# ([timeline] ticket_show_details = enabled): the tickets an account changed
+# then come from the timeline, filtered by author, instead of a scan of every
+# ticket changed since the first day.
+TIMELINE_ENV = "TRAC_MCP_ACTIVITY_TIMELINE"
+# Days one timeline request covers; Trac caps daysback at
+# [timeline] max_daysback (default 90).
+TIMELINE_WINDOW_DAYS = 30
+_TICKET_LINK = re.compile(r"<link>[^<]*/ticket/(\d+)[^<]*</link>")
+
 _DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
@@ -62,9 +73,13 @@ USER_ACTIVITY_TOOLS = [
             "empty; the result names it. Returns totals, complete, and the "
             "activities oldest first with ticket or page, fields changed, "
             "attachments added to a ticket (file names), comment text "
-            "(shortened) and URL. Not in the result: Trac keeps no history of "
-            "milestone changes, and its XML-RPC gives wiki attachments "
-            "without time or author."
+            "(shortened) and URL. ticket_source says where the changed "
+            "tickets came from: timeline (Trac's timeline filtered by the "
+            "account, every ticket it touched) or changetime (a scan of the "
+            "tickets changed since the first day, at most 3000, newest first; "
+            "complete is false when it was cut). Not in the result: Trac "
+            "keeps no history of milestone changes, and its XML-RPC gives "
+            "wiki attachments without time or author."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
@@ -191,6 +206,68 @@ def _changelogs(client: TracClient, ids: list[int]) -> dict[int, list]:
     )
 
 
+def _timeline_base(client: TracClient) -> str:
+    """The Trac base URL that carries the client's credentials.
+
+    Under OIDC the RPC endpoint (``.../login/xmlrpc``) lies below the Trac
+    instance the token is meant for; otherwise it is ``trac_url``.
+    """
+    if getattr(client.config, "bearer_token", None):
+        url = client.rpc_url.rstrip("/")
+        for tail in ("/login/xmlrpc", "/login/rpc", "/xmlrpc", "/rpc"):
+            if url.endswith(tail):
+                return url[: -len(tail)]
+        return url
+    return client.config.trac_url.rstrip("/")
+
+
+def _timeline_tickets(
+    client: TracClient, user: str, start: datetime, end: datetime
+) -> set[int] | None:
+    """Tickets with an event of ``user`` in the period, from Trac's timeline.
+
+    The RSS timeline lists ticket creations, updates (with ticket details)
+    and attachments with their author; ``authors`` filters them. Requests
+    go back from the day after the period in windows of
+    TIMELINE_WINDOW_DAYS days. None when a request fails or does not
+    return RSS -- then the caller scans instead.
+    """
+    url = _timeline_base(client) + "/timeline"
+    session = client._get_session()
+    # One day of slack on both sides: Trac reads the days in the zone of
+    # the account's session.
+    first = (start.astimezone(timezone.utc) - timedelta(days=1)).date()
+    day = (end.astimezone(timezone.utc) + timedelta(days=1)).date()
+    found: set[int] = set()
+    while day >= first:
+        try:
+            response = session.get(
+                url,
+                params={
+                    "format": "rss",
+                    "max": "0",
+                    "from": day.isoformat(),
+                    "daysback": str(TIMELINE_WINDOW_DAYS - 1),
+                    "authors": user,
+                    "ticket": "on",
+                    "ticket_details": "on",
+                },
+                timeout=(10, client.config.rpc_timeout),
+            )
+        except requests.RequestException:
+            return None
+        if (
+            response.status_code != 200
+            or "<rss" not in response.text[:500]
+        ):
+            return None
+        found.update(
+            int(n) for n in _TICKET_LINK.findall(response.text)
+        )
+        day -= timedelta(days=TIMELINE_WINDOW_DAYS)
+    return found
+
+
 def _collect(
     client: TracClient,
     user: str,
@@ -204,15 +281,27 @@ def _collect(
     since = (start.astimezone(timezone.utc) - timedelta(days=1)).date()
     complete = True
 
-    # Every ticket whose last change is on or after the first day, newest
-    # first. One day of slack: Trac reads the date in the account's zone.
-    ids = [
-        int(i)
-        for i in client.search_tickets(
-            f"changetime={since.isoformat()}..&max=0&order=changetime&desc=1"
-        )
-        or []
-    ]
+    timeline = (
+        _timeline_tickets(client, user, start, end)
+        if os.environ.get(TIMELINE_ENV, "").strip().lower()
+        in ("1", "true", "yes", "on")
+        else None
+    )
+    if timeline is not None:
+        source = "timeline"
+        ids = sorted(timeline, reverse=True)
+    else:
+        # Every ticket whose last change is on or after the first day,
+        # newest first. One day of slack: Trac reads the date in the
+        # account's zone.
+        source = "changetime"
+        ids = [
+            int(i)
+            for i in client.search_tickets(
+                f"changetime={since.isoformat()}..&max=0&order=changetime&desc=1"
+            )
+            or []
+        ]
     if len(ids) > MAX_TICKETS:
         ids = ids[:MAX_TICKETS]
         complete = False
@@ -298,6 +387,7 @@ def _collect(
         "activities": activities,
         "complete": complete,
         "tickets_scanned": len(ids),
+        "ticket_source": source,
     }
 
 
@@ -425,6 +515,7 @@ async def _handle_user_activity(
             "to": end.isoformat(timespec="seconds"),
         },
         "tickets_scanned": found["tickets_scanned"],
+        "ticket_source": found["ticket_source"],
         "total": sum(totals.values()),
         "by_kind": totals,
         "comments": comments,
@@ -434,6 +525,7 @@ async def _handle_user_activity(
         "complete": complete,
         "activities": activities,
     }
+
     return types.CallToolResult(
         content=[
             types.TextContent(

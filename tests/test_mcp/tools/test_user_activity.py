@@ -239,6 +239,107 @@ def test_activities_of_one_day(stamps):
         client.queries[0]
         == "changetime=2026-11-03..&max=0&order=changetime&desc=1"
     )
+    assert out["ticket_source"] == "changetime"
+
+
+RSS = """<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Trac</title>
+<item><title>Ticket #7 updated</title>
+<link>http://tl/trac-api/ticket/7#comment:1</link></item>
+<item><title>Ticket #9 updated</title>
+<link>http://tl/trac-api/ticket/9#comment:3</link></item>
+</channel></rss>"""
+
+
+class FakeSession:
+    def __init__(self, status=200, text=RSS):
+        self.status, self.text, self.calls = status, text, []
+
+    def get(self, url, params=None, timeout=None):
+        self.calls.append((url, dict(params or {})))
+        return SimpleNamespace(status_code=self.status, text=self.text)
+
+
+def timeline_client(session):
+    client = FakeClient(
+        bearer_token=jwt({"preferred_username": "alice"})
+    )
+    client.config.rpc_timeout = 30
+    client.rpc_url = "http://tl/trac-api/login/xmlrpc"
+    client._get_session = lambda: session
+    return client
+
+
+def test_tickets_from_the_timeline(monkeypatch):
+    monkeypatch.setenv("TRAC_MCP_ACTIVITY_TIMELINE", "true")
+    session = FakeSession()
+    client = timeline_client(session)
+    out = call(
+        client,
+        date_from="2026-11-05",
+        time_zone="Europe/Berlin",
+        include_wiki=False,
+    )
+    assert out["ticket_source"] == "timeline"
+    assert out["tickets_scanned"] == 2
+    assert out["by_kind"] == {"ticket_created": 1, "ticket_change": 3}
+    # No scan of every changed ticket; only the query for created tickets.
+    assert not [
+        q for q in client.queries if q.startswith("changetime=")
+    ]
+    url, params = session.calls[0]
+    assert url == "http://tl/trac-api/timeline"
+    assert params["authors"] == "alice"
+    assert params["format"] == "rss" and params["max"] == "0"
+    assert params["ticket"] == "on" and params["ticket_details"] == "on"
+    # One window from the day after the period reaches the day before it.
+    assert params["from"] == "2026-11-06" and len(session.calls) == 1
+
+
+def test_long_period_takes_several_timeline_windows(monkeypatch):
+    monkeypatch.setenv("TRAC_MCP_ACTIVITY_TIMELINE", "true")
+    session = FakeSession()
+    call(
+        timeline_client(session),
+        date_from="2026-07-01",
+        date_to="2026-11-05",
+        time_zone="Europe/Berlin",
+        include_wiki=False,
+    )
+    froms = [params["from"] for _, params in session.calls]
+    assert froms[0] == "2026-11-06"
+    assert froms[-1] <= "2026-07-30"
+    assert all(int(p["daysback"]) < 90 for _, p in session.calls)
+
+
+@pytest.mark.parametrize(
+    "session",
+    [FakeSession(status=403), FakeSession(text="<html>login</html>")],
+)
+def test_timeline_failure_falls_back_to_the_scan(monkeypatch, session):
+    monkeypatch.setenv("TRAC_MCP_ACTIVITY_TIMELINE", "true")
+    client = timeline_client(session)
+    out = call(
+        client,
+        date_from="2026-11-05",
+        time_zone="Europe/Berlin",
+        include_wiki=False,
+    )
+    assert out["ticket_source"] == "changetime"
+    assert client.queries[0].startswith("changetime=")
+    assert out["by_kind"]["ticket_change"] == 3
+
+
+def test_timeline_unused_without_the_setting(monkeypatch):
+    monkeypatch.delenv("TRAC_MCP_ACTIVITY_TIMELINE", raising=False)
+    session = FakeSession()
+    out = call(
+        timeline_client(session),
+        date_from="2026-11-05",
+        time_zone="Europe/Berlin",
+        include_wiki=False,
+    )
+    assert out["ticket_source"] == "changetime" and session.calls == []
 
 
 def test_signed_in_user_from_token_claim():
