@@ -16,6 +16,8 @@ code span or block, a link destination or title, an autolink, a reference
 definition) the rule never fires.
 """
 
+import time
+
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
@@ -338,6 +340,51 @@ def test_an_outer_opener_that_an_inner_link_deactivates_keeps_its_escape():
         assert markdown_to_tracwiki(md) == (
             "[http://v 'a' [b](http://u)]"
         )
+
+
+# mistune 3.4 leaves the emphasis delimiter in the source that the scheme-run
+# scan reads; `x:` is a scheme run all the same (3.2 parses the emphasis
+# content as its own source).
+def test_a_scheme_run_inside_emphasis_skips_the_escape():
+    assert markdown_to_tracwiki("*x:['a']*") == "''x:['a']''"
+    assert markdown_to_tracwiki("_x:['a']_") == "''x:['a']''"
+
+
+def test_a_quoted_bracket_beside_an_inner_link_keeps_its_escape():
+    """The shape is escaped inside a label either way; on 3.4 the inner
+    link deactivates the outer opener, which carries no escape of its own
+    here (it is not a shape)."""
+    md = "[x['a'] [b](http://u)](http://v)"
+    if _DEFERRED_LINK_CLOSE:
+        assert markdown_to_tracwiki(md) == (
+            "[x!['a'] [http://u b]](http://v)"
+        )
+    else:
+        assert markdown_to_tracwiki(md) == (
+            "[http://v x!['a'] [b](http://u)]"
+        )
+
+
+# Unclosed openers make `[`-matching quadratic if every shape rescans to the
+# end of the source (1.3 s at n=100 on mistune 3.4, 8x per doubling).
+@pytest.mark.skipif(
+    not _DEFERRED_LINK_CLOSE,
+    reason="mistune 3.2/3.3 rescan to the end of the source per `[` in "
+    "their own link parser (5 s here at n=2000, unchanged from before "
+    "#263); the bound is for the 3.4 path's bracket map",
+)
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "[" * 2000 + '["a"] ' * 2000,
+        "['a' [b] " * 2000,
+    ],
+    ids=["open run, then shapes", "unclosed nested label"],
+)
+def test_many_open_brackets_and_shapes_convert_in_linear_time(markdown):
+    start = time.perf_counter()
+    markdown_to_tracwiki(markdown)
+    assert time.perf_counter() - start < 2.0
 
 
 # -- Live: the real renderer on /trac_test --------------------------------------

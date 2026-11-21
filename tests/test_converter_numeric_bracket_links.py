@@ -31,6 +31,7 @@ import time
 import pytest
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
+    _DEFERRED_LINK_CLOSE,
     markdown_to_tracwiki,
 )
 
@@ -198,6 +199,89 @@ def test_a_numeric_bracket_where_mistune_decides_at_the_close(
     markdown, wiki
 ):
     assert markdown_to_tracwiki(markdown) == wiki
+
+
+# The escape is decided by where the shape RENDERS, not by where mistune
+# parsed it (ticket #263 review): a shape that is not a real link is always
+# a `numeric_bracket` token, written raw inside a link's label (Trac does
+# not consume the `!` there) and with the `!` everywhere else.
+#
+# On 3.4 an inner link inside an outer label deactivates the outer opener
+# (CommonMark), so no outer link forms and the shape is prose: it needs the
+# escape. On 3.2/3.3 the outer link wins and the label is raw text.
+INNER_LINK_IN_LABEL = {
+    "inline destination": (
+        "[x[0] [b](http://u)](http://v)",
+        "[x![0] [http://u b]](http://v)",
+        "[http://v x[0] [b](http://u)]",
+    ),
+    "reference label": (
+        "[[0] [b](http://u)][r]\n\n[r]: http://r",
+        "[![0] [http://u b]][http://r r]",
+        "[http://r [0] [b](http://u)]",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki_34", "wiki_32"),
+    list(INNER_LINK_IN_LABEL.values()),
+    ids=list(INNER_LINK_IN_LABEL),
+)
+def test_a_shape_beside_an_inner_link_follows_the_outer_one(
+    markdown, wiki_34, wiki_32
+):
+    expected = wiki_34 if _DEFERRED_LINK_CLOSE else wiki_32
+    assert markdown_to_tracwiki(markdown) == expected
+
+
+EMPHASIS_AND_HTML = {
+    # mistune 3.4 leaves the emphasis delimiter in the source the scheme-run
+    # scan reads; `x:` is a scheme run all the same.
+    "emphasis before a scheme run": ("_x:[0]_", "''x:[0]''"),
+    "strong and emphasis before a scheme run": (
+        "**_x:[0]_**",
+        "'''''x:[0]'''''",
+    ),
+    # `<a name=q>` sets `in_link` in mistune, but is no link label.
+    "inside an inline-html anchor": (
+        "<a name=q> y[0] z",
+        "<a name=q> y![0] z",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("markdown", "wiki"),
+    list(EMPHASIS_AND_HTML.values()),
+    ids=list(EMPHASIS_AND_HTML),
+)
+def test_a_numeric_bracket_beside_emphasis_or_inline_html(
+    markdown, wiki
+):
+    assert markdown_to_tracwiki(markdown) == wiki
+
+
+# Unclosed openers make `[`-matching quadratic if every shape rescans to the
+# end of the source (1.3 s at n=100 on mistune 3.4, 8x per doubling).
+@pytest.mark.skipif(
+    not _DEFERRED_LINK_CLOSE,
+    reason="mistune 3.2/3.3 rescan to the end of the source per `[` in "
+    "their own link parser (5 s here at n=2000, unchanged from before "
+    "#263); the bound is for the 3.4 path's bracket map",
+)
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "[" * 2000 + "[0] " * 2000,
+        "[0 [b] " * 2000,
+    ],
+    ids=["open run, then shapes", "unclosed nested label"],
+)
+def test_many_open_brackets_and_shapes_convert_in_linear_time(markdown):
+    start = time.perf_counter()
+    markdown_to_tracwiki(markdown)
+    assert time.perf_counter() - start < 2.0
 
 
 # -- Linear time: the regex must not backtrack catastrophically ---------------

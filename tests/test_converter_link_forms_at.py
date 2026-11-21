@@ -10,8 +10,10 @@ holds on mistune 3.2 as well (the helpers it calls exist in both).
 from types import SimpleNamespace
 
 import pytest
+from mistune.helpers import parse_link_text
 
 from trac_mcp_server.converters.markdown_to_tracwiki import (
+    _close_bracket_map,
     _link_forms_at,
 )
 
@@ -71,3 +73,65 @@ def test_link_forms_at(src, open_pos, refs, expected):
 def test_link_forms_at_without_a_reference_table():
     state = SimpleNamespace(src="[ref] x", env={})
     assert _link_forms_at(state, 0) is False
+
+
+# Inputs for the bracket map: nesting, unclosed openers, stray closers and
+# backslash escapes (an even run before a bracket leaves it live, an odd run
+# escapes it).
+MAP_INPUTS = [
+    "[a]",
+    "[a [b] c]",
+    "[[[x]]]",
+    "[a",
+    "a]",
+    "] [a] ]",
+    "[a [b",
+    "[a] [b] [c]",
+    "\\[a] [b]",
+    "\\\\[a]",
+    "\\\\\\[a]",
+    "[a\\]",
+    "[a\\\\]",
+    "[a\\\\\\]",
+    "[a \\[b] c]",
+    "[a [b\\] c]",
+    "x['a' [b] y",
+    "[a](b) [c](d [e])",
+    "[]",
+    "[][]",
+    "",
+    "no brackets",
+]
+
+
+@pytest.mark.parametrize("src", MAP_INPUTS)
+def test_the_close_map_agrees_with_parse_link_text(src):
+    """For every live `[`, the map holds the `]` mistune's own
+    `parse_link_text` finds from just after it, or nothing when it finds
+    none; an escaped `[` is not in the map. That includes mistune's quirk
+    that a `]` after an even run of backslashes opens a level instead of
+    closing one."""
+    closes = _close_bracket_map(src)
+    for pos, char in enumerate(src):
+        if char != "[":
+            continue
+        run = len(src[:pos]) - len(src[:pos].rstrip("\\"))
+        if run % 2:
+            assert pos not in closes, (src, pos)
+            continue
+        text, end = parse_link_text(src, pos + 1)
+        expected = None if text is None else end - 1
+        assert closes.get(pos) == expected, (src, pos)
+    assert all(src[j] == "]" for j in closes.values())
+
+
+def test_link_forms_at_reads_the_source_once_per_state():
+    """The map and the per-position answers are cached on the state."""
+    state = SimpleNamespace(
+        src="[a [b] c](http://x)", env={"ref_links": {}}
+    )
+    assert _link_forms_at(state, 0) is True
+    cached = state._tracwiki_bracket_cache
+    assert _link_forms_at(state, 0) is True
+    assert _link_forms_at(state, 3) is False
+    assert state._tracwiki_bracket_cache is cached
