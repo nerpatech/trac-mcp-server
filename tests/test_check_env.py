@@ -4,8 +4,10 @@ GitHub's test job once installed unconstrained while ci.sh ran on the
 constrained local venv, so a local pass said nothing about GitHub. The
 script compares the installed requirement closure of trac-mcp-server[dev]
 with constraints/deploy.txt and the interpreter with .python-version.
-Everything here is offline: the distribution lookup and the Python version
-are injected, and the declaration files are tmp files.
+The root package's own requirements come from the checkout's
+pyproject.toml, not installed metadata. Everything here is offline: the
+distribution lookup and the Python version are injected, and the
+declaration files are tmp files.
 """
 
 import importlib.metadata
@@ -60,25 +62,60 @@ class FakeEnv:
             ) from None
 
 
-def _files(tmp_path, pins, python="3.12.8"):
+# The root's direct requirements as the checkout declares them; the
+# installed metadata of ROOT in _clean_env() says the same, so a test
+# that wants them to differ changes one side.
+PYPROJECT = """\
+[project]
+name = "trac-mcp-server"
+dependencies = [
+    "requests>=2",
+    "winonly>=1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pyright[nodejs]==1.1.408",
+]
+docs = ["docsonly>=1"]
+"""
+
+
+def _files(tmp_path, pins, python="3.12.8", pyproject=PYPROJECT):
     constraints = tmp_path / "deploy.txt"
     constraints.write_text(
         "# header\n\n" + "".join(f"{n}=={v}\n" for n, v in pins.items())
     )
     pyver = tmp_path / ".python-version"
     pyver.write_text(f"{python}\n")
+    (tmp_path / "pyproject.toml").write_text(pyproject)
     return constraints, pyver
 
 
-def _run(tmp_path, env, pins, *, python="3.12.8", running=None):
-    constraints, pyver = _files(tmp_path, pins, python)
+def _args(tmp_path, constraints, pyver):
+    return [
+        "--constraints",
+        str(constraints),
+        "--python-version-file",
+        str(pyver),
+        "--pyproject",
+        str(tmp_path / "pyproject.toml"),
+    ]
+
+
+def _run(
+    tmp_path,
+    env,
+    pins,
+    *,
+    python="3.12.8",
+    running=None,
+    pyproject=PYPROJECT,
+):
+    constraints, pyver = _files(tmp_path, pins, python, pyproject)
     return check_env.main(
-        [
-            "--constraints",
-            str(constraints),
-            "--python-version-file",
-            str(pyver),
-        ],
+        _args(tmp_path, constraints, pyver),
         lookup=env,
         python_version=lambda: running or python,
     )
@@ -268,12 +305,7 @@ def test_a_missing_constraints_file_cannot_run(tmp_path, capsys):
     constraints, pyver = _files(tmp_path, pins)
     constraints.unlink()
     code = check_env.main(
-        [
-            "--constraints",
-            str(constraints),
-            "--python-version-file",
-            str(pyver),
-        ],
+        _args(tmp_path, constraints, pyver),
         lookup=env,
         python_version=lambda: "3.12.8",
     )
@@ -286,12 +318,7 @@ def test_a_missing_python_version_file_cannot_run(tmp_path, capsys):
     constraints, pyver = _files(tmp_path, pins)
     pyver.unlink()
     code = check_env.main(
-        [
-            "--constraints",
-            str(constraints),
-            "--python-version-file",
-            str(pyver),
-        ],
+        _args(tmp_path, constraints, pyver),
         lookup=env,
         python_version=lambda: "3.12.8",
     )
@@ -304,12 +331,7 @@ def test_a_malformed_constraints_line_cannot_run(tmp_path, capsys):
     constraints, pyver = _files(tmp_path, pins)
     constraints.write_text("requests>=2\n")
     code = check_env.main(
-        [
-            "--constraints",
-            str(constraints),
-            "--python-version-file",
-            str(pyver),
-        ],
+        _args(tmp_path, constraints, pyver),
         lookup=env,
         python_version=lambda: "3.12.8",
     )
@@ -317,11 +339,222 @@ def test_a_malformed_constraints_line_cannot_run(tmp_path, capsys):
     assert "requests>=2" in capsys.readouterr().err
 
 
+def _constraints_error(tmp_path, capsys, text):
+    env, pins = _clean_env()
+    constraints, pyver = _files(tmp_path, pins)
+    constraints.write_text(text)
+    code = check_env.main(
+        _args(tmp_path, constraints, pyver),
+        lookup=env,
+        python_version=lambda: "3.12.8",
+    )
+    return code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "line, what",
+    [
+        ("requests==2.32.5 ; python_version >= '3.9'", "marker"),
+        ("requests===2.32.5", "requests===2.32.5"),
+        ("requests>=2", "requests>=2"),
+        ("requests==2.*", "requests==2.*"),
+        ("requests[security]==2.32.5", "requests[security]"),
+        ("requests", "requests"),
+        ("==2.32.5", "==2.32.5"),
+    ],
+)
+def test_a_constraints_line_that_is_not_an_exact_pin_cannot_run(
+    tmp_path, capsys, line, what
+):
+    # Line 3: the error names the line number and the line.
+    code, err = _constraints_error(
+        tmp_path, capsys, f"# header\n\n{line}\n"
+    )
+    assert code == 2
+    assert "deploy.txt:3:" in err
+    assert what in err
+
+
+def test_inline_comments_and_whitespace_in_constraints_are_stripped(
+    tmp_path,
+):
+    env, pins = _clean_env()
+    constraints, pyver = _files(tmp_path, pins)
+    constraints.write_text(
+        "".join(
+            f"  {n} == {v}   # why this pin\n" for n, v in pins.items()
+        )
+        + "   # a comment with == and ; in it\n"
+    )
+    code = check_env.main(
+        _args(tmp_path, constraints, pyver),
+        lookup=env,
+        python_version=lambda: "3.12.8",
+    )
+    assert code == 0
+
+
+def test_parse_constraints_returns_normalised_names_and_versions(
+    tmp_path,
+):
+    f = tmp_path / "c.txt"
+    f.write_text(
+        "Foo_Bar==1.0  # c\n\n# only a comment\nbaz==2!3.4+x\n"
+    )
+    assert check_env.parse_constraints(f) == {
+        "foo-bar": "1.0",
+        "baz": "2!3.4+x",
+    }
+
+
+def _python_version_error(tmp_path, capsys, text):
+    env, pins = _clean_env()
+    constraints, pyver = _files(tmp_path, pins)
+    pyver.write_text(text)
+    code = check_env.main(
+        _args(tmp_path, constraints, pyver),
+        lookup=env,
+        python_version=lambda: "3.12.8",
+    )
+    return code, capsys.readouterr().err
+
+
+def test_python_version_ignores_blank_and_comment_lines(tmp_path):
+    f = tmp_path / ".python-version"
+    f.write_text("# the CI interpreter\n\n3.12.8\n\n")
+    assert check_env.read_python_version(f) == "3.12.8"
+
+
+def test_a_multi_version_python_file_cannot_run(tmp_path, capsys):
+    code, err = _python_version_error(
+        tmp_path, capsys, "3.12.8\n3.11.9\n"
+    )
+    assert code == 2
+    assert "exactly one version is required" in err
+    assert "3.12.8" in err and "3.11.9" in err
+
+
+def test_a_python_file_with_only_comments_cannot_run(tmp_path, capsys):
+    code, err = _python_version_error(tmp_path, capsys, "# nothing\n\n")
+    assert code == 2
+    assert "is empty" in err
+
+
+def test_root_requirements_come_from_pyproject_not_installed_metadata(
+    tmp_path, capsys
+):
+    # The checkout declares `extra-dep`; the root's INSTALLED metadata
+    # (stale, or another checkout's) does not list it. The installed
+    # metadata is not consulted for the root, so the unpinned dependency
+    # is found.
+    env, pins = _clean_env()
+    env.dists["extra-dep"] = FakeDist("1.0")
+    assert not any("extra-dep" in r for r in env.dists[ROOT].requires)
+    changed = PYPROJECT.replace(
+        '"requests>=2",', '"requests>=2",\n    "extra-dep>=1",'
+    )
+    assert _run(tmp_path, env, pins, pyproject=changed) == 1
+    assert "extra-dep: installed 1.0, no pin" in capsys.readouterr().err
+
+
+def test_a_requirement_only_in_installed_root_metadata_is_ignored(
+    tmp_path,
+):
+    # The mirror: the installed root metadata names a package the
+    # checkout no longer requires (and which is not installed).
+    env, pins = _clean_env()
+    env.dists[ROOT].requires.append("gone>=1")
+    assert _run(tmp_path, env, pins) == 0
+
+
+def test_a_pyproject_dependency_that_is_not_installed_fails(
+    tmp_path, capsys
+):
+    env, pins = _clean_env()
+    changed = PYPROJECT.replace(
+        '"requests>=2",', '"requests>=2",\n    "absent>=1",'
+    )
+    assert _run(tmp_path, env, pins, pyproject=changed) == 1
+    assert "absent: required but not installed" in (
+        capsys.readouterr().err
+    )
+
+
+def test_a_missing_pyproject_cannot_run(tmp_path, capsys):
+    env, pins = _clean_env()
+    constraints, pyver = _files(tmp_path, pins)
+    (tmp_path / "pyproject.toml").unlink()
+    code = check_env.main(
+        _args(tmp_path, constraints, pyver),
+        lookup=env,
+        python_version=lambda: "3.12.8",
+    )
+    assert code == 2
+    assert "pyproject.toml" in capsys.readouterr().err
+
+
+def test_an_unparseable_pyproject_cannot_run(tmp_path, capsys):
+    env, pins = _clean_env()
+    assert _run(tmp_path, env, pins, pyproject="[project\n") == 2
+    assert "pyproject.toml" in capsys.readouterr().err
+
+
+def test_an_invalid_requirement_cannot_run_and_prints_no_traceback(
+    tmp_path, capsys
+):
+    env, pins = _clean_env()
+    changed = PYPROJECT.replace('"requests>=2",', '"requests>=>2",')
+    assert _run(tmp_path, env, pins, pyproject=changed) == 2
+    err = capsys.readouterr().err
+    assert "requests>=>2" in err
+    assert "Traceback" not in err
+
+
+def test_an_invalid_requirement_in_installed_metadata_cannot_run(
+    tmp_path, capsys
+):
+    env, pins = _clean_env()
+    env.dists["requests"].requires.append("not a requirement !!")
+    assert _run(tmp_path, env, pins) == 2
+    assert "not a requirement" in capsys.readouterr().err
+
+
+def test_a_marker_that_cannot_be_evaluated_cannot_run(
+    tmp_path, capsys, monkeypatch
+):
+    import packaging.markers
+
+    def boom(self, environment=None):
+        raise packaging.markers.UndefinedEnvironmentName("nope")
+
+    monkeypatch.setattr(packaging.markers.Marker, "evaluate", boom)
+    env, pins = _clean_env()
+    assert _run(tmp_path, env, pins) == 2
+    err = capsys.readouterr().err
+    assert "marker" in err
+    assert "Traceback" not in err
+
+
+def test_a_missing_packaging_library_cannot_run(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setitem(sys.modules, "packaging.requirements", None)
+    env, pins = _clean_env()
+    assert _run(tmp_path, env, pins) == 2
+    assert "packaging" in capsys.readouterr().err
+
+
 def test_an_uninstalled_root_cannot_run(tmp_path, capsys):
     env, pins = _clean_env()
     del env.dists[ROOT]
     assert _run(tmp_path, env, pins) == 2
     assert ROOT in capsys.readouterr().err
+
+
+def test_the_shipped_pyproject_names_the_root_requirements():
+    reqs = check_env.root_requirements(REPO / "pyproject.toml")
+    assert ("pytest>=8.0.0", "dev") in reqs
+    assert any(r.startswith("mistune") and e == "" for r, e in reqs)
 
 
 def test_the_default_files_are_the_repos_and_agree_with_each_other():
