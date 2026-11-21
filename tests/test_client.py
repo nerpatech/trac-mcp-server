@@ -1,7 +1,7 @@
 import calendar
 import socket
 import xmlrpc.client
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 import pytest
@@ -4183,3 +4183,50 @@ def test_get_recent_wiki_changes_zero_asks_from_the_epoch(
     )
     assert method == "wiki.getRecentChanges"
     assert params.value == "19700101T00:00:00"
+
+
+def _date_header_response(date_header: str) -> Mock:
+    response = Mock()
+    response.status_code = 200
+    response.headers = {"Date": date_header}
+    response.content = b"""<?xml version="1.0"?>
+<methodResponse>
+  <params>
+    <param>
+      <value><string>1.0</string></value>
+    </param>
+  </params>
+</methodResponse>"""
+    return response
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_server_time_minus_zero_offset_is_aware_utc(
+    mock_post, mock_config
+):
+    """A ``-0000`` Date header parses to a naive datetime; it is UTC."""
+    mock_post.return_value = _date_header_response(
+        "Mon, 17 Aug 2026 17:06:07 -0000"
+    )
+    result = TracClient(mock_config).get_server_time()
+    assert result.tzinfo is not None
+    assert result.utcoffset() == timedelta(0)
+    assert result == datetime(
+        2026, 8, 17, 17, 6, 7, tzinfo=timezone.utc
+    )
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_get_server_time_non_gmt_offset_is_converted_to_utc(
+    mock_post, mock_config
+):
+    """A ``+0200`` Date header is the same instant, reported in UTC."""
+    mock_post.return_value = _date_header_response(
+        "Mon, 17 Aug 2026 19:06:07 +0200"
+    )
+    result = TracClient(mock_config).get_server_time()
+    assert result.utcoffset() == timedelta(0)
+    assert result == datetime(
+        2026, 8, 17, 17, 6, 7, tzinfo=timezone.utc
+    )
+    assert (result.hour, result.day) == (17, 17)
