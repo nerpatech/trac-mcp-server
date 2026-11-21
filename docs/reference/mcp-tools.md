@@ -2204,7 +2204,7 @@ The version named is the page's current version, re-read after the no-op, so whe
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **One of** | - | Wiki page name to retrieve history for (required) |
+| `page_name` | string | **One of** | - | Wiki page name to retrieve history for |
 | `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `limit` | integer | No | - | Maximum revisions to return, newest first. Omit for all revisions. (minimum: 1) |
 
@@ -2284,7 +2284,7 @@ Revisions are newest first. A version whose metadata cannot be fetched (a gap, o
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `page_name` | string | **One of** | - | Wiki page name to diff (required) |
+| `page_name` | string | **One of** | - | Wiki page name to diff |
 | `page` | string | **One of** | - | Alias for `page_name`; pass one of the two |
 | `to_version` | integer | No | - | End version (default: latest) (minimum: 1) |
 | `from_version` | integer | No | - | Start version, lower than to_version (default: to_version - 1). Not together with from_author. (minimum: 1) |
