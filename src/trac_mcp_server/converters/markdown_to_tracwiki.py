@@ -415,6 +415,9 @@ def _link_forms_at(state: Any, open_pos: int) -> bool:
         text, end = parse_link_text(src, open_pos + 1)
         if text is None:
             return False
+    # Both helpers set `end` here; the check narrows it for the type checker.
+    if end is None:
+        return False
     if (
         src.startswith("(", end)
         and parse_link(src, end + 1)[1] is not None
