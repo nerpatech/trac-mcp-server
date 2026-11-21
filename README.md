@@ -259,7 +259,7 @@ These four need the `tracrpc_comment` Trac plugin on the server (see [plugins/RE
 | Tool | Description |
 |------|-------------|
 | `timeline_search` | Search the Trac timeline (tickets, wiki edits, changesets, milestones), author-attributed, as plain text |
-| `user_activity` | What one account did in a period: tickets created, ticket changes and comments, wiki edits; no plugin needed |
+| `user_activity` | What one account did in a period: tickets created, ticket changes, comments and attachments, wiki edits; no plugin needed |
 
 ### System (2)
 | Tool | Description |

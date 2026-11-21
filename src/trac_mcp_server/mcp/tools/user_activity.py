@@ -1,7 +1,8 @@
 """User activity tool: user_activity.
 
-What one account did in Trac in a period: tickets created, ticket changes
-and comments, wiki page edits -- in one call, without the timeline plugin.
+What one account did in Trac in a period: tickets created, ticket changes,
+comments and attachments, wiki page edits -- in one call, without the
+timeline plugin.
 
 A ticket query can only filter on a ticket's *last* change (changetime), so
 "the tickets X changed on day D" cannot be a query: a ticket changed on D
@@ -60,7 +61,10 @@ USER_ACTIVITY_TOOLS = [
             "'who changed what'. The signed-in account is used when username is "
             "empty; the result names it. Returns totals, complete, and the "
             "activities oldest first with ticket or page, fields changed, "
-            "comment text (shortened) and URL."
+            "attachments added to a ticket (file names), comment text "
+            "(shortened) and URL. Not in the result: Trac keeps no history of "
+            "milestone changes, and its XML-RPC gives wiki attachments "
+            "without time or author."
         ),
         annotations=types.ToolAnnotations(
             readOnlyHint=True,
@@ -240,6 +244,12 @@ def _collect(
                     entry["comment"] = text[:COMMENT_CHARS] + (
                         "..." if len(text) > COMMENT_CHARS else ""
                     )
+            elif field == "attachment":
+                # Trac lists a ticket attachment in the change log with the
+                # file name as the new value.
+                name = str(new or "").strip()
+                if name:
+                    entry.setdefault("attachments", []).append(name)
             elif field not in entry["fields"]:
                 entry["fields"].append(field)
 

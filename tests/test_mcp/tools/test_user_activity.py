@@ -73,6 +73,15 @@ class FakeClient:
                     "Looks good, taking it.",
                     1,
                 ],
+                # An attachment: the change log has the file name as new value.
+                [
+                    dt("20261105T09:00:00"),
+                    "alice",
+                    "attachment",
+                    None,
+                    "trace.log",
+                    0,
+                ],
                 [
                     dt("20261112T10:00:00"),
                     "bob",
@@ -192,7 +201,7 @@ def test_activities_of_one_day(stamps):
     assert out["complete"] is True
     assert out["by_kind"] == {
         "ticket_created": 1,
-        "ticket_change": 2,
+        "ticket_change": 3,
         "wiki_edit": 1,
     }
     assert out["comments"] == 1
@@ -202,6 +211,7 @@ def test_activities_of_one_day(stamps):
     ]
     assert kinds == [
         ("ticket_change", 9, None),
+        ("ticket_change", 7, None),
         ("ticket_change", 7, None),
         ("wiki_edit", None, "Guide"),
         ("ticket_created", 11, None),
@@ -216,7 +226,14 @@ def test_activities_of_one_day(stamps):
     )
     assert second["url"] == "http://trac.example/trac/ticket/7"
     assert second["summary"] == "Ticket 7"
-    assert out["activities"][2]["version"] == 2
+    attached = out["activities"][2]
+    assert attached["time"] == "2026-11-05T10:00:00+01:00"
+    assert (
+        attached["attachments"] == ["trace.log"]
+        and attached["fields"] == []
+    )
+    assert "attachments" not in second
+    assert out["activities"][3]["version"] == 2
     # The query reaches back one day and has no upper bound.
     assert (
         client.queries[0]

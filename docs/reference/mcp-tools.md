@@ -3299,13 +3299,14 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 
 How it works:
 
-- A ticket query filters only on a ticket's last change, so the tool queries every ticket whose `changetime` is on or after the day before `date_from` (newest first, at most 3000), reads their change logs and keeps the entries in the period whose author is the account. Entries of one ticket at one moment form one activity with the changed `fields` and the `comment` (at most 200 characters).
+- A ticket query filters only on a ticket's last change, so the tool queries every ticket whose `changetime` is on or after the day before `date_from` (newest first, at most 3000), reads their change logs and keeps the entries in the period whose author is the account. Entries of one ticket at one moment form one activity with the changed `fields`, the `comment` (at most 200 characters) and the file names of added `attachments` (Trac lists a ticket attachment in the change log).
 - Tickets created: `reporter=<user>` with `time` around the period, checked against each ticket's creation time.
 - Wiki edits: `wiki.getRecentChanges` since `date_from`, then each page's versions back to the first day (at most 300 pages, 50 versions each).
 - The signed-in account: with OIDC the claim `preferred_username` of the caller's access token (another claim via `TRAC_MCP_OIDC_USER_CLAIM`), read without checking the signature -- it only selects the entries to keep, Trac decides what the token may see; with basic auth the configured user name.
 - `complete` is false when a limit cut the scan or a change log did not load.
+- Not covered: Trac keeps no history of milestone changes, and `wiki.listAttachments` gives wiki attachments without time or author.
 
-**Success Response:** `username`, `period`, `tickets_scanned`, `total`, `by_kind` (`ticket_created`, `ticket_change`, `wiki_edit`), `comments`, `tickets`, `complete`, and `activities` oldest first: `time`, `kind`, `ticket`, `summary`, `fields`, `comment`, `url` (wiki: `page`, `version`, `comment`, `url`).
+**Success Response:** `username`, `period`, `tickets_scanned`, `total`, `by_kind` (`ticket_created`, `ticket_change`, `wiki_edit`), `comments`, `tickets`, `complete`, and `activities` oldest first: `time`, `kind`, `ticket`, `summary`, `fields`, `attachments`, `comment`, `url` (wiki: `page`, `version`, `comment`, `url`).
 
 ```json
 {
