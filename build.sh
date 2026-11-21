@@ -12,7 +12,7 @@ echo ""
 
 if ! python -c "import PyInstaller" 2>/dev/null; then
     echo "PyInstaller not found. Installing dev dependencies..."
-    pip install -e ".[dev]"
+    pip install -e ".[dev]" -c constraints/deploy.txt
 fi
 
 # --- Clean previous builds ----------------------------------------------------

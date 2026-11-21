@@ -83,11 +83,12 @@ done
 echo ""
 echo "=== 5/5: rebuild + install trac-convert from $COMMIT ==="
 # Pre-install pyinstaller via the pinned constraint BEFORE calling build.sh.
-# build.sh's own preflight (`pip install -e ".[dev]"` when PyInstaller is
-# missing) would otherwise flip this non-editable deploy clone into an
-# editable install -- exactly the drift-on-a-stray-pull failure mode the
-# deploy clone is designed to avoid. Pre-installing here means build.sh's
-# check finds PyInstaller already present and never reaches that branch.
+# build.sh's own preflight (`pip install -e ".[dev]" -c constraints/deploy.txt`
+# when PyInstaller is missing) is constrained too, but it would still flip
+# this non-editable deploy clone into an editable install -- exactly the
+# drift-on-a-stray-pull failure mode the deploy clone is designed to avoid.
+# Pre-installing here means build.sh's check finds PyInstaller already
+# present and never reaches that branch.
 if ! .venv/bin/python -c "import PyInstaller" 2>/dev/null; then
     echo "Installing pyinstaller (pinned in $CONSTRAINTS)..."
     .venv/bin/pip install -q -c "$CONSTRAINTS" pyinstaller

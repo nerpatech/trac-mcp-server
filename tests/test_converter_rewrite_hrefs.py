@@ -452,8 +452,8 @@ def _reported_href(html):
 
 def test_a_doubled_equals_yields_the_value_htmlparser_reports():
     # What html.parser reports for `href==` depends on the CPython
-    # patch release: 3.12.8 and older report the URL after the second
-    # `=`, 3.12.9+ and 3.13 (HTML5) report `="URL"`, a value that is
+    # patch release: 3.12.11 and older report the URL after the second
+    # `=`, 3.12.12+ and 3.13 (HTML5) report `="URL"`, a value that is
     # not a Trac URL. The rewrite maps whatever is reported, so the
     # expectation is derived from the running interpreter (Trac #262).
     html = f'<a href=="{_T}A">x</a>'
