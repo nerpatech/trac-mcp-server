@@ -50,7 +50,7 @@ async def _handle_get_server_time(
 
     Returns:
         CallToolResult with ISO 8601 timestamp text and structured JSON with
-        server_time (ISO), unix_timestamp (int), and timezone ("server")
+        server_time (ISO), unix_timestamp (int), and timezone ("UTC")
     """
     try:
         dt = await run_sync(client.get_server_time)
@@ -62,7 +62,7 @@ async def _handle_get_server_time(
         structured_json = {
             "server_time": iso_timestamp,
             "unix_timestamp": unix_timestamp,
-            "timezone": "server",
+            "timezone": "UTC",
         }
 
         return types.CallToolResult(

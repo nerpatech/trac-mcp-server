@@ -287,8 +287,21 @@ MILESTONE_FETCH_BATCH = 50
 # make up prefixes without end.
 WIKI_SCOPE_INDEX_MAX = 16
 
-# "Since the beginning" for ``wiki.getRecentChanges``.
-_WIKI_EPOCH = "19700101T00:00:00"
+
+def _utc_xmlrpc_datetime(ts: float) -> xmlrpc.client.DateTime:
+    """An XML-RPC DateTime for unix timestamp ``ts``, in UTC.
+
+    Trac reads an XML-RPC DateTime as UTC, but the stdlib's
+    ``xmlrpc.client.DateTime(int)`` formats the timestamp with
+    ``time.localtime()``, so on a non-UTC host a window comes out
+    shifted by the host's UTC offset. The stdlib also treats a falsy
+    value as "now", so ``DateTime(0)`` is the current time, not the
+    epoch. Passing the formatted string avoids both: 0 is
+    ``19700101T00:00:00``.
+    """
+    return xmlrpc.client.DateTime(
+        time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(ts))
+    )
 
 
 @dataclass
@@ -1013,8 +1026,8 @@ class TracClient:
         return self._rpc_request(
             "timeline",
             "getEvents",
-            xmlrpc.client.DateTime(start_ts),
-            xmlrpc.client.DateTime(stop_ts),
+            _utc_xmlrpc_datetime(start_ts),
+            _utc_xmlrpc_datetime(stop_ts),
             filters,
             max_results,
         )
@@ -2287,11 +2300,8 @@ class TracClient:
         """
         try:
             # Try getRecentChanges if available
-            # DateTime(0) is "now", not the epoch: ask for everything
-            # with the epoch spelled out.
-            dt = xmlrpc.client.DateTime(
-                since_timestamp if since_timestamp else _WIKI_EPOCH
-            )
+            # In UTC, and 0 is the epoch ("everything"), not "now".
+            dt = _utc_xmlrpc_datetime(since_timestamp)
             result = self._rpc_request("wiki", "getRecentChanges", dt)
             return result
         except xmlrpc.client.Fault as e:
@@ -2310,11 +2320,10 @@ class TracClient:
                         if isinstance(
                             last_modified, xmlrpc.client.DateTime
                         ):
-                            # Convert DateTime to timestamp
-                            import time
-
-                            last_modified = int(
-                                time.mktime(last_modified.timetuple())
+                            # Convert DateTime to timestamp; Trac's
+                            # DateTime is UTC, so not time.mktime.
+                            last_modified = calendar.timegm(
+                                last_modified.timetuple()
                             )
                         if (
                             since_timestamp == 0

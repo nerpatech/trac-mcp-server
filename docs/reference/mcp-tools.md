@@ -134,16 +134,16 @@ gate off the text line reads
 ```json
 {
   "type": "text",
-  "text": "Server time: 2026-02-05T20:51:27"
+  "text": "Server time: 2026-02-05T20:51:27+00:00"
 }
 ```
 
 **Structured JSON Output:**
 ```json
 {
-  "server_time": "2026-02-05T20:51:27",
+  "server_time": "2026-02-05T20:51:27+00:00",
   "unix_timestamp": 1770324687,
-  "timezone": "server"
+  "timezone": "UTC"
 }
 ```
 

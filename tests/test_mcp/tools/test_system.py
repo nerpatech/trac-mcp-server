@@ -76,7 +76,7 @@ class TestGetServerTimeHandler(unittest.TestCase):
         self.assertEqual(
             structured["unix_timestamp"], int(server_dt.timestamp())
         )
-        self.assertEqual(structured["timezone"], "server")
+        self.assertEqual(structured["timezone"], "UTC")
 
         # Verify run_sync was handed client.get_server_time, not the old
         # wiki-page lastModified lookup.
