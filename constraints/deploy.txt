@@ -49,7 +49,7 @@ markdownify==1.2.3
 mcp==1.26.0
 mdurl==0.1.2
 merge3==0.0.16
-mistune==3.2.0
+mistune==3.4.0
 nodeenv==1.12.0
 nodejs-wheel-binaries==24.19.0
 packaging==26.0

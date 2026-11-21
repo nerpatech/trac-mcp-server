@@ -27,11 +27,10 @@ requires-python = ">=3.10"
 dependencies = [
     "requests",
     "python-dotenv",
-    # Capped: mistune 3.4 rewrote link parsing, so InlineParser.parse_link
-    # no longer returns None for a non-link, and the converter's
-    # bracket-escape rules depend on that (Trac #262). The cap comes off
-    # when the rules are ported (Trac #263).
-    "mistune>=3.0.0,<3.4",
+    # 3.2 to 3.4 are supported: mistune 3.4 resolves links at the closing
+    # bracket, and the converter's bracket-escape rules split on that
+    # (`_DEFERRED_LINK_CLOSE`, Trac #263).
+    "mistune>=3.0.0",
     "mcp[cli]>=1.26.0,<2.0.0",
     "PyYAML>=6.0",
     "lxml>=5.0.0",
