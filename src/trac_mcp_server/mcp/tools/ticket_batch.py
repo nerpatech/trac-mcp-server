@@ -94,7 +94,7 @@ TICKET_BATCH_TOOLS = [
     ),
     types.Tool(
         name="ticket_batch_update",
-        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte. A status change needs `action` per item, like ticket_update (e.g. action='resolve' with resolution='fixed', or action='reopen'): an item with a status or resolution but no action is refused, and nothing is written for it.",
+        description="Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte. A status change needs `action` per item, like ticket_update (e.g. action='resolve' with resolution='fixed', or action='reopen'): an item with a status, a non-empty resolution or action_* keys but no action is refused, and nothing is written for it (resolution=\"\" alone is allowed and clears a stale resolution).",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,
@@ -120,11 +120,11 @@ TICKET_BATCH_TOOLS = [
                             },
                             "action": {
                                 "type": "string",
-                                "description": "Trac workflow action to perform (e.g. 'accept', 'resolve', 'reopen', 'reassign'), as in ticket_update. Action-specific input fields are passed via 'action_<action>_<action>_<field>' keys.",
+                                "description": "Trac workflow action to perform (e.g. 'accept', 'resolve', 'reopen', 'reassign'), as in ticket_update. Action-specific input fields are passed via 'action_<action>_<action>_<field>' keys; an empty action counts as none.",
                             },
                             "resolution": {
                                 "type": "string",
-                                "description": "Resolution; requires action (e.g. action='resolve'), remapped onto the action's resolution field",
+                                "description": "Resolution; a non-empty value requires an action that takes one (e.g. action='resolve') and is remapped onto the action's resolution field; refused for an action that takes none (e.g. 'accept'). resolution=\"\" alone clears a stale resolution.",
                             },
                             "priority": {"type": "string"},
                             "component": {"type": "string"},
@@ -447,9 +447,19 @@ async def _handle_batch_update(
 
             # `action` and action_* keys, plus the bare-resolution
             # remap -- the helper ticket_update uses.
-            warning = await apply_workflow_fields(
-                client, ticket_id, update_data, attributes
+            workflow_outcome = await apply_workflow_fields(
+                client,
+                ticket_id,
+                update_data,
+                attributes,
+                runner=run_sync_limited,
             )
+            if workflow_outcome.refusal is not None:
+                return {
+                    "id": ticket_id,
+                    "error": workflow_outcome.refusal,
+                }
+            warning = workflow_outcome.warning
 
             await run_sync_limited(
                 client.update_ticket, ticket_id, comment, attributes

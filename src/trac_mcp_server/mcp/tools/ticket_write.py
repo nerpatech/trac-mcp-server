@@ -9,8 +9,9 @@ byte-for-byte -- no converter sits in this path (ticket #69).
 import asyncio
 import re
 import xmlrpc.client
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import mcp.types as types
 
@@ -163,7 +164,7 @@ TICKET_WRITE_TOOLS = [
                 "owner": {"type": "string", "description": "New owner"},
                 "resolution": {
                     "type": "string",
-                    "description": "Resolution; requires action (e.g. action='resolve'), remapped onto the action's resolution field",
+                    "description": "Resolution; a non-empty value requires an action that takes one (e.g. action='resolve') and is remapped onto the action's resolution field; refused for an action that takes none (e.g. 'accept'). resolution=\"\" alone clears a stale resolution.",
                 },
                 "cc": {
                     "type": "string",
@@ -324,31 +325,58 @@ async def _handle_create(
     )
 
 
+def _has_action(source: dict) -> bool:
+    """True when `source` carries a workflow action: a non-empty string.
+
+    None and "" count as absent. Defined once so the refusal and the
+    forwarding below cannot disagree about it (Trac /trac_mcp_server
+    #261 review).
+    """
+    action = source.get("action")
+    return isinstance(action, str) and action != ""
+
+
 def workflow_field_refusal(source: dict) -> str | None:
-    """Refuse a `status` or `resolution` that comes without an `action`.
+    """Refuse workflow fields that come without an `action`.
 
     Trac's ConfigurableTicketWorkflow drops a direct `status` write
-    without saying so, and a bare `resolution` is written as a plain
-    field -- an open ticket carrying a resolution. Either way the call
-    reported success while the ticket stayed as it was (Trac
-    /trac_mcp_server #261). Shared by ticket_update and
-    ticket_batch_update so the two cannot drift. Returns the refusal
-    text, or None when the write may go ahead.
+    without saying so, ignores `action_*` input fields that have no
+    action, and a non-empty `resolution` is written as a plain field --
+    an open ticket carrying a resolution. Either way the call reported
+    success while the ticket stayed as it was (Trac /trac_mcp_server
+    #261). `resolution=""` is allowed: it clears a stale resolution.
+    Shared by ticket_update and ticket_batch_update so the two cannot
+    drift. Returns the refusal text, or None when the write may go
+    ahead.
     """
-    if source.get("action"):
+    if _has_action(source):
         return None
-    present = [f for f in ("status", "resolution") if f in source]
+    present = [f for f in ("status",) if f in source]
+    if source.get("resolution", "") != "":
+        present.append("resolution")
+    present.extend(key for key in source if key.startswith("action_"))
     if not present:
         return None
     names = " and ".join(f"'{f}'" for f in present)
     return (
         f"{names} given without 'action'. Trac's workflow silently "
-        f"drops a direct status change, and a bare resolution would "
-        f"leave an open ticket with a resolution. Use 'action' to "
-        f"transition the ticket (e.g. action='resolve' with "
-        f"resolution='fixed', or action='reopen' / 'accept'); "
-        f"ticket_actions lists what this ticket allows."
+        f"drops a direct status change, ignores action_* input fields "
+        f"that have no action, and a bare resolution would leave an "
+        f"open ticket with a resolution. Use 'action' to transition "
+        f"the ticket (e.g. action='resolve' with resolution='fixed', "
+        f"or action='reopen' / 'accept'); ticket_actions lists what "
+        f"this ticket allows. To clear a stale resolution without "
+        f'transitioning, send resolution="" alone.'
     )
+
+
+class WorkflowFieldsOutcome(NamedTuple):
+    """What apply_workflow_fields decided: a refusal (the write must not
+    go ahead), a warning (it goes ahead, the caller reports this), or
+    neither."""
+
+    refusal: str | None = None
+    warning: str | None = None
 
 
 async def apply_workflow_fields(
@@ -356,19 +384,32 @@ async def apply_workflow_fields(
     ticket_id: int,
     source: dict,
     attributes: dict[str, Any],
-) -> str | None:
+    runner: Callable[..., Awaitable[Any]] | None = None,
+) -> WorkflowFieldsOutcome:
     """Copy the workflow `action` and its input fields into `attributes`.
 
-    Shared by ticket_update and ticket_batch_update. Returns the remap
-    warning when a bare `resolution` could not be placed on the
-    action's own resolution field, else None.
+    Shared by ticket_update and ticket_batch_update. `runner` is the
+    sync-to-async bridge for the ticket_actions lookup (default
+    run_sync, resolved at call time; the batch path passes
+    run_sync_limited so the lookup honours TRAC_MAX_PARALLEL_REQUESTS).
+
+    Returns a refusal when `action` + a non-empty `resolution` cannot
+    work (the action is not available for this ticket, or takes no
+    resolution), a warning when the lookup itself failed and the plain
+    `resolution` was sent as-is, else neither.
     """
+    if runner is None:
+        runner = run_sync
     # Workflow action: trigger a Trac workflow transition (e.g. accept,
     # resolve, reopen). Action-specific input fields follow Trac's
     # ``action_<action>_<action>_<field>`` convention (e.g.
     # ``action_resolve_resolve_resolution``) and are forwarded by pattern.
-    if "action" in source:
-        attributes["action"] = source["action"]
+    # Neither is forwarded without an action: the refusal rejects the
+    # action_* keys, and a null/empty action is simply absent.
+    if not _has_action(source):
+        return WorkflowFieldsOutcome()
+    action = source["action"]
+    attributes["action"] = action
     for key, value in source.items():
         if key.startswith("action_"):
             attributes[key] = value
@@ -381,61 +422,72 @@ async def apply_workflow_fields(
     # still reports success with the ticket closed but unresolved
     # (ticket #32). If the caller already supplied the action's own
     # field explicitly, leave it alone -- it already wins on the wire,
-    # so remapping would just overwrite an intentional value. Otherwise
-    # look up the action's real input fields via ticket_actions (rather
-    # than guessing the "resolve" name) and remap the bare `resolution`
-    # onto whichever field ends in "resolution", so the transition and
-    # the resolution land in one call.
-    action = source.get("action")
-    resolution_remap_warning = None
-    if action and "resolution" in attributes:
-        action_prefix = f"action_{action}_"
-        already_explicit = any(
-            key.startswith(action_prefix) and key.endswith("resolution")
-            for key in attributes
+    # so remapping would just overwrite an intentional value. An empty
+    # resolution has nothing to remap and goes as a plain field.
+    # Otherwise look up the action's real input fields via ticket_actions
+    # (rather than guessing the "resolve" name) and remap the bare
+    # `resolution` onto whichever field ends in "resolution", so the
+    # transition and the resolution land in one call.
+    if attributes.get("resolution", "") == "":
+        return WorkflowFieldsOutcome()
+    action_prefix = f"action_{action}_"
+    already_explicit = any(
+        key.startswith(action_prefix) and key.endswith("resolution")
+        for key in attributes
+    )
+    if already_explicit:
+        return WorkflowFieldsOutcome()
+
+    try:
+        actions = await runner(client.get_ticket_actions, ticket_id)
+    except Exception:
+        actions = None
+    if not isinstance(actions, (list, tuple)):
+        # The lookup itself failed: nothing is known about the action,
+        # so send the write as before and say so.
+        return WorkflowFieldsOutcome(
+            warning=(
+                f"WARNING: could not find an input field for "
+                f"action '{action}' ending in 'resolution' -- the "
+                f"plain 'resolution' attribute was sent as-is and "
+                f"may be silently overwritten by the workflow "
+                f"action."
+            )
         )
-        if not already_explicit:
-            try:
-                actions = await run_sync(
-                    client.get_ticket_actions, ticket_id
-                )
-            except Exception:
-                actions = []
-            remapped = False
-            for entry in actions or []:
-                if not isinstance(entry, (list, tuple)) or not entry:
-                    continue
-                if entry[0] != action:
-                    continue
-                input_fields = entry[3] if len(entry) > 3 else []
-                # Each entry in input_fields is [name, default, options],
-                # not a field name -- read the name out rather than
-                # stringifying the whole list (ticket #49). The name is
-                # already fully qualified (e.g.
-                # "action_resolve_resolve_resolution"), so it is used
-                # as-is rather than re-prefixed.
-                for field in input_fields or []:
-                    name = (
-                        field[0]
-                        if isinstance(field, (list, tuple)) and field
-                        else field
-                    )
-                    if str(name).endswith("resolution"):
-                        attributes[str(name)] = attributes.pop(
-                            "resolution"
-                        )
-                        remapped = True
-                        break
-                break
-            if not remapped and "resolution" in attributes:
-                resolution_remap_warning = (
-                    f"WARNING: could not find an input field for "
-                    f"action '{action}' ending in 'resolution' -- the "
-                    f"plain 'resolution' attribute was sent as-is and "
-                    f"may be silently overwritten by the workflow "
-                    f"action."
-                )
-    return resolution_remap_warning
+
+    entries = [e for e in actions if isinstance(e, (list, tuple)) and e]
+    entry = next((e for e in entries if e[0] == action), None)
+    if entry is None:
+        available = ", ".join(str(e[0]) for e in entries) or "none"
+        return WorkflowFieldsOutcome(
+            refusal=(
+                f"action '{action}' is not available for ticket "
+                f"#{ticket_id} (available: {available}). Nothing was "
+                f"written."
+            )
+        )
+    input_fields = entry[3] if len(entry) > 3 else []
+    # Each entry in input_fields is [name, default, options], not a
+    # field name -- read the name out rather than stringifying the whole
+    # list (ticket #49). The name is already fully qualified (e.g.
+    # "action_resolve_resolve_resolution"), so it is used as-is rather
+    # than re-prefixed.
+    for field in input_fields or []:
+        name = (
+            field[0]
+            if isinstance(field, (list, tuple)) and field
+            else field
+        )
+        if str(name).endswith("resolution"):
+            attributes[str(name)] = attributes.pop("resolution")
+            return WorkflowFieldsOutcome()
+    return WorkflowFieldsOutcome(
+        refusal=(
+            f"action '{action}' takes no resolution -- use "
+            f"action='resolve' to close with one, or drop the "
+            f"resolution. Nothing was written."
+        )
+    )
 
 
 async def _handle_update(
@@ -556,9 +608,17 @@ async def _handle_update(
     # the create-ticket description (#69).
     if "description" in args:
         attributes["description"] = args["description"]
-    resolution_remap_warning = await apply_workflow_fields(
+    workflow_outcome = await apply_workflow_fields(
         client, ticket_id, args, attributes
     )
+    if workflow_outcome.refusal is not None:
+        return build_error_response(
+            "validation_error",
+            workflow_outcome.refusal,
+            f"ticket_actions(ticket_id={ticket_id}) lists the actions "
+            f"this ticket allows and the resolution field each takes.",
+        )
+    resolution_remap_warning = workflow_outcome.warning
 
     # The link gate (ticket #64), on the author's OWN text.
     #

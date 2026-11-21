@@ -2075,22 +2075,24 @@ print('hello')
 
         # Close test ticket if still exists (fallback if delete failed or was skipped)
         if self.test_ticket_id:
-            try:
-                await self._call_tool(
-                    "ticket_update",
-                    {
-                        "ticket_id": self.test_ticket_id,
-                        "comment": "[AUTO-CLEANUP] MCP test completed",
-                        "status": "closed",
-                        "resolution": "invalid",
-                    },
-                )
+            # A workflow action, not a bare status: ticket_update refuses
+            # status/resolution without one (#261).
+            success, response, _ = await self._call_tool(
+                "ticket_update",
+                {
+                    "ticket_id": self.test_ticket_id,
+                    "comment": "[AUTO-CLEANUP] MCP test completed",
+                    "action": "resolve",
+                    "resolution": "invalid",
+                },
+            )
+            if success:
                 print(
                     f"  {self._color('OK')} Closed test ticket #{self.test_ticket_id}"
                 )
-            except Exception as e:
+            else:
                 print(
-                    f"  {self._color('FAIL')} Could not close ticket #{self.test_ticket_id}: {e}"
+                    f"  {self._color('FAILED')} Could not close ticket #{self.test_ticket_id}: {response[:200]}"
                 )
                 cleanup_success = False
 

@@ -1180,11 +1180,200 @@ class TestHandleTicketUpdate(unittest.TestCase):
             self.assertEqual(attrs["status"], "accepted")
             self.assertEqual(attrs["action"], "accept")
 
-    def test_update_resolve_action_no_matching_field_warns(self):
-        """If no action input field ends in 'resolution', the bare
-        `resolution` attribute is still sent (unchanged behavior) but
-        the tool result carries a warning rather than reporting quiet
-        success -- ticket #49's "do not fail silently" suggestion.
+    # --- review fixes (ticket #261) ---
+
+    def _run_update(self, args, actions=None, actions_raise=False):
+        """Run _handle_update with run_sync patched; get_ticket_actions
+        answers `actions` (or raises), everything else returns True.
+        Returns (result, run_sync mock)."""
+
+        def side_effect(func, *a, **kw):
+            if func is self.mock_client.get_ticket_actions:
+                if actions_raise:
+                    raise RuntimeError("actions lookup failed")
+                return actions
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = side_effect
+            result = asyncio.run(_handle_update(self.mock_client, args))
+        return result, mock_run_sync
+
+    @staticmethod
+    def _accept_and_resolve_actions():
+        return [
+            ["accept", "accept", ["accepted"], []],
+            [
+                "resolve",
+                "resolve",
+                ["closed"],
+                [
+                    [
+                        "action_resolve_resolve_resolution",
+                        "fixed",
+                        ["fixed", "invalid"],
+                    ]
+                ],
+            ],
+        ]
+
+    def _update_attrs(self, mock_run_sync):
+        calls = [
+            c
+            for c in mock_run_sync.call_args_list
+            if c.args[0] is self.mock_client.update_ticket
+        ]
+        return calls[0].args[3] if calls else None
+
+    def test_update_empty_or_null_action_counts_as_absent(self):
+        """action=None or "" is no action: status is refused and nothing
+        is forwarded to Trac (ticket #261 review)."""
+        for action in (None, ""):
+            with self.subTest(action=action):
+                result, mock_run_sync = self._run_update(
+                    {
+                        "ticket_id": 22,
+                        "status": "closed",
+                        "action": action,
+                    }
+                )
+                self.assertTrue(result.isError)
+                self.assertIn(
+                    "validation_error", result.content[0].text
+                )
+                self.assertIn("'status'", result.content[0].text)
+                self.assertIsNone(self._update_attrs(mock_run_sync))
+
+    def test_update_empty_action_is_never_forwarded(self):
+        """A null/empty action next to a legitimate field is dropped, not
+        sent to Trac."""
+        for action in (None, ""):
+            with self.subTest(action=action):
+                result, mock_run_sync = self._run_update(
+                    {
+                        "ticket_id": 22,
+                        "priority": "high",
+                        "action": action,
+                    }
+                )
+                self.assertFalse(result.isError)
+                attrs = self._update_attrs(mock_run_sync)
+                self.assertEqual(attrs, {"priority": "high"})
+
+    def test_update_action_keys_without_action_refused(self):
+        """action_* keys with no action would be ignored by Trac: refused,
+        naming the keys, nothing forwarded."""
+        for action_present in (False, True):
+            with self.subTest(action_present=action_present):
+                args = {
+                    "ticket_id": 22,
+                    "action_resolve_resolve_resolution": "fixed",
+                }
+                if action_present:
+                    args["action"] = ""
+                result, mock_run_sync = self._run_update(args)
+                self.assertTrue(result.isError)
+                text = result.content[0].text
+                self.assertIn("validation_error", text)
+                self.assertIn("action_resolve_resolve_resolution", text)
+                self.assertIsNone(self._update_attrs(mock_run_sync))
+
+    def test_update_empty_resolution_alone_clears(self):
+        """resolution="" with no action is allowed and forwarded as a
+        plain field: it clears a stale resolution."""
+        result, mock_run_sync = self._run_update(
+            {"ticket_id": 22, "resolution": ""}
+        )
+        self.assertFalse(result.isError)
+        self.assertEqual(
+            self._update_attrs(mock_run_sync), {"resolution": ""}
+        )
+
+    def test_update_empty_resolution_with_action_no_remap_no_warning(
+        self,
+    ):
+        """action + resolution="": no lookup, no warning, the empty
+        resolution is forwarded as a plain field."""
+        result, mock_run_sync = self._run_update(
+            {"ticket_id": 22, "action": "reopen", "resolution": ""},
+            actions=self._accept_and_resolve_actions(),
+        )
+        self.assertFalse(result.isError)
+        self.assertNotIn(
+            "could not find an input field", result.content[0].text
+        )
+        attrs = self._update_attrs(mock_run_sync)
+        self.assertEqual(attrs, {"action": "reopen", "resolution": ""})
+        self.assertNotIn(
+            self.mock_client.get_ticket_actions,
+            [c.args[0] for c in mock_run_sync.call_args_list],
+        )
+
+    def test_update_nonempty_resolution_without_action_still_refused(
+        self,
+    ):
+        result, _ = self._run_update(
+            {"ticket_id": 22, "resolution": "fixed"}
+        )
+        self.assertTrue(result.isError)
+        self.assertIn("'resolution'", result.content[0].text)
+        self.assertIn('resolution=""', result.content[0].text)
+
+    def test_update_action_without_resolution_field_refuses_resolution(
+        self,
+    ):
+        """action='accept' takes no resolution: refused, nothing written."""
+        result, mock_run_sync = self._run_update(
+            {
+                "ticket_id": 22,
+                "action": "accept",
+                "resolution": "fixed",
+            },
+            actions=self._accept_and_resolve_actions(),
+        )
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("validation_error", text)
+        self.assertIn("action 'accept' takes no resolution", text)
+        self.assertIn("action='resolve'", text)
+        self.assertIsNone(self._update_attrs(mock_run_sync))
+
+    def test_update_unknown_action_refused_listing_available(self):
+        result, mock_run_sync = self._run_update(
+            {"ticket_id": 22, "action": "bogus", "resolution": "fixed"},
+            actions=self._accept_and_resolve_actions(),
+        )
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("'bogus' is not available", text)
+        self.assertIn("accept", text)
+        self.assertIn("resolve", text)
+        self.assertIsNone(self._update_attrs(mock_run_sync))
+
+    def test_update_actions_lookup_failure_warns_and_sends(self):
+        """When get_ticket_actions itself raised, keep the old
+        warning-and-send behaviour."""
+        result, mock_run_sync = self._run_update(
+            {
+                "ticket_id": 22,
+                "action": "resolve",
+                "resolution": "fixed",
+            },
+            actions_raise=True,
+        )
+        self.assertFalse(result.isError)
+        self.assertIn("WARNING", result.content[0].text)
+        attrs = self._update_attrs(mock_run_sync)
+        self.assertEqual(attrs["resolution"], "fixed")
+        self.assertEqual(attrs["action"], "resolve")
+
+    def test_update_resolve_action_no_matching_field_is_refused(self):
+        """If get_ticket_actions succeeded and the action has no input
+        field ending in 'resolution', the write is refused rather than
+        sent with a resolution the workflow would overwrite -- ticket
+        #49's "do not fail silently", tightened by #261.
         """
 
         def run_sync_side_effect(func, *args, **kwargs):
@@ -1210,15 +1399,17 @@ class TestHandleTicketUpdate(unittest.TestCase):
                 )
             )
 
-            update_call = next(
-                c
-                for c in mock_run_sync.call_args_list
-                if c.args[0] is self.mock_client.update_ticket
+            self.assertTrue(result.isError)
+            self.assertIn(
+                "action 'resolve' takes no resolution",
+                result.content[0].text,
             )
-            attrs = update_call.args[3]
-            self.assertEqual(attrs["resolution"], "fixed")
-            text = result.content[0].text
-            self.assertIn("WARNING", text)
+            self.assertFalse(
+                any(
+                    c.args[0] is self.mock_client.update_ticket
+                    for c in mock_run_sync.call_args_list
+                )
+            )
 
     def test_update_explicit_action_resolution_field_wins(self):
         """An explicit action_resolve_resolve_resolution still wins over
@@ -1643,7 +1834,7 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
             "trac_mcp_server.mcp.tools.ticket_write.run_sync"
         ) as mock_run_sync:
             mock_run_sync.side_effect = [
-                [],  # get_ticket_actions: no resolve input field
+                RuntimeError("get_ticket_actions failed"),
                 [42, "c", "m", {"_ts": "1793631099000001"}],
             ]
             result = asyncio.run(
