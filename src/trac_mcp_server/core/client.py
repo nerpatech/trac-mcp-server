@@ -1217,7 +1217,15 @@ class TracClient:
         messages and must not be conflated. A summary that cannot be
         queried exactly is "could not check" (``ValueError``).
         """
-        escaped_summary = self._query_value(summary)
+        # Trac stores the strip()ped value of every field that is not a
+        # textarea: trac/ticket/model.py, Ticket.__setitem__, ``value =
+        # value.strip()`` (tracrpc's ticket.create assigns summary and a
+        # supplied reporter through it). Observed on /trac_test: a summary
+        # sent with a trailing space is stored without it. So query and
+        # compare the summary as stored. The description is a textarea
+        # and is kept as sent.
+        stored_summary = summary.strip()
+        escaped_summary = self._query_value(stored_summary)
         if escaped_summary is None:
             raise ValueError(
                 "the summary holds a backslash or $USER, which a Trac "
@@ -1225,7 +1233,7 @@ class TracClient:
             )
         query = f"summary={escaped_summary}"
         escaped_reporter = (
-            self._query_value(reporter) if reporter else None
+            self._query_value(reporter.strip()) if reporter else None
         )
         if escaped_reporter:
             query += f"&reporter={escaped_reporter}"
@@ -1241,7 +1249,7 @@ class TracClient:
                 continue
             attrs = ticket_data[3]
             if (
-                attrs.get("summary") != summary
+                attrs.get("summary") != stored_summary
                 or attrs.get("description") != description
             ):
                 continue

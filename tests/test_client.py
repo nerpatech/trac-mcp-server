@@ -653,6 +653,7 @@ def _timeout_run(
     config,
     *,
     summary="Test ticket",
+    description="Test description",
     found=(),
     attrs=None,
 ):
@@ -661,6 +662,7 @@ def _timeout_run(
 
     Returns ``(query, error)``: the ticket.query string sent (``None``
     when no query was sent) and the exception create_ticket raised."""
+    mock_post.reset_mock()
     mock_time.return_value = float(_NOW_EPOCH)
     responses = [
         requests.exceptions.ReadTimeout("Read timed out."),
@@ -675,9 +677,7 @@ def _timeout_run(
     with pytest.raises(
         (TicketCreateTimeout, requests.exceptions.Timeout)
     ) as exc_info:
-        client.create_ticket(
-            summary, "Test description", attributes=attrs
-        )
+        client.create_ticket(summary, description, attributes=attrs)
     if mock_post.call_count == 1:
         return None, exc_info.value
     (params,), method = xmlrpc.client.loads(
@@ -789,6 +789,100 @@ def test_create_ticket_timeout_ignores_same_summary_other_description(
     )
     assert error.ticket_id is None
     assert "most likely was not created" in str(error)
+
+
+@pytest.mark.parametrize(
+    "sent", ["Test ticket ", " Test ticket", "\t Test ticket \n"]
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_matches_the_summary_as_trac_stores_it(
+    mock_post, mock_time, mock_config, sent
+):
+    """Trac strips a summary on create (``Ticket.__setitem__`` calls
+    ``value.strip()`` for every field that is not a textarea; observed
+    live on /trac_test with a trailing space). The recovery queries and
+    compares the stripped summary, else a create that landed is
+    reported as lost and a retry makes a duplicate."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        summary=sent,
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+    )
+    assert (
+        params
+        == "summary=Test ticket&reporter=testuser&order=id&desc=1&max=20"
+    )
+    assert error.ticket_id == 10
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_strips_a_supplied_reporter_like_trac(
+    mock_post, mock_time, mock_config
+):
+    """The same ``Ticket.__setitem__`` strip applies to ``reporter``."""
+    params, _ = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": " someone "},
+    )
+    assert (
+        params
+        == "summary=Test ticket&reporter=someone&order=id&desc=1&max=20"
+    )
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_whitespace_reporter_has_no_clause(
+    mock_post, mock_time, mock_config
+):
+    """A reporter that strips to nothing is stored empty: unknown."""
+    params, _ = _timeout_run(
+        mock_post, mock_time, mock_config, attrs={"reporter": "  "}
+    )
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
+
+
+@pytest.mark.parametrize(
+    "description", ["body\n", "  body  ", "line one\n\nline two\n"]
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_compares_the_description_unstripped(
+    mock_post, mock_time, mock_config, description
+):
+    """The description is a textarea: Trac keeps it as sent (no strip),
+    so it is compared exactly, whitespace included."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=description,
+        found=[(10, "Test ticket", description, "20260812T12:00:05")],
+    )
+    assert error.ticket_id == 10
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=description,
+        found=[
+            (
+                10,
+                "Test ticket",
+                description.strip(),
+                "20260812T12:00:05",
+            )
+        ],
+    )
+    assert error.ticket_id is None
 
 
 @pytest.mark.parametrize("summary", ["a\\b", "cost $USER", "$USER"])
@@ -908,21 +1002,24 @@ class TestFindRecentlyCreatedTicketLive:
             if tid is not None:
                 client.delete_ticket(tid)
 
-    def test_a_summary_with_a_trailing_space(self):
-        """Whether Trac keeps a trailing space in a summary, and whether
-        ``summary=<value> `` still finds it, was not known when this row
-        was written. It asserts the outcome the recovery wants (the
-        finder returns the id); the stored summary is in the failure
-        message. If this row fails, the recorded value says whether Trac
-        strips the space on create (then the finder's exact comparison
-        misses the ticket) or the query drops it."""
+    @pytest.mark.parametrize(
+        "pad", ["trailing", "leading"], ids=["trailing", "leading"]
+    )
+    def test_a_summary_with_edge_whitespace_is_found_as_trac_stores_it(
+        self, pad
+    ):
+        """Trac strips a summary on create (``Ticket.__setitem__``,
+        ``value.strip()``; observed live with a trailing space), so the
+        finder must query and compare the stripped summary. The stored
+        value is in the failure message."""
         import uuid
 
         from tests.live_helpers import trac_test_client
 
         client = trac_test_client()
         run = uuid.uuid4().hex[:8]
-        summary = f"t269 trailing space {run} "
+        core = f"t269 {pad} space {run}"
+        summary = core + " " if pad == "trailing" else " " + core
         description = f"Ticket 269 live finder row, run {run}."
         tid = None
         try:
@@ -934,6 +1031,41 @@ class TestFindRecentlyCreatedTicketLive:
             assert found == tid, (
                 f"Trac stored the summary as {stored!r} (sent "
                 f"{summary!r}); the finder returned {found!r}"
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    @pytest.mark.parametrize(
+        "ending",
+        ["\n", "  ", "\r\n", "\r\nsecond line\r\n"],
+        ids=["lf", "spaces", "crlf", "crlf-lines"],
+    )
+    def test_a_description_is_found_as_trac_stores_it(self, ending):
+        """Trac's source keeps a description as sent (a textarea is not
+        strip()ped), so the finder compares it exactly. A ``\\r`` in it
+        is the open question: Python's XML-RPC client sends it raw, and
+        an XML parser on the server may fold ``\\r\\n`` to ``\\n`` before
+        Trac sees it. The stored value is in the failure message; the
+        row asserts the finder returns the id."""
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 description ending {run}"
+        description = f"Ticket 269 live finder row, run {run}.{ending}"
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            stored = client.get_ticket(tid)[3]["description"]
+            found = client._find_recently_created_ticket(
+                summary, description, "", sent_at
+            )
+            assert found == tid, (
+                f"Trac stored the description as {stored!r} (sent "
+                f"{description!r}); the finder returned {found!r}"
             )
         finally:
             if tid is not None:
