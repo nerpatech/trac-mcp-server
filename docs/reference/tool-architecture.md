@@ -46,7 +46,7 @@ class ToolSpec:
 ```
 
 - `tool` -- the standard MCP SDK `Tool` object with name, description, and JSON Schema
-- `permissions` -- set of Trac permission strings (e.g., `{"TICKET_VIEW"}`). Empty frozenset means the tool requires no permission and is always available (used for `ping`, `get_server_time`, `wiki_file_detect_format`)
+- `permissions` -- set of Trac permission strings (e.g., `{"TICKET_VIEW"}`). Empty frozenset means the tool requires no permission and is always available (used for `ping`, `get_server_time`, `list_instances`, `wiki_file_detect_format`)
 - `handler` -- async function with standardized signature `(client, args) -> CallToolResult`
 
 ### ToolRegistry
@@ -270,6 +270,7 @@ The registry includes a tool only if:
 | `wiki_file_push` | `WIKI_CREATE`, `WIKI_MODIFY` |
 | `wiki_file_pull` | `WIKI_VIEW` |
 | `wiki_file_detect_format` | *(none -- always available)* |
+| `list_instances` | *(none -- always available)* |
 | `convert_preview` | `WIKI_VIEW`, `TICKET_VIEW` (its render expands either realm; Trac /trac_mcp_server #273) |
 | `milestone_list` | `MILESTONE_VIEW` |
 | `milestone_get` | `MILESTONE_VIEW` |

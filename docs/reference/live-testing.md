@@ -90,12 +90,12 @@ Adding a new scenario requires no code changes -- just add the file pair.
 
 | Scenario | Permissions | Expected Tools | Description |
 |----------|-------------|:--------------:|-------------|
-| `readonly` | TICKET_VIEW, WIKI_VIEW, MILESTONE_VIEW | 21 | Read-only agent, no modifications |
-| `ticket_manager` | 10 perms (all ticket + all milestone) | 29 | Ticket/milestone management, no wiki |
-| `wiki_editor` | WIKI_VIEW, WIKI_CREATE, WIKI_MODIFY | 14 | Wiki editing, no tickets or milestones |
-| `full_access` | All 14 permissions | 42 | Unrestricted access to all tools |
+| `readonly` | TICKET_VIEW, WIKI_VIEW, MILESTONE_VIEW | 29 | Read-only agent, no modifications |
+| `ticket_manager` | 10 perms (all ticket + all milestone) | 35 | Ticket/milestone management, no wiki |
+| `wiki_editor` | WIKI_VIEW, WIKI_CREATE, WIKI_MODIFY | 18 | Wiki editing, no tickets or milestones |
+| `full_access` | All 14 permissions | 52 | Unrestricted access to all tools |
 
-System tools (`ping`, `get_server_time`, `wiki_file_detect_format`) require no permissions and are always available. Tool counts above are pinned to the reference `.expected_tools.txt` files under `scripts/scenarios/` -- regenerate them with `--update-refs` (see below) after adding, removing, or re-permissioning a tool; `agent_scenarios.py` fails loudly on drift, so a stale table here is just documentation lag, not a live risk.
+System tools (`ping`, `get_server_time`, `list_instances`, `wiki_file_detect_format`) require no permissions and are always available. Tool counts above are pinned to the reference `.expected_tools.txt` files under `scripts/scenarios/` -- regenerate them with `--update-refs` (see below) after adding, removing, or re-permissioning a tool; `agent_scenarios.py` fails loudly on drift, so a stale table here is just documentation lag, not a live risk.
 
 #### Example Permission File
 

@@ -340,7 +340,8 @@ async def handle_read_resource(uri: Url) -> str:
     - trac://wiki/{page_name}?instance=/project - Read from another instance
     - trac://wiki/_index - List all wiki pages with tree structure
 
-    A ``format`` query parameter is refused with a validation error: the
+    ``?format=tracwiki`` is accepted (it is what is returned anyway); any
+    other ``format`` value is refused with a validation error, because the
     Markdown read path was removed with ticket #69. Wiki resources are
     served only when ``wiki_get`` is; otherwise a read is refused as an
     unknown resource type, the way a filtered-out tool is refused as an

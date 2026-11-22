@@ -1,4 +1,6 @@
+convert_preview
 get_server_time
+list_instances
 milestone_get
 milestone_list
 ping
@@ -7,10 +9,12 @@ ticket_attachment_get
 ticket_attachment_list
 ticket_changelog
 ticket_check_list
+ticket_comment_history
 ticket_component_list
 ticket_enum_list
 ticket_fields
 ticket_get
+ticket_render_check
 ticket_search
 wiki_attachment_get
 wiki_attachment_list
@@ -21,4 +25,5 @@ wiki_file_pull
 wiki_get
 wiki_get_history
 wiki_recent_changes
+wiki_render_check
 wiki_search

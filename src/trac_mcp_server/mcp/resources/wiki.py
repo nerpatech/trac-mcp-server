@@ -19,6 +19,9 @@ from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
 from ..tools.errors import classify_fault, format_timestamp
 
+# XML-RPC's int is 32-bit signed: a larger version cannot be sent to Trac.
+_MAX_VERSION = 2**31 - 1
+
 # Concrete resources for list_resources(). The page URI is a template, not
 # a resource: it is listed by list_resource_templates() below, so a client
 # does not offer to read a page literally named "{page_name}".
@@ -120,20 +123,24 @@ async def handle_read_wiki_resource(
         )
     version_str = params.get("version")
     version = None
-    if version_str:
-        # A whole number of 1 or more, ASCII digits only: int() alone
-        # also takes " 2", "+3" and non-ASCII digits, and "0" or "-1"
-        # name no version.
+    if version_str is not None:
+        # A whole number of 1 to XML-RPC's int maximum, ASCII digits
+        # only: int() alone also takes " 2", "+3" and non-ASCII digits,
+        # "0" or "-1" name no version, an empty value names none either,
+        # and a longer one is refused on length first -- int() of a
+        # 5000-digit string raises, and a value past 2**31-1 does not
+        # fit an XML-RPC int.
         if (
             not (version_str.isascii() and version_str.isdigit())
-            or int(version_str) < 1
+            or len(version_str) > len(str(_MAX_VERSION))
+            or not 1 <= int(version_str) <= _MAX_VERSION
         ):
             return (
-                f"Error (validation_error): version={version_str!r} is "
-                "not a version number -- it must be a whole number of "
-                "1 or more.\n\nHint: use ?version=N with N from 1 up, "
-                "or drop the version query parameter to read the latest "
-                "version."
+                f"Error (validation_error): version={version_str[:40]!r} "
+                "is not a version number -- it must be a whole number "
+                f"from 1 to {_MAX_VERSION}.\n\nHint: use ?version=N "
+                "with N from 1 up, or drop the version query parameter "
+                "to read the latest version."
             )
         version = int(version_str)
 

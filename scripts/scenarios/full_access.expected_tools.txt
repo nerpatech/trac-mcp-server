@@ -1,4 +1,6 @@
+convert_preview
 get_server_time
+list_instances
 milestone_create
 milestone_delete
 milestone_get
@@ -15,6 +17,9 @@ ticket_batch_delete
 ticket_batch_update
 ticket_changelog
 ticket_check_list
+ticket_comment_delete
+ticket_comment_history
+ticket_comment_reply
 ticket_component_create
 ticket_component_delete
 ticket_component_list
@@ -25,6 +30,7 @@ ticket_enum_delete
 ticket_enum_list
 ticket_fields
 ticket_get
+ticket_render_check
 ticket_search
 ticket_update
 wiki_attachment_delete
@@ -41,5 +47,6 @@ wiki_file_push
 wiki_get
 wiki_get_history
 wiki_recent_changes
+wiki_render_check
 wiki_search
 wiki_update

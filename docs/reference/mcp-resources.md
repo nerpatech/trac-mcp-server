@@ -31,7 +31,7 @@ When withdrawn, `resources/list` and `resources/templates/list` return nothing, 
 
 | Parameter | Values | Description |
 |-----------|--------|-------------|
-| `version` | Integer (1+) | Retrieve specific version instead of latest. Anything that is not a whole number of 1 or more (`abc`, `0`, `-1`, `1.5`) returns `Error (validation_error)` |
+| `version` | Integer (1+) | Retrieve specific version instead of latest. Anything that is not a whole number from 1 to 2147483647 (`abc`, `0`, `-1`, `1.5`, an empty `?version=`, a longer number) returns `Error (validation_error)`; omit the parameter for the latest |
 | `instance` | Configured name, or a path/URL on the same host | Route to another Trac instance instead of the default -- see [Multiple Instances](configuration.md#multiple-instances) |
 
 ## Examples
@@ -41,10 +41,11 @@ When withdrawn, `resources/list` and `resources/templates/list` return nothing, 
 trac://wiki/WikiStart
 ```
 
-Content comes back as stored -- TracWiki, byte-for-byte. `?format=` was
-removed with the rest of the Markdown read path (ticket #69) and is
-reported as an error rather than ignored, so a stale caller is told
-instead of quietly handed something else. To convert the result, use the
+Content comes back as stored -- TracWiki, byte-for-byte. `?format=tracwiki`
+is accepted (it is what comes back anyway); any other `format` value, such
+as `markdown`, was removed with the rest of the Markdown read path (ticket
+#69) and is reported as an error rather than ignored, so a stale caller is
+told instead of quietly handed something else. To convert the result, use the
 `trac-convert` binary.
 
 **Read specific version:**
@@ -114,7 +115,7 @@ Hint: Use trac://wiki/WikiStart to see the latest version.
 
 **Invalid version:**
 ```
-Error (validation_error): version='abc' is not a version number -- it must be a whole number of 1 or more.
+Error (validation_error): version='abc' is not a version number -- it must be a whole number from 1 to 2147483647.
 
 Hint: use ?version=N with N from 1 up, or drop the version query parameter to read the latest version.
 ```

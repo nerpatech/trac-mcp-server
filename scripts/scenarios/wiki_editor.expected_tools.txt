@@ -1,4 +1,5 @@
 get_server_time
+list_instances
 ping
 wiki_attachment_get
 wiki_attachment_list
@@ -12,5 +13,6 @@ wiki_file_push
 wiki_get
 wiki_get_history
 wiki_recent_changes
+wiki_render_check
 wiki_search
 wiki_update
