@@ -114,8 +114,19 @@ class TestMilestoneFormatDate:
         assert _format_date(0) == "(Not set)"
         assert _format_date(None) == "(Not set)"
 
+    def test_empty_string_is_not_set(self):
+        """What ``<string/>`` decodes to; milestone_list's _UNSET_RAW
+        holds "" too."""
+        assert _format_date("") == "(Not set)"
+
     def test_datetime(self):
         assert _format_date(DT) == self.ISO
+
+    def test_year_below_1000_is_zero_padded(self):
+        assert (
+            _format_date(datetime(999, 1, 2, 3, 4, 5))
+            == "0999-01-02T03:04:05"
+        )
 
     def test_datetime_is_not_shifted_by_the_host_zone(self, non_utc_tz):
         assert _format_date(DT) == self.ISO
@@ -175,6 +186,12 @@ class TestMilestoneGetUnsetCompleted:
         assert result.structuredContent["completed"] is None
         assert "Completed: (Not set)" in result.content[0].text
 
+    def test_empty_string_completed_is_none_in_structured_content(self):
+        result = self._get(completed="", due="")
+        assert result.structuredContent["completed"] is None
+        assert "Completed: (Not set)" in result.content[0].text
+        assert "Due: (Not set)" in result.content[0].text
+
     def test_set_completed_is_the_formatted_date(self):
         result = self._get(completed=DT)
         assert (
@@ -220,29 +237,81 @@ class TestRecentChangesDisplay:
         names = [p["name"] for p in result.structuredContent["pages"]]
         assert names == ["P1", "P0"]
 
-    def test_int_timestamp_is_formatted_in_utc(self, non_utc_tz):
+    def test_int_timestamp_is_the_utc_wire_form(self, non_utc_tz):
         result = self._run(self._changes(TS))
         assert (
-            result.structuredContent["pages"][0]["lastModified"]
-            == "2026-11-21 20:44"
+            result.structuredContent["pages"][0]["lastModified"] == WIRE
         )
-        assert (
-            "modified: 2026-11-21 20:44 by a" in result.content[0].text
-        )
+        assert f"modified: {WIRE} by a" in result.content[0].text
 
-    def test_float_timestamp_is_formatted_in_utc(self, non_utc_tz):
+    def test_float_timestamp_is_the_utc_wire_form(self, non_utc_tz):
         result = self._run(self._changes(float(TS)))
         assert (
-            result.structuredContent["pages"][0]["lastModified"]
-            == "2026-11-21 20:44"
+            result.structuredContent["pages"][0]["lastModified"] == WIRE
         )
 
-    def test_xmlrpc_datetime_is_read_as_utc(self, non_utc_tz):
+    def test_xmlrpc_datetime_is_its_wire_form(self, non_utc_tz):
         result = self._run(self._changes(xmlrpc.client.DateTime(WIRE)))
         assert (
-            result.structuredContent["pages"][0]["lastModified"]
-            == "2026-11-21 20:44"
+            result.structuredContent["pages"][0]["lastModified"] == WIRE
         )
+
+    def test_one_listing_shows_one_form_for_every_kind_of_value(
+        self, non_utc_tz
+    ):
+        result = self._run(
+            self._changes(
+                DT,
+                TS + 1,
+                float(TS + 2),
+                xmlrpc.client.DateTime("20261121T20:44:14"),
+                "20261121T20:44:15",
+            )
+        )
+        shown = [
+            p["lastModified"] for p in result.structuredContent["pages"]
+        ]
+        assert sorted(shown) == [
+            "20261121T20:44:11",
+            "20261121T20:44:12",
+            "20261121T20:44:13",
+            "20261121T20:44:14",
+            "20261121T20:44:15",
+        ]
+
+    def test_a_row_without_a_time_sorts_last_and_does_not_raise(self):
+        later = datetime(2026, 11, 22, 1, 2, 3)
+        changes = [
+            {"name": "NoKey", "author": "a", "version": 1},
+            {
+                "name": "Old",
+                "author": "a",
+                "version": 1,
+                "lastModified": DT,
+            },
+            {
+                "name": "NoneTime",
+                "author": "a",
+                "version": 1,
+                "lastModified": None,
+            },
+            {
+                "name": "New",
+                "author": "a",
+                "version": 1,
+                "lastModified": later,
+            },
+            {
+                "name": "Str",
+                "author": "a",
+                "version": 1,
+                "lastModified": "20261121T21:00:00",
+            },
+        ]
+        result = self._run(changes)
+        names = [p["name"] for p in result.structuredContent["pages"]]
+        assert names[:3] == ["New", "Str", "Old"]
+        assert set(names[3:]) == {"NoKey", "NoneTime"}
 
 
 class TestOtherDisplays:
@@ -351,4 +420,29 @@ class TestCheckListWithADatetimeField:
         assert not result.isError
         found = json.loads(result.content[0].text)["found"]["5"]
         assert found["summary"] == "s"
-        assert found["due_close"] == str(DT)
+        assert found["due_close"] == WIRE
+
+    def test_time_fields_carry_the_wire_form_in_text_and_structured(
+        self,
+    ):
+        client = MagicMock()
+        client.config = MagicMock(trac_url="https://trac.example/proj/")
+        client.search_tickets.return_value = [5]
+        client.get_tickets.return_value = {
+            5: [5, DT, DT, {"summary": "s", "changetime": DT}]
+        }
+        with (
+            patch.object(ticket_list, "run_sync", _direct),
+            patch.object(ticket_list, "run_sync_limited", _direct),
+        ):
+            result = run(
+                ticket_list._handle_check_list(
+                    client,
+                    {"values": "5", "fields": "summary,changetime"},
+                )
+            )
+        text_found = json.loads(result.content[0].text)["found"]["5"]
+        assert text_found["changetime"] == WIRE
+        assert (
+            result.structuredContent["found"]["5"]["changetime"] == WIRE
+        )

@@ -365,6 +365,31 @@ def _wiki_time_key(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _builtin_values(value: Any) -> Any:
+    """``value`` with the stdlib's wrapper types replaced, recursively
+    through lists and dicts (what ``loads(use_builtin_types=True)``
+    does, without its all-or-nothing date parse).
+
+    ``Binary`` becomes its ``bytes``. A ``DateTime`` holding the compact
+    ``YYYYMMDDTHH:MM:SS`` becomes a naive ``datetime`` (UTC); one that
+    does not parse stays its raw string, which every date helper takes.
+    """
+    if isinstance(value, xmlrpc.client.Binary):
+        return value.data
+    if isinstance(value, xmlrpc.client.DateTime):
+        try:
+            return datetime.strptime(value.value, "%Y%m%dT%H:%M:%S")
+        except ValueError:
+            return value.value
+    if isinstance(value, list):
+        return [_builtin_values(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _builtin_values(item) for key, item in value.items()
+        }
+    return value
+
+
 K = TypeVar("K")
 V = TypeVar("V")
 
@@ -638,14 +663,15 @@ class TracClient:
 
         # The stdlib decoder, so a struct holds only its own members, an
         # empty ``<string/>`` is "", an untyped ``<value>`` is a string,
-        # and ``i8`` and ``nil`` decode. ``dateTime.iso8601`` comes back
-        # as a naive ``datetime`` holding UTC, ``base64`` as ``bytes``.
-        # A fault reply raises ``xmlrpc.client.Fault`` here; a reply that
-        # is not XML raises ``xml.parsers.expat.ExpatError``.
-        params, _method = xmlrpc.client.loads(
-            response.content, use_builtin_types=True
-        )
-        return params[0]
+        # and ``i8`` and ``nil`` decode. A fault reply raises
+        # ``xmlrpc.client.Fault`` here; a reply that is not XML raises
+        # ``xml.parsers.expat.ExpatError``. ``use_builtin_types`` stays
+        # off: it makes the stdlib strptime every ``dateTime.iso8601``,
+        # and one value that is not compact (an offset, a ``Z``,
+        # fractions) would raise for the whole reply. ``_builtin_values``
+        # converts instead, per value.
+        params, _method = xmlrpc.client.loads(response.content)
+        return _builtin_values(params[0])
 
     def search_tickets(self, query: str) -> Any:
         """

@@ -7,6 +7,7 @@ comparison needs one tool call instead of one search per item.
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 import mcp.types as types
@@ -17,7 +18,7 @@ from ...core.async_utils import (
     run_sync_limited,
 )
 from ...core.client import TICKET_FETCH_BATCH, TracClient
-from .errors import build_error_response
+from .errors import build_error_response, compact_time
 from .registry import ToolSpec
 from .ticket_read import _ticket_url
 
@@ -244,12 +245,22 @@ async def _load(
         )
 
 
+def _field_value(value: Any) -> Any:
+    """A field's value for the result: ``""`` when unset, and a date
+    (``time``, ``changetime``, a custom time field decode as a
+    ``datetime``) as the compact wire text it showed before the client
+    decoded it (Trac /trac_mcp_server #270)."""
+    if isinstance(value, datetime):
+        return compact_time(value)
+    return value or ""
+
+
 def _compact(
     client: TracClient, tid: int, attrs: dict, fields: list[str]
 ) -> dict[str, Any]:
     return {
         "id": tid,
-        **{name: attrs.get(name) or "" for name in fields},
+        **{name: _field_value(attrs.get(name)) for name in fields},
         "url": _ticket_url(client, tid),
     }
 

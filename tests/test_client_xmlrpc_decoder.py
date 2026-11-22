@@ -130,6 +130,68 @@ class TestDecoder:
         assert result == b"Hello"
         assert isinstance(result, bytes)
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "2026-11-21T20:44:00Z",
+            "2026-11-21T20:44:00+02:00",
+            "20261121T20:44:00.250",
+            "not a date",
+        ],
+    )
+    def test_a_non_compact_date_time_is_kept_as_its_raw_string(
+        self, post, mock_config, raw
+    ):
+        """The stdlib's own datetime parse raises ValueError for the
+        whole reply on one of these; the date helpers take strings."""
+        result = _decode(
+            post,
+            mock_config,
+            _reply(f"<dateTime.iso8601>{raw}</dateTime.iso8601>"),
+        )
+        assert result == raw
+
+    def test_date_times_and_binary_inside_a_struct_and_an_array(
+        self, post, mock_config
+    ):
+        body = _reply(
+            "<array><data><value>"
+            + _struct(
+                (
+                    "good",
+                    f"<dateTime.iso8601>{TS_WIRE}</dateTime.iso8601>",
+                ),
+                (
+                    "odd",
+                    "<dateTime.iso8601>2026-11-21T20:44:00Z</dateTime.iso8601>",
+                ),
+                ("blob", "<base64>SGVsbG8=</base64>"),
+                (
+                    "inner",
+                    _struct(
+                        (
+                            "when",
+                            f"<dateTime.iso8601>{TS_WIRE}</dateTime.iso8601>",
+                        ),
+                        ("blob", "<base64></base64>"),
+                    ),
+                ),
+            )
+            + "</value><value><base64>AQI=</base64></value></data></array>"
+        )
+        result = _decode(post, mock_config, body)
+        assert result == [
+            {
+                "good": TS_DT,
+                "odd": "2026-11-21T20:44:00Z",
+                "blob": b"Hello",
+                "inner": {"when": TS_DT, "blob": b""},
+            },
+            b"\x01\x02",
+        ]
+        assert isinstance(result[0]["blob"], bytes)
+        assert isinstance(result[1], bytes)
+
     def test_array_and_scalars(self, post, mock_config):
         body = _reply(
             "<array><data><value><int>1</int></value>"

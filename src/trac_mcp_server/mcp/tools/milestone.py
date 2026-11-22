@@ -544,8 +544,16 @@ def _parse_date(date_str: str) -> xmlrpc.client.DateTime:
 # What _format_date returns for a date that is not set.
 _NOT_SET = "(Not set)"
 
-# How a set date is shown, and the form milestone_create/update take.
-_ISO = "%Y-%m-%dT%H:%M:%S"
+
+def _iso(dt: datetime) -> str:
+    """``YYYY-MM-DDTHH:MM:SS``, the form milestone_create/update take.
+    Spelled out: ``strftime("%Y")`` does not zero-pad a year below 1000
+    on glibc."""
+    return (
+        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
+        f"T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+    )
+
 
 # Raw `due` / `completed` values Trac uses for "no date".
 _UNSET_RAW = (0, None, "")
@@ -568,24 +576,22 @@ def _format_date(date_value: Any) -> str:
         Formatted date string or "(Not set)"
     """
     match date_value:
-        case 0 | None:
+        case 0 | None | "":
             return _NOT_SET
         case xmlrpc.client.DateTime() as dt_val:
             try:
                 dt = datetime(*dt_val.timetuple()[:6])
             except ValueError:
                 return dt_val.value
-            return dt.strftime(_ISO)
+            return _iso(dt)
         case int() | float() as ts:
             dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            return dt.strftime(_ISO)
+            return _iso(dt)
         case datetime() as dt:
-            return dt.strftime(_ISO)
+            return _iso(dt)
         case str() as s:
             try:
-                return datetime.strptime(s, "%Y%m%dT%H:%M:%S").strftime(
-                    _ISO
-                )
+                return _iso(datetime.strptime(s, "%Y%m%dT%H:%M:%S"))
             except ValueError:
                 return s
         case _:
