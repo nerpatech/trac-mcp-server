@@ -374,9 +374,7 @@ class TestProjectIndexScraping:
 
         assert result == []
 
-    def test_scrape_out_of_scope_propagates(self):
-        """A scoped session's refusal is not an empty index: the caller
-        has to tell "outside this caller's scope" from "no projects"."""
+    def test_scrape_out_of_scope_returns_empty_list(self):
         from trac_mcp_server.core.scope import DestinationOutOfScope
         from trac_mcp_server.detection.web_scraper import (
             scrape_project_index,
@@ -387,8 +385,10 @@ class TestProjectIndexScraping:
             "https://trac.example.org"
         )
 
-        with pytest.raises(DestinationOutOfScope):
+        assert (
             scrape_project_index("https://trac.example.org", session)
+            == []
+        )
 
     def test_scrape_ignores_links_without_href(self):
         from trac_mcp_server.detection.web_scraper import (

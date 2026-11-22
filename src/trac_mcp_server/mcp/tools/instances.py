@@ -11,7 +11,7 @@ import mcp.types as types
 
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
-from ...core.scope import DestinationOutOfScope
+from ...core.scope import ScopedSession
 from ...detection.web_scraper import scrape_project_index
 from ...instances import (
     IdentityRequiredError,
@@ -24,6 +24,23 @@ from .errors import IDENTITY_REQUIRED_ACTION, build_error_response
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
+
+# (connect, read) seconds for the discovery scrape: a best-effort page
+# fetch, not an RPC call, so not the configurable (up to 300 s) rpc_timeout.
+_SCRAPE_TIMEOUT = (10, 10)
+
+
+def _unscoped_copy(session: ScopedSession) -> ScopedSession:
+    """A session for the same origin and credentials as ``session`` but
+    with no allowlist, for the one fetch of the host's project index."""
+    copy = ScopedSession(session.own_url, None)
+    copy.auth = session.auth
+    copy.verify = session.verify
+    copy.cert = session.cert
+    copy.proxies = dict(session.proxies)
+    copy.trust_env = session.trust_env
+    return copy
+
 
 INSTANCE_TOOLS = [
     types.Tool(
@@ -311,26 +328,38 @@ async def _handle_list_instances(
     if discover and default_config is not None:
         host_root = _host_root(default_config.trac_url)
         # Trac /trac_mcp_server #274: fetched with the caller's own client
-        # session (its credentials, TLS settings and scope check, the same
-        # resolved config as above), off the event loop, bounded like an
-        # RPC call. The session is read inside the worker: a client's
-        # sessions are thread-local, so the loop thread's one session
-        # must not be shared by every concurrent call's worker.
+        # (its credentials and TLS settings, the same resolved config as
+        # above), off the event loop, bounded. Best effort, so the read
+        # timeout is short and not the RPC one.
         scrape_client = registry.get_client(None, identity=identity)
-        timeout = (10, scrape_client.config.rpc_timeout)
 
         def scrape() -> list[dict]:
+            # Read inside the worker: a client's sessions are
+            # thread-local, so the loop thread's one session must not be
+            # shared by every concurrent call's worker.
+            session = scrape_client.session
+            if isinstance(session, ScopedSession) and (
+                session.scope is not None
+            ):
+                # The host root is outside a scoped caller's allowlist,
+                # so its session refuses it. The index is the host's own
+                # page, on the origin the caller's credentials already
+                # go to: fetch it with a session for the same origin and
+                # no scope (so credentials still stay on that origin,
+                # redirects included), and let the `allowed` filter below
+                # keep only what the caller may reach.
+                unscoped = _unscoped_copy(session)
+                try:
+                    return scrape_project_index(
+                        host_root, unscoped, _SCRAPE_TIMEOUT
+                    )
+                finally:
+                    unscoped.close()
             return scrape_project_index(
-                host_root, scrape_client.session, timeout
+                host_root, session, _SCRAPE_TIMEOUT
             )
 
-        try:
-            discovered = await run_sync(scrape)
-        except DestinationOutOfScope:
-            discovered = []
-            skipped = "skipped: the project index is outside this caller's scope"
-            structured["discovery"] = skipped
-            lines.extend(["", f"Discovery {skipped}"])
+        discovered = await run_sync(scrape)
         if allowed is not None:
             discovered = [
                 e for e in discovered if e["url"].rstrip("/") in allowed

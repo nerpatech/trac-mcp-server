@@ -17,7 +17,6 @@ import pytest
 import requests
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.core.scope import DestinationOutOfScope
 from trac_mcp_server.instances import Identity, InstanceRegistry
 from trac_mcp_server.mcp.tools.instances import (
     INSTANCE_SPECS,
@@ -201,7 +200,7 @@ class TestDiscoveryUsesTheClientSession:
         ):
             result = _list(registry)
 
-        session.get.assert_called_once_with(HOST, timeout=(10, 42))
+        session.get.assert_called_once_with(HOST, timeout=(10, 10))
         assert {
             e["path"] for e in result.structuredContent["discovered"]
         } == {
@@ -244,52 +243,139 @@ class TestDiscoveryUsesTheClientSession:
         assert seen == {"verify": False}
 
 
-class TestDiscoveryOutsideTheCallersScope:
-    def test_an_index_outside_the_allowlist_is_skipped_not_a_crash(
-        self,
-    ):
-        session = MagicMock()
-        session.get.side_effect = DestinationOutOfScope(HOST)
-        registry = _registry_with_session(session)
+class TestDiscoveryForAScopedCaller:
+    """A caller with an allowlist keeps discovery: the index is fetched
+    with its own credentials on the host's origin, and what comes back is
+    filtered to the allowlist."""
 
-        result = _list(registry)
-
-        assert not result.isError
-        assert (
-            result.structuredContent["discovery"]
-            == "skipped: the project index is outside this caller's scope"
-        )
-        assert "discovered" not in result.structuredContent
-        assert any(
-            "project index is outside this caller's scope" in c.text
-            for c in result.content
-        )
-
-    def test_a_real_scoped_client_skips_without_sending(self):
-        """End to end through the real ScopedSession: the host root is not
-        under the allowlisted instance, so nothing is sent."""
+    def _scoped_client(self):
         from trac_mcp_server.core.client import TracClient
 
-        config = _config(allowed_instances=frozenset({DEFAULT_URL}))
-        client = TracClient(config)
+        trac_test = f"{HOST}/trac_test"
+        config = _config(
+            trac_url=trac_test,
+            username="cloud_rpc",
+            password="cloud-pw",
+            allowed_instances=frozenset({trac_test}),
+        )
+        return config, TracClient(config)
+
+    def test_the_index_is_fetched_as_the_caller_and_filtered(self):
+        config, client = self._scoped_client()
         registry = InstanceRegistry(config, {})
         registry.get_client = MagicMock(return_value=client)
+        index = (
+            b"<html><body><ul>"
+            b'<li><a href="/trac_test">Test</a></li>'
+            b'<li><a href="/auto_pm">APM</a></li>'
+            b"</ul></body></html>"
+        )
+        sent = []
 
-        with patch(
-            "requests.adapters.HTTPAdapter.send",
-            side_effect=AssertionError("a request was sent"),
-        ):
+        def fake_send(adapter, request, **kwargs):
+            sent.append(request)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = index
+            response.url = request.url
+            response.request = request
+            return response
+
+        with patch("requests.adapters.HTTPAdapter.send", new=fake_send):
             result = _list(registry)
 
-        assert result.structuredContent["discovery"].startswith(
-            "skipped"
-        )
+        assert [r.url for r in sent] == [f"{HOST}/"]
+        assert sent[0].headers["Authorization"].startswith("Basic ")
+        import base64
 
-    def test_an_unscoped_listing_has_no_discovery_field(self):
-        session = MagicMock()
-        session.get.return_value = _response()
-        result = _list(_registry_with_session(session))
-        assert "discovery" not in result.structuredContent
+        assert (
+            base64.b64decode(sent[0].headers["Authorization"][6:])
+            == b"cloud_rpc:cloud-pw"
+        )
+        structured = result.structuredContent
+        assert [e["path"] for e in structured["discovered"]] == [
+            "/trac_test"
+        ]
+        assert "discovery" not in structured
+        assert "skipped" not in result.content[0].text
+
+    def test_the_throwaway_session_keeps_the_client_settings(self):
+        """verify, cert, proxies, trust_env and auth are copied; the
+        client's own session is left alone and the copy is closed."""
+        config, client = self._scoped_client()
+        # One fixed session, whichever thread asks (the real property is
+        # thread-local), carrying settings the copy must keep.
+        own = client._create_session()
+        own.verify = "/etc/ssl/ca.pem"
+        own.cert = "/etc/ssl/client.pem"
+        own.proxies = {"https": "http://proxy.example.org:3128"}
+        own.trust_env = False
+        stub = MagicMock()
+        stub.config = config
+        stub.session = own
+        registry = InstanceRegistry(config, {})
+        registry.get_client = MagicMock(return_value=stub)
+        seen = []
+        closed = []
+
+        original_close = requests.Session.close
+
+        def record_close(session):
+            closed.append(session)
+            original_close(session)
+
+        def fake_get(session, url, **kwargs):
+            seen.append(session)
+            return _response()
+
+        with (
+            patch.object(requests.Session, "get", new=fake_get),
+            patch.object(requests.Session, "close", new=record_close),
+        ):
+            _list(registry)
+
+        (used,) = seen
+        assert used is not own
+        assert used.scope is None
+        assert used.own_url == own.own_url
+        assert used.auth == ("cloud_rpc", "cloud-pw")
+        assert used.verify == "/etc/ssl/ca.pem"
+        assert used.cert == "/etc/ssl/client.pem"
+        assert used.proxies == own.proxies
+        assert used.trust_env is False
+        assert closed == [used]
+        assert own.scope is not None
+
+    def test_an_unscoped_client_keeps_using_its_own_session(self):
+        from trac_mcp_server.core.client import TracClient
+
+        config = _config()
+        client = TracClient(config)
+        own = client._create_session()
+        stub = MagicMock()
+        stub.config = config
+        stub.session = own
+        registry = InstanceRegistry(config, {})
+        registry.get_client = MagicMock(return_value=stub)
+        seen = []
+        closed = []
+
+        def fake_get(session, url, **kwargs):
+            seen.append(session)
+            return _response()
+
+        with (
+            patch.object(requests.Session, "get", new=fake_get),
+            patch.object(
+                requests.Session,
+                "close",
+                new=lambda session: closed.append(session),
+            ),
+        ):
+            _list(registry)
+
+        assert seen == [own]
+        assert closed == []
 
 
 class TestRenderCheckFetchTimeout:

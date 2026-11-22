@@ -3383,7 +3383,7 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 
 `write_gate` is whether the write-time link gate runs on this daemon (see [Write Gate Status](#write-gate-status)). It is a per-daemon setting every routed instance inherits, so it is reported once, at the top level, and also to a caller whose allowlist leaves out the default instance. When it is `false`, the text line reads `write_gate: false -- OFF on this daemon: writes are NOT link-checked`.
 
-The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are never included in the response. The `discovered` key is omitted when `discover` is `false` or the host's project index could not be scraped.
+The `credentials` field is always `"explicit"` or `"inherited"` -- passwords are never included in the response. The `discovered` key is omitted when `discover` is `false` or the host's project index could not be scraped (any failure, including a timeout, gives no `discovered` and no error). Discovery is a best-effort fetch of the host's index page as the calling identity, with a 10 s connect and 10 s read timeout, run off the server's event loop; it uses the same TLS settings as the default instance. A caller with an instance allowlist still gets discovery, and `discovered` lists only the instances in its allowlist.
 
 **Example Call:**
 ```json

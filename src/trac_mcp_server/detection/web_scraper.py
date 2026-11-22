@@ -11,8 +11,6 @@ from urllib.parse import urljoin
 import requests
 from lxml import html
 
-from ..core.scope import DestinationOutOfScope
-
 logger = logging.getLogger(__name__)
 
 
@@ -138,9 +136,7 @@ def scrape_project_index(
     Returns:
         List of dicts with keys: path, title, description, url -- one per
         project link found in the page's ``<ul><li><a>`` listing.
-        Returns an empty list on any failure, except that a
-        ``DestinationOutOfScope`` from a scoped session propagates so the
-        caller can tell "outside this caller's scope" from "no projects".
+        Returns an empty list on any failure (never raises).
     """
     try:
         response = session.get(host_url, timeout=timeout)
@@ -179,9 +175,6 @@ def scrape_project_index(
             "Project index scrape failed: connection error - %s", e
         )
         return []
-
-    except DestinationOutOfScope:
-        raise
 
     except Exception as e:
         logger.warning(
