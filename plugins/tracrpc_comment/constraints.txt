@@ -1,0 +1,20 @@
+# Exact pins for the tracrpc_comment plugin's test environment (Trac #279).
+# Used by the CI "plugin" job and by anyone running the plugin suite:
+#   pip install -c plugins/tracrpc_comment/constraints.txt \
+#       'setuptools<81' Trac pytest
+# This is NOT constraints/deploy.txt: Trac is not a dependency of the MCP
+# server, so the plugin tests get their own fresh venv (plugins/README.md,
+# "Tests"). setuptools stays below 81 because Trac 1.6 imports
+# pkg_resources, which setuptools 81 removed.
+# Regenerate in a FRESH venv, then re-run the suite there:
+#   python -m venv v && v/bin/pip install 'setuptools<81' 'Trac==1.6' pytest
+#   v/bin/pip freeze   # paste below (pip itself is not pinned)
+iniconfig==2.3.1
+Jinja2==3.1.6
+MarkupSafe==3.0.4
+packaging==26.3
+pluggy==1.7.0
+Pygments==2.21.0
+pytest==9.2.0
+setuptools==80.10.2
+Trac==1.6

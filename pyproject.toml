@@ -108,3 +108,9 @@ exclude = ["tests/fixtures/trac_html/*.golden.md"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B011"]  # Allow assert True/False in tests
+# B904 asks for `raise ... from err` / `from None` inside except. Either
+# changes the raised exception's __cause__/__suppress_context__, which is a
+# behaviour change in a plugin this ticket (#279) only lints, so these two
+# raises stay as they are until the plugin is changed on purpose.
+"plugins/tracrpc_comment/tracrpc_comment/ticket_comment.py" = ["B904"]
+"plugins/tracrpc_comment/tracrpc_comment/wiki_put.py" = ["B904"]

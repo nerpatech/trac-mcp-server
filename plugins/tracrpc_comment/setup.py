@@ -9,23 +9,23 @@ See plugins/README.md.
 from setuptools import setup
 
 setup(
-    name='TracRpcComment',
-    version='1.2.0',
-    author='Oleg Mazurov',
-    author_email='admin@nerpa.tech',
-    description='Ticket comment edit/delete/history/lookup, timeline access '
-                'and a version-checked wiki put over Trac XML-RPC.',
-    license='MIT',
-    packages=['tracrpc_comment'],
+    name="TracRpcComment",
+    version="1.2.0",
+    author="Oleg Mazurov",
+    author_email="admin@nerpa.tech",
+    description="Ticket comment edit/delete/history/lookup, timeline access "
+    "and a version-checked wiki put over Trac XML-RPC.",
+    license="MIT",
+    packages=["tracrpc_comment"],
     # Declares the Trac components this package provides. Trac reads this to
     # discover them; they still have to be enabled per environment with
     #   trac-admin <env> config set components tracrpc_comment.* enabled
     entry_points={
-        'trac.plugins': [
-            'tracrpc_comment.ticket_comment = '
-            'tracrpc_comment.ticket_comment',
-            'tracrpc_comment.timeline = tracrpc_comment.timeline',
-            'tracrpc_comment.wiki_put = tracrpc_comment.wiki_put',
+        "trac.plugins": [
+            "tracrpc_comment.ticket_comment = "
+            "tracrpc_comment.ticket_comment",
+            "tracrpc_comment.timeline = tracrpc_comment.timeline",
+            "tracrpc_comment.wiki_put = tracrpc_comment.wiki_put",
         ],
     },
     # Not declared as an install_requires: TracXMLRPC is a plugin of the Trac

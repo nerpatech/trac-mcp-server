@@ -229,9 +229,16 @@ rather than contaminating the hermetic one `ci.sh` depends on:
 ```
 cd plugins/tracrpc_comment
 python3 -m venv .venv
-.venv/bin/pip install 'setuptools<81' 'Trac==1.6' pytest
+.venv/bin/pip install -c constraints.txt 'setuptools<81' Trac pytest
 PYTHONPATH=. .venv/bin/python -m pytest -c pytest.ini
 ```
+
+`constraints.txt` (this directory) pins every package that install pulls in,
+so the run is the same one CI makes: the `plugin` job in
+`.github/workflows/ci.yml` installs with the same `-c` command and runs the
+same pytest line with `plugins/tracrpc_comment` as its working directory.
+The file's header says how to regenerate it. `ci.sh` and CI's lint job also
+run `ruff check` and `ruff format --check` over `plugins/`.
 
 `setuptools<81` is required because Trac 1.6 imports `pkg_resources`, which
 setuptools 81 removed.

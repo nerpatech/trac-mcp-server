@@ -31,7 +31,9 @@ from trac.web.chrome import web_context as _real_web_context
 
 
 def _install_tracrpc_stub():
-    if 'tracrpc.api' in sys.modules:  # pragma: no cover - real one present
+    if (
+        "tracrpc.api" in sys.modules
+    ):  # pragma: no cover - real one present
         return
 
     class IXMLRPCHandler(Interface):
@@ -43,9 +45,9 @@ def _install_tracrpc_stub():
         def xmlrpc_methods():
             """Yield (permission, signatures, callable) tuples."""
 
-    tracrpc = types.ModuleType('tracrpc')
-    api = types.ModuleType('tracrpc.api')
-    util = types.ModuleType('tracrpc.util')
+    tracrpc = types.ModuleType("tracrpc")
+    api = types.ModuleType("tracrpc.api")
+    util = types.ModuleType("tracrpc.util")
 
     api.IXMLRPCHandler = IXMLRPCHandler
     # Same object upstream re-exports -- not a reimplementation.
@@ -53,9 +55,9 @@ def _install_tracrpc_stub():
     tracrpc.api = api
     tracrpc.util = util
 
-    sys.modules['tracrpc'] = tracrpc
-    sys.modules['tracrpc.api'] = api
-    sys.modules['tracrpc.util'] = util
+    sys.modules["tracrpc"] = tracrpc
+    sys.modules["tracrpc.api"] = api
+    sys.modules["tracrpc.util"] = util
 
 
 _install_tracrpc_stub()

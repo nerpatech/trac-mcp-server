@@ -16,8 +16,8 @@ python scripts/check_env.py
 
 echo ""
 echo "=== Lint ==="
-ruff check src/ tests/ scripts/
-ruff format --check src/ tests/ scripts/
+ruff check src/ tests/ scripts/ plugins/
+ruff format --check src/ tests/ scripts/ plugins/
 
 echo ""
 echo "=== Type check ==="

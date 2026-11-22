@@ -25,8 +25,8 @@ jobs:
       - name: Installed versions
         run: pip freeze
       - run: python scripts/check_env.py
-      - run: ruff check src/ tests/ scripts/
-      - run: ruff format --check src/ tests/ scripts/
+      - run: ruff check src/ tests/ scripts/ plugins/
+      - run: ruff format --check src/ tests/ scripts/ plugins/
 
   typecheck:
     runs-on: ubuntu-24.04
@@ -71,3 +71,22 @@ jobs:
         run: pip freeze
       - run: python scripts/check_env.py
       - run: bash build.sh
+
+  # The tracrpc_comment plugin runs on the Trac host, not in the MCP server,
+  # and needs real Trac, so it has its own environment: exact pins in
+  # plugins/tracrpc_comment/constraints.txt, not constraints/deploy.txt, and
+  # no check_env.py (that file describes the other environment) (Trac #279).
+  plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+          cache: "pip"
+          cache-dependency-path: plugins/tracrpc_comment/constraints.txt
+      - run: pip install -c plugins/tracrpc_comment/constraints.txt 'setuptools<81' Trac pytest
+      - name: Installed versions
+        run: pip freeze
+      - run: PYTHONPATH=. python -m pytest -c pytest.ini
+        working-directory: plugins/tracrpc_comment

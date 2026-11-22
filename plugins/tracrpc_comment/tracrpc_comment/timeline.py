@@ -13,11 +13,10 @@ is the same source the /timeline page and its RSS feed are built from.
 from trac.core import Component, ExtensionPoint, implements
 from trac.timeline.api import ITimelineEventProvider
 from trac.util.html import plaintext
-
 from tracrpc.api import IXMLRPCHandler
 from tracrpc.util import web_context
 
-__all__ = ['TimelineRPC']
+__all__ = ["TimelineRPC"]
 
 # Refuse to build a response larger than this even if asked, so a wide
 # date range cannot turn into an unbounded XML payload.
@@ -36,15 +35,19 @@ class TimelineRPC(Component):
     # IXMLRPCHandler methods
 
     def xmlrpc_namespace(self):
-        return 'timeline'
+        return "timeline"
 
     def xmlrpc_methods(self):
-        yield ('TIMELINE_VIEW', ((list,),), self.getFilters)
-        yield ('TIMELINE_VIEW',
-               ((list, str, str),
+        yield ("TIMELINE_VIEW", ((list,),), self.getFilters)
+        yield (
+            "TIMELINE_VIEW",
+            (
+                (list, str, str),
                 (list, str, str, list),
-                (list, str, str, list, int)),
-               self.getEvents)
+                (list, str, str, list, int),
+            ),
+            self.getEvents,
+        )
 
     # Exported methods
 
@@ -61,11 +64,19 @@ class TimelineRPC(Component):
                 for entry in provider.get_timeline_filters(req) or []:
                     filters.append([entry[0], entry[1]])
             except Exception:
-                self._log_provider_failure(provider, 'get_timeline_filters')
+                self._log_provider_failure(
+                    provider, "get_timeline_filters"
+                )
         return filters
 
-    def getEvents(self, req, start, stop, filters=None,
-                  max_results=DEFAULT_MAX_EVENTS):
+    def getEvents(
+        self,
+        req,
+        start,
+        stop,
+        filters=None,
+        max_results=DEFAULT_MAX_EVENTS,
+    ):
         """Return timeline events between `start` and `stop`, newest first.
 
         `start` and `stop` are datetimes. `filters` is a list of filter names
@@ -101,18 +112,27 @@ class TimelineRPC(Component):
             # to the caller than no timeline, and the failure is logged.
             try:
                 events = provider.get_timeline_events(
-                    req, start, stop, filters or self._all_filter_names(req))
+                    req,
+                    start,
+                    stop,
+                    filters or self._all_filter_names(req),
+                )
             except Exception:
-                self._log_provider_failure(provider, 'get_timeline_events')
+                self._log_provider_failure(
+                    provider, "get_timeline_events"
+                )
                 continue
             for event in events or []:
                 try:
-                    collected.append(self._render(context, provider, event))
+                    collected.append(
+                        self._render(context, provider, event)
+                    )
                 except Exception:
                     self._log_provider_failure(
-                        provider, 'render_timeline_event')
+                        provider, "render_timeline_event"
+                    )
 
-        collected.sort(key=lambda item: item['date'], reverse=True)
+        collected.sort(key=lambda item: item["date"], reverse=True)
         return collected[:limit]
 
     # Internal methods
@@ -136,19 +156,25 @@ class TimelineRPC(Component):
         def field(name):
             value = provider.render_timeline_event(context, name, event)
             if value is None:
-                return ''
+                return ""
             return plaintext(value, keeplinebreaks=False).strip()
 
         return {
-            'kind': kind or '',
-            'date': date,
-            'author': author or '',
-            'title': field('title'),
-            'description': field('description'),
-            'url': str(provider.render_timeline_event(context, 'url', event)
-                       or ''),
+            "kind": kind or "",
+            "date": date,
+            "author": author or "",
+            "title": field("title"),
+            "description": field("description"),
+            "url": str(
+                provider.render_timeline_event(context, "url", event)
+                or ""
+            ),
         }
 
     def _log_provider_failure(self, provider, method):
-        self.log.warning("timeline RPC: %s.%s failed, skipping",
-                         provider.__class__.__name__, method, exc_info=True)
+        self.log.warning(
+            "timeline RPC: %s.%s failed, skipping",
+            provider.__class__.__name__,
+            method,
+            exc_info=True,
+        )

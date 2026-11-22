@@ -20,6 +20,6 @@ from tracrpc_comment.ticket_comment import TicketCommentRPC
 from tracrpc_comment.timeline import TimelineRPC
 from tracrpc_comment.wiki_put import WikiConditionalPutRPC
 
-__all__ = ['TicketCommentRPC', 'TimelineRPC', 'WikiConditionalPutRPC']
+__all__ = ["TicketCommentRPC", "TimelineRPC", "WikiConditionalPutRPC"]
 
-__version__ = '1.2.0'
+__version__ = "1.2.0"
