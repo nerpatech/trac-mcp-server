@@ -47,6 +47,7 @@ from .http_app import run_http
 from .lifespan import server_lifespan
 from .oidc import OidcClientCache, extract_bearer_token
 from .resources.wiki import (
+    handle_list_wiki_resource_templates,
     handle_list_wiki_resources,
     handle_read_wiki_resource,
 )
@@ -290,13 +291,42 @@ async def handle_list_tools() -> list[types.Tool]:
     return get_registry().list_tools()
 
 
+def _wiki_resources_served() -> bool:
+    """Whether wiki resources are served: exactly when ``wiki_get`` is.
+
+    ``trac://wiki/...`` reads the same pages as ``wiki_get``, so it goes
+    through the same filters, and through the one ``ToolRegistry`` that
+    applies them: a permissions file without WIKI_VIEW drops ``wiki_get``
+    and so the resources; ``--read-only`` keeps both (a read stays);
+    disabling ``wiki_get`` withdraws both (Trac /trac_mcp_server #273).
+    """
+    return get_registry().has_tool("wiki_get")
+
+
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
     """List available Trac resources.
 
-    Returns wiki resources for reading wiki pages via URI templates.
+    Returns the wiki page index, or nothing when ``wiki_get`` is not
+    served (see ``_wiki_resources_served``).
     """
+    if not _wiki_resources_served():
+        return []
     return await handle_list_wiki_resources()
+
+
+@server.list_resource_templates()
+async def handle_list_resource_templates() -> list[
+    types.ResourceTemplate
+]:
+    """List available Trac resource templates.
+
+    Returns the wiki page template, or nothing when ``wiki_get`` is not
+    served (see ``_wiki_resources_served``).
+    """
+    if not _wiki_resources_served():
+        return []
+    return await handle_list_wiki_resource_templates()
 
 
 @server.read_resource()  # type: ignore[arg-type]  # MCP Url type mismatch
@@ -304,27 +334,35 @@ async def handle_read_resource(uri: Url) -> str:
     """Read a Trac resource by URI.
 
     Supports:
-    - trac://wiki/{page_name} - Read wiki page (Markdown by default)
-    - trac://wiki/{page_name}?format=tracwiki - Read raw TracWiki
+    - trac://wiki/{page_name} - Read a wiki page as stored (TracWiki,
+      byte-for-byte; there is no Markdown default)
     - trac://wiki/{page_name}?version=N - Read historical version
     - trac://wiki/{page_name}?instance=/project - Read from another instance
     - trac://wiki/_index - List all wiki pages with tree structure
+
+    ``?format=tracwiki`` is accepted (it is what is returned anyway); any
+    other ``format`` value is refused with a validation error, because the
+    Markdown read path was removed with ticket #69. Wiki resources are
+    served only when ``wiki_get`` is; otherwise a read is refused as an
+    unknown resource type, the way a filtered-out tool is refused as an
+    unknown tool.
 
     Args:
         uri: Resource URI (e.g., trac://wiki/WikiStart)
 
     Returns:
-        Resource content as formatted text
+        Resource content as stored, or an ``Error (...)`` text
 
     Raises:
-        ValueError: If URI scheme or path is not recognized
+        ValueError: If URI scheme or path is not recognized, or the
+            resource is not served
     """
     # Validate URI scheme
     if uri.scheme != "trac":
         raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
 
     # Route by resource type (host portion of URI)
-    if uri.host == "wiki":
+    if uri.host == "wiki" and _wiki_resources_served():
         instance = _instance_from_query(uri.query)
         try:
             client = await _resolve_client(instance)

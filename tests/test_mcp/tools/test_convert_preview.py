@@ -59,9 +59,11 @@ class TestConvertPreviewToolDefinition(unittest.TestCase):
             CONVERT_PREVIEW_TOOLS[0].annotations.readOnlyHint
         )
 
-    def test_no_permissions_required(self):
+    def test_requires_both_view_permissions(self):
+        """Trac /trac_mcp_server #273: the render expands either realm."""
         self.assertEqual(
-            CONVERT_PREVIEW_SPECS[0].permissions, frozenset()
+            CONVERT_PREVIEW_SPECS[0].permissions,
+            frozenset({"WIKI_VIEW", "TICKET_VIEW"}),
         )
 
     def test_description_names_local_captured_tail_links(self):

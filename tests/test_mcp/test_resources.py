@@ -10,10 +10,29 @@ from unittest.mock import patch
 import pytest
 from pydantic_core import Url
 
+from trac_mcp_server.mcp import server as server_module
 from trac_mcp_server.mcp.server import (
+    PING_SPEC,
     handle_list_resources,
     handle_read_resource,
+    set_registry,
 )
+from trac_mcp_server.mcp.tools import ALL_SPECS, ToolRegistry
+
+
+@pytest.fixture(autouse=True)
+def _unfiltered_registry():
+    """Wiki resources are served when wiki_get is: serve every tool.
+
+    Filtered registries are covered by test_resource_permissions.py.
+    """
+    previous = server_module._registry
+    set_registry(ToolRegistry([PING_SPEC] + ALL_SPECS))
+    try:
+        yield
+    finally:
+        set_registry(previous)
+
 
 # ---------------------------------------------------------------------------
 # handle_list_resources tests
@@ -24,19 +43,15 @@ class TestListResources:
     """Test handle_list_resources MCP handler."""
 
     def test_returns_wiki_resources(self):
-        """list_resources returns wiki resources."""
+        """list_resources returns the index only; the page is a template."""
         result = asyncio.run(handle_list_resources())
-        assert len(result) == 2
+        assert len(result) == 1
 
-    def test_has_page_template_resource(self):
-        """list_resources includes wiki page template resource."""
+    def test_page_template_is_not_a_resource(self):
+        """list_resources does not list trac://wiki/{page_name}."""
         result = asyncio.run(handle_list_resources())
 
-        page_resource = next(
-            (r for r in result if "page_name" in str(r.uri)), None
-        )
-        assert page_resource is not None
-        assert page_resource.name == "Wiki Page"
+        assert not any("page_name" in str(r.uri) for r in result)
 
     def test_has_index_resource(self):
         """list_resources includes wiki index resource."""

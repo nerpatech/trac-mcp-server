@@ -411,7 +411,12 @@ async def _handle_convert_preview(
 CONVERT_PREVIEW_SPECS: list[ToolSpec] = [
     ToolSpec(
         tool=CONVERT_PREVIEW_TOOLS[0],
-        permissions=frozenset(),
+        # The render expands [[TicketQuery]], [[TitleIndex]] and #N
+        # links in either realm as the server's account, and this handler
+        # cannot see the active filter, so it requires both views (#273).
+        # Other render-based reads (ticket_render_check, wiki_render_check,
+        # the write gate) are not covered here: a follow-up ticket.
+        permissions=frozenset({"WIKI_VIEW", "TICKET_VIEW"}),
         handler=_handle_convert_preview,
     ),
 ]
