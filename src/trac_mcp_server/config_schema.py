@@ -83,6 +83,31 @@ class TracConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+def require_password_with_username(
+    name: str, username: str | None, password: str | None, where: str
+) -> None:
+    """Refuse a declared instance that names a username but no password.
+
+    Trac /trac_mcp_server #268: credentials inherit from the default as a
+    pair, so an explicit username has no default password to fall back
+    on. A missing or empty password is almost always an unset ``${VAR}``
+    (which interpolates to ``""``); refusing it at load keeps the default
+    account's password from ever being sent to that instance's host.
+    Shared by the YAML ``instances:`` section and the ``TRAC_INSTANCES``
+    loader. Never put a password value in the message.
+
+    Raises:
+        ValueError: ``username`` is set and ``password`` is missing/empty.
+    """
+    if username and not password:
+        raise ValueError(
+            f"Instance '{name}' in {where} sets a username but no "
+            "password. An explicit username needs its own password: it "
+            "is never paired with the default account's. A ${VAR} that "
+            "is unset interpolates to empty and is the usual cause."
+        )
+
+
 class InstanceConfig(BaseModel):
     """A named additional Trac instance.
 
@@ -305,7 +330,23 @@ class UnifiedConfig(BaseModel):
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
     export: ExportConfig = Field(default_factory=ExportConfig)
 
-    model_config = {"frozen": True}
+    @field_validator("instances")
+    @classmethod
+    def _check_instance_credentials(
+        cls, value: dict[str, InstanceConfig]
+    ) -> dict[str, InstanceConfig]:
+        for name, inst in value.items():
+            require_password_with_username(
+                name,
+                inst.username,
+                inst.password,
+                "the 'instances' section",
+            )
+        return value
+
+    # The default error text echoes the offending input, which here holds
+    # every instance's password; hide it (Trac /trac_mcp_server #268).
+    model_config = {"frozen": True, "hide_input_in_errors": True}
 
 
 # ---------------------------------------------------------------------------

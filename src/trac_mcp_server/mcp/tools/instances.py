@@ -12,10 +12,12 @@ import mcp.types as types
 from ...core.client import TracClient
 from ...detection.web_scraper import scrape_project_index
 from ...instances import (
+    IdentityRequiredError,
     InstanceNotAllowedError,
     InstanceRegistry,
     caller_identity,
 )
+from .errors import IDENTITY_REQUIRED_ACTION, build_error_response
 from .registry import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -216,7 +218,14 @@ async def _handle_list_instances(
     )
 
     discover = args.get("discover", True)
-    identity = caller_identity()
+    try:
+        identity = caller_identity()
+    except IdentityRequiredError as e:
+        # Trac /trac_mcp_server #268: never list or scrape as the
+        # default account for an unauthenticated request.
+        return build_error_response(
+            "permission_denied", str(e), IDENTITY_REQUIRED_ACTION
+        )
     configured = registry.describe()
 
     # Ticket #110: a scoped caller sees only what it may reach, and the

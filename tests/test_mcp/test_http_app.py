@@ -17,7 +17,10 @@ from starlette.testclient import TestClient
 
 from trac_mcp_server import __version__, version
 from trac_mcp_server.config_schema import ServerConfig
-from trac_mcp_server.instances import Identity
+from trac_mcp_server.instances import (
+    IDENTITIES_CONFIGURED_STATE,
+    Identity,
+)
 from trac_mcp_server.mcp.http_app import (
     _OIDC_EXPIRY_LEEWAY_SECONDS,
     BearerAuthMiddleware,
@@ -426,6 +429,91 @@ class TestBearerAuthMiddlewareIdentities:
 
         assert sent[0]["status"] == 200
         assert app.received_scope["trac_identity"] is alice
+
+
+class TestBearerAuthMiddlewareMarksAdmittedRequests:
+    """Trac /trac_mcp_server #268 (L27): every request admitted while
+    auth is active carries ``scope["trac_auth"]``, so ``caller_identity``
+    can tell an admitted static-token request from one that never went
+    through the middleware."""
+
+    async def test_static_token_is_marked_static(self):
+        app = _RecordingApp()
+        middleware = BearerAuthMiddleware(app, token="legacy-token")
+
+        await _call_middleware(middleware, "legacy-token")
+
+        assert app.received_scope["trac_auth"] == "static"
+
+    async def test_identity_token_is_marked_identity(self):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token="legacy-token", identities={"tok-alice": alice}
+        )
+
+        await _call_middleware(middleware, "tok-alice")
+
+        assert app.received_scope["trac_auth"] == "identity"
+
+    async def test_static_token_with_identities_configured_is_static(
+        self,
+    ):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token="legacy-token", identities={"tok-alice": alice}
+        )
+
+        await _call_middleware(middleware, "legacy-token")
+
+        assert app.received_scope["trac_auth"] == "static"
+        assert "trac_identity" not in app.received_scope
+
+    async def test_identity_wins_when_both_tokens_match(self):
+        app = _RecordingApp()
+        alice = Identity(name="alice", username="a", password="a-pw")
+        middleware = BearerAuthMiddleware(
+            app, token="same-token", identities={"same-token": alice}
+        )
+
+        await _call_middleware(middleware, "same-token")
+
+        assert app.received_scope["trac_auth"] == "identity"
+        assert app.received_scope["trac_identity"] is alice
+
+    async def test_rejected_request_is_never_forwarded(self):
+        app = _RecordingApp()
+        middleware = BearerAuthMiddleware(app, token="legacy-token")
+
+        sent = await _call_middleware(middleware, "wrong")
+
+        assert sent[0]["status"] == 401
+        assert app.received_scope is None
+
+    async def test_no_auth_configured_leaves_scope_unmarked(self):
+        app = _RecordingApp()
+        middleware = BearerAuthMiddleware(app, token=None)
+
+        await _call_middleware(middleware, None)
+
+        assert "trac_auth" not in app.received_scope
+
+
+class TestAppRecordsIdentitiesConfigured:
+    def test_state_is_true_with_identities(self):
+        alice = Identity(name="alice", username="a", password="a-pw")
+        app = build_http_app(
+            _make_mcp_server(),
+            _make_server_config(identities={"tok-alice": alice}),
+        )
+        assert getattr(app.state, IDENTITIES_CONFIGURED_STATE) is True
+
+    def test_state_is_false_without_identities(self):
+        app = build_http_app(
+            _make_mcp_server(), _make_server_config(auth_token="s")
+        )
+        assert getattr(app.state, IDENTITIES_CONFIGURED_STATE) is False
 
 
 # ---------------------------------------------------------------------------

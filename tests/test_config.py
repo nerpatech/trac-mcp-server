@@ -734,14 +734,17 @@ class TestLoadConfig:
         config = load_config()
         assert config.username == "admin"
 
-    def test_password_whitespace_stripped(self, monkeypatch):
-        """Leading/trailing whitespace in TRAC_PASSWORD should be stripped."""
+    def test_password_whitespace_preserved(self, monkeypatch):
+        """TRAC_PASSWORD is a secret, not a name: leading/trailing
+        spaces are part of it and survive load byte-for-byte (Trac
+        /trac_mcp_server #268). Replaces the test that pinned the
+        strip."""
         monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
         monkeypatch.setenv("TRAC_USERNAME", "user")
         monkeypatch.setenv("TRAC_PASSWORD", "  secret  ")
 
         config = load_config()
-        assert config.password == "secret"
+        assert config.password == "  secret  "
 
     # --- URL empty host via load_config ---
 

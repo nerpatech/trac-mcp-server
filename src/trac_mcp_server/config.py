@@ -446,6 +446,8 @@ def load_config(
     else:
         trac_username = trac_username.strip()
 
+    # No strip: unlike a username, a password's leading/trailing spaces
+    # are part of the secret (Trac /trac_mcp_server #268).
     trac_password = (
         password or os.getenv("TRAC_PASSWORD") or fb.get("password")
     )
@@ -457,8 +459,6 @@ def load_config(
                 "Trac password not found. Set TRAC_PASSWORD environment variable, "
                 "pass --password CLI argument, or add 'password' to config.yaml."
             )
-    else:
-        trac_password = trac_password.strip()
 
     # True only when TRAC_MCP_OIDC_RPC_URL is configured AND no real
     # credentials ended up available -- setting it alongside a working

@@ -33,7 +33,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .. import version as _version
 from ..config_schema import ServerConfig
-from ..instances import Identity
+from ..instances import IDENTITIES_CONFIGURED_STATE, Identity
 from .oidc import extract_bearer_token
 
 # sse-starlette's shutdown flag. If a future release moves or drops
@@ -121,6 +121,12 @@ class BearerAuthMiddleware:
     ``mcp/server.py``'s ``_caller_identity()`` to read back out of the
     in-flight request later in the dispatch (see that function's
     docstring for the mechanism and its mcp-SDK-version caveat).
+
+    Trac /trac_mcp_server #268: while auth is active, every request this
+    admits also carries ``scope["trac_auth"]``, ``"identity"`` or
+    ``"static"``. ``caller_identity`` refuses a request with no mark when
+    identities are configured, so the static-token path keeps resolving
+    to the default credentials only because it is marked here.
     """
 
     def __init__(
@@ -178,8 +184,15 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
 
+        # Mark every admitted request (Trac /trac_mcp_server #268), so
+        # ``caller_identity`` can tell an admitted static-token request
+        # (default credentials, on purpose) from one that never passed
+        # through here. An identity wins when both tokens matched.
         if identity is not None:
             scope["trac_identity"] = identity
+            scope["trac_auth"] = "identity"
+        else:
+            scope["trac_auth"] = "static"
 
         await self._app(scope, receive, send)
 
@@ -511,7 +524,7 @@ def build_http_app(
     # Route (not Mount): Mount treats its path as a prefix and 307-redirects
     # a bare request at exactly that path to path + "/" -- most MCP HTTP
     # clients won't replay a POST body across a redirect.
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/healthz", _healthz, methods=["GET"]),
             Route(
@@ -532,6 +545,17 @@ def build_http_app(
         ],
         lifespan=lifespan,
     )
+    # Read back by ``instances.caller_identity`` through the request's own
+    # ``scope["app"]`` (Starlette sets it before the middleware stack).
+    # App state rather than a module global: it travels with the app that
+    # serves the request, so two apps in one process (tests) never share
+    # it, and there is nothing to reset between tests.
+    setattr(
+        app.state,
+        IDENTITIES_CONFIGURED_STATE,
+        bool(server_config.identities),
+    )
+    return app
 
 
 async def run_http(

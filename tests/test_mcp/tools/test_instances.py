@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from trac_mcp_server.config import Config
-from trac_mcp_server.instances import Identity, InstanceRegistry
+from trac_mcp_server.instances import (
+    Identity,
+    IdentityRequiredError,
+    InstanceRegistry,
+)
 from trac_mcp_server.mcp.tools.instances import (
     INSTANCE_SPECS,
     INSTANCE_TOOLS,
@@ -172,6 +176,31 @@ class TestListInstancesHandler(unittest.TestCase):
         mock_scrape.assert_called_once()
         _host_root, credentials = mock_scrape.call_args[0]
         self.assertEqual(credentials, ("alice-trac", "alice-pw"))
+
+    @patch("trac_mcp_server.mcp.tools.instances.caller_identity")
+    @patch("trac_mcp_server.mcp.tools.instances.scrape_project_index")
+    def test_unauthenticated_request_is_refused_not_listed(
+        self, mock_scrape, mock_caller_identity
+    ):
+        """Trac /trac_mcp_server #268: no identity, no default creds."""
+        set_instance_registry(InstanceRegistry(self.config, {}))
+        mock_caller_identity.side_effect = IdentityRequiredError(
+            "no authenticated identity"
+        )
+
+        result = asyncio.run(
+            ToolRegistry(INSTANCE_SPECS).call_tool(
+                "list_instances", {}, self.client
+            )
+        )
+
+        self.assertTrue(result.isError)
+        self.assertTrue(
+            result.content[0].text.startswith(
+                "Error (permission_denied):"
+            )
+        )
+        mock_scrape.assert_not_called()
 
     @patch("trac_mcp_server.mcp.tools.instances.caller_identity")
     @patch("trac_mcp_server.mcp.tools.instances.scrape_project_index")

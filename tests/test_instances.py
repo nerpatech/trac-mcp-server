@@ -509,7 +509,7 @@ class TestDescribe:
         default = _default_config()
         declared = {
             "explicit": InstanceSpec(
-                name="explicit", url="/x", username="u"
+                name="explicit", url="/x", username="u", password="p"
             ),
             "inherited": InstanceSpec(name="inherited", url="/y"),
         }
@@ -669,3 +669,181 @@ def test_live_ad_hoc_same_host_addressing():
     assert isinstance(client, TracClient)
     version = client.validate_connection()
     assert version
+
+
+# ---------------------------------------------------------------------------
+# Trac /trac_mcp_server #268: credentials inherit as a pair
+# ---------------------------------------------------------------------------
+
+
+class TestTracInstancesFileExplicitUsernameNeedsPassword:
+    """The TRAC_INSTANCES loader applies the same refusal as the YAML
+    model: an explicit username needs its own password."""
+
+    @staticmethod
+    def _load(tmp_path, monkeypatch, body: str):
+        instances_file = tmp_path / "instances.yml"
+        instances_file.write_text(body)
+        monkeypatch.setenv("TRAC_INSTANCES", str(instances_file))
+        return load_declared_instances()
+
+    def test_username_with_empty_password_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("UNSET_OTHER_PW", raising=False)
+        with pytest.raises(ValueError) as excinfo:
+            self._load(
+                tmp_path,
+                monkeypatch,
+                "instances:\n  other:\n    url: /other\n"
+                "    username: otheruser\n"
+                "    password: ${UNSET_OTHER_PW}\n",
+            )
+        message = str(excinfo.value)
+        assert "other" in message
+        assert "instances.yml" in message
+        assert "own password" in message
+
+    def test_username_with_missing_password_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        with pytest.raises(ValueError, match="own password"):
+            self._load(
+                tmp_path,
+                monkeypatch,
+                "other:\n  url: /other\n  username: otheruser\n",
+            )
+
+    def test_username_with_password_is_accepted(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("OTHER_PW", "pw")
+        declared = self._load(
+            tmp_path,
+            monkeypatch,
+            "other:\n  url: /other\n  username: otheruser\n"
+            "  password: ${OTHER_PW}\n",
+        )
+        assert declared["other"].username == "otheruser"
+        assert declared["other"].password == "pw"
+
+    def test_no_username_no_password_inherits(
+        self, tmp_path, monkeypatch
+    ):
+        declared = self._load(
+            tmp_path, monkeypatch, "other:\n  url: /other\n"
+        )
+        assert declared["other"].username is None
+        assert declared["other"].password is None
+
+    def test_error_never_carries_a_password_value(
+        self, tmp_path, monkeypatch
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            self._load(
+                tmp_path,
+                monkeypatch,
+                "good:\n  url: /good\n  username: g\n"
+                "  password: hunter2-sentinel\n"
+                "other:\n  url: /other\n  username: x\n",
+            )
+        assert "hunter2-sentinel" not in str(excinfo.value)
+
+
+class TestSynthesizeInheritsCredentialsAsAPair:
+    """``_synthesize`` takes username and password together: an explicit
+    username never picks up the default account's password, and an
+    inherited username always brings the default's password with it."""
+
+    def test_username_without_password_never_gets_default_password(
+        self,
+    ):
+        # Load validation makes this unreachable from config; a spec
+        # built by hand bypasses it, so the pair rule is asserted on
+        # _synthesize itself.
+        default = _default_config(password="default-secret")
+        declared = {
+            "other": InstanceSpec(
+                name="other",
+                url="https://trac.example.org/other",
+                username="other",
+                password=None,
+            )
+        }
+        registry = InstanceRegistry(default, declared)
+
+        with pytest.raises(ValueError, match="password") as excinfo:
+            registry.resolve("other")
+
+        assert "default-secret" not in str(excinfo.value)
+
+    def test_explicit_username_uses_its_own_password(self):
+        registry = InstanceRegistry(
+            _default_config(password="default-secret"), {}
+        )
+
+        config = registry._synthesize("/other", "other", "other-pw")
+
+        assert (config.username, config.password) == (
+            "other",
+            "other-pw",
+        )
+
+    def test_no_username_inherits_both_from_default(self):
+        registry = InstanceRegistry(
+            _default_config(username="agent_rpc", password="secret"), {}
+        )
+
+        config = registry._synthesize("/other", None, None)
+
+        assert (config.username, config.password) == (
+            "agent_rpc",
+            "secret",
+        )
+
+    def test_a_password_without_a_username_is_not_paired_with_the_default_username(
+        self,
+    ):
+        registry = InstanceRegistry(
+            _default_config(username="agent_rpc", password="secret"), {}
+        )
+
+        config = registry._synthesize("/other", None, "stray-pw")
+
+        assert (config.username, config.password) == (
+            "agent_rpc",
+            "secret",
+        )
+
+    def test_identity_replaces_inherited_credentials_as_a_pair(self):
+        registry = InstanceRegistry(
+            _default_config(username="agent_rpc", password="secret"),
+            {"bcs": InstanceSpec(name="bcs", url="/bcs")},
+        )
+
+        for name in (None, "bcs", "/adhoc"):
+            config = registry.resolve(name, _SYNTH_IDENTITY)
+            assert (config.username, config.password) == (
+                "alice-trac",
+                "alice-pw",
+            ), name
+
+    def test_declared_explicit_credentials_win_over_identity(self):
+        registry = InstanceRegistry(
+            _default_config(),
+            {
+                "other": InstanceSpec(
+                    name="other",
+                    url="/other",
+                    username="otheruser",
+                    password="otherpass",
+                )
+            },
+        )
+
+        config = registry.resolve("other", _SYNTH_IDENTITY)
+
+        assert (config.username, config.password) == (
+            "otheruser",
+            "otherpass",
+        )
