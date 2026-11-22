@@ -348,7 +348,7 @@ async def _handle_get(
         "name": milestone_name,
         "due": due_str,
         "completed": completed_str
-        if completed_str != "Not set"
+        if completed_str != _NOT_SET
         else None,
         "description": description_output,
     }

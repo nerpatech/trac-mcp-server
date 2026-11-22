@@ -155,6 +155,34 @@ class TestMilestoneFormatDate:
         assert result.structuredContent["due"] == self.ISO
 
 
+class TestMilestoneGetUnsetCompleted:
+    def _get(self, **data):
+        client = MagicMock()
+        client.get_milestone.return_value = {
+            "name": "M",
+            "due": 0,
+            "completed": 0,
+            "description": "d",
+            **data,
+        }
+        with patch.object(milestone, "run_sync", _direct):
+            return run(milestone._handle_get(client, {"name": "M"}))
+
+    def test_unset_completed_is_none_in_structured_content(self):
+        """It compared with "Not set", never the "(Not set)" that
+        ``_format_date`` returns, so the text leaked into the field."""
+        result = self._get()
+        assert result.structuredContent["completed"] is None
+        assert "Completed: (Not set)" in result.content[0].text
+
+    def test_set_completed_is_the_formatted_date(self):
+        result = self._get(completed=DT)
+        assert (
+            result.structuredContent["completed"]
+            == "2026-11-21T20:44:11"
+        )
+
+
 class TestRecentChangesDisplay:
     @staticmethod
     def _changes(*values):
@@ -191,6 +219,23 @@ class TestRecentChangesDisplay:
         result = self._run(self._changes(DT, later))
         names = [p["name"] for p in result.structuredContent["pages"]]
         assert names == ["P1", "P0"]
+
+    def test_int_timestamp_is_formatted_in_utc(self, non_utc_tz):
+        result = self._run(self._changes(TS))
+        assert (
+            result.structuredContent["pages"][0]["lastModified"]
+            == "2026-11-21 20:44"
+        )
+        assert (
+            "modified: 2026-11-21 20:44 by a" in result.content[0].text
+        )
+
+    def test_float_timestamp_is_formatted_in_utc(self, non_utc_tz):
+        result = self._run(self._changes(float(TS)))
+        assert (
+            result.structuredContent["pages"][0]["lastModified"]
+            == "2026-11-21 20:44"
+        )
 
     def test_xmlrpc_datetime_is_read_as_utc(self, non_utc_tz):
         result = self._run(self._changes(xmlrpc.client.DateTime(WIRE)))

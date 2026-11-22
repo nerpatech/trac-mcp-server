@@ -12,7 +12,7 @@ import json
 import time
 import xmlrpc.client
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import mcp.types as types
 
@@ -483,7 +483,7 @@ async def _handle_recent_changes(
                 dt = datetime(*dt_val.timetuple()[:6])
                 modified_str = dt.strftime("%Y-%m-%d %H:%M")
             case int() | float() as ts:
-                dt = datetime.fromtimestamp(ts)
+                dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                 modified_str = dt.strftime("%Y-%m-%d %H:%M")
             case _:
                 modified_str = compact_time(last_modified)
