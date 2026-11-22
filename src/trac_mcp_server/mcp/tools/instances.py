@@ -9,7 +9,9 @@ from urllib.parse import urlparse
 
 import mcp.types as types
 
+from ...core.async_utils import run_sync
 from ...core.client import TracClient
+from ...core.scope import DestinationOutOfScope
 from ...detection.web_scraper import scrape_project_index
 from ...instances import (
     IdentityRequiredError,
@@ -308,10 +310,23 @@ async def _handle_list_instances(
 
     if discover and default_config is not None:
         host_root = _host_root(default_config.trac_url)
-        discovered = scrape_project_index(
-            host_root,
-            (default_config.username, default_config.password),
-        )
+        # Trac /trac_mcp_server #274: fetched with the caller's own client
+        # session (its credentials, TLS settings and scope check, the same
+        # resolved config as above), off the event loop, bounded like an
+        # RPC call.
+        scrape_client = registry.get_client(None, identity=identity)
+        try:
+            discovered = await run_sync(
+                scrape_project_index,
+                host_root,
+                scrape_client.session,
+                (10, scrape_client.config.rpc_timeout),
+            )
+        except DestinationOutOfScope:
+            discovered = []
+            skipped = "skipped: the project index is outside this caller's scope"
+            structured["discovery"] = skipped
+            lines.extend(["", f"Discovery {skipped}"])
         if allowed is not None:
             discovered = [
                 e for e in discovered if e["url"].rstrip("/") in allowed

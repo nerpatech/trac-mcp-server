@@ -174,8 +174,8 @@ class TestListInstancesHandler(unittest.TestCase):
         )
 
         mock_scrape.assert_called_once()
-        _host_root, credentials = mock_scrape.call_args[0]
-        self.assertEqual(credentials, ("alice-trac", "alice-pw"))
+        _host_root, session, _timeout = mock_scrape.call_args[0]
+        self.assertEqual(session.auth, ("alice-trac", "alice-pw"))
 
     @patch("trac_mcp_server.mcp.tools.instances.caller_identity")
     @patch("trac_mcp_server.mcp.tools.instances.scrape_project_index")
@@ -218,9 +218,9 @@ class TestListInstancesHandler(unittest.TestCase):
             )
         )
 
-        _host_root, credentials = mock_scrape.call_args[0]
+        _host_root, session, _timeout = mock_scrape.call_args[0]
         self.assertEqual(
-            credentials, (self.config.username, self.config.password)
+            session.auth, (self.config.username, self.config.password)
         )
 
     # Ticket #153: the write gate's switch, which nothing a session

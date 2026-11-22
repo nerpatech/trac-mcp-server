@@ -11,6 +11,8 @@ from urllib.parse import urljoin
 import requests
 from lxml import html
 
+from ..core.scope import DestinationOutOfScope
+
 logger = logging.getLogger(__name__)
 
 
@@ -117,24 +119,31 @@ def scrape_about_page(
 
 
 def scrape_project_index(
-    host_url: str, auth_tuple: tuple[str, str] | None = None
+    host_url: str,
+    session: requests.Session,
+    timeout: float | tuple[float, float] = 10,
 ) -> list[dict[str, Any]]:
     """
     Scrape a multi-project Trac host's root "Available Projects" page.
 
     Args:
         host_url: Trac host root URL (e.g. "http://host:8000/")
-        auth_tuple: Optional (username, password) for HTTP Basic authentication.
-            The root page is typically unauthenticated, but auth is passed
-            through when available in case a deployment restricts it.
+        session: The session to fetch with -- a ``TracClient``'s own, so the
+            caller's credentials, the instance's TLS settings (``verify`` /
+            ``TRAC_INSECURE``) and the scope check apply. The root page is
+            typically unauthenticated, but the session's auth goes along in
+            case a deployment restricts it.
+        timeout: ``requests`` timeout, a number or a (connect, read) pair.
 
     Returns:
         List of dicts with keys: path, title, description, url -- one per
         project link found in the page's ``<ul><li><a>`` listing.
-        Returns an empty list on any failure (never raises).
+        Returns an empty list on any failure, except that a
+        ``DestinationOutOfScope`` from a scoped session propagates so the
+        caller can tell "outside this caller's scope" from "no projects".
     """
     try:
-        response = requests.get(host_url, auth=auth_tuple, timeout=10)
+        response = session.get(host_url, timeout=timeout)
         response.raise_for_status()
 
         tree = html.fromstring(response.content)
@@ -170,6 +179,9 @@ def scrape_project_index(
             "Project index scrape failed: connection error - %s", e
         )
         return []
+
+    except DestinationOutOfScope:
+        raise
 
     except Exception as e:
         logger.warning(
