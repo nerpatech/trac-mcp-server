@@ -33,7 +33,12 @@ _SCRAPE_TIMEOUT = (10, 10)
 def _unscoped_copy(session: ScopedSession) -> ScopedSession:
     """A session for the same origin and credentials as ``session`` but
     with no allowlist, for the one fetch of the host's project index."""
-    copy = ScopedSession(session.own_url, None)
+    # ``own_url`` is a prepared URL, typed ``str | None`` by requests but
+    # always set from the client's trac_url.
+    own_url = session.own_url
+    if own_url is None:
+        raise ValueError("the client session has no own URL")
+    copy = ScopedSession(own_url, None)
     copy.auth = session.auth
     copy.verify = session.verify
     copy.cert = session.cert
