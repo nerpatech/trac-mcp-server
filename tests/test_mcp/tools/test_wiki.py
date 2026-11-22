@@ -18,6 +18,7 @@ import pytest
 from trac_mcp_server.config import Config
 from trac_mcp_server.core.client import (
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
 )
 from trac_mcp_server.mcp.tools import WIKI_TOOLS
@@ -917,6 +918,122 @@ class TestHandleCreate(unittest.TestCase):
         self.assertIn("Error (already_exists)", text)
         self.assertIn("(version unknown)", text)
         self.assertIn("Trac stored nothing", text)
+
+    def test_handle_create_asks_for_a_create_only_write(self):
+        """The put is create-only (ticket #272): without it a page made
+        by someone else after the existence check is overwritten."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(404, "Page not found"),
+                {"name": "NewPage", "version": 1, "author": "alice"},
+            ]
+            result = asyncio.run(
+                _handle_create(
+                    self.mock_client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+        self.assertFalse(result.isError)
+        put_call = mock_run_sync.call_args_list[1]
+        self.assertEqual(put_call.args[1], "NewPage")
+        self.assertIsNone(put_call.args[4])  # no version
+        self.assertIs(put_call.kwargs.get("create_only"), True)
+
+    def _create_exists_race(self, current_version):
+        """Run wiki_create where the page is absent at the existence
+        check and put_wiki_page then refuses: another writer created
+        it in between."""
+        with patch(
+            "trac_mcp_server.mcp.tools.wiki_write.run_sync"
+        ) as mock_run_sync:
+            mock_run_sync.side_effect = [
+                xmlrpc.client.Fault(404, "Page not found"),
+                WikiPageExists("exists", "NewPage", current_version),
+            ]
+            return asyncio.run(
+                _handle_create(
+                    self.mock_client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+    def test_handle_create_page_appeared_after_the_check(self):
+        """A page that appears between the handler's check and the put is
+        already_exists naming the other writer's version, never "Created"
+        (ticket #272)."""
+        result = self._create_exists_race(4)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn(
+            "Page 'NewPage' was created by another writer after this "
+            "call's existence check (version 4). Trac stored nothing.",
+            text,
+        )
+        self.assertIn("wiki_update", text)
+        self.assertNotIn("Created wiki page", text)
+
+    def test_handle_create_page_appeared_version_unknown(self):
+        result = self._create_exists_race(None)
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn("(version unknown)", text)
+        self.assertIn("Trac stored nothing", text)
+
+    def test_handle_create_real_client_page_appears_before_the_put(
+        self,
+    ):
+        """End to end through a real TracClient: the page is absent at
+        the check, and the plugin's conflict fault for version 0 comes
+        back as already_exists. The stand-in server has the page by
+        the time the put arrives and stores nothing."""
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(self.mock_config)
+        calls = []
+
+        def _rpc(namespace, method, *args):
+            calls.append(method)
+            if method == "getPage":
+                raise xmlrpc.client.Fault(
+                    404, 'Wiki page "NewPage" does not exist'
+                )
+            if method == "putPageIfVersion":
+                assert args[3] == 0
+                raise xmlrpc.client.Fault(
+                    409,
+                    "'[wiki-version-conflict current_version=2] "
+                    "Version conflict' while executing "
+                    "'wiki.putPageIfVersion()'",
+                )
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = asyncio.run(
+                _handle_create(
+                    client,
+                    {"page_name": "NewPage", "content": "# New Page"},
+                )
+            )
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn("(version 2)", text)
+        self.assertNotIn("Created wiki page", text)
+        self.assertEqual(calls, ["getPage", "putPageIfVersion"])
 
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""

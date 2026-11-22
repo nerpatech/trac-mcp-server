@@ -316,7 +316,9 @@ class TestRoundTripFidelity:
         # Track what gets pushed to wiki
         pushed_content = {}
 
-        def capture_put(page_name, content, comment, version):
+        def capture_put(
+            page_name, content, comment, version, *, create_only=False
+        ):
             pushed_content["wiki"] = content
             return {"version": 1}
 
@@ -372,7 +374,9 @@ class TestRoundTripFidelity:
 
         pushed_content = {}
 
-        def capture_put(page_name, content, comment, version):
+        def capture_put(
+            page_name, content, comment, version, *, create_only=False
+        ):
             pushed_content["wiki"] = content
             return {"version": 1}
 

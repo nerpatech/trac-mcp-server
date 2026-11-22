@@ -607,7 +607,9 @@ class FakeTrac:
             else {}
         )
 
-    def put_wiki_page(self, name, content, comment, version):
+    def put_wiki_page(
+        self, name, content, comment, version, *, create_only=False
+    ):
         self.pages.setdefault(name, []).append(content)
         return {"version": len(self.pages[name])}
 
@@ -787,7 +789,15 @@ class TestRealSubstrate:
         )
 
         class _ReadbackFails(FakeTrac):
-            def put_wiki_page(self, name, content, comment, version):
+            def put_wiki_page(
+                self,
+                name,
+                content,
+                comment,
+                version,
+                *,
+                create_only=False,
+            ):
                 self.pages.setdefault(name, []).append(content)
                 raise WikiPageStoredReadbackFailed(
                     f"Page '{name}' was stored, but reading back its new "
@@ -821,7 +831,15 @@ class TestRealSubstrate:
             def get_wiki_page_info(self, name, version=None):
                 return {"name": name, "version": 3}
 
-            def put_wiki_page(self, name, content, comment, version):
+            def put_wiki_page(
+                self,
+                name,
+                content,
+                comment,
+                version,
+                *,
+                create_only=False,
+            ):
                 self.pages.setdefault(name, []).append(content)
                 return {
                     "version": 5,

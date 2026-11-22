@@ -15,6 +15,7 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
@@ -245,14 +246,40 @@ async def _handle_create(
     if refusal is not None:
         return refusal
 
-    # Create the page (version=None creates new page)
+    # Create the page (version=None creates new page). create_only: the
+    # existence check above, and the gate's render and probes since,
+    # leave a window in which another writer can create the page, and a
+    # plain putPage would replace theirs (ticket #272).
     try:
         result = await run_sync(
-            client.put_wiki_page, page_name, wiki_content, comment, None
+            client.put_wiki_page,
+            page_name,
+            wiki_content,
+            comment,
+            None,
+            create_only=True,
         )
     except WikiPageStoredReadbackFailed as e:
         response_lines = _stored_readback_failed_lines(
             "Created", page_name, e, "wiki_create"
+        )
+    except WikiPageExists as e:
+        # Absent at the existence check, present by the put (ticket
+        # #272): the plugin refused version 0, or the re-check before
+        # putPage found the page. Nothing was stored.
+        shown = (
+            "unknown"
+            if e.current_version is None
+            else e.current_version
+        )
+        return build_error_response(
+            "already_exists",
+            f"Page '{page_name}' was created by another writer after "
+            f"this call's existence check (version {shown}). Trac "
+            "stored nothing.",
+            f"Read it with wiki_get(page_name='{page_name}'); to change "
+            "it use wiki_update with the version you read, or choose a "
+            "different name.",
         )
     except WikiPageNotModified as e:
         # The page was absent at the existence check above and someone

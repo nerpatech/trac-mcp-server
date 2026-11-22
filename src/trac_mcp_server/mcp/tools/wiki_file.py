@@ -45,6 +45,7 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
@@ -575,13 +576,25 @@ async def _handle_push(
     # The write: exactly one putPage, with no fallback.
     readback_error: str | None = None
     try:
-        result = await run_sync(
-            client.put_wiki_page,
-            page_name,
-            wiki_content,
-            comment,
-            version,
-        )
+        if action == "created":
+            # create_only: a page another writer makes after the probe
+            # above is refused, not replaced (ticket #272).
+            result = await run_sync(
+                client.put_wiki_page,
+                page_name,
+                wiki_content,
+                comment,
+                version,
+                create_only=True,
+            )
+        else:
+            result = await run_sync(
+                client.put_wiki_page,
+                page_name,
+                wiki_content,
+                comment,
+                version,
+            )
     except WikiPageStoredReadbackFailed as e:
         # Stored, but the new version is unknown. Not an error result:
         # an error means nothing was stored, and a caller retrying on
@@ -599,6 +612,25 @@ async def _handle_push(
             e.current_version
             if e.current_version is not None
             else version
+        )
+    except WikiPageExists as e:
+        # Listed before WikiPageConflict, its base class. The probe
+        # found no page and the create-only write found one (ticket
+        # #272): another writer created it in between. Nothing was
+        # stored.
+        shown = (
+            "unknown"
+            if e.current_version is None
+            else e.current_version
+        )
+        return build_error_response(
+            "version_conflict",
+            f"Page '{page_name}' was created by another writer after "
+            f"this push read it (version {shown}). Trac stored "
+            "nothing.",
+            f"Read it with wiki_get(page_name='{page_name}') before "
+            "pushing again: a second push replaces the other writer's "
+            "page.",
         )
     except WikiPageConflict as e:
         # The page changed between the read above and the write (ticket

@@ -1996,6 +1996,7 @@ Every page with a positive score is returned, best first (ties by page name), so
   }
   ```
   The same error answers a race: the page was absent at the existence check, and another writer created it with byte-identical content before this call's write. The message says so, names the version the page is at (or "unknown"), and says Trac stored nothing; the action says nothing needs doing, since the page already holds this content (Trac /trac_mcp_server #174).
+  A page created by another writer with *different* content in that window is refused the same way, and never overwritten: the create is create-only (through `wiki.putPageIfVersion` with version 0 where the plugin is installed, so the server checks and saves in one transaction; otherwise the page is looked up again immediately before `putPage`, which narrows the window without closing it). The message names the version the other writer created and says Trac stored nothing; the action says to read the page with `wiki_get` and use `wiki_update` or another name (Trac /trac_mcp_server #272).
 
 - **permission_denied:** Insufficient permissions
   ```json
@@ -2519,6 +2520,8 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
   }
   ```
 
+- **version_conflict:** the push's version check failed and nothing was stored. On an update: the page changed (or was deleted) after the push read it. On a create: the page did not exist when the push read it but another writer created it before the write (`Page 'P' was created by another writer after this push read it (version 2). Trac stored nothing.`); the action says to read it with `wiki_get(page_name='P')` before pushing again, because a second push would then update it and replace the other writer's content (Trac /trac_mcp_server #272)
+
 - **permission_denied:** a `file_path` while the server's `file_access` is `off` (the default over http, ticket #111)
   ```json
   {
@@ -2532,7 +2535,7 @@ A template's record has `name`, `available`, `reason` and `message` (no `instanc
 - Inline `content` over the server's `max_inline_bytes` is refused
 - Auto-detects format from file extension (.md/.markdown = Markdown, .wiki/.tracwiki = TracWiki) with content heuristic fallback
 - Strips YAML frontmatter by default (first `---` block)
-- Creates new page if it doesn't exist, updates with optimistic locking if it does (through `wiki.putPageIfVersion` where the plugin is installed, as for `wiki_update`). Only the existence probe's "not found" means "create"; the write itself is never retried
+- Creates new page if it doesn't exist, updates with optimistic locking if it does (through `wiki.putPageIfVersion` where the plugin is installed, as for `wiki_update`). Only the existence probe's "not found" means "create", and that write is create-only (see `version_conflict`); the write itself is never retried
 - Handles Trac instances that return 0 (int) instead of Fault for non-existent pages
 
 **Example Call:**

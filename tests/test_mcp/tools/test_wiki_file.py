@@ -14,6 +14,7 @@ from trac_mcp_server.converters.html_to_markdown import (
 )
 from trac_mcp_server.core.client import (
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
 )
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -804,6 +805,141 @@ class TestPushReadbackAfterWrite:
         )
         assert result.isError
         client.put_wiki_page.assert_called_once()
+
+
+class TestPushCreateRace:
+    """A create whose page was made by another writer after the push's
+    probe (Trac /trac_mcp_server #272): refused, not overwritten."""
+
+    async def test_create_branch_asks_for_a_create_only_write(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = 0
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        call = client.put_wiki_page.call_args
+        assert call[0][3] is None
+        assert call.kwargs.get("create_only") is True
+
+    async def test_update_branch_is_not_create_only(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.return_value = {"version": 4}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        call = client.put_wiki_page.call_args
+        assert call[0][3] == 3
+        assert not call.kwargs.get("create_only")
+
+    async def test_page_created_after_the_probe_is_a_version_conflict(
+        self,
+    ):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = 0
+        client.put_wiki_page.side_effect = WikiPageExists(
+            "exists", "X", 2
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Page 'X' was created by another writer after this push "
+            "read it (version 2). Trac stored nothing."
+        ) in text
+        assert "wiki_get(page_name='X')" in text
+        assert "replaces the other writer's page" in text
+        # Not the update branch's wording.
+        assert "has been modified" not in text
+        assert "was deleted after it was read" not in text
+        assert "Created wiki page" not in text
+
+    async def test_update_conflict_wording_is_unchanged(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageConflict(
+            "stale", "X", 3, 4
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Page has been modified. Current version is 4, you tried "
+            "to update version 3."
+        ) in text
+        assert "created by another writer" not in text
+
+    async def test_real_client_page_appears_between_probe_and_put(
+        self, mock_config
+    ):
+        """End to end through a real TracClient on a server without the
+        plugin: the probe finds no page, the re-check before putPage
+        finds one. putPage is never posted."""
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+        probes = []
+        methods = []
+
+        def _rpc(namespace, method, *args):
+            methods.append(method)
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
+            if method == "getPageInfo":
+                probes.append(1)
+                if len(probes) == 1:
+                    return 0
+                return {"name": "X", "version": 5}
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        with (
+            patch.object(client, "_rpc_request", side_effect=_rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            result = await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\n", "page_name": "X"},
+                client,
+            )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert "(version 5)" in text
+        assert "putPage" not in methods
+        assert methods == [
+            "getPageInfo",
+            "putPageIfVersion",
+            "getPageInfo",
+        ]
 
 
 class TestPushNotModified:
