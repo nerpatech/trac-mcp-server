@@ -30,6 +30,7 @@ from .targets import (
     ERROR,
     MISSING,
     NOT_ALLOWED_REASON,
+    REDIRECT_LEFT_ORIGIN_REASON,
     SKIPPED,
     dispatcher_base,
     is_missing_realm_href,
@@ -1832,8 +1833,8 @@ def _check_target_probes(
     not be confirmed reachable arrives as ERROR -- uncertainty, never a
     broken link.
 
-    **Four codes, one per reason** (three since ticket #83, the fourth
-    from ticket #110). They used to be one ``target_check_skipped``, and
+    **Five codes, one per reason** (three since ticket #83, the fourth
+    from ticket #110, the fifth from ticket #267). They used to be one ``target_check_skipped``, and
     they want different answers from ticket #64's blocking gate, so no
     single severity is right for the merged code:
 
@@ -1857,6 +1858,13 @@ def _check_target_probes(
         on it, and blocking would refuse every write on an allowed
         instance (e.g. ``/trac_test``) that links to a disallowed one.
         Stays advisory.
+    ``target_check_redirected``
+        The target's dispatcher answered with a redirect to another
+        origin (ticket #267), which the probe does not follow: what a
+        third host says is not a verdict on this link. Not verified, not
+        necessarily clean, and the author cannot act on where the remote
+        side redirects, so it stays advisory and must never fall into
+        the blocking ``target_check_capped``.
     """
     probeable_hrefs: list[str] = [
         a.href
@@ -1882,6 +1890,7 @@ def _check_target_probes(
 
     capped: list[str] = []
     not_allowed: list[str] = []
+    redirected: list[str] = []
     failed: list[str] = []
     for anchor in facts.anchors:
         if not anchor.href or not is_probeable_href(anchor.href):
@@ -1908,10 +1917,12 @@ def _check_target_probes(
                 )
             )
         elif status == SKIPPED:
-            # A skip with a reason is not the cap (ticket #110): a plain
-            # SKIPPED stays `target_check_capped`.
+            # A skip with a reason is not the cap (tickets #110, #267): a
+            # plain SKIPPED stays `target_check_capped`.
             if outcome.get("reason") == NOT_ALLOWED_REASON:
                 not_allowed.append(anchor.href)
+            elif outcome.get("reason") == REDIRECT_LEFT_ORIGIN_REASON:
+                redirected.append(anchor.href)
             else:
                 capped.append(anchor.href)
         elif status == ERROR or status is None:
@@ -1952,6 +1963,18 @@ def _check_target_probes(
                 "instances this caller may not reach, not checked -- "
                 "not verified, not necessarily clean.",
                 {"hrefs": sorted(set(not_allowed))},
+            )
+        )
+
+    if redirected:
+        warnings.append(
+            _warning(
+                "target_check_redirected",
+                "info",
+                f"{len(set(redirected))} cross-instance target(s) "
+                "redirect to another origin, not followed -- not "
+                "verified, not necessarily clean.",
+                {"hrefs": sorted(set(redirected))},
             )
         )
 

@@ -453,7 +453,9 @@ def test_dispatch_allowed_instance_reaches_the_tool():
 def _probe_client(allowed):
     client = MagicMock()
     client.config = _config(allowed_instances=allowed)
-    response = MagicMock(status_code=200, text=EXISTING_PAGE_STUB)
+    response = MagicMock(
+        status_code=200, text=EXISTING_PAGE_STUB, is_redirect=False
+    )
     response.url = ALLOWED_HREF
     client.session.get.return_value = response
     return client

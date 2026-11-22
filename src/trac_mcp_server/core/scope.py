@@ -26,6 +26,14 @@ Two rules:
 * **A scoped client never leaves its allowlist** (#110). With
   ``allowed_instances`` set, a request outside :func:`in_scope` raises
   :class:`DestinationOutOfScope` before anything is sent.
+
+Neither rule stops an UNSCOPED client following a redirect to another
+host, which is the session's job to allow in general. The link probe
+(``preview.targets._get``) therefore does not let ``requests`` follow
+redirects for it: it walks the chain itself and refuses, unsent, a hop
+that leaves the probed href's origin (#267), by this module's own
+``should_strip_auth`` rule. Every hop it does send still goes through
+:meth:`ScopedSession.send`, so both rules above hold for it unchanged.
 """
 
 from urllib.parse import unquote, urlsplit

@@ -61,9 +61,12 @@ is invisible to the probing account, which would read as missing.
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
+
 from ..config import Config
 from ..core.client import TracClient
 from ..core.scope import (
+    MAX_REDIRECTS,
     DestinationOutOfScope,
     dispatcher_base,
     in_scope,
@@ -145,6 +148,26 @@ ERROR = "error"
 # the probe cap.
 NOT_ALLOWED_REASON = "instance_not_allowed"
 
+# Ticket #267. The `reason` on a SKIPPED outcome for an href whose
+# redirect chain left the origin of the href itself; that hop was not sent.
+REDIRECT_LEFT_ORIGIN_REASON = "redirect_left_origin"
+
+
+class RedirectLeftOrigin(Exception):
+    """A redirect hop would have left the origin of the href being
+    probed; it was not sent.
+
+    ``url`` is the href the probe was asked about, ``location`` the hop
+    it was redirected to.
+    """
+
+    def __init__(self, url: str, location: str):
+        super().__init__(
+            f"Redirect from {url} leaves its origin: {location}"
+        )
+        self.url = url
+        self.location = location
+
 
 def is_probeable_wiki_href(href: str | None) -> bool:
     """Whether ``href`` is an InterTrac wiki-dispatcher link this module
@@ -217,19 +240,70 @@ def is_missing_realm_href(href: str | None) -> bool:
 
 
 def _get(client: TracClient, url: str, timeout: float):
-    """``GET url`` on the client's session, following redirects.
+    """``GET url`` on the client's session, following redirects by hand,
+    one hop at a time, and only within ``url``'s own origin.
 
-    Where the request may go, and with what credentials, is the
+    Where the request may go, and with what credentials, is partly the
     session's business since ticket #118 (``core.scope.ScopedSession``):
     it refuses every out-of-scope hop of a scoped client before it is
-    sent, raising :class:`DestinationOutOfScope`, and sends nothing
-    off the client's own origin with credentials. This used to be a
-    hand-followed redirect loop here, which covered the probe and
-    nothing else on the session.
+    sent, raising :class:`DestinationOutOfScope`, and sends nothing off
+    the client's own origin with credentials. That leaves an UNSCOPED
+    client free to follow a redirect to any host, and the probe then
+    reported the link from what that third host answered (ticket #267).
+
+    So the redirect is not left to ``requests``. Each hop is built the
+    way ``requests`` would (``response.next``: relative ``Location``
+    resolved, ``rebuild_auth`` applied) and compared with the ORIGINAL
+    href, not the previous hop: a hop on another origin raises
+    :class:`RedirectLeftOrigin` and is never sent, so ``A -> A -> B`` is
+    refused at ``B``. "Same origin" is the session's own credential rule,
+    ``should_strip_auth``: same scheme, host and port, except that an
+    http -> https upgrade on the default ports counts. A same-origin hop
+    outside a scoped client's allowlist still raises
+    :class:`DestinationOutOfScope` from the session. More than
+    :data:`~trac_mcp_server.core.scope.MAX_REDIRECTS` hops raises
+    ``requests.TooManyRedirects``.
+
+    ``client.session`` is read here, per call; see :func:`_probe_one`.
+
+    Raises:
+        RedirectLeftOrigin: A hop would leave ``url``'s origin.
+        DestinationOutOfScope: A hop would leave a scoped client's
+            allowlist.
+        requests.TooManyRedirects: The chain is longer than the bound.
     """
-    return client.session.get(
-        url, timeout=timeout, allow_redirects=True
+    session = client.session
+    origin = requests.Request("GET", url).prepare().url
+    # `Session.request` merges the environment (REQUESTS_CA_BUNDLE,
+    # CURL_CA_BUNDLE, proxies, cert) into the settings for one request;
+    # `Session.send`, which the later hops go through, does not. Merged
+    # once for the original url and handed to every hop, so a hop is sent
+    # with what `requests`' own redirect handling would have given it.
+    settings = session.merge_environment_settings(
+        url, {}, None, None, None
     )
+    response = session.get(
+        url, timeout=timeout, allow_redirects=False, **settings
+    )
+    hops = 0
+    while response.is_redirect and response.next is not None:
+        nxt = response.next
+        hop_url = nxt.url or ""
+        if session.should_strip_auth(origin, hop_url):
+            response.close()
+            raise RedirectLeftOrigin(url, hop_url)
+        if hops >= MAX_REDIRECTS:
+            response.close()
+            raise requests.TooManyRedirects(
+                f"Exceeded {MAX_REDIRECTS} redirects.",
+                response=response,
+            )
+        response.close()
+        response = session.send(
+            nxt, timeout=timeout, allow_redirects=False, **settings
+        )
+        hops += 1
+    return response
 
 
 def _control_url(href: str) -> str | None:
@@ -263,10 +337,20 @@ def _probe_one(
 
     Under an allowlist, an href whose redirect chain would leave it comes
     back ``SKIPPED`` with :data:`NOT_ALLOWED_REASON`, like one refused
-    up front (ticket #110): the session refused that hop unsent.
+    up front (ticket #110): the session refused that hop unsent. An href
+    whose redirect chain leaves the href's own origin comes back
+    ``SKIPPED`` with :data:`REDIRECT_LEFT_ORIGIN_REASON` (ticket #267):
+    that hop was not sent either, and what is there is not this probe's
+    to report.
     """
     try:
         response = _get(client, href, timeout)
+    except RedirectLeftOrigin:
+        return {
+            "status": SKIPPED,
+            "resolved_url": None,
+            "reason": REDIRECT_LEFT_ORIGIN_REASON,
+        }
     except DestinationOutOfScope:
         return {
             "status": SKIPPED,
@@ -319,17 +403,22 @@ def _instance_answers(
     client: TracClient,
     control_url: str,
     timeout: float,
-) -> bool:
-    """Whether the instance answers its wiki-realm control with 200.
+) -> str:
+    """How the instance answers its wiki-realm control.
 
-    A control that would leave the allowlist counts as no answer, so the
-    candidate degrades to unchecked rather than being called missing.
+    ``"answers"``: 200. ``"redirected"``: the control's redirect left the
+    control URL's origin (ticket #267), so what is there is not this
+    probe's to report. ``"no_answer"``: anything else, including a
+    control that would leave the allowlist and any exception. Only
+    ``"answers"`` lets a provisional ``MISSING`` stand.
     """
     try:
         response = _get(client, control_url, timeout)
+    except RedirectLeftOrigin:
+        return "redirected"
     except Exception:
-        return False
-    return response.status_code == 200
+        return "no_answer"
+    return "answers" if response.status_code == 200 else "no_answer"
 
 
 def _confirm_provisional(
@@ -343,11 +432,13 @@ def _confirm_provisional(
     One control request per distinct instance, and only when something on
     that instance came back 500 -- a document whose cross-instance ticket
     links are all live costs nothing extra. Control 200: the instance is
-    up, so the 500 was evidence and the MISSING stands. Anything else: the
-    candidate degrades to ERROR, which reports as unchecked rather than as
-    a broken link (ticket #82's third acceptance row, and the one that
-    would otherwise turn one unreachable instance into a document full of
-    errors under ticket #64).
+    up, so the 500 was evidence and the MISSING stands. A control whose
+    redirect leaves its origin (ticket #267): the candidate is ``SKIPPED``
+    with :data:`REDIRECT_LEFT_ORIGIN_REASON`, like the href itself would
+    be. Anything else: the candidate degrades to ERROR, which reports as
+    unchecked rather than as a broken link (ticket #82's third acceptance
+    row, and the one that would otherwise turn one unreachable instance
+    into a document full of errors under ticket #64).
     """
     pending = {
         href: outcome
@@ -366,7 +457,7 @@ def _confirm_provisional(
             if url is not None
         }
     )
-    healthy: dict[str, bool] = {}
+    healthy: dict[str, str] = {}
     if controls:
         with ThreadPoolExecutor(
             max_workers=max(1, min(concurrency, len(controls)))
@@ -386,9 +477,17 @@ def _confirm_provisional(
 
     for href, outcome in pending.items():
         control = _control_url(href)
-        if control is None or not healthy.get(control, False):
+        answer = (
+            "no_answer" if control is None else healthy.get(control)
+        )
+        if answer == "answers":
+            continue
+        outcome["resolved_url"] = None
+        if answer == "redirected":
+            outcome["status"] = SKIPPED
+            outcome["reason"] = REDIRECT_LEFT_ORIGIN_REASON
+        else:
             outcome["status"] = ERROR
-            outcome["resolved_url"] = None
 
 
 def probe_targets(

@@ -63,9 +63,20 @@ def _mock_client(
     responses: dict[str, tuple[int, str]],
     resolved: dict[str, str] | None = None,
 ) -> MagicMock:
-    def fake_get(url, timeout=None, allow_redirects=None):
+    # GETs are counted here, under a lock, and NOT via
+    # `session.get.call_count`: probe_targets fans out over a thread
+    # pool and MagicMock's `call_count += 1` is not atomic, so
+    # concurrent calls lose counts under load (observed once in a full
+    # ci.sh run as `45 != 50`; 40/40 green in isolation).
+    get_lock = threading.Lock()
+    get_urls: list[str] = []
+
+    def fake_get(url, timeout=None, allow_redirects=None, **kwargs):
+        with get_lock:
+            get_urls.append(url)
         status, body = responses[url]
         resp = MagicMock()
+        resp.is_redirect = False
         resp.status_code = status
         resp.text = body
         resp.url = (resolved or {}).get(url, url)
@@ -89,6 +100,16 @@ def _mock_client(
             with self._lock:
                 self.session_access_count += 1
             return session
+
+        @property
+        def get_urls(self) -> list[str]:
+            with get_lock:
+                return list(get_urls)
+
+        @property
+        def get_count(self) -> int:
+            with get_lock:
+                return len(get_urls)
 
     return _Client()
 
@@ -312,7 +333,7 @@ class TestProbeTargets(unittest.TestCase):
         results = probe_targets(
             client, [EXISTING_HREF, EXISTING_HREF, EXISTING_HREF]
         )
-        self.assertEqual(client.session.get.call_count, 1)
+        self.assertEqual(client.get_count, 1)
         self.assertEqual(
             results,
             {
@@ -357,7 +378,7 @@ class TestProbeTargets(unittest.TestCase):
         statuses = [v["status"] for v in results.values()]
         self.assertEqual(statuses.count(EXISTS), 2)
         self.assertEqual(statuses.count(SKIPPED), 3)
-        self.assertEqual(client.session.get.call_count, 2)
+        self.assertEqual(client.get_count, 2)
 
 
 class TestCapPosition(unittest.TestCase):
@@ -411,7 +432,7 @@ class TestCapPosition(unittest.TestCase):
         results = probe_targets(client, hrefs)
         statuses = [v["status"] for v in results.values()]
         self.assertEqual(statuses.count(SKIPPED), 1)
-        self.assertEqual(client.session.get.call_count, 50)
+        self.assertEqual(client.get_count, 50)
         self.assertEqual(results[hrefs[50]]["status"], SKIPPED)
 
 
@@ -430,7 +451,7 @@ class TestConcurrentProbe(unittest.TestCase):
         results = probe_targets(client, hrefs)
 
         self.assertEqual(set(results), set(hrefs))
-        self.assertEqual(client.session.get.call_count, 40)
+        self.assertEqual(client.get_count, 40)
         self.assertEqual(results[hrefs[7]]["status"], MISSING)
         self.assertEqual(results[hrefs[31]]["status"], ERROR)
         self.assertEqual(
@@ -467,6 +488,7 @@ class TestConcurrentProbe(unittest.TestCase):
             # least 4 fetches are genuinely in flight together.
             barrier.wait()
             resp = MagicMock()
+            resp.is_redirect = False
             resp.status_code = 200
             resp.text = EXISTING_PAGE_STUB
             resp.url = url
@@ -553,6 +575,7 @@ class TestTicketRealmProbe(unittest.TestCase):
             if url == CONTROL_URL:
                 raise OSError("no route to host")
             resp = MagicMock()
+            resp.is_redirect = False
             resp.status_code = 500
             resp.text = ""
             resp.url = url
@@ -570,10 +593,7 @@ class TestTicketRealmProbe(unittest.TestCase):
             {TICKET_HREF: (200, "<html>a ticket page</html>")}
         )
         probe_targets(client, [TICKET_HREF])
-        urls = [
-            call.args[0] for call in client.session.get.call_args_list
-        ]
-        self.assertEqual(urls, [TICKET_HREF])
+        self.assertEqual(client.get_urls, [TICKET_HREF])
 
     def test_one_control_per_instance_not_per_target(self):
         dead_b = "https://trac.example.org/auto_pm/intertrac/%23999998"
@@ -588,11 +608,7 @@ class TestTicketRealmProbe(unittest.TestCase):
         self.assertEqual(
             [v["status"] for v in results.values()], [MISSING, MISSING]
         )
-        controls = [
-            call.args[0]
-            for call in client.session.get.call_args_list
-            if call.args[0] == CONTROL_URL
-        ]
+        controls = [u for u in client.get_urls if u == CONTROL_URL]
         self.assertEqual(len(controls), 1)
 
     def test_other_status_codes_are_never_missing(self):

@@ -153,6 +153,10 @@ BLOCKING_CODES = frozenset(
 #:   is the operator's deliberate configuration and the author cannot act
 #:   on it; blocking would refuse every write on an allowed instance that
 #:   links to a disallowed one.
+#: * `target_check_redirected` -- ticket #267: the target's dispatcher
+#:   redirected to another origin, which the probe does not follow; the
+#:   author cannot act on where the remote side sends the request, and
+#:   blocking would refuse every write that links to such an instance.
 ADVISORY_CODES = frozenset(
     {
         "link_ref_in_code_span",
@@ -164,6 +168,7 @@ ADVISORY_CODES = frozenset(
         "target_check_failed",
         "target_check_disabled",
         "target_check_not_allowed",
+        "target_check_redirected",
     }
 )
 

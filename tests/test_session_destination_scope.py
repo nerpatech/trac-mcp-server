@@ -179,7 +179,23 @@ class TestUnscopedCredentials:
     ):
         path = f"/trac_test{WIKI_TARGET}"
         own.routes[path] = (302, {"Location": f"{foreign.base}/wiki/X"})
-        probe_targets(_client(own), [f"{own.base}{path}"], timeout=5)
+        href = f"{own.base}{path}"
+        result = probe_targets(_client(own), [href], timeout=5)
+        assert own.auth_for(path) == [BASIC]
+        # Since #267 the probe does not send the off-origin hop at all;
+        # the session-level credential drop on a followed redirect is
+        # held by the next test.
+        assert result[href]["reason"] == "redirect_left_origin"
+        assert foreign.requests == []
+
+    def test_session_redirect_to_a_foreign_host_drops_credentials(
+        self, own, foreign
+    ):
+        """#118 on the session itself, where ``requests`` follows the
+        redirect: the hop to another origin goes out anonymously."""
+        path = f"/trac_test{WIKI_TARGET}"
+        own.routes[path] = (302, {"Location": f"{foreign.base}/wiki/X"})
+        _client(own).session.get(f"{own.base}{path}", timeout=5)
         assert own.auth_for(path) == [BASIC]
         assert foreign.auth_for("/wiki/X") == [None]
 
@@ -293,8 +309,29 @@ class TestScopedDestinations:
         )
         href = f"{own.base}{path}"
         result = probe_targets(client, [href], timeout=5)
-        assert result[href]["reason"] == "instance_not_allowed"
+        # Another host is another origin: refused as `redirect_left_origin`
+        # before the session's scope check (#267); never requested either way.
+        assert result[href]["reason"] == "redirect_left_origin"
         assert foreign.requests == []
+
+    def test_session_redirect_out_of_scope_on_the_same_host_is_refused(
+        self, own
+    ):
+        """#110 on the session itself, where ``requests`` follows the
+        redirect. The probe's own origin rule (#267) now refuses an
+        off-origin hop first, so this is the row that keeps the session's
+        scope check on a FOLLOWED same-host redirect covered: the hop to
+        a path outside the allowlist raises and is never requested."""
+        from trac_mcp_server.core.scope import DestinationOutOfScope
+
+        path = f"/trac_test{WIKI_TARGET}"
+        refused = "/auto_pm/intertrac/wiki%3AIndex"
+        own.routes[path] = (302, {"Location": f"{own.base}{refused}"})
+        with pytest.raises(DestinationOutOfScope):
+            _scoped(own).session.get(
+                f"{own.base}{path}", timeout=5, allow_redirects=True
+            )
+        assert own.paths() == [path]
 
     def test_redirect_to_another_instances_dispatcher_is_not_requested(
         self, own

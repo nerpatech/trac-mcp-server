@@ -115,6 +115,8 @@ An identity's reach is otherwise whatever its Trac user's permissions allow. Two
 
 The check is an exact match on the *resolved* instance URL (trailing slash ignored), so a declared instance name or full URL cannot route around it, and a non-canonical spelling such as `/trac_test/../auto_pm` is refused, not normalised. A refused call returns the `instance_not_allowed` error before any client is created. `list_instances` shows a scoped caller only its allowed instances (plus an `allowed` field). A cross-instance link target outside the scope is not fetched and is reported as the advisory `target_check_not_allowed`, which does not block a write.
 
+Separately from the allowlist (ticket #267), the link probe follows a redirect only within the origin of the link it was asked about. A dispatcher that redirects to another host or port is not followed: the target is reported as the advisory `target_check_redirected` (not verified, not necessarily clean), which does not block a write, rather than from what the other host answered.
+
 Startup errors: an empty `instances:` list or an empty `TRAC_ALLOWED_INSTANCES` (never read as "deny all"), an entry that is neither a `/path` nor an http(s) URL, and a `TRAC_URL` that is not on its own `TRAC_ALLOWED_INSTANCES`.
 
 **Loaded once at startup; changing identities needs a restart.** Unlike `TRAC_INSTANCES` (which reloads on an mtime change), there is no live-reload here.
