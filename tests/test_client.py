@@ -830,6 +830,116 @@ def test_create_ticket_timeout_unqueryable_reporter_is_dropped(
     assert error.ticket_id == 10
 
 
+@pytest.mark.live
+class TestFindRecentlyCreatedTicketLive:
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Creates a few
+    throwaway tickets on /trac_test and deletes each in a ``finally``.
+
+    Trac /trac_mcp_server #269: the create-timeout recovery rests on how
+    Trac parses ``summary=<value>`` (exact match, ``\\&`` and ``\\|``
+    escapes) in a ``ticket.query`` string. That was reasoned from Trac's
+    source; these rows observe it, with a real create and the real
+    finder, called directly with the ``sent_at`` a timed-out create
+    would have noted.
+    """
+
+    @staticmethod
+    def _create(client, summary, description):
+        import time
+
+        sent_at = time.time()
+        return client.create_ticket(summary, description), sent_at
+
+    def test_finds_a_ticket_with_ampersand_and_pipe_in_the_summary(
+        self,
+    ):
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 a & b | c {run}"
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            # An OIDC caller's reporter is unknown (""): no reporter
+            # clause; and a known one: both clauses.
+            assert (
+                client._find_recently_created_ticket(
+                    summary, description, "", sent_at
+                )
+                == tid
+            )
+            assert (
+                client._find_recently_created_ticket(
+                    summary,
+                    description,
+                    client.config.username,
+                    sent_at,
+                )
+                == tid
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    def test_a_description_differing_by_one_character_is_no_match(self):
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 a & b | c {run}"
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            for reporter in ("", client.config.username):
+                assert (
+                    client._find_recently_created_ticket(
+                        summary, description + "x", reporter, sent_at
+                    )
+                    is None
+                )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    def test_a_summary_with_a_trailing_space(self):
+        """Whether Trac keeps a trailing space in a summary, and whether
+        ``summary=<value> `` still finds it, was not known when this row
+        was written. It asserts the outcome the recovery wants (the
+        finder returns the id); the stored summary is in the failure
+        message. If this row fails, the recorded value says whether Trac
+        strips the space on create (then the finder's exact comparison
+        misses the ticket) or the query drops it."""
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 trailing space {run} "
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            stored = client.get_ticket(tid)[3]["summary"]
+            found = client._find_recently_created_ticket(
+                summary, description, "", sent_at
+            )
+            assert found == tid, (
+                f"Trac stored the summary as {stored!r} (sent "
+                f"{summary!r}); the finder returned {found!r}"
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_create_ticket_timeout_reraises_when_verification_fails(
     mock_post, mock_config
