@@ -388,7 +388,7 @@ class TestOtherDisplays:
                     MagicMock(),
                     {
                         "ticket_id": 42,
-                        "status": "accepted",
+                        "priority": "high",
                         "base_ts": "1",
                     },
                 )
