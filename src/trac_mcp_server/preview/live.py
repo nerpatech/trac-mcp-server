@@ -132,7 +132,10 @@ def fetch_ticket_sections(
             blank).
     """
     base_url = client.config.trac_url.rstrip("/")
-    response = client.session.get(f"{base_url}/ticket/{ticket_id}")
+    response = client.session.get(
+        f"{base_url}/ticket/{ticket_id}",
+        timeout=(10, client.config.rpc_timeout),
+    )
     if response.status_code == 404:
         raise TicketNotFoundError(f"Ticket #{ticket_id} not found.")
     response.raise_for_status()

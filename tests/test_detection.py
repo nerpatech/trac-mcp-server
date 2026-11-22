@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlparse
 
 import pytest
+import requests
 
 from trac_mcp_server.detection.capabilities import CapabilityDetector
 from trac_mcp_server.detection.processor_utils import (
@@ -289,8 +290,7 @@ class TestProjectIndexScraping:
         b"</body></html>"
     )
 
-    @patch("trac_mcp_server.detection.web_scraper.requests.get")
-    def test_scrape_success(self, mock_get):
+    def test_scrape_success(self):
         from trac_mcp_server.detection.web_scraper import (
             scrape_project_index,
         )
@@ -298,10 +298,11 @@ class TestProjectIndexScraping:
         mock_response = Mock()
         mock_response.content = self.MOCK_INDEX_HTML
         mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        session = Mock()
+        session.get.return_value = mock_response
 
         result = scrape_project_index(
-            "https://trac.example.org", ("user", "pass")
+            "https://trac.example.org", session, timeout=(10, 60)
         )
 
         assert len(result) == 2
@@ -309,15 +310,12 @@ class TestProjectIndexScraping:
         assert bcs["title"] == "BCS"
         assert bcs["description"] == "BCS project"
         assert bcs["url"] == "https://trac.example.org/bcs"
-        mock_get.assert_called_once_with(
-            "https://trac.example.org",
-            auth=("user", "pass"),
-            timeout=10,
+        session.get.assert_called_once_with(
+            "https://trac.example.org", timeout=(10, 60)
         )
 
-    @patch("trac_mcp_server.detection.web_scraper.requests.get")
-    def test_scrape_without_auth(self, mock_get):
-        """The host root is typically unauthenticated (auth_tuple optional)."""
+    def test_scrape_default_timeout(self):
+        """A caller that passes no timeout still gets a bounded fetch."""
         from trac_mcp_server.detection.web_scraper import (
             scrape_project_index,
         )
@@ -325,35 +323,37 @@ class TestProjectIndexScraping:
         mock_response = Mock()
         mock_response.content = self.MOCK_INDEX_HTML
         mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        session = Mock()
+        session.get.return_value = mock_response
 
-        result = scrape_project_index("https://trac.example.org")
-
-        assert len(result) == 2
-        mock_get.assert_called_once_with(
-            "https://trac.example.org", auth=None, timeout=10
+        result = scrape_project_index(
+            "https://trac.example.org", session
         )
 
-    @patch("trac_mcp_server.detection.web_scraper.requests.get")
-    def test_scrape_connection_failure_returns_empty_list(
-        self, mock_get
-    ):
+        assert len(result) == 2
+        session.get.assert_called_once_with(
+            "https://trac.example.org", timeout=10
+        )
+
+    def test_scrape_connection_failure_returns_empty_list(self):
         import requests as req
 
         from trac_mcp_server.detection.web_scraper import (
             scrape_project_index,
         )
 
-        mock_get.side_effect = req.RequestException(
+        session = Mock()
+        session.get.side_effect = req.RequestException(
             "Connection refused"
         )
 
-        result = scrape_project_index("https://trac.example.org")
+        result = scrape_project_index(
+            "https://trac.example.org", session
+        )
 
         assert result == []
 
-    @patch("trac_mcp_server.detection.web_scraper.requests.get")
-    def test_scrape_http_error_returns_empty_list(self, mock_get):
+    def test_scrape_http_error_returns_empty_list(self):
         import requests as req
 
         from trac_mcp_server.detection.web_scraper import (
@@ -365,14 +365,32 @@ class TestProjectIndexScraping:
         mock_response.raise_for_status.side_effect = req.HTTPError(
             response=mock_response
         )
-        mock_get.return_value = mock_response
+        session = Mock()
+        session.get.return_value = mock_response
 
-        result = scrape_project_index("https://trac.example.org")
+        result = scrape_project_index(
+            "https://trac.example.org", session
+        )
 
         assert result == []
 
-    @patch("trac_mcp_server.detection.web_scraper.requests.get")
-    def test_scrape_ignores_links_without_href(self, mock_get):
+    def test_scrape_out_of_scope_returns_empty_list(self):
+        from trac_mcp_server.core.scope import DestinationOutOfScope
+        from trac_mcp_server.detection.web_scraper import (
+            scrape_project_index,
+        )
+
+        session = Mock()
+        session.get.side_effect = DestinationOutOfScope(
+            "https://trac.example.org"
+        )
+
+        assert (
+            scrape_project_index("https://trac.example.org", session)
+            == []
+        )
+
+    def test_scrape_ignores_links_without_href(self):
         from trac_mcp_server.detection.web_scraper import (
             scrape_project_index,
         )
@@ -383,9 +401,12 @@ class TestProjectIndexScraping:
             b'<li><a href="/bcs">BCS</a></li></ul></body></html>'
         )
         mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        session = Mock()
+        session.get.return_value = mock_response
 
-        result = scrape_project_index("https://trac.example.org")
+        result = scrape_project_index(
+            "https://trac.example.org", session
+        )
 
         assert len(result) == 1
         assert result[0]["path"] == "/bcs"
@@ -407,9 +428,13 @@ def test_live_scrape_project_index():
     trac_url = os.environ["TRAC_URL"]
     parsed = urlparse(trac_url)
     host_root = f"{parsed.scheme}://{parsed.netloc}"
-    auth = (os.environ["TRAC_USERNAME"], os.environ["TRAC_PASSWORD"])
+    session = requests.Session()
+    session.auth = (
+        os.environ["TRAC_USERNAME"],
+        os.environ["TRAC_PASSWORD"],
+    )
 
-    results = scrape_project_index(host_root, auth)
+    results = scrape_project_index(host_root, session)
 
     assert len(results) > 0
     assert any(
