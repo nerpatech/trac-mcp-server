@@ -12,9 +12,19 @@
 # ci.sh, not instead of it.
 #
 # NOT RUN must not be able to look like PASSED: without credentials this
-# script exits non-zero without running pytest at all, so there is no green
+# script exits 2 without running pytest at all, so there is no green
 # summary line to misread. That is #80's target_check_skipped shape one
 # layer out -- a skipped check reported as a clean one.
+#
+# Exit codes, the same three states in both modes:
+#   0  the live suite ran and passed.
+#   1  the live suite ran and FAILED (pytest's own exit 1).
+#   2  the live suite could NOT run, so there is no verdict: a tool this
+#      script calls is not on PATH, the live credentials are missing (or
+#      python-dotenv is), pytest stopped before giving a verdict (its exits
+#      2 to 5: interrupted, internal error, usage error, no tests
+#      collected), or the command line was bad. A caller that treats 1 as
+#      "fix the change" and 2 as "fix the environment" can rely on this.
 #
 # ci-live.sh --daemon <url> [--token-env NAME] [--instance PATH
 #                            [--allow-instance-writes]] [--expect-sha SHA]
@@ -47,6 +57,27 @@
 # every tool this checkout defines, so it fails by design).
 
 set -e
+
+# Every tool this script calls must be on PATH before anything else runs, so a
+# bare shell fails with one line naming the fix, not a "command not found"
+# (127) from deep inside that reads like a broken change. Exit 2: not run.
+# GitHub's runner has no .venv, so the fix is a PATH one, not a path to
+# .venv/bin. --daemon execs only python; the live suite needs pytest too.
+if [ "$#" -eq 0 ]; then
+    needed="python pytest"
+else
+    needed="python"
+fi
+missing=""
+for tool in $needed; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        missing="${missing:+$missing, }$tool"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "ci-live.sh: not on PATH: $missing. Fix: PATH=<checkout>/.venv/bin:\$PATH ./ci-live.sh" >&2
+    exit 2
+fi
 
 # Run from the repo root whatever the caller's cwd, so the .env probe and
 # pytest both see the same checkout.
@@ -108,7 +139,8 @@ echo "=== Live credentials ==="
 # (conftest.py loads it under --run-live), then the environment. Testing
 # shell variables alone would tell a developer with a working .env that they
 # have no credentials.
-# A non-zero exit here aborts the script under `set -e`, before pytest.
+# A non-zero exit here aborts the script under `set -e`, before pytest, and
+# is always 2 (cannot run), never 1 (failed): no test has run.
 #
 # Ticket #102 adds a second required pair, TRAC_USERNAME_2/TRAC_PASSWORD_2 --
 # the second real Trac account (auto_pm) the multi-identity live test needs
@@ -119,7 +151,16 @@ python - <<'PY'
 import os
 import sys
 
-from dotenv import find_dotenv, load_dotenv
+try:
+    from dotenv import find_dotenv, load_dotenv
+except ImportError:
+    print(
+        "ERROR: python-dotenv is not installed, so the live credentials "
+        "cannot be resolved. The live suite was NOT run -- this is not a "
+        "passing result.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # This heredoc has no file of its own -- it arrives on stdin -- so
 # find_dotenv() has no calling file to start from. usecwd=True starts it at
@@ -151,7 +192,7 @@ if missing:
         "suite was NOT run -- this is not a passing result.",
         file=sys.stderr,
     )
-    sys.exit(1)
+    sys.exit(2)
 
 print(f"TRAC_URL={os.environ['TRAC_URL']} as {os.environ['TRAC_USERNAME']}")
 print(f"Second identity: {os.environ['TRAC_USERNAME_2']}")
@@ -159,7 +200,17 @@ PY
 
 echo ""
 echo "=== Full Suite (offline + live) ==="
-pytest tests/ -q --run-live
+# pytest's exit 1 is a failed run and stays 1; its 2 to 5 (interrupted,
+# internal error, usage error, nothing collected) are no verdict, so 2. The
+# `|| live_rc=$?` keeps `set -e` from ending the script before the mapping.
+live_rc=0
+pytest tests/ -q --run-live || live_rc=$?
+if [ "$live_rc" -eq 1 ]; then
+    exit 1
+elif [ "$live_rc" -ne 0 ]; then
+    echo "ci-live.sh: pytest exited $live_rc before giving a verdict. The live suite was NOT run to completion -- this is not a passing result." >&2
+    exit 2
+fi
 
 echo ""
 echo "=== Live checks passed ==="

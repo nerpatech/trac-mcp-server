@@ -7,7 +7,25 @@
 # so it can only fail for reasons belonging to the change under test. The
 # live suite is therefore NOT run here — use ci-live.sh for that half
 # (ticket #81).
+#
+# Exit codes: 0 every check passed; 1 a check failed; 2 the checks could not
+# start because a tool is not on PATH (Trac #279).
 set -e
+
+# Before anything else: every tool this script calls must be on PATH. A shell
+# without the venv would otherwise die deep inside with "command not found"
+# (127), which reads like a broken change. GitHub's runner has no .venv, so
+# the fix is a PATH one, not a path to .venv/bin.
+missing=""
+for tool in python ruff pyright pytest; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        missing="${missing:+$missing, }$tool"
+    fi
+done
+if [ -n "$missing" ]; then
+    echo "ci.sh: not on PATH: $missing. Fix: PATH=<checkout>/.venv/bin:\$PATH ./ci.sh" >&2
+    exit 2
+fi
 
 echo "=== Environment ==="
 # Refuses a stale or drifted venv, so a local pass means GitHub (same

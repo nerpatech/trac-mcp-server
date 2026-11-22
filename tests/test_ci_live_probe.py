@@ -112,7 +112,9 @@ def test_probe_refuses_when_no_dotenv_anywhere(layout):
                 "would find it and this case is not hermetic"
             )
     result = _run(tmp_path, script, env)
-    assert result.returncode == 1
+    # 2, not 1: the suite could not run, which is not a failed run
+    # (Trac #279, the exit-code contract in ci-live.sh's header).
+    assert result.returncode == 2
     assert "NOT run" in result.stderr
     assert "STUB-PYTEST-RAN" not in result.stdout
 
@@ -145,3 +147,30 @@ def test_no_arguments_still_runs_the_probe_then_pytest(layout):
     assert "STUB-PYTEST-RAN tests/ -q --run-live" in result.stdout
     assert "=== Live checks passed ===" in result.stdout
     assert "DAEMON SMOKE" not in result.stdout
+
+
+def _stub_pytest_exiting(layout, code):
+    tmp_path, _child, script, env = layout
+    (tmp_path / "parent" / ".env").write_text(
+        _dotenv("http://fake.invalid")
+    )
+    stub = tmp_path / "bin" / "pytest"
+    stub.write_text(f'#!/bin/sh\necho "STUB-PYTEST-RAN"\nexit {code}\n')
+    return _run(tmp_path, script, env)
+
+
+def test_a_failing_live_suite_is_exit_1(layout):
+    result = _stub_pytest_exiting(layout, 1)
+    assert result.returncode == 1
+    assert "STUB-PYTEST-RAN" in result.stdout
+    assert "=== Live checks passed ===" not in result.stdout
+
+
+@pytest.mark.parametrize("code", [2, 3, 4, 5])
+def test_a_live_suite_that_did_not_complete_is_exit_2(layout, code):
+    # pytest's own codes 2-5: interrupted, internal error, usage error, no
+    # tests collected. None of them is a verdict on the change.
+    result = _stub_pytest_exiting(layout, code)
+    assert result.returncode == 2
+    assert "STUB-PYTEST-RAN" in result.stdout
+    assert "=== Live checks passed ===" not in result.stdout
