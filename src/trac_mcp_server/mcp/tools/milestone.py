@@ -7,7 +7,7 @@ date conversions, and provide structured error responses.
 
 import time
 import xmlrpc.client
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import mcp.types as types
@@ -544,6 +544,9 @@ def _parse_date(date_str: str) -> xmlrpc.client.DateTime:
 # What _format_date returns for a date that is not set.
 _NOT_SET = "(Not set)"
 
+# How a set date is shown, and the form milestone_create/update take.
+_ISO = "%Y-%m-%dT%H:%M:%S"
+
 # Raw `due` / `completed` values Trac uses for "no date".
 _UNSET_RAW = (0, None, "")
 
@@ -551,8 +554,15 @@ _UNSET_RAW = (0, None, "")
 def _format_date(date_value: Any) -> str:
     """Format date value for display.
 
+    A set date is ``YYYY-MM-DDTHH:MM:SS``, the form ``milestone_create``
+    and ``milestone_update`` accept, so a value read here can be written
+    back. Every input is read as UTC: a decoded ``dateTime.iso8601`` is
+    a naive ``datetime`` holding UTC, and an int or float is a UTC epoch
+    (not the host's local time, Trac /trac_mcp_server #270).
+
     Args:
-        date_value: DateTime object, timestamp, or 0 for not set
+        date_value: datetime, DateTime object, timestamp, compact wire
+            string, or 0 for not set
 
     Returns:
         Formatted date string or "(Not set)"
@@ -561,12 +571,23 @@ def _format_date(date_value: Any) -> str:
         case 0 | None:
             return _NOT_SET
         case xmlrpc.client.DateTime() as dt_val:
-            return dt_val.value
+            try:
+                dt = datetime(*dt_val.timetuple()[:6])
+            except ValueError:
+                return dt_val.value
+            return dt.strftime(_ISO)
         case int() | float() as ts:
-            dt = datetime.fromtimestamp(ts)
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.strftime(_ISO)
         case datetime() as dt:
-            return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            return dt.strftime(_ISO)
+        case str() as s:
+            try:
+                return datetime.strptime(s, "%Y%m%dT%H:%M:%S").strftime(
+                    _ISO
+                )
+            except ValueError:
+                return s
         case _:
             return str(date_value)
 

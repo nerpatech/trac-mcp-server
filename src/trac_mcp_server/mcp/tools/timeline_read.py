@@ -18,7 +18,7 @@ import mcp.types as types
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from ...core.faults import is_missing_method_fault
-from .errors import build_error_response
+from .errors import build_error_response, compact_time
 from .registry import ToolSpec
 
 # Raised by Trac's RPC dispatcher when the plugin is not installed/enabled.
@@ -166,11 +166,13 @@ async def _handle_search(
         author = event.get("author", "")
         title = event.get("title", "")
         url = event.get("url", "")
-        lines.append(f"- [{kind}] {date} {author}: {title} ({url})")
+        lines.append(
+            f"- [{kind}] {compact_time(date)} {author}: {title} ({url})"
+        )
         events_json.append(
             {
                 "kind": kind,
-                "date": str(date),
+                "date": compact_time(date),
                 "author": author,
                 "title": title,
                 "description": event.get("description", ""),

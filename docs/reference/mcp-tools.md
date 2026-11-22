@@ -3027,7 +3027,7 @@ Structured content: `{"milestones": ["v1.0", "v1.1", "v2.0", "Future"]}`.
 ```json
 {
   "type": "text",
-  "text": "2 milestone(s) (open) starting with 'v':\nv1.1 | due: 20250630T22:00:00 | completed: (Not set)\nv2.0 | due: (Not set) | completed: (Not set)"
+  "text": "2 milestone(s) (open) starting with 'v':\nv1.1 | due: 2025-06-30T22:00:00 | completed: (Not set)\nv2.0 | due: (Not set) | completed: (Not set)"
 }
 ```
 

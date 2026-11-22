@@ -424,7 +424,8 @@ async def _handle_check_list(
     )
     if not only_missing:
         result["found"] = found
-    text = json.dumps(result, ensure_ascii=False)
+    # default=str: a custom time field decodes as a datetime.
+    text = json.dumps(result, ensure_ascii=False, default=str)
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=text)],
         structuredContent=result,

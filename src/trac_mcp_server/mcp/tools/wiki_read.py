@@ -21,6 +21,7 @@ from ...core.client import TracClient
 from ...core.wiki_search import tokenize
 from .errors import (
     build_error_response,
+    compact_time,
     format_timestamp,
     translate_xmlrpc_error,
 )
@@ -474,17 +475,18 @@ async def _handle_recent_changes(
         page_version = change.get("version", 1)
 
         # Format timestamp
+        # A decoded dateTime.iso8601 is a naive datetime holding UTC:
+        # shown as the compact wire string it replaced (Trac
+        # /trac_mcp_server #270). A DateTime wrapper is read as UTC too.
         match last_modified:
             case xmlrpc.client.DateTime() as dt_val:
-                dt = datetime.fromtimestamp(
-                    time.mktime(dt_val.timetuple())
-                )
+                dt = datetime(*dt_val.timetuple()[:6])
                 modified_str = dt.strftime("%Y-%m-%d %H:%M")
             case int() | float() as ts:
                 dt = datetime.fromtimestamp(ts)
                 modified_str = dt.strftime("%Y-%m-%d %H:%M")
             case _:
-                modified_str = str(last_modified)
+                modified_str = compact_time(last_modified)
 
         response_lines.append(
             f"- {page_name} (modified: {modified_str} by {author})"

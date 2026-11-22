@@ -12,9 +12,9 @@ import xmlrpc.client
 def coerce_attachment_payload(data: object) -> bytes:
     """Normalize a decoded XML-RPC attachment payload to raw bytes.
 
-    ``_parse_xmlrpc_value``'s base64 arm returns ``bytes``; this
-    defensively handles the other shapes it or a future parser change
-    could hand back, so callers always get bytes to write to disk.
+    The client's decoder returns an XML-RPC ``<base64>`` as ``bytes``;
+    this defensively handles the other shapes it or a future decoder
+    change could hand back, so callers always get bytes to write to disk.
 
     Raises:
         ValueError: If data is not str, bytes/bytearray, or Binary.

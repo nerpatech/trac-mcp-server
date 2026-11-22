@@ -2,7 +2,7 @@
 
 Both ``ticket_attachment.py`` and ``wiki_attachment.py`` wrap Trac
 attachment XML-RPC calls that hand back the fetched bytes wrapped
-differently depending on how ``_parse_xmlrpc_value`` decoded the
+differently depending on how the client decoded the
 response. The coercion logic is identical for both realms -- an
 attachment's bytes don't care whether they're attached to a ticket or a
 wiki page -- so it lives once, in ``core.attachment_payload`` (which

@@ -22,7 +22,7 @@ from ...core.client import (
     TracClient,
 )
 from .constants import DEFAULT_TICKET_TYPE, TICKET_TYPE_LIST
-from .errors import build_error_response, classify_fault
+from .errors import build_error_response, classify_fault, compact_time
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
@@ -658,7 +658,8 @@ async def _handle_update(
     except TicketUpdateConflict as e:
         if e.changes:
             what_changed = "; ".join(
-                f"{c['field']} by {c['author']} at {c['timestamp']}"
+                f"{c['field']} by {c['author']} at "
+                f"{compact_time(c['timestamp'])}"
                 for c in e.changes
             )
         else:
@@ -973,7 +974,8 @@ async def _comment_from_plugin(
         or found[1].strip().lower() != author
     ):
         return None
-    # An empty <string></string> arrives as None, not "".
+    # An empty comment is "" on the wire; a NULL stored text arrives
+    # as <nil/>, which is None.
     stored = "" if found[2] is None else found[2]
     if not isinstance(stored, str) or stored != _fold_line_endings(
         comment
@@ -1084,7 +1086,8 @@ async def _find_posted_comment(
             )
         chosen = max(same_text, key=lambda e: _comment_cnum(e) or 0)
 
-    # An empty <string></string> arrives as None, not "".
+    # An empty comment is "" on the wire; a NULL stored text arrives
+    # as <nil/>, which is None.
     return _posted_comment_from_stored(
         _comment_cnum(chosen), comment, chosen[4] or ""
     )

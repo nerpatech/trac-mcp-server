@@ -1,4 +1,3 @@
-import base64
 import calendar
 import logging
 import re
@@ -13,7 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, NamedTuple, TypeVar, cast
-from xml.etree import ElementTree
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -353,7 +351,15 @@ def _wiki_version(value: Any) -> int | None:
 
 def _wiki_time_key(value: Any) -> str | None:
     """A ``lastModified`` as the ``YYYYMMDDTHH:MM:SS`` string XML-RPC
-    carries (these sort as times), or ``None`` for anything else."""
+    carries (these sort as times), or ``None`` for anything else.
+
+    The decoder returns a ``dateTime.iso8601`` as a naive ``datetime``
+    holding UTC (Trac /trac_mcp_server #270); the key is its compact
+    wire form, so pages sort as they did when it was a string. The
+    stdlib's ``DateTime`` pads a year below 1000, ``strftime`` does not.
+    """
+    if isinstance(value, datetime):
+        value = xmlrpc.client.DateTime(value)
     if isinstance(value, xmlrpc.client.DateTime):
         value = value.value
     return value if isinstance(value, str) and value else None
@@ -397,8 +403,6 @@ def _wiki_page_record(
     and ``getPage`` results, or ``None`` if they are not a page."""
     if not isinstance(info, dict):
         return None
-    if text is None:  # an empty page comes back as an empty <string/>
-        text = ""
     if not isinstance(text, str):
         return None
     return (
@@ -632,75 +636,16 @@ class TracClient:
         """
         response = self._rpc_call(service, method, *params)
 
-        # Parse the response
-        tree = ElementTree.fromstring(response.content)
-        fault = tree.find(".//fault")
-        if fault is not None:
-            fault_code_element = fault.find(
-                './/member[name="faultCode"]/value/int'
-            )
-            fault_string_element = fault.find(
-                './/member[name="faultString"]/value/string'
-            )
-            fault_code = (
-                int(fault_code_element.text)
-                if fault_code_element is not None
-                and fault_code_element.text is not None
-                else 0
-            )
-            fault_string = (
-                fault_string_element.text
-                if fault_string_element is not None
-                and fault_string_element.text is not None
-                else "Unknown error"
-            )
-            raise xmlrpc.client.Fault(fault_code, fault_string)
-
-        # Extract the value from the response
-        value_element = tree.find(".//param/value")
-        return self._parse_xmlrpc_value(value_element)
-
-    def _parse_xmlrpc_value(self, element) -> Any:
-        """
-        Recursively parse an XML-RPC value element.
-        """
-        data_type = element[0].tag
-        data_value = element[0].text
-
-        match data_type:
-            case "array":
-                data_element = element.find("./array/data")
-                if data_element is not None:
-                    return [
-                        self._parse_xmlrpc_value(v)
-                        for v in data_element.findall("value")
-                    ]
-                return []
-            case "struct":
-                result = {}
-                for member in element.findall(".//member"):
-                    name = member.find("name").text
-                    value = self._parse_xmlrpc_value(
-                        member.find("value")
-                    )
-                    result[name] = value
-                return result
-            case "int" | "i4":
-                return int(data_value)
-            case "boolean":
-                return data_value == "1"
-            case "string":
-                return data_value
-            case "double":
-                return float(data_value)
-            case "base64":
-                # XML-RPC <base64> wraps binary attachment payloads.
-                # data_value is the base64-encoded string from ElementTree;
-                # b64decode accepts str directly and returns raw bytes.
-                # Empty Binary (<base64/>) -> "" -> b"" (graceful zero-length).
-                return base64.b64decode(data_value or "")
-            case _:
-                return data_value
+        # The stdlib decoder, so a struct holds only its own members, an
+        # empty ``<string/>`` is "", an untyped ``<value>`` is a string,
+        # and ``i8`` and ``nil`` decode. ``dateTime.iso8601`` comes back
+        # as a naive ``datetime`` holding UTC, ``base64`` as ``bytes``.
+        # A fault reply raises ``xmlrpc.client.Fault`` here; a reply that
+        # is not XML raises ``xml.parsers.expat.ExpatError``.
+        params, _method = xmlrpc.client.loads(
+            response.content, use_builtin_types=True
+        )
+        return params[0]
 
     def search_tickets(self, query: str) -> Any:
         """
@@ -759,8 +704,8 @@ class TracClient:
         item. Skipping it would make N calls, each waiting out
         ``rpc_timeout``, and report every item absent as success.
         Anything else -- a ``Fault`` (missing or not viewable), an
-        ``ElementTree.ParseError`` from a reply holding a character
-        XML cannot carry, an ``IndexError`` or ``ValueError`` from
+        ``xml.parsers.expat.ExpatError`` from a reply holding a
+        character XML cannot carry, an ``IndexError`` or ``ValueError`` from
         decoding one value -- is treated as that item's problem: the
         item is left out and the others are still read.
         """
@@ -1276,10 +1221,14 @@ class TracClient:
     def _parse_trac_time(value: Any) -> float | None:
         """Convert a Trac timestamp to a UTC epoch, or None if unrecognised.
 
-        Trac's XML-RPC layer returns compact iso8601 strings such as
-        "20260812T07:46:13" (UTC, no separators, no offset), and older
-        setups may return an xmlrpc DateTime.
+        A ``dateTime.iso8601`` decodes as a naive ``datetime`` holding
+        UTC (Trac /trac_mcp_server #270), which is read as UTC whatever
+        the host's zone; an aware one is converted to UTC. Compact
+        iso8601 strings such as "20260812T07:46:13" (UTC, no separators,
+        no offset) and an xmlrpc DateTime are accepted too.
         """
+        if isinstance(value, datetime):
+            return calendar.timegm(value.utctimetuple())
         if isinstance(value, xmlrpc.client.DateTime):
             value = str(value)
         if not isinstance(value, str):
@@ -2234,7 +2183,7 @@ class TracClient:
         """
         Download a wiki attachment as raw bytes.
 
-        Relies on ``_parse_xmlrpc_value`` decoding the XML-RPC ``<base64>``
+        Relies on ``_rpc_request`` decoding the XML-RPC ``<base64>``
         payload into ``bytes``.
 
         Args:
@@ -2323,8 +2272,8 @@ class TracClient:
                     except Exception:
                         continue
                     # ``lastModified`` is a ``dateTime.iso8601`` on the
-                    # wire, which the client's parser returns as a
-                    # compact UTC string. ``info`` keeps that value.
+                    # wire, which the client's decoder returns as a naive
+                    # ``datetime`` holding UTC. ``info`` keeps that value.
                     modified = self._parse_trac_time(
                         info.get("lastModified")
                     )
@@ -2710,7 +2659,7 @@ class TracClient:
         """
         Download a ticket attachment as raw bytes.
 
-        Relies on ``_parse_xmlrpc_value`` decoding the XML-RPC ``<base64>``
+        Relies on ``_rpc_request`` decoding the XML-RPC ``<base64>``
         payload into ``bytes``.
 
         Args:

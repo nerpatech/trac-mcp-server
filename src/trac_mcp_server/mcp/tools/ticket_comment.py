@@ -31,7 +31,7 @@ import mcp.types as types
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from ...core.faults import is_missing_method_fault
-from .errors import build_error_response
+from .errors import build_error_response, compact_time
 from .registry import ToolSpec
 from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 
@@ -494,7 +494,10 @@ async def _handle_history(
     ]
     for entry in history:
         rev, when, author, body = entry[0], entry[1], entry[2], entry[3]
-        lines.append(f"\n--- revision {rev} by {author} at {when} ---")
+        lines.append(
+            f"\n--- revision {rev} by {author} at "
+            f"{compact_time(when)} ---"
+        )
         lines.append(str(body))
 
     return types.CallToolResult(
