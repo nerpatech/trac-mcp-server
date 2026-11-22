@@ -204,7 +204,9 @@ class WikiPageExists(WikiPageConflict):
     writer made it.
 
     ``current_version`` is that page's version, ``expected_version`` is
-    ``None`` (the caller expected no page). Subclasses
+    ``None`` (the caller expected no page). When the page already holds
+    exactly the text being written, ``put_wiki_page`` raises
+    ``WikiPageNotModified`` instead (ticket #174's no-op). Subclasses
     ``WikiPageConflict``, so a caller that does not tell the two apart
     still reads it as "refused, nothing stored".
     """
@@ -1815,17 +1817,23 @@ class TracClient:
             dict then also carries ``intervening_versions``, the versions
             ``version + 1 .. new - 1`` this call did not write (empty if
             the read-back version is not above ``version + 1``). The page
-            is stored either way; a create never sets the flag (Trac
-            /trac_mcp_server #130). Through the plugin method only the
-            "just after" case is possible, but the check runs on both
-            paths.
+            is stored either way; a plain create never sets the flag
+            (Trac /trac_mcp_server #130). A ``create_only`` create sets
+            it when the read-back version is not 1 (#272), with
+            ``intervening_versions`` ``1 .. new - 1``. Through the plugin
+            method only the "just after" case is possible, but the check
+            runs on both paths.
 
         Raises:
             WikiPageExists: With ``create_only``, if the page exists (a
                 ``WikiPageConflict`` subclass, so the next entry covers
                 it too): the plugin refused the version-0 write, or the
                 re-check before putPage found the page, and nothing was
-                stored. ``current_version`` is the page's version.
+                stored. ``current_version`` is the page's version. When
+                the page's text is exactly ``content`` it is
+                ``WikiPageNotModified`` (below) instead, with
+                ``current_version`` set: the page's text is read for
+                that, and an unreadable text counts as different.
             WikiPageConflict: If ``version`` is not the page's current
                 version (or the page does not exist): the client's
                 precheck found it, and putPage was not called, or the
@@ -1889,7 +1897,9 @@ class TracClient:
         if result is not True:
             raise ValueError(f"Failed to update page '{page_name}'")
 
-        return self._read_back_stored_page(page_name, version)
+        return self._read_back_stored_page(
+            page_name, version, create_only=create_only
+        )
 
     def _put_wiki_page_if_version(
         self,
@@ -1966,8 +1976,8 @@ class TracClient:
                 # "none" cannot be this fault; leave it to the generic
                 # fault below rather than call it "page exists".
                 if found != "none":
-                    raise self._wiki_page_exists(
-                        page_name, int(found)
+                    raise self._refuse_create(
+                        page_name, content, int(found)
                     ) from None
             elif conflict is not None:
                 found = conflict.group(1)
@@ -1989,11 +1999,29 @@ class TracClient:
                 ) from None
             raise unwrap_tracrpc_fault(err) from None
 
-    @staticmethod
-    def _wiki_page_exists(
-        page_name: str, current: int | None
-    ) -> WikiPageExists:
-        """The refusal of a create-only write (ticket #272)."""
+    def _refuse_create(
+        self, page_name: str, content: str, current: int | None
+    ) -> WikiPageExists | WikiPageNotModified:
+        """The exception for a create-only write that found the page
+        (ticket #272), to be raised by the caller.
+
+        ``WikiPageNotModified`` (with ``current_version`` and no
+        ``version``) when the page's text is byte-for-byte ``content``:
+        another writer stored what this call was about to, which is the
+        ticket #174 no-op however the page came to exist. Otherwise
+        ``WikiPageExists``, also when the text cannot be read (best
+        effort: nothing then says it is identical)."""
+        try:
+            text = self.get_wiki_page(page_name)
+        except Exception:
+            text = None
+        if isinstance(text, str) and text == content:
+            return WikiPageNotModified(
+                "Page not modified (content identical)",
+                page_name,
+                None,
+                current,
+            )
         shown = "unknown" if current is None else current
         return WikiPageExists(
             f"Page '{page_name}' already exists (version {shown}): "
@@ -2101,8 +2129,10 @@ class TracClient:
                     raise unwrap_tracrpc_fault(err) from None
                 info = None
             if isinstance(info, dict) and info:
-                raise self._wiki_page_exists(
-                    page_name, _wiki_version(info.get("version"))
+                raise self._refuse_create(
+                    page_name,
+                    content,
+                    _wiki_version(info.get("version")),
                 )
 
         # The write. Only a fault from putPage itself is translated here:
@@ -2149,7 +2179,11 @@ class TracClient:
         return result
 
     def _read_back_stored_page(
-        self, page_name: str, version: int | None
+        self,
+        page_name: str,
+        version: int | None,
+        *,
+        create_only: bool = False,
     ) -> dict[str, Any]:
         """Read back a page ``put_wiki_page`` has just stored, by either
         path, and build its result dict (tickets #140 and #130)."""
@@ -2196,19 +2230,23 @@ class TracClient:
         # landed between the precheck above and putPage -- so putPage
         # replaced it -- or right after putPage, before the read-back.
         # Either way the caller is told; the write itself succeeded.
-        # A create (version=None) has no expectation to compare with.
+        # A plain create (version=None) has no expectation to compare
+        # with. A create-only one does (ticket #272): the page was absent,
+        # so it expects to store version 1, as an update of "version 0"
+        # would; a higher read-back is flagged the same way.
+        base = 0 if create_only else version
         if (
-            version is not None
+            base is not None
             and isinstance(new_version, int)
             and not isinstance(new_version, bool)
-            and new_version != version + 1
+            and new_version != base + 1
         ):
             stored["possible_overwrite"] = True
             # int(): a JSON-schema "integer" admits 3.0, which passes the
             # precheck (3 == 3.0) but would make range() raise here --
             # after the page was stored.
             stored["intervening_versions"] = list(
-                range(int(version) + 1, new_version)
+                range(int(base) + 1, new_version)
             )
         return stored
 

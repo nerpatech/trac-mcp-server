@@ -84,10 +84,11 @@ WIKI_FILE_TOOLS = [
             "stored but its new version could not be read back, the "
             "result is not an error: structuredContent.readback_failed "
             "is true and version is null -- do not push again. If "
-            "structuredContent.possible_overwrite is true, the update "
+            "structuredContent.possible_overwrite is true, the write "
             "stored a version other than the one after the version it "
-            "was based on: another write most likely landed just before "
-            "it and was replaced (intervening_versions lists them; "
+            "was based on (version 1 for a create): another write most "
+            "likely landed just before it and was replaced "
+            "(intervening_versions lists them; "
             "inspect with wiki_diff). The page was stored. Content "
             "identical to the stored page stores nothing and returns "
             'an "unchanged" result (structuredContent.action is '
@@ -647,8 +648,10 @@ async def _handle_push(
             f"Fetch current content with wiki_get(page_name='{page_name}'), then push again.",
         )
 
-    # Trac /trac_mcp_server #130: only an update read back successfully
-    # can be flagged; put_wiki_page never sets it on a create.
+    # Trac /trac_mcp_server #130: only a write read back successfully
+    # can be flagged. An update is compared with its version + 1; a
+    # create-only write (#272) with version 1, and its `version` here is
+    # None, which possible_overwrite_warning reads as a create.
     possible_overwrite = bool(result.get("possible_overwrite"))
     if action == "unchanged":
         # Nothing was stored; `version` is what the page is at.
@@ -664,7 +667,7 @@ async def _handle_push(
         text_parts = [
             f"{verb} wiki page '{page_name}' (version {new_version})"
         ]
-        if possible_overwrite and version is not None:
+        if possible_overwrite:
             overwrite = possible_overwrite_warning(
                 page_name, version, result
             )

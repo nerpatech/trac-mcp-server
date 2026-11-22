@@ -3118,7 +3118,8 @@ def test_put_wiki_page_create_only_plugin_conflict_is_page_exists(
     exists: WikiPageExists carrying the version the other writer
     reached. Nothing else is posted."""
     mock_post.side_effect = [
-        _fault_response(_conflict_fault_string(current), code=409)
+        _fault_response(_conflict_fault_string(current), code=409),
+        _xmlrpc_response(b"<string>another writer's text</string>"),
     ]
 
     client = TracClient(mock_config)
@@ -3134,7 +3135,12 @@ def test_put_wiki_page_create_only_plugin_conflict_is_page_exists(
     # Still a WikiPageConflict, hence a ValueError: "nothing stored".
     assert isinstance(err, WikiPageConflict)
     assert isinstance(err, ValueError)
-    assert _posted_methods(mock_post) == ["wiki.putPageIfVersion"]
+    # The text read that tells a page with other content from an
+    # identical one (#174), and nothing stored.
+    assert _posted_methods(mock_post) == [
+        "wiki.putPageIfVersion",
+        "wiki.getPage",
+    ]
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
@@ -3245,6 +3251,7 @@ def test_put_wiki_page_create_only_without_plugin_refuses_existing_page(
     mock_post.side_effect = [
         _method_not_found_response(),
         _page_info_response(3),
+        _xmlrpc_response(b"<string>another writer's text</string>"),
     ]
 
     client = TracClient(mock_config)
@@ -3259,6 +3266,7 @@ def test_put_wiki_page_create_only_without_plugin_refuses_existing_page(
     assert _posted_methods(mock_post) == [
         "wiki.putPageIfVersion",
         "wiki.getPageInfo",
+        "wiki.getPage",
     ]
 
 
@@ -3273,6 +3281,8 @@ def test_put_wiki_page_create_only_remembered_no_plugin_skips_the_call(
         calls.append(method)
         if method == "putPageIfVersion":
             raise _NO_PLUGIN
+        if method == "getPage":
+            return "another writer's text"
         return {"name": "Page", "version": 2}
 
     client = TracClient(mock_config)
@@ -3286,7 +3296,9 @@ def test_put_wiki_page_create_only_remembered_no_plugin_skips_the_call(
     assert calls == [
         "putPageIfVersion",
         "getPageInfo",
+        "getPage",
         "getPageInfo",
+        "getPage",
     ]
 
 
@@ -3371,6 +3383,156 @@ def test_put_wiki_page_ordinary_version_zero_is_still_a_conflict(
     assert exc_info.value.expected_version == 0
     assert exc_info.value.current_version == current_page
     assert calls == ["getPageInfo"]
+
+
+# A create that finds the page already holding this very content is the
+# #174 no-op, not a conflict; one that cannot read the text says "exists".
+
+
+def _text_reply(text: str) -> Mock:
+    return _xmlrpc_response(b"<string>" + text.encode() + b"</string>")
+
+
+_CREATE_EXISTING_PATHS = {
+    "plugin": lambda current: [
+        _fault_response(_conflict_fault_string(str(current)), code=409)
+    ],
+    "no-plugin": lambda current: [
+        _method_not_found_response(),
+        _page_info_response(current),
+    ],
+}
+
+
+@pytest.mark.parametrize("path", ["plugin", "no-plugin"])
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_create_only_identical_content_is_not_modified(
+    mock_post, mock_config, path
+):
+    """The page exists with exactly this text: on both paths that is
+    WikiPageNotModified (ticket #174's no-op) carrying the page's
+    version, not WikiPageExists. Nothing is stored."""
+    mock_post.side_effect = [
+        *_CREATE_EXISTING_PATHS[path](3),
+        _text_reply("same text"),
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageNotModified) as exc_info:
+        client.put_wiki_page(
+            "Page", "same text", "comment", create_only=True
+        )
+
+    assert not isinstance(exc_info.value, WikiPageExists)
+    assert exc_info.value.page_name == "Page"
+    assert exc_info.value.version is None
+    assert exc_info.value.current_version == 3
+    assert "wiki.putPage" not in _posted_methods(mock_post)
+
+
+@pytest.mark.parametrize("path", ["plugin", "no-plugin"])
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_create_only_near_identical_content_still_exists(
+    mock_post, mock_config, path
+):
+    """Byte for byte: a trailing newline is different content."""
+    mock_post.side_effect = [
+        *_CREATE_EXISTING_PATHS[path](3),
+        _text_reply("same text\n"),
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageExists) as exc_info:
+        client.put_wiki_page(
+            "Page", "same text", "comment", create_only=True
+        )
+
+    assert exc_info.value.current_version == 3
+
+
+@pytest.mark.parametrize("path", ["plugin", "no-plugin"])
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_create_only_unreadable_text_is_page_exists(
+    mock_post, mock_config, path
+):
+    """If the page's text cannot be read, nothing says it is identical:
+    WikiPageExists."""
+    mock_post.side_effect = [
+        *_CREATE_EXISTING_PATHS[path](3),
+        _fault_response("denied", code=403),
+    ]
+
+    client = TracClient(mock_config)
+    with pytest.raises(WikiPageExists) as exc_info:
+        client.put_wiki_page(
+            "Page", "same text", "comment", create_only=True
+        )
+
+    assert exc_info.value.current_version == 3
+
+
+# A create is flagged when it reads back above version 1 (ticket #272
+# review): a write landed after the existence check and was replaced.
+
+
+@pytest.mark.parametrize(
+    "readback, intervening",
+    [(2, [1]), (4, [1, 2, 3])],
+)
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_create_only_flags_a_readback_above_one(
+    mock_post, mock_config, readback, intervening
+):
+    mock_post.side_effect = [
+        _method_not_found_response(),
+        _xmlrpc_response(b"<int>0</int>"),
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(readback),
+    ]
+
+    client = TracClient(mock_config)
+    result = client.put_wiki_page(
+        "Page", "text", "comment", create_only=True
+    )
+
+    assert result["version"] == readback
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == intervening
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_create_only_flags_a_readback_above_one_plugin(
+    mock_post, mock_config
+):
+    mock_post.side_effect = [
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(2),
+    ]
+
+    result = TracClient(mock_config).put_wiki_page(
+        "Page", "text", "comment", create_only=True
+    )
+
+    assert result["possible_overwrite"] is True
+    assert result["intervening_versions"] == [1]
+
+
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_put_wiki_page_plain_create_is_never_flagged(
+    mock_post, mock_config
+):
+    """Without create_only a create has no expectation to compare."""
+    mock_post.side_effect = [
+        _xmlrpc_response(b"<boolean>1</boolean>"),
+        _page_info_response(5),
+    ]
+
+    result = TracClient(mock_config).put_wiki_page(
+        "Page", "text", "comment"
+    )
+
+    assert result["possible_overwrite"] is False
+    assert "intervening_versions" not in result
 
 
 @pytest.mark.live

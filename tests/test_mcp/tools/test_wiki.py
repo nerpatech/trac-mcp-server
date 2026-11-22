@@ -986,25 +986,47 @@ class TestHandleCreate(unittest.TestCase):
         self.assertIn("(version unknown)", text)
         self.assertIn("Trac stored nothing", text)
 
-    def test_handle_create_real_client_page_appears_before_the_put(
-        self,
-    ):
-        """End to end through a real TracClient: the page is absent at
-        the check, and the plugin's conflict fault for version 0 comes
-        back as already_exists. The stand-in server has the page by
-        the time the put arrives and stores nothing."""
+    def _create_through_real_client(self, rpc, content="# New Page"):
+        """wiki_create through a real TracClient whose RPC is ``rpc``."""
         from trac_mcp_server.core.client import TracClient
 
         client = TracClient(self.mock_config)
-        calls = []
+        with (
+            patch.object(client, "_rpc_request", side_effect=rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            return asyncio.run(
+                _handle_create(
+                    client,
+                    {"page_name": "NewPage", "content": content},
+                )
+            )
+
+    @staticmethod
+    def _racing_server(plugin, other_text, calls):
+        """An RPC stand-in: NewPage is absent at the handler's existence
+        check, and another writer has created it (version 2, with
+        ``other_text``) by the time the put arrives. Stores nothing."""
+        gets = []
 
         def _rpc(namespace, method, *args):
             calls.append(method)
             if method == "getPage":
-                raise xmlrpc.client.Fault(
-                    404, 'Wiki page "NewPage" does not exist'
-                )
+                gets.append(1)
+                if len(gets) == 1:
+                    raise xmlrpc.client.Fault(
+                        404, 'Wiki page "NewPage" does not exist'
+                    )
+                return other_text
             if method == "putPageIfVersion":
+                if not plugin:
+                    raise xmlrpc.client.Fault(
+                        -32601,
+                        'RPC method "wiki.putPageIfVersion" not found',
+                    )
                 assert args[3] == 0
                 raise xmlrpc.client.Fault(
                     409,
@@ -1012,28 +1034,138 @@ class TestHandleCreate(unittest.TestCase):
                     "Version conflict' while executing "
                     "'wiki.putPageIfVersion()'",
                 )
+            if method == "getPageInfo":
+                return {"name": "NewPage", "version": 2}
             raise AssertionError(f"unexpected RPC {namespace}.{method}")
 
-        with (
-            patch.object(client, "_rpc_request", side_effect=_rpc),
-            patch(
-                "trac_mcp_server.mcp.tools.wiki_write.gate_or_refuse",
-                return_value=(None, []),
-            ),
-        ):
-            result = asyncio.run(
-                _handle_create(
-                    client,
-                    {"page_name": "NewPage", "content": "# New Page"},
-                )
-            )
+        return _rpc
+
+    def test_handle_create_real_client_page_appears_before_the_put(
+        self,
+    ):
+        """End to end through a real TracClient: the page is absent at
+        the check, and the plugin's conflict fault for version 0, with
+        other content, comes back as already_exists. The stand-in
+        server has the page by the time the put arrives and stores
+        nothing."""
+        calls = []
+        result = self._create_through_real_client(
+            self._racing_server(True, "# Someone else's", calls)
+        )
 
         self.assertTrue(result.isError)
         text = result.content[0].text
         self.assertIn("Error (already_exists)", text)
+        self.assertIn("created by another writer after", text)
         self.assertIn("(version 2)", text)
+        self.assertNotIn("identical content", text)
         self.assertNotIn("Created wiki page", text)
-        self.assertEqual(calls, ["getPage", "putPageIfVersion"])
+        self.assertEqual(
+            calls, ["getPage", "putPageIfVersion", "getPage"]
+        )
+
+    def test_handle_create_real_client_page_appears_no_plugin(self):
+        calls = []
+        result = self._create_through_real_client(
+            self._racing_server(False, "# Someone else's", calls)
+        )
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("created by another writer after", text)
+        self.assertIn("(version 2)", text)
+        self.assertNotIn("identical content", text)
+        self.assertNotIn("putPage", calls)
+
+    def _assert_identical_content_race(self, plugin):
+        calls = []
+        result = self._create_through_real_client(
+            self._racing_server(plugin, "# New Page", calls)
+        )
+
+        self.assertTrue(result.isError)
+        text = result.content[0].text
+        self.assertIn("Error (already_exists)", text)
+        self.assertIn(
+            "created by another writer with identical content "
+            "after this call's existence check (version 2)",
+            text,
+        )
+        self.assertIn("Nothing needs doing", text)
+        self.assertNotIn("putPage", calls)
+
+    def test_handle_create_real_client_identical_content_race_plugin(
+        self,
+    ):
+        """Ticket #174 through the create-only path: the page another
+        writer created holds exactly this content, so the answer is
+        the no-op's, not "created by another writer"."""
+        self._assert_identical_content_race(True)
+
+    def test_handle_create_real_client_identical_content_race_no_plugin(
+        self,
+    ):
+        self._assert_identical_content_race(False)
+
+    def test_handle_create_warns_when_a_write_landed_before_the_put(
+        self,
+    ):
+        """No plugin and the re-check finds nothing, but the page reads
+        back at version 2: someone's version 1 slipped in after the
+        re-check and was replaced. Stored, so a warning, not an
+        error."""
+        infos = []
+
+        def _rpc(namespace, method, *args):
+            if method == "getPage":
+                raise xmlrpc.client.Fault(
+                    404, 'Wiki page "NewPage" does not exist'
+                )
+            if method == "putPageIfVersion":
+                raise xmlrpc.client.Fault(
+                    -32601,
+                    'RPC method "wiki.putPageIfVersion" not found',
+                )
+            if method == "getPageInfo":
+                infos.append(1)
+                if len(infos) == 1:  # the re-check
+                    return 0
+                return {"name": "NewPage", "version": 2}
+            if method == "putPage":
+                return True
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        result = self._create_through_real_client(_rpc)
+
+        self.assertFalse(result.isError)
+        text = result.content[0].text
+        self.assertIn("Created wiki page 'NewPage' (version 2)", text)
+        self.assertIn("Warning: possible overwrite on 'NewPage'", text)
+        self.assertIn("version 1", text)
+        self.assertIn("wiki_diff(page_name='NewPage'", text)
+
+    def test_handle_create_no_warning_for_version_one(self):
+        infos = []
+
+        def _rpc(namespace, method, *args):
+            if method == "getPage":
+                raise xmlrpc.client.Fault(
+                    404, 'Wiki page "NewPage" does not exist'
+                )
+            if method == "putPageIfVersion":
+                return True
+            if method == "getPageInfo":
+                infos.append(1)
+                return {"name": "NewPage", "version": 1}
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        result = self._create_through_real_client(_rpc)
+
+        self.assertFalse(result.isError)
+        self.assertEqual(
+            result.content[0].text,
+            "Created wiki page 'NewPage' (version 1)",
+        )
 
     def test_handle_create_already_exists(self):
         """Test _handle_create detects existing page."""

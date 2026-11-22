@@ -46,15 +46,55 @@ def _stored_readback_failed_lines(
     ]
 
 
+def _possible_create_overwrite_warning(
+    page_name: str, result: dict
+) -> str:
+    """The warning line for a create-only write that read back above
+    version 1 (Trac /trac_mcp_server #272): a page appeared after the
+    existence check and this write replaced it."""
+    new_version = result.get("version")
+    head = (
+        f"Warning: possible overwrite on '{page_name}'. This create "
+        "expected the page to be absent, so it should have stored "
+        f"version 1, but the page reads back as version {new_version}."
+    )
+    intervening = result.get("intervening_versions") or []
+    if not intervening:
+        return (
+            f"{head} The page was stored; check its history with "
+            f"wiki_get_history(page_name='{page_name}')."
+        )
+    if len(intervening) == 1:
+        others = f"version {intervening[0]}"
+        verb = "was"
+    else:
+        others = f"versions {intervening[0]}-{intervening[-1]}"
+        verb = "were"
+    return (
+        f"{head} {others[0].upper()}{others[1:]} {verb} most likely "
+        "written by someone else after the existence check, and this "
+        "write replaced it without merging. The page was stored; "
+        f"inspect what was replaced with wiki_diff(page_name="
+        f"'{page_name}', from_version={intervening[-1]}, "
+        f"to_version={new_version}) and re-apply anything this write "
+        "dropped."
+    )
+
+
 def possible_overwrite_warning(
-    page_name: str, sent_version: int, result: dict
+    page_name: str, sent_version: int | None, result: dict
 ) -> str | None:
     """The warning line for an update whose read-back version is not
     ``sent_version + 1`` (Trac /trac_mcp_server #130), or ``None`` when
     ``put_wiki_page`` did not flag one. A warning, never an error: the
-    page was stored, and an error result means nothing was."""
+    page was stored, and an error result means nothing was.
+
+    ``sent_version`` ``None`` is a create-only write (ticket #272), which
+    should have stored version 1."""
     if not result.get("possible_overwrite"):
         return None
+    if sent_version is None:
+        return _possible_create_overwrite_warning(page_name, result)
     # 3.0 is a JSON-schema "integer"; the flag only fires when it equalled
     # an int precheck, so int() is lossless and keeps "3.0" out of the text.
     sent_version = int(sent_version)
@@ -303,6 +343,9 @@ async def _handle_create(
         response_lines = [
             f"Created wiki page '{page_name}' (version {new_version})"
         ]
+        overwrite = possible_overwrite_warning(page_name, None, result)
+        if overwrite is not None:
+            response_lines.append(overwrite)
     response_lines.extend(gate_lines)
 
     return types.CallToolResult(
