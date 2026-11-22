@@ -33,6 +33,7 @@ trac:
   max_parallel_requests: 5
   max_batch_size: 500
   rpc_timeout: 60
+  write_gate: true       # false = emergency off switch; see "Write gate"
 
 logging:
   level: INFO
@@ -143,6 +144,7 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
+| `TRAC_WRITE_GATE` | No | `true` | Write gate (YAML `trac.write_gate`): refuses a write whose text carries a broken link. Off only for `0`, `false`, `no` or `off` (case-insensitive); any other value, an empty one included, leaves it on. See [Write gate](#write-gate) |
 | `TRAC_MCP_LINK_REWRITES` | No | -- | Whitespace-separated `FROM=TO` link-rewrite rules of the Markdown export, split at the first `=`; replaces the YAML `export.link_rewrites` list whole, an empty value clears it. See [Link rewrites](#link-rewrites-export) |
 | `LOG_FILE` | No | `/tmp/trac-mcp-server.log` (stdio) / none (http) | Log file path, used when `--log-file` is not given. Set it to an empty string for no log file (stdio then logs to stderr). Read by the logger, not by the config file; `logging.file` above does not set it |
 
@@ -163,14 +165,28 @@ These govern the MCP server process itself -- transport, bind address, and auth 
 | `TRAC_MCP_DISABLED_TOOLS` | -- | Comma-separated tool names to leave out (YAML `disabled_tools`); see [Tool Architecture](tool-architecture.md#disabling-individual-tools). Replaces the YAML list; an empty value counts as unset. |
 | `TRAC_MCP_ALLOWED_HOSTS` | -- | Comma-separated `Host` headers accepted besides loopback and the bind address (`host[:port]` or `host:*`). Replaces the YAML `allowed_hosts` list; empty counts as unset. |
 | `TRAC_MCP_ALLOWED_ORIGINS` | -- | Comma-separated `Origin` headers accepted, with scheme (`http://trac-mcp:8080`). Replaces the YAML `allowed_origins` list; empty counts as unset. |
+| `TRAC_MCP_FILE_ACCESS` | `off` for `http`, `local` for `stdio` | Whether file tools may read and write paths on the server (`--file-access`, YAML `file_access`): `local` or `off`; any other value is refused at startup. |
+| `TRAC_MCP_MAX_INLINE_BYTES` | `5242880` (5 MiB) | Largest inline file-tool result in bytes (YAML `max_inline_bytes`); must be positive, zero or negative is refused at startup, an empty value counts as unset. |
+
+An empty `TRAC_MCP_PORT` counts as unset, like every other `TRAC_MCP_*` string here: the YAML `port`, else `8080`, applies.
 
 See [HTTP Transport](http-transport.md) for the full picture, including the bind-safety rule that refuses an unauthenticated non-loopback bind.
 
 **Note:** Environment variables always take precedence over config file values, whether or not a config file is present. The `${VAR}` interpolation syntax in YAML is a convenience for referencing env vars within config files, but is not required -- env vars are checked directly during configuration loading and override any config file value for the same setting.
 
+## Write gate
+
+Every write that stores TracWiki (`ticket_create`, `ticket_update`, `ticket_comment_edit`, `ticket_comment_reply`, `wiki_create`, `wiki_update`, `wiki_file_push`, `milestone_create`, `milestone_update`, and per item `ticket_batch_create` / `ticket_batch_update`) passes through a write-time link check. A write carrying a link that does not resolve is refused with `link_check_failed`.
+
+- **Off switch**: `TRAC_WRITE_GATE=0` (or `write_gate: false` under `trac:`). It parses fail-closed: only `0`, `false`, `no` or `off` (case-insensitive) turn the gate off, so a typo or an empty value leaves it on.
+- **Routed instances**: every instance the daemon routes to inherits the switch.
+- **Disabled gate says so**: each write response then carries a `NOTE:` line saying the write was not link-checked.
+
+See [MCP Tools: Write Gate Status](mcp-tools.md#write-gate-status) for the response format and the `gate_notes` field.
+
 ## .env File Support
 
-trac-mcp-server uses [python-dotenv](https://pypi.org/project/python-dotenv/) to load a `.env` file from the working directory. Values from `.env` are treated as environment variables and sit between real shell env vars and config file values in the precedence order. You can use `.env` alongside a YAML config file -- for example, store non-secret settings in `config.yaml` and credentials in `.env`.
+trac-mcp-server uses [python-dotenv](https://pypi.org/project/python-dotenv/) to load a `.env` file, searched from the working directory upward: the nearest `.env` wins. (An editable install therefore no longer reads the checkout's `.env` when started from another directory, and an installed copy reads the `.env` of its working directory.) Values from `.env` are treated as environment variables and sit between real shell env vars and config file values in the precedence order. You can use `.env` alongside a YAML config file -- for example, store non-secret settings in `config.yaml` and credentials in `.env`.
 
 ```bash
 # .env
