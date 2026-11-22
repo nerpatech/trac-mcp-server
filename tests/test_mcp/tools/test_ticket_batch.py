@@ -6,7 +6,9 @@ import xmlrpc.client
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types as types
+import pytest
 
+from trac_mcp_server.core.client import TracClient
 from trac_mcp_server.mcp.tools.registry import ToolRegistry, ToolSpec
 from trac_mcp_server.mcp.tools.ticket_batch import (
     TICKET_BATCH_SPECS,
@@ -14,6 +16,9 @@ from trac_mcp_server.mcp.tools.ticket_batch import (
     _handle_batch_create,
     _handle_batch_delete,
     _handle_batch_update,
+)
+from trac_mcp_server.mcp.tools.ticket_write import (
+    workflow_field_refusal,
 )
 
 
@@ -70,6 +75,33 @@ class TestTicketBatchToolSchemas(unittest.TestCase):
         item_schema = updates_prop["items"]
         self.assertEqual(item_schema["type"], "object")
         self.assertIn("ticket_id", item_schema["required"])
+
+    def test_batch_update_item_schema_carries_workflow_fields(self):
+        """Items accept `action` and the action_* input fields, like
+        ticket_update (ticket #261), and the descriptions say a status
+        or resolution needs an action.
+        """
+        tool = next(
+            t
+            for t in TICKET_BATCH_TOOLS
+            if t.name == "ticket_batch_update"
+        )
+        item_schema = tool.inputSchema["properties"]["updates"]["items"]
+        props = item_schema["properties"]
+        self.assertEqual(props["action"]["type"], "string")
+        self.assertIn(
+            r"^action_[A-Za-z0-9_]+$", item_schema["patternProperties"]
+        )
+        self.assertIn(
+            "without `action`", props["status"]["description"]
+        )
+        self.assertIn(
+            "requires an action", props["resolution"]["description"]
+        )
+        self.assertIn(
+            'resolution=""', props["resolution"]["description"]
+        )
+        self.assertIn("action", tool.description)
 
 
 class TestHandleBatchCreate(unittest.TestCase):
@@ -472,7 +504,7 @@ class TestHandleBatchUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "updates": [
-                            {"ticket_id": 1, "status": "closed"},
+                            {"ticket_id": 1, "action": "accept"},
                             {"ticket_id": 2, "priority": "high"},
                         ]
                     },
@@ -504,8 +536,8 @@ class TestHandleBatchUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "updates": [
-                            {"ticket_id": 5, "status": "assigned"},
-                            {"ticket_id": 6, "status": "closed"},
+                            {"ticket_id": 5, "action": "accept"},
+                            {"ticket_id": 6, "action": "reopen"},
                         ]
                     },
                 )
@@ -546,8 +578,8 @@ class TestHandleBatchUpdate(unittest.TestCase):
                     self.mock_client,
                     {
                         "updates": [
-                            {"status": "closed"},  # missing ticket_id
-                            {"ticket_id": 1, "status": "closed"},
+                            {"action": "reopen"},  # missing ticket_id
+                            {"ticket_id": 1, "action": "reopen"},
                         ]
                     },
                 )
@@ -583,6 +615,396 @@ class TestHandleBatchUpdate(unittest.TestCase):
 
             call_args = mock_rsl.call_args[0]
             self.assertEqual(call_args[2], "'''bold comment'''")
+
+    @staticmethod
+    def _resolve_actions():
+        """get_ticket_actions in its real wire shape (see the
+        ticket_update remap tests in test_ticket.py)."""
+        return [
+            ["leave", "leave", [], []],
+            [
+                "resolve",
+                "resolve",
+                ["closed"],
+                [
+                    [
+                        "action_resolve_resolve_resolution",
+                        "fixed",
+                        ["fixed", "invalid", "wontfix"],
+                    ]
+                ],
+            ],
+        ]
+
+    def _update_calls(self, mock_rsl):
+        return {
+            c.args[1]: c.args[3]
+            for c in mock_rsl.call_args_list
+            if c.args[0] is self.mock_client.update_ticket
+        }
+
+    def test_batch_update_action_with_resolution_is_remapped(self):
+        """action + resolution lands as the action and the action's own
+        resolution field, not a bare resolution the workflow overwrites
+        (ticket #261, the #32/#49 remap shared with ticket_update).
+        """
+        result, _, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 9,
+                    "action": "resolve",
+                    "resolution": "fixed",
+                    "comment": "done",
+                }
+            ],
+            actions=self._resolve_actions(),
+        )
+
+        attrs = calls[9]
+        self.assertEqual(attrs["action"], "resolve")
+        self.assertEqual(
+            attrs["action_resolve_resolve_resolution"], "fixed"
+        )
+        self.assertNotIn("resolution", attrs)
+        self.assertEqual(result.structuredContent["updated"], [9])
+        self.assertEqual(result.structuredContent["warnings"], [])
+
+    def test_batch_update_explicit_action_field_passes_through(self):
+        """An explicit action_<a>_<a>_<field> key is forwarded as given
+        and needs no ticket_actions lookup.
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.return_value = True
+
+            asyncio.run(
+                _handle_batch_update(
+                    self.mock_client,
+                    {
+                        "updates": [
+                            {
+                                "ticket_id": 9,
+                                "action": "resolve",
+                                "action_resolve_resolve_resolution": "wontfix",
+                            }
+                        ]
+                    },
+                )
+            )
+
+        attrs = self._update_calls(mock_rsl)[9]
+        self.assertEqual(
+            attrs,
+            {
+                "action": "resolve",
+                "action_resolve_resolve_resolution": "wontfix",
+            },
+        )
+        self.mock_client.get_ticket_actions.assert_not_called()
+
+    def test_batch_update_bare_status_item_refused_sibling_runs(self):
+        """A bare status is refused for that item alone: nothing is
+        written for it, the sibling still runs (ticket #261).
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.return_value = True
+
+            result = asyncio.run(
+                _handle_batch_update(
+                    self.mock_client,
+                    {
+                        "updates": [
+                            {"ticket_id": 1, "status": "closed"},
+                            {"ticket_id": 2, "priority": "high"},
+                        ]
+                    },
+                )
+            )
+
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [2])
+        self.assertEqual(sc["failed_count"], 1)
+        self.assertEqual(sc["failed"][0]["id"], 1)
+        self.assertIn("'status'", sc["failed"][0]["error"])
+        self.assertIn("action", sc["failed"][0]["error"])
+        self.assertEqual(list(self._update_calls(mock_rsl)), [2])
+        self.assertIn("#1:", result.content[0].text)
+
+    def test_batch_update_bare_resolution_item_refused(self):
+        """A bare resolution is refused the same way, with the same text
+        ticket_update uses.
+        """
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.return_value = True
+
+            result = asyncio.run(
+                _handle_batch_update(
+                    self.mock_client,
+                    {
+                        "updates": [
+                            {"ticket_id": 3, "resolution": "fixed"}
+                        ]
+                    },
+                )
+            )
+
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [])
+        self.assertEqual(sc["failed"][0]["id"], 3)
+        self.assertEqual(
+            sc["failed"][0]["error"],
+            workflow_field_refusal({"resolution": "fixed"}),
+        )
+        mock_rsl.assert_not_called()
+
+    def test_batch_update_refusal_comes_before_the_link_gate(self):
+        """A refused item does no gate network work."""
+        self.mock_client.config.write_gate = True
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+            ) as mock_rsl,
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_batch.check_write"
+            ) as mock_check,
+        ):
+            asyncio.run(
+                _handle_batch_update(
+                    self.mock_client,
+                    {
+                        "updates": [
+                            {
+                                "ticket_id": 3,
+                                "status": "closed",
+                                "comment": "see wiki:NoSuchPage",
+                            }
+                        ]
+                    },
+                )
+            )
+        mock_check.assert_not_called()
+        mock_rsl.assert_not_called()
+
+    def test_batch_update_remap_warning_surfaces_on_item(self):
+        """The ticket_actions lookup itself failed: the item still
+        succeeds but carries the remap warning, in the text and the
+        structure.
+        """
+        result, _, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 4,
+                    "action": "resolve",
+                    "resolution": "fixed",
+                }
+            ],
+            actions_raise=True,
+        )
+
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [4])
+        self.assertEqual(sc["failed_count"], 0)
+        self.assertEqual(sc["warnings"][0]["id"], 4)
+        self.assertIn(
+            "could not find an input field",
+            sc["warnings"][0]["warning"],
+        )
+        self.assertIn("WARNING", result.content[0].text)
+        self.assertEqual(calls[4]["resolution"], "fixed")
+
+    # --- review fixes (ticket #261) ---
+
+    def _run_batch(self, updates, actions=None, actions_raise=False):
+        """Run _handle_batch_update with run_sync_limited patched, so the
+        per-item get_ticket_actions lookup is observable too. Returns
+        (result, mock, {ticket_id: attributes passed to update_ticket})."""
+
+        def side_effect(func, *a, **kw):
+            if func is self.mock_client.get_ticket_actions:
+                if actions_raise:
+                    raise RuntimeError("actions lookup failed")
+                return actions
+            return True
+
+        with patch(
+            "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+        ) as mock_rsl:
+            mock_rsl.side_effect = side_effect
+            result = asyncio.run(
+                _handle_batch_update(
+                    self.mock_client, {"updates": updates}
+                )
+            )
+        return result, mock_rsl, self._update_calls(mock_rsl)
+
+    @staticmethod
+    def _accept_and_resolve_actions():
+        return [
+            ["accept", "accept", ["accepted"], []],
+            [
+                "resolve",
+                "resolve",
+                ["closed"],
+                [
+                    [
+                        "action_resolve_resolve_resolution",
+                        "fixed",
+                        ["fixed", "invalid"],
+                    ]
+                ],
+            ],
+        ]
+
+    def test_batch_update_actions_lookup_goes_through_run_sync_limited(
+        self,
+    ):
+        """The per-item get_ticket_actions lookup honours
+        TRAC_MAX_PARALLEL_REQUESTS: it goes through run_sync_limited."""
+        _, mock_rsl, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 9,
+                    "action": "resolve",
+                    "resolution": "fixed",
+                }
+            ],
+            actions=self._accept_and_resolve_actions(),
+        )
+        self.assertIn(
+            self.mock_client.get_ticket_actions,
+            [c.args[0] for c in mock_rsl.call_args_list],
+        )
+        self.assertEqual(
+            calls[9]["action_resolve_resolve_resolution"], "fixed"
+        )
+
+    def test_batch_update_empty_or_null_action_counts_as_absent(self):
+        for action in (None, ""):
+            with self.subTest(action=action):
+                result, mock_rsl, calls = self._run_batch(
+                    [
+                        {
+                            "ticket_id": 1,
+                            "status": "closed",
+                            "action": action,
+                        },
+                        {
+                            "ticket_id": 2,
+                            "priority": "high",
+                            "action": action,
+                        },
+                    ]
+                )
+                sc = result.structuredContent
+                self.assertEqual(sc["failed"][0]["id"], 1)
+                self.assertIn("'status'", sc["failed"][0]["error"])
+                self.assertEqual(list(calls), [2])
+                self.assertEqual(calls[2], {"priority": "high"})
+
+    def test_batch_update_action_keys_without_action_refused(self):
+        result, mock_rsl, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 5,
+                    "action_resolve_resolve_resolution": "fixed",
+                }
+            ]
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [])
+        self.assertIn(
+            "action_resolve_resolve_resolution",
+            sc["failed"][0]["error"],
+        )
+        self.assertEqual(calls, {})
+
+    def test_batch_update_empty_resolution_alone_clears(self):
+        result, mock_rsl, calls = self._run_batch(
+            [{"ticket_id": 6, "resolution": ""}]
+        )
+        self.assertEqual(result.structuredContent["updated"], [6])
+        self.assertEqual(calls[6], {"resolution": ""})
+
+    def test_batch_update_empty_resolution_with_action_no_warning(self):
+        result, mock_rsl, calls = self._run_batch(
+            [{"ticket_id": 6, "action": "reopen", "resolution": ""}],
+            actions=self._accept_and_resolve_actions(),
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [6])
+        self.assertEqual(sc["warnings"], [])
+        self.assertEqual(
+            calls[6], {"action": "reopen", "resolution": ""}
+        )
+        self.assertNotIn(
+            self.mock_client.get_ticket_actions,
+            [c.args[0] for c in mock_rsl.call_args_list],
+        )
+
+    def test_batch_update_action_without_resolution_field_refused(self):
+        result, mock_rsl, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 7,
+                    "action": "accept",
+                    "resolution": "fixed",
+                },
+                {"ticket_id": 8, "priority": "high"},
+            ],
+            actions=self._accept_and_resolve_actions(),
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [8])
+        self.assertEqual(sc["failed"][0]["id"], 7)
+        self.assertIn(
+            "action 'accept' takes no resolution",
+            sc["failed"][0]["error"],
+        )
+        self.assertIn("action='resolve'", sc["failed"][0]["error"])
+        self.assertNotIn(7, calls)
+
+    def test_batch_update_unknown_action_refused(self):
+        result, mock_rsl, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 7,
+                    "action": "bogus",
+                    "resolution": "fixed",
+                }
+            ],
+            actions=self._accept_and_resolve_actions(),
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [])
+        error = sc["failed"][0]["error"]
+        self.assertIn("'bogus' is not available", error)
+        self.assertIn("accept", error)
+        self.assertIn("resolve", error)
+        self.assertEqual(calls, {})
+
+    def test_batch_update_actions_lookup_failure_warns_and_sends(self):
+        result, mock_rsl, calls = self._run_batch(
+            [
+                {
+                    "ticket_id": 4,
+                    "action": "resolve",
+                    "resolution": "fixed",
+                }
+            ],
+            actions_raise=True,
+        )
+        sc = result.structuredContent
+        self.assertEqual(sc["updated"], [4])
+        self.assertIn(
+            "could not find an input field",
+            sc["warnings"][0]["warning"],
+        )
+        self.assertEqual(calls[4]["resolution"], "fixed")
 
     def test_batch_update_exceeds_max_batch_size(self):
         """Batch exceeding max size returns validation error."""
@@ -732,3 +1154,56 @@ class TestHandleTicketBatchToolDispatcher(unittest.TestCase):
         )
 
         mock_handler.assert_awaited_once_with(self.mock_client, {})
+
+
+@pytest.mark.live
+async def test_live_batch_update_action_and_bare_status():
+    """Real Trac (/trac_test), ticket #261: an item with action +
+    resolution closes its ticket as fixed (the resolution remapped onto
+    the action's field), while an item with a bare status is refused and
+    its ticket is left as it was."""
+    from tests.live_helpers import trac_test_config
+
+    client = TracClient(trac_test_config())
+    resolved_id = client.create_ticket(
+        "#261 live test: batch action",
+        "Throwaway; deleted by the test.",
+        attributes={"owner": "agent_rpc"},
+    )
+    refused_id = client.create_ticket(
+        "#261 live test: batch bare status",
+        "Throwaway; deleted by the test.",
+        attributes={"owner": "agent_rpc"},
+    )
+    try:
+        result = await _handle_batch_update(
+            client,
+            {
+                "updates": [
+                    {
+                        "ticket_id": resolved_id,
+                        "action": "resolve",
+                        "resolution": "fixed",
+                        "comment": "closed through action",
+                    },
+                    {"ticket_id": refused_id, "status": "closed"},
+                ]
+            },
+        )
+        sc = result.structuredContent
+        assert sc["updated"] == [resolved_id], result.content[0].text
+        assert sc["warnings"] == []
+        assert [f["id"] for f in sc["failed"]] == [refused_id]
+        assert "'status'" in sc["failed"][0]["error"]
+        assert "action" in sc["failed"][0]["error"]
+
+        resolved = client.get_ticket(resolved_id)[3]
+        assert resolved["status"] == "closed"
+        assert resolved["resolution"] == "fixed"
+
+        refused = client.get_ticket(refused_id)[3]
+        assert refused["status"] == "new"
+        assert not refused.get("resolution")
+    finally:
+        client.delete_ticket(resolved_id)
+        client.delete_ticket(refused_id)

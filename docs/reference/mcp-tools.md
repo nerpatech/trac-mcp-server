@@ -465,19 +465,23 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
 | `summary` | string | No | - | New summary (ticket title) |
 | `description` | string | No | - | New description, replacing the ticket body. TracWiki, stored verbatim |
 | `type` | string | No | - | New ticket type (e.g., `defect`, `enhancement`, `task`) |
-| `status` | string | No | - | New status |
+| `status` | string | No | - | New status. Refused without `action`: Trac's workflow drops a direct status write, so transition with `action` instead (e.g., `action='accept'`) |
 | `action` | string | No | - | Trac workflow action to perform (e.g., `accept`, `resolve`, `reopen`, `reassign`); the canonical way to move a ticket through its workflow. Action-specific input fields are passed as `action_<action>_<action>_<field>` keys (e.g., `action_resolve_resolve_resolution='fixed'`) |
 | `priority` | string | No | - | New priority |
 | `severity` | string | No | - | New severity |
 | `component` | string | No | - | New component |
 | `milestone` | string | No | - | New milestone |
 | `owner` | string | No | - | New owner |
-| `resolution` | string | No | - | Resolution (when closing, e.g., `fixed`, `invalid`, `wontfix`) |
+| `resolution` | string | No | - | Resolution (e.g., `fixed`, `invalid`, `wontfix`); a non-empty value requires an `action` that takes one (e.g., `action='resolve'`) and is remapped onto the action's resolution field. `resolution=""` alone clears a stale resolution |
 | `cc` | string | No | - | CC email addresses |
 | `keywords` | string | No | - | Keywords/tags |
 | `target_cap` | integer | No | `50` | Maximum cross-instance targets the write-time link check probes (default: 50). Anything beyond the cap is reported as target_check_capped, which BLOCKS the write -- an unchecked target must not read as a clean one. Raise this for a legitimately link-dense document; there is deliberately no way to switch the check off. (minimum: 1, maximum: 500) |
 | `reply_to` | integer | No | - | Comment number to reply to. Prepends Trac's standard `Replying to [comment:N author]:` quote block (quoting that comment's own text) before the new comment. Requires `comment` (minimum: 1) |
 | `base_ts` | string | No | - | Change token from a prior `ticket_get` call's `_ts` field, or the new token a previous `ticket_update` on this ticket returned (a numeric string; pass it through as-is). When provided, the update is rejected with a `version_conflict` error naming what changed if the ticket was modified since that token was read. Strongly recommended: without it, this write silently overwrites any concurrent change |
+
+A `status`, a non-empty `resolution` or any `action_*` key given without an `action` (a null or empty `action` counts as none) is refused before anything is written: Trac's workflow silently drops a direct status change and ignores `action_*` fields that have no action, and a bare resolution would leave an open ticket carrying a resolution. Close a ticket with `action="resolve"` and `resolution="fixed"`; use `action="reopen"` or `"accept"` for other transitions (`ticket_actions` lists what a ticket allows). `resolution=""` alone is allowed and clears a stale resolution.
+
+With an `action` and a non-empty `resolution`, the tool looks up the action's input fields (`ticket_actions`): an action the ticket does not offer is refused (the text lists the available names), and so is an action that takes no resolution (e.g. `accept`: use `action='resolve'`). Only when that lookup itself fails is the write sent as given, with a warning.
 
 **Success Response:**
 ```json
@@ -504,6 +508,8 @@ fails, `comments_included` is `false` and `comments_error` carries the reason.
     "text": "Error (version_conflict): Ticket has been modified since you loaded it\n\nAction: Fetch current version with ticket_get(ticket_id=N), then retry update."
   }
   ```
+
+- **validation_error:** `status`, a non-empty `resolution` or `action_*` keys without `action`; or an `action` that is not available for the ticket or takes no resolution (the text names the offenders and shows the form to use)
 
 **Example Call:**
 ```json
@@ -777,7 +783,7 @@ Each ticket object:
 **Implementation Notes:**
 - Batch size limited by `TRAC_MAX_BATCH_SIZE` (default 500, max 10000)
 - Parallelism bounded by `TRAC_MAX_PARALLEL_REQUESTS` semaphore
-- Descriptions are converted from Markdown to TracWiki before creation
+- Descriptions are TracWiki and are stored byte-for-byte
 
 **Example Call:**
 ```json
@@ -869,7 +875,7 @@ Each ticket object:
 
 ## ticket_batch_update
 
-**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte.
+**Description:** Update multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Comments are TracWiki and are stored byte-for-byte. A status change needs `action` per item, like `ticket_update` (e.g. `action='resolve'` with `resolution='fixed'`, or `action='reopen'`): an item with a status, a non-empty resolution or `action_*` keys but no action is refused, and nothing is written for it (`resolution=""` alone is allowed and clears a stale resolution).
 
 **Parameters:**
 
@@ -884,8 +890,9 @@ Each update object:
 |------|------|----------|---------|-------------|
 | `ticket_id` | integer | **Yes** | - | Ticket number to update (minimum: 1) |
 | `comment` | string | No | - | Comment body. TracWiki, stored verbatim |
-| `status` | string | No | - | New status |
-| `resolution` | string | No | - | Resolution (when closing) |
+| `status` | string | No | - | New status. Refused without `action`: Trac's workflow drops a direct status write, so transition with `action` instead (e.g., `action='accept'`) |
+| `action` | string | No | - | Trac workflow action to perform (e.g., `accept`, `resolve`, `reopen`, `reassign`), as in `ticket_update`. Action-specific input fields are passed as `action_<action>_<action>_<field>` keys on the same item (e.g., `action_resolve_resolve_resolution='fixed'`) |
+| `resolution` | string | No | - | Resolution; a non-empty value requires an `action` that takes one (e.g., `action='resolve'`) and is remapped onto the action's resolution field. `resolution=""` alone clears a stale resolution |
 | `priority` | string | No | - | New priority |
 | `component` | string | No | - | New component |
 | `milestone` | string | No | - | New milestone |
@@ -909,11 +916,12 @@ Each update object:
   "total": 3,
   "succeeded": 3,
   "failed_count": 0,
+  "warnings": [],
   "gate_notes": []
 }
 ```
 
-`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status). `warnings` (list, always present) holds `{"id", "warning"}` for each item that succeeded with an action-resolution remap warning.
 
 **Error Responses:**
 
@@ -935,7 +943,9 @@ Each update object:
 **Implementation Notes:**
 - Batch size limited by `TRAC_MAX_BATCH_SIZE` (default 500, max 10000)
 - Parallelism bounded by `TRAC_MAX_PARALLEL_REQUESTS` semaphore
-- Comments are converted from Markdown to TracWiki before submission
+- Comments are TracWiki and are stored byte-for-byte
+- An item with a `status`, a non-empty `resolution` or `action_*` keys but no `action` (a null or empty `action` counts as none) is refused: it is listed under `failed` with the same text `ticket_update` returns, nothing is written for it, and the other items still run. `resolution=""` alone is allowed and clears a stale resolution
+- A `resolution` alongside an `action` is remapped onto the action's own resolution field (the `ticket_actions` lookup `ticket_update` does, run through the same `TRAC_MAX_PARALLEL_REQUESTS` limit). An action the ticket does not offer, or one that takes no resolution (e.g. `accept`), is refused for that item like the cases above. When the lookup itself fails the item is still sent and succeeds with a warning, listed under `warnings` in the structured output and under the item in the text
 
 **Example Call:**
 ```json
@@ -946,7 +956,7 @@ Each update object:
       {
         "ticket_id": 42,
         "comment": "Fixed in commit abc123.",
-        "status": "closed",
+        "action": "resolve",
         "resolution": "fixed"
       },
       {
