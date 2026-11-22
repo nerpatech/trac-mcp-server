@@ -381,6 +381,7 @@ def load_config(
     insecure: bool = False,
     debug: bool = False,
     yaml_fallbacks: dict | None = None,
+    oidc_rpc_url: str | None = None,
 ) -> Config:
     """Load configuration with unified precedence.
 
@@ -400,6 +401,11 @@ def load_config(
             Used as fallback when CLI arg and env var are both unset. Its
             ``link_rewrites`` key, when present, is the list of
             ``{from, to}`` rules ``ExportConfig`` already validated.
+        oidc_rpc_url: The OIDC RPC URL the caller resolved (the
+            ``TRAC_MCP_OIDC_RPC_URL`` env var, else the YAML
+            ``server.oidc_rpc_url``). Its being set relaxes the
+            username/password requirement. When not passed, the env var
+            is read here, so callers that resolve nothing keep working.
 
     Returns:
         Validated Config instance.
@@ -410,17 +416,22 @@ def load_config(
     """
     fb = yaml_fallbacks or {}
 
-    # TRAC_MCP_OIDC_RPC_URL relaxes the TRAC_USERNAME/TRAC_PASSWORD
-    # requirement below -- an OIDC-only deployment (see Config.oidc_only)
-    # has no shared service-account identity by design; every request
-    # carries its own token instead (mcp/oidc.py). Read directly via
-    # os.getenv rather than threading ServerConfig through this call:
-    # validate_server_config() runs first for the server and refuses the
-    # variable outside the http transport. Config.oidc_only itself is
-    # computed further down, once we know whether real credentials ended up configured
-    # anyway -- so setting TRAC_MCP_OIDC_RPC_URL *alongside* a real
-    # TRAC_USERNAME/TRAC_PASSWORD keeps the startup self-test enabled.
-    oidc_rpc_configured = bool(os.getenv("TRAC_MCP_OIDC_RPC_URL"))
+    # An OIDC RPC URL relaxes the TRAC_USERNAME/TRAC_PASSWORD requirement
+    # below -- an OIDC-only deployment (see Config.oidc_only) has no shared
+    # service-account identity by design; every request carries its own
+    # token instead (mcp/oidc.py). The caller passes the one value
+    # config_bootstrap resolved from the env var or the YAML ``server``
+    # section (Trac /trac_mcp_server #269), the same one
+    # bootstrap_server_config() hands the server; without it only the env
+    # var is read. validate_server_config() runs first for the server and
+    # refuses the setting outside the http transport. Config.oidc_only
+    # itself is computed further down, once we know whether real
+    # credentials ended up configured anyway -- so setting the URL
+    # *alongside* a real TRAC_USERNAME/TRAC_PASSWORD keeps the startup
+    # self-test enabled.
+    if oidc_rpc_url is None:
+        oidc_rpc_url = os.getenv("TRAC_MCP_OIDC_RPC_URL")
+    oidc_rpc_configured = bool(oidc_rpc_url)
 
     # --- String fields: CLI > env > YAML > error ---
 

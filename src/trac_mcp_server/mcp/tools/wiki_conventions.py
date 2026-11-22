@@ -27,10 +27,13 @@ from ...instances import (
     IdentityRequiredError,
     InstanceNotAllowedError,
     UnknownInstanceError,
-    caller_identity,
 )
 from .errors import classify_fault
-from .instances import get_instance_registry, own_intertrac_prefix
+from .instances import (
+    OidcInstanceRefusedError,
+    other_instance_client,
+    own_intertrac_prefix,
+)
 from .registry import ToolSpec
 
 _MARKER = "'''Wiki style:'''"
@@ -173,17 +176,13 @@ async def _read_style_page(
         # InterTrac prefixes are case-insensitive; the instance path is
         # the lower-cased prefix.
         path = "/" + prefix.lower()
-        registry = get_instance_registry()
-        if registry is None:
-            return _style_unavailable(
-                path,
-                page,
-                "unknown_instance",
-                "Instance registry not initialized.",
-            )
         try:
-            target = registry.get_client(
-                path, identity=caller_identity()
+            target = other_instance_client(client, path)
+        except OidcInstanceRefusedError as exc:
+            # Trac /trac_mcp_server #269: not served with the startup
+            # credentials under OIDC per-user auth.
+            return _style_unavailable(
+                path, page, "permission_denied", str(exc)
             )
         except IdentityRequiredError as exc:
             # Trac /trac_mcp_server #268: reported like the other

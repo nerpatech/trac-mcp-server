@@ -218,6 +218,8 @@ class FakeClient:
         self.pages = pages
         self.config = MagicMock()
         self.config.trac_url = trac_url
+        # A MagicMock attribute is truthy: say "not an OIDC client".
+        self.config.bearer_token = None
         self.faults = faults or {}
         self.reads = []
         self.read_versions = []
@@ -247,7 +249,7 @@ class FakeClient:
 def _run(client, registry="unset", identity="ID"):
     patches = [
         patch(
-            "trac_mcp_server.mcp.tools.wiki_conventions.caller_identity",
+            "trac_mcp_server.mcp.tools.instances.caller_identity",
             **(
                 {"side_effect": identity}
                 if isinstance(identity, Exception)
@@ -258,7 +260,7 @@ def _run(client, registry="unset", identity="ID"):
     if registry != "unset":
         patches.append(
             patch(
-                "trac_mcp_server.mcp.tools.wiki_conventions."
+                "trac_mcp_server.mcp.tools.instances."
                 "get_instance_registry",
                 return_value=registry,
             )
@@ -426,6 +428,45 @@ class TestHandler:
         assert out["style_page"]["reason"] == "permission_denied"
         assert out["style_page"]["message"] == str(error)
         registry.get_client.assert_not_called()
+
+    def test_oidc_caller_is_refused_another_instance_without_the_registry(
+        self,
+    ):
+        """Trac /trac_mcp_server #269: under OIDC per-user auth
+        ``caller_identity`` is None, so the registry would hand back the
+        startup credentials and read another instance's style page as
+        that account. The caller's bearer token marks the mode: the
+        lookup is refused, reported like #268's refusal, and the
+        registry is never asked for a client."""
+        client = FakeClient(
+            {"WikiStart": (AGENT + "\n", 1), **TEMPLATES}
+        )
+        client.config.bearer_token = "per-user-token"
+        other = FakeClient({STYLE_PAGE: ("agent style\n", 12)})
+        registry = _registry(other)
+        out = _run(client, registry, identity=None)
+        registry.get_client.assert_not_called()
+        assert other.reads == []
+        record = out["style_page"]
+        assert record["available"] is False
+        assert record["reason"] == "permission_denied"
+        assert record["instance"] == "/auto_pm"
+        assert "OIDC" in record["message"]
+        assert out["style"] == "agent"
+        assert len(out["templates"]) == 2
+
+    def test_oidc_caller_still_reads_its_own_instance_style_page(self):
+        client = FakeClient(
+            {
+                "WikiStart": (OWN + "\n", 1),
+                STYLE_PAGE: ("own style\n", 4),
+            }
+        )
+        client.config.bearer_token = "per-user-token"
+        registry = _registry()
+        out = _run(client, registry)
+        registry.get_client.assert_not_called()
+        assert out["style_page"]["body"] == "own style\n"
 
     def test_registry_none_is_unknown_instance(self):
         client = FakeClient({"WikiStart": (AGENT + "\n", 1)})

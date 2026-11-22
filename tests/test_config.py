@@ -416,6 +416,34 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="Trac URL not found"):
             load_config()
 
+    def test_oidc_rpc_url_argument_relaxes_credentials(
+        self, monkeypatch
+    ):
+        """Trac /trac_mcp_server #269 (L19): the caller passes the URL it
+        resolved (env or YAML); with no env var set it still counts."""
+        monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+        monkeypatch.delenv("TRAC_USERNAME", raising=False)
+        monkeypatch.delenv("TRAC_PASSWORD", raising=False)
+        monkeypatch.delenv("TRAC_MCP_OIDC_RPC_URL", raising=False)
+
+        config = load_config(
+            oidc_rpc_url="https://trac.example.com/trac-api/login/xmlrpc"
+        )
+
+        assert config.oidc_only is True
+
+    def test_oidc_rpc_url_env_var_is_the_default(self, monkeypatch):
+        """Callers that pass no ``oidc_rpc_url`` keep reading the env var."""
+        monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
+        monkeypatch.delenv("TRAC_USERNAME", raising=False)
+        monkeypatch.delenv("TRAC_PASSWORD", raising=False)
+        monkeypatch.setenv(
+            "TRAC_MCP_OIDC_RPC_URL",
+            "https://trac.example.com/trac-api/login/xmlrpc",
+        )
+
+        assert load_config().oidc_only is True
+
     def test_missing_username_raises(self, monkeypatch):
         monkeypatch.setenv("TRAC_URL", "https://trac.example.com")
         monkeypatch.delenv("TRAC_USERNAME", raising=False)

@@ -1171,7 +1171,7 @@ class TracClient:
     _CREATE_MATCH_WINDOW_SECONDS = 600
 
     def _find_recently_created_ticket(
-        self, summary: str, reporter: str, sent_at: float
+        self, summary: str, reporter: str | None, sent_at: float
     ) -> int | None:
         """
         Look for a ticket matching ``summary`` among ``reporter``'s recent
@@ -1186,10 +1186,21 @@ class TracClient:
         propagate: "could not check" and "checked, nothing there" lead to
         different messages and must not be conflated.
         """
+        # Trac /trac_mcp_server #269. An OIDC client has no username (Trac
+        # records the token's user as reporter), so there is nothing to
+        # filter on: the summary and creation time below decide. A reporter
+        # goes into the query escaped, not URL-encoded: Query.from_string
+        # does not URL-decode, it splits clauses on an unescaped "&" and
+        # alternatives on an unescaped "|" and removes only the "\&" and
+        # "\|" escapes.
+        reporter_clause = ""
+        if reporter:
+            escaped = reporter.replace("|", r"\|").replace("&", r"\&")
+            reporter_clause = f"reporter={escaped}&"
         ticket_ids = self._rpc_request(
             "ticket",
             "query",
-            f"reporter={reporter}&order=id&desc=1&max=20",
+            f"{reporter_clause}order=id&desc=1&max=20",
         )
 
         cutoff = sent_at - self._CREATE_MATCH_WINDOW_SECONDS

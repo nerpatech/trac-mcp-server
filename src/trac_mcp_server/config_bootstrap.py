@@ -72,6 +72,7 @@ def bootstrap_config(
 
     # Step 2: Load YAML config if present, extract trac section as fallbacks
     yaml_fallbacks: dict[str, Any] | None = None
+    yaml_oidc_rpc_url: str | None = None
     sources: list[str] = []
     config_files = discover_config_files()
 
@@ -89,6 +90,10 @@ def bootstrap_config(
             yaml_fallbacks["link_rewrites"] = list(
                 unified.export.link_rewrites
             )
+        # Trac /trac_mcp_server #269: bootstrap_server_config() resolves
+        # the OIDC RPC URL from the env var or this key, and so must the
+        # credential check below.
+        yaml_oidc_rpc_url = unified.server.oidc_rpc_url
         sources.append(f"config file: {config_files[0]}")
 
     # Step 3: Single call to load_config with all sources merged
@@ -100,6 +105,9 @@ def bootstrap_config(
         insecure=overrides.get("insecure", False),
         debug=overrides.get("debug", False),
         yaml_fallbacks=yaml_fallbacks,
+        oidc_rpc_url=(
+            os.getenv("TRAC_MCP_OIDC_RPC_URL") or yaml_oidc_rpc_url
+        ),
     )
 
     # Step 4-6: Build source labels

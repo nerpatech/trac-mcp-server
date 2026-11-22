@@ -627,6 +627,83 @@ def test_create_ticket_timeout_ignores_older_ticket_with_same_summary(
     assert "most likely was not created" in str(exc_info.value)
 
 
+def _timeout_query_sent(
+    mock_post, mock_time, config, *, ids=(), attrs=None
+):
+    """Run a create that times out, return the ticket.query string sent."""
+    mock_time.return_value = float(_NOW_EPOCH)
+    responses = [
+        requests.exceptions.ReadTimeout("Read timed out."),
+        _query_response(*ids),
+    ]
+    responses += [
+        _ticket_get_response(i, "Test ticket", "20260812T12:00:05")
+        for i in ids
+    ]
+    mock_post.side_effect = responses
+    client = TracClient(config)
+    with pytest.raises(TicketCreateTimeout) as exc_info:
+        client.create_ticket(
+            "Test ticket", "Test description", attributes=attrs
+        )
+    (params,), method = xmlrpc.client.loads(
+        mock_post.call_args_list[1][1]["data"]
+    )
+    assert method == "ticket.query"
+    return params, exc_info.value
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_names_a_plain_reporter(
+    mock_post, mock_time, mock_config
+):
+    params, _ = _timeout_query_sent(mock_post, mock_time, mock_config)
+    assert params == "reporter=testuser&order=id&desc=1&max=20"
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_escapes_reporter_for_trac(
+    mock_post, mock_time, mock_config
+):
+    """Trac /trac_mcp_server #269 (L10): Query.from_string does not
+    URL-decode; it splits on an unescaped ``&`` and ``|`` and removes
+    only the ``\\&`` and ``\\|`` escapes."""
+    params, _ = _timeout_query_sent(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": "a&b|c"},
+    )
+    assert params == "reporter=a\\&b\\|c&order=id&desc=1&max=20"
+
+
+@pytest.mark.parametrize("empty", ["", None])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_without_reporter_for_oidc(
+    mock_post, mock_time, empty
+):
+    """Trac /trac_mcp_server #269 (L9): an OIDC client has username="" but
+    Trac records the token's user as reporter, so ``reporter=`` would
+    match nothing and a landed create would be reported as lost."""
+    config = Config(
+        trac_url="https://trac.example.com/trac",
+        username="",
+        password="",
+        bearer_token="per-user-token",
+    )
+    attrs = None if empty is None else {"reporter": empty}
+    params, error = _timeout_query_sent(
+        mock_post, mock_time, config, ids=(10,), attrs=attrs
+    )
+    assert params == "order=id&desc=1&max=20"
+    assert "reporter" not in params
+    assert error.ticket_id == 10
+    assert "created anyway as #10" in str(error)
+
+
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_create_ticket_timeout_reraises_when_verification_fails(
     mock_post, mock_config

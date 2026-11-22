@@ -15,6 +15,7 @@ from ...instances import (
     IdentityRequiredError,
     InstanceNotAllowedError,
     InstanceRegistry,
+    UnknownInstanceError,
     caller_identity,
 )
 from .errors import IDENTITY_REQUIRED_ACTION, build_error_response
@@ -74,6 +75,41 @@ def get_instance_registry() -> InstanceRegistry | None:
     exists at all: a direct ``tools -> server`` import would be
     circular, since ``server.py`` imports tool specs from this package."""
     return _registry_ref
+
+
+class OidcInstanceRefusedError(Exception):
+    """Another instance was asked for under OIDC per-user authentication."""
+
+
+def other_instance_client(caller: TracClient, path: str) -> TracClient:
+    """A client for the instance at ``path``, acting as this caller
+    (Trac /trac_mcp_server #269).
+
+    Under OIDC per-user auth, ``caller_identity()`` is ``None``, so the
+    registry would answer with the startup credentials -- a service
+    account when ``TRAC_USERNAME``/``TRAC_PASSWORD`` are set -- and the
+    caller would read another instance as that account. ``server.py``'s
+    ``_resolve_client`` and ``list_instances`` refuse another instance in
+    that mode; this is the same refusal for a tool that reaches into one
+    itself. ``caller`` is the client the call itself runs with: its
+    ``config.bearer_token`` is what marks the mode.
+
+    Raises:
+        OidcInstanceRefusedError: ``caller`` carries a bearer token.
+        UnknownInstanceError: no registry is installed yet, or none matches.
+        IdentityRequiredError, InstanceNotAllowedError: as the registry's
+            ``get_client`` raises them.
+    """
+    if caller.config.bearer_token:
+        raise OidcInstanceRefusedError(
+            "Another instance is not available when OIDC per-user "
+            "authentication is configured -- this deployment serves "
+            "only its single configured Trac endpoint."
+        )
+    registry = get_instance_registry()
+    if registry is None:
+        raise UnknownInstanceError("Instance registry not initialized.")
+    return registry.get_client(path, identity=caller_identity())
 
 
 def local_intertrac_bases() -> frozenset[str]:
