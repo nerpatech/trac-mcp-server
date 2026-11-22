@@ -36,8 +36,8 @@ trac:
   write_gate: true       # false = emergency off switch; see "Write gate"
 
 logging:
-  level: INFO
-  file: /tmp/trac-mcp-server.log
+  level: INFO            # unset = WARNING for stdio, INFO for http
+  file: /var/log/trac-mcp-server.log   # unset = the default; see "Logging"
 
 server:
   transport: stdio       # or "http"
@@ -123,7 +123,7 @@ trac:
   password: secret
 
 logging:
-  level: INFO
+  level: INFO   # optional; leave it out for the mode default
 EOF
 ```
 
@@ -139,14 +139,15 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_USERNAME` | Yes | -- | Trac username for XML-RPC authentication |
 | `TRAC_PASSWORD` | Yes | -- | Trac password for XML-RPC authentication |
 | `TRAC_INSECURE` | No | `false` | Skip SSL certificate verification (development only) |
-| `TRAC_DEBUG` | No | `false` | Enable debug logging |
+| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`): the level is DEBUG whatever `LOG_LEVEL` or `logging.level` say. See [Logging](#logging) |
+| `LOG_LEVEL` | No | `WARNING` (stdio) / `INFO` (http) | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (any case; a blank value counts as unset). Overrides YAML `logging.level`. An unknown name stops startup naming the variable. See [Logging](#logging) |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Maximum parallel XML-RPC requests to Trac |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |
 | `TRAC_WRITE_GATE` | No | `true` | Write gate (YAML `trac.write_gate`): refuses a write whose text carries a broken link. Off only for `0`, `false`, `no` or `off` (case-insensitive); any other value, an empty one included, leaves it on. See [Write gate](#write-gate) |
 | `TRAC_MCP_LINK_REWRITES` | No | -- | Whitespace-separated `FROM=TO` link-rewrite rules of the Markdown export, split at the first `=`; replaces the YAML `export.link_rewrites` list whole, an empty value clears it. See [Link rewrites](#link-rewrites-export) |
-| `LOG_FILE` | No | `/tmp/trac-mcp-server.log` (stdio) / none (http) | Log file path, used when `--log-file` is not given. Set it to an empty string for no log file (stdio then logs to stderr). Read by the logger, not by the config file; `logging.file` above does not set it |
+| `LOG_FILE` | No | per-user state file (stdio) / none (http) | Log file path, used when `--log-file` is not given; overrides YAML `logging.file`. Set it to an empty string for no log file (stdio then logs to stderr). See [Logging](#logging) |
 
 Boolean variables (`TRAC_INSECURE`, `TRAC_DEBUG`) accept `true`, `1`, `yes`, or `on` (case-insensitive). Any other value is treated as `false`.
 
@@ -173,6 +174,30 @@ An empty or blank `TRAC_MCP_PORT` counts as unset: the YAML `port`, else `8080`,
 See [HTTP Transport](http-transport.md) for the full picture, including the bind-safety rule that refuses an unauthenticated non-loopback bind.
 
 **Note:** Environment variables always take precedence over config file values, whether or not a config file is present. The `${VAR}` interpolation syntax in YAML is a convenience for referencing env vars within config files, but is not required -- env vars are checked directly during configuration loading and override any config file value for the same setting.
+
+## Logging
+
+Three settings, each resolved from the same layers (Trac /trac_mcp_server #277). A `.env` file counts as the environment; the config file's keys count only when the file sets them.
+
+**Level**, highest first:
+
+1. `TRAC_DEBUG` true (or YAML `trac.debug: true`): DEBUG.
+2. The `LOG_LEVEL` environment variable (a blank value counts as unset).
+3. YAML `logging.level`.
+4. The mode default: WARNING for stdio, INFO for http.
+
+`LOG_LEVEL` and `logging.level` accept DEBUG, INFO, WARNING, ERROR and CRITICAL in any case. Any other name stops startup with a message that names the source (`LOG_LEVEL` or `logging.level`). Leaving `level` out of the file is not the same as `level: INFO`: it keeps stdio at WARNING.
+
+**File**, highest first:
+
+1. `--log-file`.
+2. The `LOG_FILE` environment variable (set but empty means no file).
+3. YAML `logging.file`.
+4. The default: for stdio, `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset or blank; for http, no file.
+
+An empty or blank value at any step means no file: stdio then logs to stderr, http logs to stderr only.
+
+The stdio default file is created for you: its directory with mode 0700, the file with 0600, and it rotates at 5 MiB, keeping three old files (`server.log.1` to `.3`). If it cannot be created (a read-only home, say), the server prints one `WARNING: cannot open default log file ...; logging to stderr` line and carries on logging to stderr. A file you name yourself (any of the first three steps) is a plain append file, created with mode 0600 if it does not exist, never rotated and with no directory created for it; if it cannot be opened, startup stops with `ERROR: Cannot open log file`.
 
 ## Write gate
 

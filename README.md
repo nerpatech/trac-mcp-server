@@ -40,7 +40,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_USERNAME` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac username |
 | `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
-| `TRAC_DEBUG` | No | `false` | Enable debug logging |
+| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`); the level is DEBUG whatever `LOG_LEVEL` or `logging.level` say |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
