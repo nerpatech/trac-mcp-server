@@ -234,6 +234,22 @@ The server's write-time link gate and notes apply to all three writes, as for th
 
 Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working directory up: that entry's `url` and its `Authorization: Bearer ...` header, with `${VAR}` and `${VAR:-default}` expanded from the environment exactly as Claude Code expands them. Run from a project directory, it therefore connects as the same identity the project's MCP session uses, with no extra setup. Failing both, it reads `TRAC_MCP_URL` and `TRAC_MCP_AUTH_TOKEN`. A variable named with `--token-env` must be set; if the default `TRAC_MCP_AUTH_TOKEN` is unset, `trac-mcp` says that it is sending no token. An HTTP failure is reported by status, e.g. `HTTP 401 Unauthorized -- the bearer token was missing or rejected`.
 
+Four rules bound which `.mcp.json` is used and what it may run, because a cloned tree's `.mcp.json` is somebody else's file:
+
+- **Search bound.** The search checks each directory from the working directory upward and stops after the first one that holds a `.git` (a directory, or the file of a linked worktree) or is your home directory, whichever comes first. A file above a project root or above `$HOME` is never used. From a directory outside home with no `.git` on the way, it still walks up to `/`.
+- **File check (POSIX).** The file is refused (exit 3, naming it and the reason) unless you own it and neither group nor others can write it (`chmod go-w`). A symlink is checked on its target.
+- **The file in use.** When the endpoint comes from an `.mcp.json`, `trac-mcp: using <path> (server <name>)` is printed to stderr once per run. It is not printed for `--url` or `TRAC_MCP_URL`.
+- **`headersHelper` needs a trust file.** A `headersHelper` is a shell command, so a cloned tree's `.mcp.json` could otherwise run a command as you the first time you ran `trac-mcp` in it. It runs only when the `.mcp.json`'s real path is listed in `${XDG_CONFIG_HOME:-~/.config}/trac-mcp/trusted-helpers`, which has to pass the same file check. Otherwise `trac-mcp` exits 3 without running it, naming the file and the exact line to add. Entries with plain `headers` need no trust, and `--token-env` skips the helper (and so the check).
+
+The trust file holds one absolute path per line, compared by real path (a symlink and its target are the same file); blank lines and lines starting with `#` are ignored, and surrounding whitespace is stripped:
+
+```
+# read 2026-11-22: the helper runs `pass show trac/token`
+/path/to/myproject/.mcp.json
+```
+
+Create it once with `mkdir -p ~/.config/trac-mcp && chmod 700 ~/.config/trac-mcp`, then append the line the refusal printed, and `chmod 600` the file.
+
 ### Exit Codes
 
 | Code | Meaning |
@@ -241,10 +257,11 @@ Without `--url`, `trac-mcp` uses the nearest `.mcp.json` from the working direct
 | 0 | Success |
 | 1 | The server answered with an error (the message is printed to stderr) |
 | 2 | Usage error, or a local file problem |
-| 3 | No endpoint, a missing token variable, or a transport/HTTP failure (e.g. 401) |
+| 3 | No endpoint, a missing token variable, an `.mcp.json` or trust file that fails the file check, a `headersHelper` that is not trusted, or a transport/HTTP failure (e.g. 401) before any write was sent, or in a read |
 | 4 | The write WAS stored, but reading it back failed: a `ticket-comment` whose number could not be determined, or a `wiki-push` whose new page version could not be read. Do not retry the write |
+| 5 | A write was sent and the transport failed before any answer came back (a dropped connection, a timeout): the server may have stored it. Check the ticket or page before retrying |
 
-Exit 1 always means nothing was stored.
+Exit 1 means the server answered with an error, so nothing was stored. Exit 3 means no write was sent, or the failing call was a read, so a retry cannot write twice. Exit 4 and exit 5 both mean a write may be stored (4: it was, and only the read-back failed; 5: no answer came back), so neither is safe to retry blindly.
 
 ### Installation
 

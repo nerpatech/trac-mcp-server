@@ -19,13 +19,18 @@ Where to connect, in order:
 2. the ``trac-http`` entry (or ``--server NAME``) of the nearest
    ``.mcp.json`` from the working directory up -- its ``url`` and its
    ``Authorization`` header, with ``${VAR}`` / ``${VAR:-default}``
-   expanded from the environment, exactly as Claude Code would. An entry
+   expanded from the environment, exactly as Claude Code would. The
+   search stops at the project root (the first directory with a ``.git``)
+   or at the home directory; the file must be yours and not writable by
+   group or others, and the CLI says which file it used. An entry
    with a ``headersHelper`` command (Claude Code's dynamic headers) has
    it run through a shell in the ``.mcp.json``'s directory, with
    ``CLAUDE_CODE_MCP_SERVER_NAME`` and ``CLAUDE_CODE_MCP_SERVER_URL`` set;
    it prints a JSON object of headers, and an ``Authorization`` it
    returns overrides the entry's static one (``--token-env`` skips the
-   helper and overrides both);
+   helper and overrides both). A command is run only from an ``.mcp.json``
+   listed in ``~/.config/trac-mcp/trusted-helpers`` (Trac
+   /trac_mcp_server #278);
 3. ``TRAC_MCP_URL`` and ``TRAC_MCP_AUTH_TOKEN`` from the environment.
 
 Using the project's own ``.mcp.json`` means a session's CLI calls run as
@@ -37,6 +42,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -69,6 +75,28 @@ EXIT_CONNECT_ERROR = (
 # #140). Distinct from EXIT_TOOL_ERROR, which means nothing was stored:
 # a caller that retries on 1 must not retry on 4, or it writes twice.
 EXIT_STORED_INCOMPLETE = 4
+# A write's request was sent and the transport failed before any answer
+# came back (Trac /trac_mcp_server #278): the server may have stored it.
+# Distinct from EXIT_CONNECT_ERROR, which a caller may retry blindly
+# because nothing was sent, and from EXIT_TOOL_ERROR, which means the
+# server answered that nothing was stored: a caller must check the
+# target before retrying on 5.
+EXIT_SENT_OUTCOME_UNKNOWN = 5
+
+# The tools whose request can store something. Every one the CLI calls
+# through call_tool() that is not a read; a new subcommand that writes
+# through another tool must be added here, or its transport failures
+# stay exit 3.
+WRITE_TOOLS = frozenset(
+    {
+        "ticket_update",
+        "ticket_create",
+        "ticket_comment_edit",
+        "wiki_file_push",
+        "ticket_attachment_put",
+        "wiki_attachment_put",
+    }
+)
 
 DEFAULT_SERVER = "trac-http"
 DEFAULT_TOKEN_ENV = "TRAC_MCP_AUTH_TOKEN"
@@ -121,13 +149,110 @@ def expand_vars(value: str, environ: Mapping[str, str]) -> str:
     return _VAR_RE.sub(_sub, value)
 
 
-def find_mcp_json(start: Path) -> Path | None:
-    """The nearest ``.mcp.json`` from ``start`` up to the filesystem root."""
+def _home_dir(home: Path | None) -> Path | None:
+    if home is not None:
+        return home
+    try:
+        return Path.home()
+    except RuntimeError:  # no HOME and no passwd entry
+        return None
+
+
+def find_mcp_json(start: Path, home: Path | None = None) -> Path | None:
+    """The nearest ``.mcp.json`` from ``start`` upward, checking each
+    directory and then stopping after the first one that holds a ``.git``
+    (a directory, or the file of a linked worktree) or is the home
+    directory (``home``, default ``Path.home()``, compared resolved).
+    Above either, a file belongs to some other project or to a parent
+    tree the caller never chose. A ``start`` outside home with no
+    ``.git`` on the way walks up to the filesystem root.
+    """
+    home_dir = _home_dir(home)
+    if home_dir is not None:
+        home_dir = home_dir.resolve()
     for directory in [start, *start.parents]:
         candidate = directory / ".mcp.json"
         if candidate.is_file():
             return candidate
+        if os.path.lexists(directory / ".git"):
+            return None
+        if home_dir is not None and directory.resolve() == home_dir:
+            return None
     return None
+
+
+def _check_file_is_yours(path: Path, what: str) -> None:
+    """Refuse ``path`` unless this user owns it and neither group nor
+    others can write it (POSIX; elsewhere there is no such check). A
+    symlink is checked on its target. A file anyone else can edit is a
+    file whose content, a ``headersHelper`` command included, is not
+    the operator's."""
+    if os.name != "posix":
+        return
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        raise CliError(
+            f"cannot check {what} {path}: {e}", EXIT_CONNECT_ERROR
+        ) from None
+    if st.st_uid != os.getuid():
+        raise CliError(
+            f"refusing {what} {path}: it is not owned by you (uid "
+            f"{st.st_uid}, you are {os.getuid()})",
+            EXIT_CONNECT_ERROR,
+        )
+    if st.st_mode & 0o022:
+        raise CliError(
+            f"refusing {what} {path}: it is writable by group or "
+            f"others (mode {st.st_mode & 0o777:04o}); run "
+            f"'chmod go-w {path}'",
+            EXIT_CONNECT_ERROR,
+        )
+
+
+def _trust_file_path(
+    environ: Mapping[str, str], home: Path | None
+) -> Path:
+    """``${XDG_CONFIG_HOME:-~/.config}/trac-mcp/trusted-helpers``."""
+    base = environ.get("XDG_CONFIG_HOME")
+    if base:
+        return Path(base) / "trac-mcp" / "trusted-helpers"
+    home_dir = _home_dir(home)
+    if home_dir is None:
+        raise CliError(
+            "cannot find the trust file: XDG_CONFIG_HOME is unset and "
+            "the home directory is unknown",
+            EXIT_CONNECT_ERROR,
+        )
+    return home_dir / ".config" / "trac-mcp" / "trusted-helpers"
+
+
+def _helper_is_trusted(mcp_json: Path, trust_file: Path) -> bool:
+    """Whether ``mcp_json``'s real path is one of the lines of the trust
+    file: absolute paths, one per line, blank lines and ``#`` comments
+    ignored, surrounding whitespace stripped, each compared by real
+    path. A missing trust file trusts nothing; one that is not yours or
+    is writable by others is refused (CliError), since whoever can edit
+    it can grant themselves a command to run."""
+    if not trust_file.is_file():
+        return False
+    _check_file_is_yours(trust_file, "trust file")
+    try:
+        lines = trust_file.read_text().splitlines()
+    except (OSError, ValueError) as e:
+        raise CliError(
+            f"cannot read trust file {trust_file}: {e}",
+            EXIT_CONNECT_ERROR,
+        ) from None
+    real = mcp_json.resolve()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        listed = Path(line)
+        if listed.is_absolute() and listed.resolve() == real:
+            return True
+    return False
 
 
 def _bearer(header: str) -> str:
@@ -273,8 +398,31 @@ def _printable(text: str) -> str:
     return "".join(c if c.isprintable() else "?" for c in text)
 
 
+def _require_trusted_helper(
+    mcp_json: Path,
+    server: str,
+    environ: Mapping[str, str],
+    home: Path | None,
+) -> None:
+    """Refuse (exit 3) unless ``mcp_json`` is in the trust file, telling
+    the operator the exact line to add. Runs nothing."""
+    trust_file = _trust_file_path(environ, home)
+    if _helper_is_trusted(mcp_json, trust_file):
+        return
+    raise CliError(
+        f"{mcp_json}: its headersHelper is not trusted (server "
+        f"'{server}'), so it was not run -- a command in a cloned "
+        "tree's file would run as you. If you wrote or have read it, "
+        f"add the line {mcp_json.resolve()} to {trust_file}",
+        EXIT_CONNECT_ERROR,
+    )
+
+
 def resolve_endpoint(
-    args: argparse.Namespace, cwd: Path, environ: Mapping[str, str]
+    args: argparse.Namespace,
+    cwd: Path,
+    environ: Mapping[str, str],
+    home: Path | None = None,
 ) -> tuple[str, str | None, str]:
     """Return ``(url, token, where)``; ``where`` says which source won,
     for error messages. The token is never part of ``where``.
@@ -287,12 +435,20 @@ def resolve_endpoint(
     fallback to the static one); else from the static header. A
     ``headersHelper`` that is not a string is an error. Only
     Authorization is used.
+
+    The ``.mcp.json`` is found by :func:`find_mcp_json` (bounded by
+    ``home`` and the project root), refused unless it is yours and not
+    group- or other-writable, and named on stderr once its entry is
+    found. A ``headersHelper`` that would run is refused unless the file
+    is listed in the trust file (:func:`_helper_is_trusted`); the
+    command is never run for an untrusted file.
     """
     if args.url:
         return args.url, _token_from_env(args, environ), WHERE_URL_FLAG
 
-    mcp_json = find_mcp_json(cwd)
+    mcp_json = find_mcp_json(cwd, home)
     if mcp_json is not None:
+        _check_file_is_yours(mcp_json, ".mcp.json")
         try:
             servers = json.loads(mcp_json.read_text()).get(
                 "mcpServers", {}
@@ -303,6 +459,10 @@ def resolve_endpoint(
             ) from None
         entry = servers.get(args.server)
         if entry is not None:
+            print(
+                f"trac-mcp: using {mcp_json} (server {args.server})",
+                file=sys.stderr,
+            )
             if "url" not in entry:
                 raise CliError(
                     f"server '{args.server}' in {mcp_json} has no url "
@@ -329,6 +489,9 @@ def resolve_endpoint(
                             EXIT_CONNECT_ERROR,
                         )
                     if helper.strip():
+                        _require_trusted_helper(
+                            mcp_json, args.server, environ, home
+                        )
                         # Not expand_vars'd: the shell expands it.
                         printed = _run_headers_helper(
                             helper,
@@ -401,12 +564,37 @@ async def _mcp_session(url: str, token: str | None):
                 yield session
 
 
+class _WriteState:
+    """Whether a write's request is out and unanswered (Trac
+    /trac_mcp_server #278). One per run, made by :func:`main`; the
+    ``_write_state`` variable carries it into :func:`call_tool` through
+    the event loop's task, which shares the object."""
+
+    unanswered: bool = False
+
+
+_write_state: contextvars.ContextVar[_WriteState | None] = (
+    contextvars.ContextVar("trac_mcp_write_state", default=None)
+)
+
+
 async def call_tool(
     url: str, token: str | None, name: str, arguments: dict[str, Any]
 ):
-    """Open one MCP session, call one tool, return its CallToolResult."""
+    """Open one MCP session, call one tool, return its CallToolResult.
+
+    For a write (``WRITE_TOOLS``) the run's :class:`_WriteState` says
+    "sent, unanswered" from just before the request until the result is
+    back, so a transport failure in between is told apart by
+    :func:`main` from one before anything was sent."""
     async with _mcp_session(url, token) as session:
-        return await session.call_tool(name, arguments)
+        state = _write_state.get() if name in WRITE_TOOLS else None
+        if state is not None:
+            state.unanswered = True
+        result = await session.call_tool(name, arguments)
+        if state is not None:
+            state.unanswered = False
+        return result
 
 
 def _result_text(result) -> str:
@@ -1791,6 +1979,7 @@ def main(
     argv: list[str] | None = None,
     cwd: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    home: Path | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -1802,6 +1991,7 @@ def main(
             args,
             cwd or Path.cwd(),
             os.environ if environ is None else environ,
+            home,
         )
         if token is None:
             # --url and TRAC_MCP_URL take the token from the environment;
@@ -1815,16 +2005,25 @@ def main(
                 f"trac-mcp: no bearer token sent ({reason})",
                 file=sys.stderr,
             )
+        state = _WriteState()
+        reset = _write_state.set(state)
         try:
             return asyncio.run(_run(args, url, token))
         except Exception as e:  # transport, HTTP status, protocol
             cause = _root_cause(e)
             if isinstance(cause, CliError):
                 raise cause from None
-            raise CliError(
-                f"call to {url} (from {where}) failed: {_describe(cause)}",
-                EXIT_CONNECT_ERROR,
-            ) from None
+            failure = f"call to {url} (from {where}) failed: {_describe(cause)}"
+            if state.unanswered:
+                raise CliError(
+                    f"{failure}. The write was sent and no answer came "
+                    "back, so it may be stored: check before retrying "
+                    f"(exit {EXIT_SENT_OUTCOME_UNKNOWN})",
+                    EXIT_SENT_OUTCOME_UNKNOWN,
+                ) from None
+            raise CliError(failure, EXIT_CONNECT_ERROR) from None
+        finally:
+            _write_state.reset(reset)
     except CliError as e:
         print(f"trac-mcp: {e}", file=sys.stderr)
         return e.code
