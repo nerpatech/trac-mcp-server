@@ -260,7 +260,7 @@ def _build_trac_overrides(args) -> dict:
         # File takes precedence; returns None on read failure (signal to caller)
         password = _read_password_file(args.trac_password_file)
         if password is None:
-            return None  # type: ignore[return-value]  # caller checks for None
+            return None  # pyright: ignore[reportReturnType]  # caller checks for None
         overrides["password"] = password
     elif args.trac_password is not None:
         overrides["password"] = args.trac_password

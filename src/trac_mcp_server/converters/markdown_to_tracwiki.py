@@ -1377,13 +1377,13 @@ class TracWikiRenderer(mistune.BaseRenderer):
         """
         old_depth = getattr(state, "list_depth", -1)
         old_citation = self._citation
-        state.list_depth = -1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+        state.list_depth = -1
         self._citation = True
         try:
             return self.render_tokens(children, state)
         finally:
             self._citation = old_citation
-            state.list_depth = old_depth  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+            state.list_depth = old_depth
 
     def block_html(self, html: str) -> str:
         """Render block HTML (pass through)."""
@@ -1647,8 +1647,8 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 old_item_num = getattr(state, "list_item_num", 0)
 
                 # Set new state
-                state.list_ordered = ordered  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
-                state.list_depth = depth + 1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+                state.list_ordered = ordered  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
+                state.list_depth = depth + 1  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
                 # Ticket #150: number from the list's own start (mistune
                 # sets `start` only when it is not 1). Trac renders
                 # `<ol start="N">` from the FIRST item's number and counts
@@ -1657,7 +1657,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
                 # count up from the first), so consecutive numbers from
                 # `start` are what Trac shows.
                 start = (attrs or {}).get("start", 1)
-                state.list_item_num = start - 1  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+                state.list_item_num = start - 1  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
 
                 # Render children
                 if "children" in token:
@@ -1666,9 +1666,9 @@ class TracWikiRenderer(mistune.BaseRenderer):
                     text = ""
 
                 # Restore state
-                state.list_ordered = old_ordered  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
-                state.list_depth = old_depth  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
-                state.list_item_num = old_item_num  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+                state.list_ordered = old_ordered  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
+                state.list_depth = old_depth  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
+                state.list_item_num = old_item_num  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
 
                 # Call list renderer with text and ordered flag
                 if attrs:
@@ -1693,7 +1693,7 @@ class TracWikiRenderer(mistune.BaseRenderer):
 
                 # Increment and get item number
                 item_num = getattr(state, "list_item_num", 0) + 1
-                state.list_item_num = item_num  # type: ignore[attr-defined]  # mistune BlockState dynamic attr
+                state.list_item_num = item_num  # pyright: ignore[reportAttributeAccessIssue]  # mistune BlockState dynamic attr
 
                 # Determine marker
                 if ordered:
@@ -2127,7 +2127,7 @@ def _render_markdown(
     )
 
     # Parse and render
-    result: str = markdown(stashed_text)  # type: ignore[assignment]
+    result: str = markdown(stashed_text)  # pyright: ignore[reportAssignmentType]
     if downgraded_fences is not None:
         downgraded_fences.extend(
             (
