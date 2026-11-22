@@ -7,8 +7,12 @@ left unset, so an exported ``TRAC_URL``/``TRAC_PASSWORD`` never reached it
 and the script's documented "the server also reads TRAC_* variables" was
 untrue. These tests pin the launch parameters without starting a server:
 
-* the ``TRAC_*`` variables of the caller's environment, and nothing else of
-  it beyond the SDK's own defaults, are passed to the subprocess;
+* the connection variables of the caller's environment (``TRAC_URL``,
+  ``TRAC_USERNAME``, ``TRAC_PASSWORD``, ``TRAC_INSECURE``,
+  ``TRAC_RPC_TIMEOUT``), and nothing else of it beyond the SDK's own
+  defaults, are passed to the subprocess. The server's own mode settings
+  (``TRAC_MCP_TRANSPORT``, ``TRAC_MCP_READ_ONLY``, ...) are not: they would
+  make the child serve HTTP, or list fewer tools than the scenario expects;
 * no password value is ever put on the command line (visible in ``ps``);
   the script has no ``--password`` option, the password is
   ``TRAC_PASSWORD`` only.
@@ -49,13 +53,58 @@ def _parse(*argv):
     return scenarios.build_parser().parse_args(list(argv))
 
 
-def test_trac_variables_reach_the_server_and_others_do_not():
+def test_connection_variables_reach_the_server_and_others_do_not():
     params = scenarios.build_server_params(_parse(), ENVIRON)
 
     assert params.env is not None
     assert params.env["TRAC_URL"] == ENVIRON["TRAC_URL"]
     assert params.env["TRAC_PASSWORD"] == SECRET
     assert "FOO" not in params.env
+
+
+@pytest.mark.parametrize("name", sorted(scenarios.CONNECTION_ENV_VARS))
+def test_every_connection_variable_is_forwarded(name):
+    params = scenarios.build_server_params(
+        _parse(), {name: "value-for-" + name}
+    )
+
+    assert params.env is not None
+    assert params.env[name] == "value-for-" + name
+
+
+def test_the_connection_variables_are_these():
+    assert scenarios.CONNECTION_ENV_VARS == frozenset(
+        {
+            "TRAC_URL",
+            "TRAC_USERNAME",
+            "TRAC_PASSWORD",
+            "TRAC_INSECURE",
+            "TRAC_RPC_TIMEOUT",
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "TRAC_MCP_TRANSPORT",
+        "TRAC_MCP_READ_ONLY",
+        "TRAC_MCP_DISABLED_TOOLS",
+        "TRAC_MCP_AUTH_TOKEN",
+    ],
+)
+def test_server_mode_settings_are_not_forwarded(name):
+    """A ``TRAC_MCP_*`` setting changes what the child serves or lists:
+    TRANSPORT makes it serve HTTP and never answer on stdio, READ_ONLY and
+    DISABLED_TOOLS shorten ``list_tools`` (which ``--update-refs`` would
+    write into the reference files)."""
+    params = scenarios.build_server_params(
+        _parse(), {**ENVIRON, name: "http"}
+    )
+
+    assert params.env is not None
+    assert name not in params.env
+    assert params.env["TRAC_URL"] == ENVIRON["TRAC_URL"]
 
 
 def test_the_sdk_default_environment_is_kept():

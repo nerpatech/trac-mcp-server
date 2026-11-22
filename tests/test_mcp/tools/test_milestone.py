@@ -813,10 +813,6 @@ class TestMilestoneToolErrors(unittest.TestCase):
         self.assertIn("Unknown", result.content[0].text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # -- Live round-trip (create -> get -> list -> update -> delete) -------------
 
 
@@ -901,3 +897,7 @@ async def test_live_milestone_lifecycle():
                 await registry.call_tool(
                     "milestone_delete", {"name": name}, client
                 )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Scenario Tests for trac-mcp-server permission filtering. (v1.0.0)
+"""Agent Scenario Tests for trac-mcp-server permission filtering. (v2.0.0)
 
 Tests agent persona scenarios by launching trac-mcp-server with different
 permission files and verifying that tool exposure matches expectations.
@@ -37,7 +37,7 @@ from mcp.client.stdio import (
 
 from trac_mcp_server import __version__ as PACKAGE_VERSION
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # Locate the scenarios directory relative to this script
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -125,6 +125,21 @@ def write_expected_tools(path: Path, tools: list[str]) -> None:
     path.write_text("\n".join(sorted(tools)) + "\n")
 
 
+# The Trac connection settings the server reads (config.py). Deliberately
+# not every TRAC_* variable: TRAC_MCP_* settings choose the transport and
+# the tools offered, and must not leak from the caller's shell into the
+# subprocess this script compares against a reference.
+CONNECTION_ENV_VARS = frozenset(
+    {
+        "TRAC_URL",
+        "TRAC_USERNAME",
+        "TRAC_PASSWORD",
+        "TRAC_INSECURE",
+        "TRAC_RPC_TIMEOUT",
+    }
+)
+
+
 def build_server_params(
     args: argparse.Namespace, environ: Mapping[str, str]
 ) -> StdioServerParameters:
@@ -133,9 +148,11 @@ def build_server_params(
     ``--url``, ``--username`` and ``--insecure`` go on the command line.
     The password never does (it would show in ``ps``); it reaches the
     server as ``TRAC_PASSWORD`` in its environment. The subprocess gets
-    the MCP SDK's default environment plus every ``TRAC_*`` variable in
-    ``environ``: with ``env`` unset the SDK passes only its defaults, so
-    an exported ``TRAC_URL`` or ``TRAC_PASSWORD`` would not arrive.
+    the MCP SDK's default environment plus the connection variables in
+    ``CONNECTION_ENV_VARS`` found in ``environ``: with ``env`` unset the
+    SDK passes only its defaults, so an exported ``TRAC_URL`` or
+    ``TRAC_PASSWORD`` would not arrive. Other ``TRAC_*`` variables are
+    not passed, ``TRAC_MCP_*`` above all.
     """
     server_args: list[str] = []
     if args.url:
@@ -147,7 +164,7 @@ def build_server_params(
 
     env = get_default_environment()
     env.update(
-        {k: v for k, v in environ.items() if k.startswith("TRAC_")}
+        {k: v for k, v in environ.items() if k in CONNECTION_ENV_VARS}
     )
     return StdioServerParameters(
         command="trac-mcp-server", args=server_args, env=env

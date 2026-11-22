@@ -24,13 +24,17 @@ Live testing of `trac-mcp-server` against a running Trac instance has three part
 --url http://trac.example.com --username admin
 ```
 
-It has no `--password` option, so a password never appears on a command line: export `TRAC_PASSWORD`. Every `TRAC_*` variable exported in the calling shell (`TRAC_URL`, `TRAC_USERNAME`, `TRAC_PASSWORD`, ...) is passed through to the server subprocess, which also reads `.trac_mcp/config.yaml` for anything not given by a flag or a variable.
+It has no `--password` option (removed in v2.0.0), so a password never appears on a command line: export `TRAC_PASSWORD`.
+
+Exactly these connection variables exported in the calling shell are passed through to the server subprocess: `TRAC_URL`, `TRAC_USERNAME`, `TRAC_PASSWORD`, `TRAC_INSECURE` and `TRAC_RPC_TIMEOUT`. No other variable is passed, in particular no `TRAC_MCP_*` server-mode setting (`TRAC_MCP_TRANSPORT`, `TRAC_MCP_READ_ONLY`, `TRAC_MCP_DISABLED_TOOLS`, ...): with one of those the subprocess would serve HTTP instead of stdio or offer fewer tools than a scenario expects, and `--update-refs` would write that list into the reference files.
+
+An exported variable beats the same setting in `.env`: the server's `load_dotenv()` does not override variables that are already set, so a stale exported `TRAC_URL` wins over the `.env` file. Unset it (or export the right value) before a run. For anything not given by a flag, a variable or `.env`, the server also reads `.trac_mcp/config.yaml`.
 
 ---
 
 ## agent_scenarios.py -- Permission Scenario Testing
 
-Agent scenario test runner (v1.0.0) that verifies permission-based tool filtering across different agent personas. For each scenario, it launches `trac-mcp-server` with a specific permissions file, calls `list_tools()`, and compares the result against a stored reference.
+Agent scenario test runner (v2.0.0) that verifies permission-based tool filtering across different agent personas. For each scenario, it launches `trac-mcp-server` with a specific permissions file, calls `list_tools()`, and compares the result against a stored reference.
 
 ### Quick Start
 
