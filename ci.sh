@@ -39,13 +39,18 @@ ruff format --check src/ tests/ scripts/ plugins/
 
 echo ""
 echo "=== Type check ==="
-# src/ only, zero errors (Trac #236): pyright exits non-zero on any error,
-# so there is no script to keep. --pythonpath names the interpreter that
-# has the dependencies (the venv first on PATH here, setup-python's in
-# Actions); pyrightconfig.json hard-codes no venv. The ignore-warnings
+# src/ plus scripts/check_env.py, zero errors (Trac #236, #279): pyright
+# exits non-zero on any error, so there is no baseline to keep. The other
+# scripts/ files have errors of their own and are not checked yet.
+# --pythonpath names the interpreter that has the dependencies (the venv
+# first on PATH here, setup-python's in Actions). pyrightconfig.json does
+# set venvPath/venv, to ".venv" in the checkout, but that is only the
+# fallback for a bare `pyright` run: --pythonpath overrides it, so a
+# checkout without a .venv (a worktree, GitHub's runner) works, and pyright
+# only prints "venv .venv subdirectory not found". The ignore-warnings
 # variable stops the pip wrapper's newer-version check calling PyPI, which
 # this script must not need.
-PYRIGHT_PYTHON_IGNORE_WARNINGS=1 pyright --pythonpath "$(command -v python)" src/
+PYRIGHT_PYTHON_IGNORE_WARNINGS=1 pyright --pythonpath "$(command -v python)" src/ scripts/check_env.py
 
 echo ""
 echo "=== Unit Tests (no credentials, like GitHub Actions) ==="

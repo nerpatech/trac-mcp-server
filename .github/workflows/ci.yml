@@ -42,7 +42,7 @@ jobs:
       - name: Installed versions
         run: pip freeze
       - run: python scripts/check_env.py
-      - run: pyright --pythonpath "$(command -v python)" src/
+      - run: pyright --pythonpath "$(command -v python)" src/ scripts/check_env.py
 
   test:
     runs-on: ubuntu-24.04
