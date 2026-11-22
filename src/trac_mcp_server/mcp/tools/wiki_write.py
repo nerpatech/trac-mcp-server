@@ -15,6 +15,7 @@ from ...core.async_utils import run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
     WikiPageStoredReadbackFailed,
 )
@@ -45,15 +46,55 @@ def _stored_readback_failed_lines(
     ]
 
 
+def _possible_create_overwrite_warning(
+    page_name: str, result: dict
+) -> str:
+    """The warning line for a create-only write that read back above
+    version 1 (Trac /trac_mcp_server #272): a page appeared after the
+    existence check and this write replaced it."""
+    new_version = result.get("version")
+    head = (
+        f"Warning: possible overwrite on '{page_name}'. This create "
+        "expected the page to be absent, so it should have stored "
+        f"version 1, but the page reads back as version {new_version}."
+    )
+    intervening = result.get("intervening_versions") or []
+    if not intervening:
+        return (
+            f"{head} The page was stored; check its history with "
+            f"wiki_get_history(page_name='{page_name}')."
+        )
+    if len(intervening) == 1:
+        others = f"version {intervening[0]}"
+        verb = "was"
+    else:
+        others = f"versions {intervening[0]}-{intervening[-1]}"
+        verb = "were"
+    return (
+        f"{head} {others[0].upper()}{others[1:]} {verb} most likely "
+        "written by someone else after the existence check, and this "
+        "write replaced it without merging. The page was stored; "
+        f"inspect what was replaced with wiki_diff(page_name="
+        f"'{page_name}', from_version={intervening[-1]}, "
+        f"to_version={new_version}) and re-apply anything this write "
+        "dropped."
+    )
+
+
 def possible_overwrite_warning(
-    page_name: str, sent_version: int, result: dict
+    page_name: str, sent_version: int | None, result: dict
 ) -> str | None:
     """The warning line for an update whose read-back version is not
     ``sent_version + 1`` (Trac /trac_mcp_server #130), or ``None`` when
     ``put_wiki_page`` did not flag one. A warning, never an error: the
-    page was stored, and an error result means nothing was."""
+    page was stored, and an error result means nothing was.
+
+    ``sent_version`` ``None`` is a create-only write (ticket #272), which
+    should have stored version 1."""
     if not result.get("possible_overwrite"):
         return None
+    if sent_version is None:
+        return _possible_create_overwrite_warning(page_name, result)
     # 3.0 is a JSON-schema "integer"; the flag only fires when it equalled
     # an int precheck, so int() is lossless and keeps "3.0" out of the text.
     sent_version = int(sent_version)
@@ -245,14 +286,40 @@ async def _handle_create(
     if refusal is not None:
         return refusal
 
-    # Create the page (version=None creates new page)
+    # Create the page (version=None creates new page). create_only: the
+    # existence check above, and the gate's render and probes since,
+    # leave a window in which another writer can create the page, and a
+    # plain putPage would replace theirs (ticket #272).
     try:
         result = await run_sync(
-            client.put_wiki_page, page_name, wiki_content, comment, None
+            client.put_wiki_page,
+            page_name,
+            wiki_content,
+            comment,
+            None,
+            create_only=True,
         )
     except WikiPageStoredReadbackFailed as e:
         response_lines = _stored_readback_failed_lines(
             "Created", page_name, e, "wiki_create"
+        )
+    except WikiPageExists as e:
+        # Absent at the existence check, present by the put (ticket
+        # #272): the plugin refused version 0, or the re-check before
+        # putPage found the page. Nothing was stored.
+        shown = (
+            "unknown"
+            if e.current_version is None
+            else e.current_version
+        )
+        return build_error_response(
+            "already_exists",
+            f"Page '{page_name}' was created by another writer after "
+            f"this call's existence check (version {shown}). Trac "
+            "stored nothing.",
+            f"Read it with wiki_get(page_name='{page_name}'); to change "
+            "it use wiki_update with the version you read, or choose a "
+            "different name.",
         )
     except WikiPageNotModified as e:
         # The page was absent at the existence check above and someone
@@ -276,6 +343,9 @@ async def _handle_create(
         response_lines = [
             f"Created wiki page '{page_name}' (version {new_version})"
         ]
+        overwrite = possible_overwrite_warning(page_name, None, result)
+        if overwrite is not None:
+            response_lines.append(overwrite)
     response_lines.extend(gate_lines)
 
     return types.CallToolResult(

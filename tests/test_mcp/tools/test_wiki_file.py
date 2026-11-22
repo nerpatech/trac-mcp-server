@@ -14,6 +14,7 @@ from trac_mcp_server.converters.html_to_markdown import (
 )
 from trac_mcp_server.core.client import (
     WikiPageConflict,
+    WikiPageExists,
     WikiPageNotModified,
 )
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -806,6 +807,234 @@ class TestPushReadbackAfterWrite:
         client.put_wiki_page.assert_called_once()
 
 
+class TestPushCreateRace:
+    """A create whose page was made by another writer after the push's
+    probe (Trac /trac_mcp_server #272): refused, not overwritten."""
+
+    async def test_create_branch_asks_for_a_create_only_write(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = 0
+        client.put_wiki_page.return_value = {"version": 1}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        call = client.put_wiki_page.call_args
+        assert call[0][3] is None
+        assert call.kwargs.get("create_only") is True
+
+    async def test_update_branch_is_not_create_only(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.return_value = {"version": 4}
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert not result.isError
+        call = client.put_wiki_page.call_args
+        assert call[0][3] == 3
+        assert not call.kwargs.get("create_only")
+
+    async def test_page_created_after_the_probe_is_a_version_conflict(
+        self,
+    ):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = 0
+        client.put_wiki_page.side_effect = WikiPageExists(
+            "exists", "X", 2
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Page 'X' was created by another writer after this push "
+            "read it (version 2). Trac stored nothing."
+        ) in text
+        assert "wiki_get(page_name='X')" in text
+        assert "replaces the other writer's page" in text
+        # Not the update branch's wording.
+        assert "has been modified" not in text
+        assert "was deleted after it was read" not in text
+        assert "Created wiki page" not in text
+
+    async def test_update_conflict_wording_is_unchanged(self):
+        client = _make_client()
+        client.get_wiki_page_info.return_value = {"version": 3}
+        client.put_wiki_page.side_effect = WikiPageConflict(
+            "stale", "X", 3, 4
+        )
+
+        result = await _registry.call_tool(
+            "wiki_file_push",
+            {"content": "= X =\n", "page_name": "X"},
+            client,
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "Page has been modified. Current version is 4, you tried "
+            "to update version 3."
+        ) in text
+        assert "created by another writer" not in text
+
+    @staticmethod
+    def _racing_server(plugin, other_text, methods):
+        """An RPC stand-in: the push's probe finds no page; another
+        writer has created it (version 5, with ``other_text``) before
+        the write. Stores nothing."""
+        probes = []
+
+        def _rpc(namespace, method, *args):
+            methods.append(method)
+            if method == "putPageIfVersion":
+                if not plugin:
+                    raise _NO_PLUGIN
+                assert args[3] == 0
+                raise xmlrpc.client.Fault(
+                    409,
+                    "'[wiki-version-conflict current_version=5] "
+                    "Version conflict' while executing "
+                    "'wiki.putPageIfVersion()'",
+                )
+            if method == "getPageInfo":
+                probes.append(1)
+                if len(probes) == 1:
+                    return 0
+                return {"name": "X", "version": 5}
+            if method == "getPage":
+                return other_text
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        return _rpc
+
+    async def _push_through_real_client(self, mock_config, rpc):
+        from trac_mcp_server.core.client import TracClient
+
+        client = TracClient(mock_config)
+        with (
+            patch.object(client, "_rpc_request", side_effect=rpc),
+            patch(
+                "trac_mcp_server.mcp.tools.wiki_file.gate_or_refuse",
+                return_value=(None, []),
+            ),
+        ):
+            return await _registry.call_tool(
+                "wiki_file_push",
+                {"content": "= X =\n", "page_name": "X"},
+                client,
+            )
+
+    async def test_real_client_page_appears_between_probe_and_put(
+        self, mock_config
+    ):
+        """End to end through a real TracClient on a server without the
+        plugin: the probe finds no page, the re-check before putPage
+        finds one with other content. putPage is never posted."""
+        methods = []
+        result = await self._push_through_real_client(
+            mock_config,
+            self._racing_server(False, "= Other =\n", methods),
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert "Error (version_conflict)" in text
+        assert (
+            "created by another writer after this push read it" in text
+        )
+        assert "(version 5)" in text
+        assert "putPage" not in methods
+        assert methods == [
+            "getPageInfo",
+            "putPageIfVersion",
+            "getPageInfo",
+            "getPage",
+        ]
+
+    async def test_real_client_plugin_page_appears_with_other_content(
+        self, mock_config
+    ):
+        methods = []
+        result = await self._push_through_real_client(
+            mock_config,
+            self._racing_server(True, "= Other =\n", methods),
+        )
+
+        assert result.isError
+        text = result.content[0].text
+        assert (
+            "created by another writer after this push read it" in text
+        )
+        assert "(version 5)" in text
+        assert methods == ["getPageInfo", "putPageIfVersion", "getPage"]
+
+    @pytest.mark.parametrize("plugin", [True, False])
+    async def test_real_client_identical_content_race_is_unchanged(
+        self, mock_config, plugin
+    ):
+        """Ticket #174 through the create-only path, on both: the page
+        the other writer created holds exactly what this push sends,
+        so it is the "unchanged" success, not a conflict."""
+        methods = []
+        result = await self._push_through_real_client(
+            mock_config, self._racing_server(plugin, "= X =\n", methods)
+        )
+
+        assert not result.isError
+        assert result.structuredContent["action"] == "unchanged"
+        assert result.structuredContent["version"] == 5
+        assert "putPage" not in methods
+
+    async def test_create_read_back_above_one_is_flagged(
+        self, mock_config
+    ):
+        """No plugin, the re-check finds nothing, and the page reads
+        back at version 2: a warning on a create, as on an update."""
+        infos = []
+
+        def _rpc(namespace, method, *args):
+            if method == "putPageIfVersion":
+                raise _NO_PLUGIN
+            if method == "getPageInfo":
+                infos.append(1)
+                if len(infos) <= 2:  # the probe, then the re-check
+                    return 0
+                return {"name": "X", "version": 2}
+            if method == "putPage":
+                return True
+            raise AssertionError(f"unexpected RPC {namespace}.{method}")
+
+        result = await self._push_through_real_client(mock_config, _rpc)
+
+        assert not result.isError
+        text = result.content[0].text
+        assert (
+            text.splitlines()[0] == "Created wiki page 'X' (version 2)"
+        )
+        assert "Warning: possible overwrite on 'X'" in text
+        sc = result.structuredContent
+        assert sc["action"] == "created"
+        assert sc["possible_overwrite"] is True
+        assert sc["intervening_versions"] == [1]
+
+
 class TestPushNotModified:
     """An identical push stores nothing and says so (Trac
     /trac_mcp_server #174): a success-shaped "unchanged" result."""
@@ -1068,9 +1297,13 @@ class TestPushPossibleOverwrite:
         assert "intervening_versions" not in sc
         assert "overwrite" not in result.content[0].text.lower()
 
-    async def test_create_is_never_flagged(self, mock_config):
-        # Even a read-back version other than 1 (the page was written
-        # again right after the create) says nothing about an overwrite.
+    async def test_create_reading_back_above_one_is_flagged(
+        self, mock_config
+    ):
+        # A create expects version 1 (ticket #272, which made it
+        # create-only): a read-back of 2 means another write landed
+        # after the probe and was replaced. The page is stored, so a
+        # warning, and no version attribute is sent.
         result, puts = await self._push(
             mock_config, before=None, after=2
         )
@@ -1079,7 +1312,19 @@ class TestPushPossibleOverwrite:
         assert "version" not in puts[0][4]
         sc = result.structuredContent
         assert sc["action"] == "created"
+        assert sc["possible_overwrite"] is True
+        assert sc["intervening_versions"] == [1]
+        assert not result.isError
+        assert "Warning: possible overwrite" in result.content[0].text
+
+    async def test_create_reading_back_one_is_not_flagged(
+        self, mock_config
+    ):
+        result, _ = await self._push(mock_config, before=None, after=1)
+
+        sc = result.structuredContent
         assert sc["possible_overwrite"] is False
+        assert "intervening_versions" not in sc
         assert "overwrite" not in result.content[0].text.lower()
 
 
