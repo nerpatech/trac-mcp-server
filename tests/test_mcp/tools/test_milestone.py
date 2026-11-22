@@ -8,6 +8,7 @@ and that milestone tool calls are correctly routed via ToolRegistry in server.py
 import asyncio
 import unittest
 import xmlrpc.client
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from trac_mcp_server.mcp.server import (
@@ -394,8 +395,8 @@ class TestMilestoneListFilters(unittest.TestCase):
     DATA = {
         "Release_7.0": {
             "name": "Release_7.0",
-            "due": "20240101T00:00:00",
-            "completed": "20240105T10:00:00",
+            "due": datetime(2024, 1, 1, 0, 0, 0),
+            "completed": datetime(2024, 1, 5, 10, 0, 0),
             "description": "",
         },
         "Release_7.1": {
@@ -407,7 +408,7 @@ class TestMilestoneListFilters(unittest.TestCase):
         # Release_7.2 does not load (absent from get_milestones)
         "Release_8.0": {
             "name": "Release_8.0",
-            "due": "20261231T00:00:00",
+            "due": datetime(2026, 12, 31, 0, 0, 0),
             "completed": 0,
             "description": "",
         },
@@ -467,8 +468,8 @@ class TestMilestoneListFilters(unittest.TestCase):
             [
                 {
                     "name": "Release_7.0",
-                    "due": "20240101T00:00:00",
-                    "completed": "20240105T10:00:00",
+                    "due": "2024-01-01T00:00:00",
+                    "completed": "2024-01-05T10:00:00",
                 },
                 {"name": "Release_7.1", "due": None, "completed": None},
             ],

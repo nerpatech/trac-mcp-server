@@ -12,7 +12,8 @@ import json
 import time
 import xmlrpc.client
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import mcp.types as types
 
@@ -21,6 +22,7 @@ from ...core.client import TracClient
 from ...core.wiki_search import tokenize
 from .errors import (
     build_error_response,
+    compact_time,
     format_timestamp,
     translate_xmlrpc_error,
 )
@@ -423,6 +425,15 @@ async def _handle_search(
     )
 
 
+def _change_epoch(value: Any) -> float:
+    """A recent-changes ``lastModified`` as a UTC epoch to sort by;
+    ``-inf`` (last, newest first) for a missing or unreadable one."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    parsed = TracClient._parse_trac_time(value)
+    return float("-inf") if parsed is None else parsed
+
+
 async def _handle_recent_changes(
     client: TracClient, args: dict
 ) -> types.CallToolResult:
@@ -453,8 +464,12 @@ async def _handle_recent_changes(
             structuredContent={"pages": [], "since_days": since_days},
         )
 
-    # Sort by lastModified descending (most recent first)
-    changes.sort(key=lambda x: x.get("lastModified", 0), reverse=True)
+    # Sort by lastModified descending (most recent first). A time is a
+    # datetime, a compact string, a DateTime or an epoch; one that is
+    # missing or unreadable sorts last instead of failing the compare.
+    changes.sort(
+        key=lambda x: _change_epoch(x.get("lastModified")), reverse=True
+    )
 
     # Limit results
     total = len(changes)
@@ -473,18 +488,16 @@ async def _handle_recent_changes(
         last_modified = change.get("lastModified", 0)
         page_version = change.get("version", 1)
 
-        # Format timestamp
-        match last_modified:
-            case xmlrpc.client.DateTime() as dt_val:
-                dt = datetime.fromtimestamp(
-                    time.mktime(dt_val.timetuple())
-                )
-                modified_str = dt.strftime("%Y-%m-%d %H:%M")
-            case int() | float() as ts:
-                dt = datetime.fromtimestamp(ts)
-                modified_str = dt.strftime("%Y-%m-%d %H:%M")
-            case _:
-                modified_str = str(last_modified)
+        # Format timestamp: every kind of value shows as the compact UTC
+        # wire form (``YYYYMMDDTHH:MM:SS``) a live listing always showed,
+        # so one listing never mixes forms (Trac /trac_mcp_server #270).
+        # A decoded dateTime.iso8601 is a naive datetime holding UTC; an
+        # epoch is UTC.
+        if isinstance(last_modified, (int, float)):
+            last_modified = datetime.fromtimestamp(
+                last_modified, tz=timezone.utc
+            ).replace(tzinfo=None)
+        modified_str = compact_time(last_modified)
 
         response_lines.append(
             f"- {page_name} (modified: {modified_str} by {author})"

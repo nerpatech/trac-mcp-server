@@ -5,7 +5,6 @@ to help AI agents recover from errors without human intervention, plus
 shared formatting utilities used across tool modules.
 """
 
-import time
 import xmlrpc.client
 from datetime import datetime, timezone
 from typing import Any
@@ -53,11 +52,28 @@ def build_error_response(
 # ---------------------------------------------------------------------------
 
 
+def compact_time(value: Any) -> str:
+    """A date value as the compact ``YYYYMMDDTHH:MM:SS`` text XML-RPC
+    carries, which is what a decoded ``dateTime.iso8601`` read as before
+    the client decoded it to a ``datetime`` (Trac /trac_mcp_server #270).
+
+    For tools that show a raw wire time: a ``datetime`` (naive, holding
+    UTC) gives the same text as the string it replaced; anything else is
+    ``str(value)``, as it always was.
+    """
+    if isinstance(value, datetime):
+        return xmlrpc.client.DateTime(value).value
+    return str(value)
+
+
 def format_timestamp(timestamp: Any) -> str:
     """Format timestamp for display.
 
     Handles datetime objects, Unix timestamps (int/float), and
-    xmlrpc.client.DateTime objects. Uses timezone-aware UTC conversion.
+    xmlrpc.client.DateTime objects. A naive ``datetime`` or ``DateTime``
+    holds UTC (that is what the client's decoder returns for a
+    ``dateTime.iso8601``) and is shown as it is, never shifted by the
+    host's zone; an int or float is converted from a UTC epoch.
 
     Args:
         timestamp: datetime, int/float Unix timestamp, or other value
@@ -69,13 +85,10 @@ def format_timestamp(timestamp: Any) -> str:
         case datetime() as dt:
             return dt.strftime("%Y-%m-%d %H:%M")
         case xmlrpc.client.DateTime() as dt_val:
-            # xmlrpc.client.DateTime wraps an iso-like string with no
-            # attached tz; convert via timetuple -> mktime (local) then
-            # fall back to string form if conversion fails.
+            # Wraps an iso-like string with no attached tz, in UTC; fall
+            # back to string form if it does not parse.
             try:
-                dt = datetime.fromtimestamp(
-                    time.mktime(dt_val.timetuple())
-                )
+                dt = datetime(*dt_val.timetuple()[:6])
                 return dt.strftime("%Y-%m-%d %H:%M")
             except (ValueError, OverflowError):
                 return str(timestamp)

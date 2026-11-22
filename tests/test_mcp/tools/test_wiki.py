@@ -609,8 +609,9 @@ class TestHandleRecentChanges(unittest.TestCase):
 
             self.assertIn("XmlRpcPage", text)
             self.assertIn("admin", text)
-            # Should have formatted the DateTime properly
-            self.assertIn("2026-02-01", text)
+            # A DateTime shows as its compact wire value, like every
+            # other kind of lastModified (Trac #270)
+            self.assertIn("modified: 20260201T14:00:00 by admin", text)
 
 
 class TestHandleGetHistory(unittest.TestCase):

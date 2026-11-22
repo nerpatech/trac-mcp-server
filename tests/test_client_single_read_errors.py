@@ -17,7 +17,7 @@ paths' own test files use, wrapped so a chosen error comes out of
 import asyncio
 import xmlrpc.client
 from unittest.mock import patch
-from xml.etree.ElementTree import ParseError
+from xml.parsers.expat import ExpatError
 
 import pytest
 import requests
@@ -192,17 +192,17 @@ def test_a_transport_or_http_error_in_a_single_read_propagates_after_one_call(
 @pytest.mark.parametrize(
     "item_error",
     [
-        ParseError("not well-formed"),
+        ExpatError("not well-formed: line 1, column 0"),
         IndexError("list index out of range"),
         ValueError("bad value"),
     ],
-    ids=["parse_error", "index_error", "value_error"],
+    ids=["expat_error", "index_error", "value_error"],
 )
 def test_a_non_transport_error_on_one_item_skips_only_that_item(
     path, item_error
 ):
     # e.g. a page holding a control character xmlrpc emits raw and
-    # ElementTree.fromstring rejects: one item's problem, not the read's.
+    # xmlrpc.client.loads rejects: one item's problem, not the read's.
     path.multicall_error = requests.Timeout("read timed out")
     bad = path.items[1]
     path.single_errors = {bad: item_error}
@@ -261,7 +261,7 @@ def test_a_global_multicall_error_raises_without_any_single_read(
         http_error(413),
         http_error(500),
         http_error(502),
-        ParseError("not well-formed"),
+        ExpatError("not well-formed: line 1, column 0"),
         xmlrpc.client.Fault(1, "some other fault"),
     ],
     ids=[
@@ -269,7 +269,7 @@ def test_a_global_multicall_error_raises_without_any_single_read(
         "http_413",
         "http_500",
         "http_502",
-        "parse_error",
+        "expat_error",
         "fault",
     ],
 )

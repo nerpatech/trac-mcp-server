@@ -28,7 +28,7 @@ import mcp.types as types
 from ...core.async_utils import run_sync
 from ...core.client import TracClient
 from .attachment_common import coerce_attachment_payload
-from .errors import build_error_response, classify_fault
+from .errors import build_error_response, classify_fault, compact_time
 from .file_io import (
     check_output_path,
     deliver_output,
@@ -366,7 +366,9 @@ async def _handle_list(
                 "filename": filename,
                 "description": description,
                 "size": size,
-                "time": str(time_val) if time_val is not None else None,
+                "time": compact_time(time_val)
+                if time_val is not None
+                else None,
                 "author": author,
             }
         )

@@ -552,10 +552,10 @@ class TestFormatTimestamp:
     def test_iso8601_compact_string(self):
         """Compact iso8601 string (no separators) -> 'YYYY-MM-DD HH:MM'.
 
-        trac-mcp-server's custom _parse_xmlrpc_value strips the
-        DateTime wrapper and returns the raw text, so handlers receive
-        strings like "20260406T00:03:15". format_timestamp must parse
-        these for display.
+        Strings like "20260406T00:03:15" are what a wire time was
+        before the client decoded it to a datetime (Trac
+        /trac_mcp_server #270), and what other callers still pass.
+        format_timestamp must parse these for display.
         """
         result = format_timestamp("20260406T00:03:15")
         assert result == "2026-04-06 00:03"

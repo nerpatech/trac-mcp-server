@@ -10,6 +10,7 @@ under a non-UTC ``TZ`` and checks the value the server would receive.
 import calendar
 import time
 import xmlrpc.client
+from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -129,7 +130,8 @@ class TestRecentWikiChangesFallbackIsUtc:
     ``lastModified`` of each page with the UTC ``since_timestamp``.
 
     On the wire ``lastModified`` is a ``dateTime.iso8601`` element, which
-    the client's own parser returns as a plain compact string."""
+    the client's decoder returns as a naive ``datetime`` holding UTC
+    (Trac #270); the string rows feed the older compact wire form."""
 
     @staticmethod
     def _fallback(client, pages: dict, since: int):
@@ -275,7 +277,10 @@ class TestRecentWikiChangesFallbackIsUtc:
         client = TracClient(mock_config)
         changes = client.get_recent_wiki_changes(TS)
         assert [c["name"] for c in changes] == ["A"]
-        assert changes[0]["lastModified"] == _wire(TS + 5)
+        # Decoded as a naive datetime holding UTC (Trac #270).
+        assert changes[0]["lastModified"] == datetime(
+            *time.gmtime(TS + 5)[:6]
+        )
 
 
 class TestUtcXmlrpcDatetimeFormat:

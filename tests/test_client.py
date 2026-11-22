@@ -3646,7 +3646,7 @@ def test_list_methods_success(mock_post, mock_config):
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_parse_base64_value(mock_post, mock_config):
-    """_parse_xmlrpc_value decodes <base64> elements to raw bytes."""
+    """_rpc_request decodes <base64> elements to raw bytes."""
     mock_response = Mock()
     mock_response.status_code = 200
     # "Hello, World!" base64-encoded
@@ -3671,7 +3671,7 @@ def test_parse_base64_value(mock_post, mock_config):
 
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_parse_base64_empty(mock_post, mock_config):
-    """_parse_xmlrpc_value handles empty <base64/> element gracefully."""
+    """_rpc_request handles empty <base64/> element gracefully."""
     mock_response = Mock()
     mock_response.status_code = 200
     mock_response.content = b"""<?xml version="1.0"?>

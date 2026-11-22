@@ -2586,7 +2586,7 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
     # -- empty stored text -------------------------------------------
 
     def test_empty_stored_text_is_not_the_string_none(self):
-        # _parse_xmlrpc_value turns an empty <string></string> into None.
+        # A NULL stored text arrives as <nil/>, which is None.
         row = _comment_entry(_EPOCH, 5, None)
         result, _ = self._run(
             [_update_reply(), [row]], {"comment": "None"}
