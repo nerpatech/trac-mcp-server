@@ -885,6 +885,50 @@ def test_create_ticket_timeout_compares_the_description_unstripped(
     assert error.ticket_id is None
 
 
+@pytest.mark.parametrize(
+    ("sent", "stored"),
+    [
+        ("one\r\ntwo\r\n", "one\ntwo\n"),
+        ("one\rtwo\r", "one\ntwo\n"),
+        ("a\r\n\r\nb\rc\nd", "a\n\nb\nc\nd"),
+    ],
+    ids=["crlf", "lone-cr", "mixed"],
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_compares_descriptions_with_eol_normalised(
+    mock_post, mock_time, mock_config, sent, stored
+):
+    """The XML-RPC request is XML, whose end-of-line handling turns
+    ``\\r\\n`` and a lone ``\\r`` into ``\\n`` before Trac sees the text
+    (observed live on /trac_test: a CRLF description is stored with LF).
+    A sent CR/CRLF description must match its stored LF form."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=sent,
+        found=[(10, "Test ticket", stored, "20260812T12:00:05")],
+    )
+    assert error.ticket_id == 10
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_eol_normalising_keeps_other_differences(
+    mock_post, mock_time, mock_config
+):
+    """Only line endings are folded: other differences still mismatch."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description="one\r\ntwo\r\n",
+        found=[(10, "Test ticket", "one\ntwo", "20260812T12:00:05")],
+    )
+    assert error.ticket_id is None
+
+
 @pytest.mark.parametrize("summary", ["a\\b", "cost $USER", "$USER"])
 @patch("trac_mcp_server.core.client.time.time")
 @patch("trac_mcp_server.core.client.requests.Session.post")

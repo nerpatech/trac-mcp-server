@@ -1217,14 +1217,23 @@ class TracClient:
         messages and must not be conflated. A summary that cannot be
         queried exactly is "could not check" (``ValueError``).
         """
+
         # Trac stores the strip()ped value of every field that is not a
         # textarea: trac/ticket/model.py, Ticket.__setitem__, ``value =
         # value.strip()`` (tracrpc's ticket.create assigns summary and a
         # supplied reporter through it). Observed on /trac_test: a summary
         # sent with a trailing space is stored without it. So query and
         # compare the summary as stored. The description is a textarea
-        # and is kept as sent.
+        # and Trac keeps it as received, but the XML-RPC request is XML,
+        # whose end-of-line handling turns "\r\n" and a lone "\r" into
+        # "\n" before Trac sees it (observed on /trac_test: a CRLF
+        # description is stored with LF). So the description is compared
+        # with line endings normalised on both sides.
+        def eol(text: object) -> str:
+            return str(text).replace("\r\n", "\n").replace("\r", "\n")
+
         stored_summary = summary.strip()
+        sent_description = eol(description)
         escaped_summary = self._query_value(stored_summary)
         if escaped_summary is None:
             raise ValueError(
@@ -1250,7 +1259,7 @@ class TracClient:
             attrs = ticket_data[3]
             if (
                 attrs.get("summary") != stored_summary
-                or attrs.get("description") != description
+                or eol(attrs.get("description", "")) != sent_description
             ):
                 continue
             created = self._parse_trac_time(ticket_data[1])
