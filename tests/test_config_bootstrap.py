@@ -1,11 +1,14 @@
 # Unit tests for the extracted bootstrap_config() helper.
 # Behavior parity for the lifespan integration is covered by tests/test_lifespan.py.
 
+import logging
+import os
 from unittest.mock import patch
 
 import pytest
 
 from trac_mcp_server.config_bootstrap import (
+    _load_dotenv_from_cwd,
     bootstrap_config,
     bootstrap_server_config,
 )
@@ -1000,3 +1003,248 @@ def test_allowed_hosts_defaults_to_empty_list(monkeypatch):
 
     assert config.allowed_hosts == []
     assert config.allowed_origins == []
+
+
+# ---------------------------------------------------------------------------
+# .env is searched from the working directory (Trac /trac_mcp_server #276)
+# ---------------------------------------------------------------------------
+
+
+def _enable_real_dotenv(monkeypatch, tmp_path):
+    """Isolated config sources, but with the ``.env`` search live.
+
+    The offline run sets ``PYTHON_DOTENV_DISABLED``; remove it so the
+    lookup under test runs for real.
+    """
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.delenv("TRAC_IDENTITIES", raising=False)
+    # setenv then delenv records "unset", so the variable load_dotenv
+    # writes into os.environ is removed at teardown.
+    monkeypatch.setenv("TRAC_MCP_PATH", "x")
+    monkeypatch.delenv("TRAC_MCP_PATH")
+
+
+def test_dotenv_is_found_in_the_working_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-cwd-dotenv\n"
+    )
+
+    assert bootstrap_server_config().path == "/from-cwd-dotenv"
+
+
+def test_dotenv_is_found_in_a_parent_of_the_working_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-parent-dotenv\n"
+    )
+    sub = isolated_config / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert bootstrap_server_config().path == "/from-parent-dotenv"
+
+
+def test_dotenv_disabled_switch_still_wins(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-cwd-dotenv\n"
+    )
+
+    assert bootstrap_server_config().path == "/mcp"
+
+
+def _write_env(directory, value):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / ".env").write_text(f"TRAC_MCP_PATH={value}\n")
+
+
+def test_dotenv_search_stops_at_the_first_git_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    monkeypatch.setenv("HOME", str(isolated_config / "elsewhere"))
+    project = isolated_config / "proj"
+    (project / ".git").mkdir(parents=True)
+    sub = project / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    # Above the .git: some other tree's file, not loaded.
+    _write_env(isolated_config, "/above-git")
+    assert bootstrap_server_config().path == "/mcp"
+
+    # Beside the .git: this project's file, loaded.
+    _write_env(project, "/beside-git")
+    assert bootstrap_server_config().path == "/beside-git"
+
+
+def test_dotenv_search_stops_at_a_linked_worktrees_git_file(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    monkeypatch.setenv("HOME", str(isolated_config / "elsewhere"))
+    worktree = isolated_config / "wt"
+    worktree.mkdir()
+    (worktree / ".git").write_text("gitdir: /nowhere\n")
+    monkeypatch.chdir(worktree)
+    _write_env(isolated_config, "/above-git-file")
+
+    assert bootstrap_server_config().path == "/mcp"
+
+
+def test_dotenv_search_stops_at_the_home_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    home = isolated_config / "home"
+    work = home / "work"
+    work.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(work)
+
+    # Above home: not loaded.
+    _write_env(isolated_config, "/above-home")
+    assert bootstrap_server_config().path == "/mcp"
+
+    # In home itself: loaded.
+    _write_env(home, "/in-home")
+    assert bootstrap_server_config().path == "/in-home"
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX ownership and modes"
+)
+def test_dotenv_writable_by_group_is_skipped_with_a_warning(
+    isolated_config, monkeypatch, caplog
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    _write_env(isolated_config, "/group-writable")
+    env_file = isolated_config / ".env"
+    env_file.chmod(0o664)
+
+    with caplog.at_level(logging.WARNING):
+        config = bootstrap_server_config()
+
+    assert config.path == "/mcp"
+    assert str(env_file) in caplog.text
+    assert "writable by group or others" in caplog.text
+    assert "TRAC_MCP_PATH" not in os.environ
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX ownership and modes"
+)
+def test_dotenv_not_owned_by_the_user_is_skipped_with_a_warning(
+    isolated_config, monkeypatch, caplog
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    _write_env(isolated_config, "/someone-elses")
+    monkeypatch.setattr(
+        os, "getuid", lambda: os.stat(".env").st_uid + 1
+    )
+
+    with caplog.at_level(logging.WARNING):
+        config = bootstrap_server_config()
+
+    assert config.path == "/mcp"
+    assert "not owned by the current user" in caplog.text
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="POSIX ownership and modes"
+)
+def test_dotenv_search_does_not_walk_past_a_refused_file(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    _write_env(isolated_config, "/farther-up")
+    sub = isolated_config / "sub"
+    _write_env(sub, "/refused")
+    (sub / ".env").chmod(0o666)
+    monkeypatch.setenv("HOME", str(isolated_config / "elsewhere"))
+    monkeypatch.chdir(sub)
+
+    assert bootstrap_server_config().path == "/mcp"
+
+
+def test_dotenv_disabled_returns_before_touching_the_cwd(monkeypatch):
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+
+    def _gone():
+        raise FileNotFoundError("cwd was removed")
+
+    monkeypatch.setattr(os, "getcwd", _gone)
+    _load_dotenv_from_cwd()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Empty / non-positive settings (Trac /trac_mcp_server #276)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_empty_port_env_counts_as_unset(monkeypatch, raw):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_PORT", raw)
+    assert _bootstrap_server().port == 8080
+
+
+def test_empty_port_env_falls_back_to_yaml_port(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_PORT", "")
+    assert _bootstrap_server(yaml_server={"port": 9123}).port == 9123
+
+
+@pytest.mark.parametrize("raw", ["", "  "])
+def test_empty_inline_bytes_env_counts_as_unset(monkeypatch, raw):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
+    assert _bootstrap_server().max_inline_bytes == 5 * 1024 * 1024
+    assert (
+        _bootstrap_server(
+            yaml_server={"max_inline_bytes": 1000}
+        ).max_inline_bytes
+        == 1000
+    )
+
+
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_non_positive_inline_bytes_env_names_the_setting(
+    monkeypatch, raw
+):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
+    with pytest.raises(
+        ValueError,
+        match="TRAC_MCP_MAX_INLINE_BYTES.*must be a positive number of bytes",
+    ):
+        _bootstrap_server()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_inline_bytes_yaml_names_the_setting(
+    monkeypatch, value
+):
+    _clear_server_env(monkeypatch)
+    with pytest.raises(
+        ValueError,
+        match="max_inline_bytes",
+    ):
+        _bootstrap_server(yaml_server={"max_inline_bytes": value})

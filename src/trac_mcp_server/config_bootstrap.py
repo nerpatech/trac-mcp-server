@@ -8,9 +8,12 @@ call this helper to resolve the layered config precedence without duplicating
 logic.
 """
 
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
+import dotenv.main
 from dotenv import load_dotenv
 
 from .config import Config, load_config, validate_server_config
@@ -22,6 +25,86 @@ from .config_schema import ServerConfig, build_config
 from .instances import load_identities
 from .link_rewrites import LinkRewrites, validate_link_rewrites
 
+logger = logging.getLogger(__name__)
+
+
+def _dotenv_disabled() -> bool:
+    """``PYTHON_DOTENV_DISABLED``, read as python-dotenv reads it."""
+    check = getattr(dotenv.main, "_load_dotenv_disabled", None)
+    if check is not None:
+        return bool(check())
+    value = os.environ.get("PYTHON_DOTENV_DISABLED")
+    return value is not None and value.casefold() in {
+        "1",
+        "true",
+        "t",
+        "yes",
+        "y",
+    }
+
+
+def _find_dotenv_bounded(start: Path) -> Path | None:
+    """The nearest ``.env`` from ``start`` upward, checking each directory
+    and then stopping after the first one that holds a ``.git`` (a
+    directory, or the file of a linked worktree) or is the home directory
+    (resolved; skipped if it cannot be). Above either, a file belongs to
+    another project or to a parent tree nobody chose (``/tmp``, say), the
+    way ``find_mcp_json`` bounds its search (Trac /trac_mcp_server #278).
+
+    On POSIX a ``.env`` that another user owns, or that group or others
+    can write, is not loaded: a warning names it and the search stops, so
+    a planted file is neither read nor stepped over for one further up.
+    """
+    try:
+        home_dir: Path | None = Path.home().resolve()
+    except (RuntimeError, OSError):
+        home_dir = None
+    for directory in [start, *start.parents]:
+        candidate = directory / ".env"
+        if candidate.is_file():
+            if os.name == "posix":
+                st = candidate.stat()
+                reason = None
+                if st.st_uid != os.getuid():
+                    reason = "it is not owned by the current user"
+                elif st.st_mode & 0o022:
+                    reason = "it is writable by group or others"
+                if reason is not None:
+                    logger.warning("Ignoring %s: %s", candidate, reason)
+                    return None
+            return candidate
+        if os.path.lexists(directory / ".git"):
+            return None
+        if home_dir is not None:
+            try:
+                if directory.resolve() == home_dir:
+                    return None
+            except (RuntimeError, OSError):
+                pass
+    return None
+
+
+def _load_dotenv_from_cwd() -> None:
+    """Load the nearest ``.env``, searched from the working directory up
+    to the first ``.git`` or the home directory (``_find_dotenv_bounded``).
+
+    A bare ``load_dotenv()`` calls ``find_dotenv()`` with ``usecwd=False``,
+    which walks up from the *calling module's* directory instead: an
+    editable install then read the checkout's ``.env`` wherever it was
+    started, and a site-packages install never found a project's
+    (Trac /trac_mcp_server #276). ``find_dotenv(usecwd=True)`` would fix
+    the start but walks to ``/``, so it would load a ``.env`` planted in
+    a shared parent. ``PYTHON_DOTENV_DISABLED`` is honoured here, before
+    the working directory is touched: this walk does not go through
+    ``dotenv.main.find_dotenv``, which the offline test run patches as
+    its fallback switch.
+    """
+    if _dotenv_disabled():
+        return
+    path = _find_dotenv_bounded(Path(os.getcwd()))
+    if path is not None:
+        load_dotenv(path)
+
 
 def bootstrap_config(
     cli_overrides: dict[str, Any] | None = None,
@@ -32,7 +115,8 @@ def bootstrap_config(
 
     Performs the six-step bootstrap sequence:
 
-    1. ``load_dotenv()`` — loads ``.env`` file so env vars are available
+    1. ``_load_dotenv_from_cwd()`` — loads the nearest ``.env`` (searched
+       from the working directory up to the first ``.git`` or home) so env vars are available
        before any reads (idempotent; safe to call multiple times).
     2. ``discover_config_files()`` — finds YAML config files in precedence
        order; if any exist, loads and merges them via
@@ -80,7 +164,7 @@ def bootstrap_config(
             code 4) for the CLI. Do NOT catch this error here.
     """
     # Step 1: Load .env early so ${VAR} interpolation in YAML can use them
-    load_dotenv()
+    _load_dotenv_from_cwd()
 
     # Step 2: Load YAML config if present, extract trac section as fallbacks
     yaml_fallbacks: dict[str, Any] | None = None
@@ -155,7 +239,7 @@ def load_local_link_rewrites() -> LinkRewrites | None:
         ValueError: a config file cannot be read or parsed, its
             ``export`` section is not a mapping, or a rule is invalid.
     """
-    load_dotenv()
+    _load_dotenv_from_cwd()
     try:
         raw = load_hierarchical_config()
     except Exception as e:
@@ -238,7 +322,7 @@ def bootstrap_server_config(
             ``local`` nor ``off``, or an unauthenticated http
             transport would bind a non-loopback host.
     """
-    load_dotenv()
+    _load_dotenv_from_cwd()
 
     yaml_server: dict[str, Any] = {}
     config_files = discover_config_files()
@@ -280,6 +364,11 @@ def bootstrap_server_config(
         if port_override is not None
         else os.getenv("TRAC_MCP_PORT")
     )
+    # An empty or blank TRAC_MCP_PORT counts as unset, so
+    # ``${TRAC_MCP_PORT:-}`` in a compose file keeps the YAML port.
+    # (The CLI override is an int or None and never blank.)
+    if isinstance(port_raw, str) and not port_raw.strip():
+        port_raw = None
     if port_raw is not None:
         try:
             port = int(port_raw)
@@ -381,8 +470,10 @@ def bootstrap_server_config(
             f"Invalid file_access '{file_access}': must be 'local' or 'off'"
         )
 
+    # Empty or blank counts as unset (``${VAR:-}`` in a compose file);
+    # a value from either source must be positive.
     inline_raw = os.getenv("TRAC_MCP_MAX_INLINE_BYTES")
-    if inline_raw is not None:
+    if inline_raw is not None and inline_raw.strip():
         try:
             max_inline_bytes = int(inline_raw)
         except ValueError:
@@ -390,9 +481,22 @@ def bootstrap_server_config(
                 f"Invalid TRAC_MCP_MAX_INLINE_BYTES '{inline_raw}': "
                 "must be a positive number of bytes"
             ) from None
+        inline_name, inline_shown = (
+            "TRAC_MCP_MAX_INLINE_BYTES",
+            inline_raw,
+        )
     else:
         max_inline_bytes = int(
             yaml_server.get("max_inline_bytes", 5 * 1024 * 1024)
+        )
+        inline_name, inline_shown = (
+            "max_inline_bytes",
+            str(max_inline_bytes),
+        )
+    if max_inline_bytes <= 0:
+        raise ValueError(
+            f"Invalid {inline_name} '{inline_shown}': "
+            "must be a positive number of bytes"
         )
 
     # Ticket #102: loaded once here, env-var only (see docstring) -- never

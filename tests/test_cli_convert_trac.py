@@ -269,7 +269,7 @@ def test_check_trac_auth_missing_prints_friendly_error_and_exits_4(
     # re-inject credentials that monkeypatch.delenv() just removed.
     monkeypatch.setattr(
         "trac_mcp_server.config_bootstrap.load_dotenv",
-        lambda: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = main(["--check-trac"])
@@ -605,7 +605,7 @@ def test_from_wiki_auth_missing_prints_friendly_error_and_exits_4(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "trac_mcp_server.config_bootstrap.load_dotenv",
-        lambda: None,
+        lambda *_args, **_kwargs: None,
     )
 
     result = main(["--from-wiki", "MyPage", "--to", "md"])
@@ -1019,7 +1019,7 @@ def test_to_wiki_auth_missing_prints_friendly_error_and_exits_4(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "trac_mcp_server.config_bootstrap.load_dotenv",
-        lambda: None,
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("hello"))
 

@@ -23,7 +23,9 @@ def _disable_dotenv():
     if not hasattr(dotenv.main, "_load_dotenv_disabled"):
         # A python-dotenv without the documented switch: cut the search off
         # instead. load_dotenv() resolves find_dotenv through its own module
-        # globals at call time, so this reaches every call site too.
+        # globals at call time, so this reaches a bare load_dotenv(); the
+        # bounded lookup in config_bootstrap does not use find_dotenv and
+        # reads PYTHON_DOTENV_DISABLED itself.
         dotenv.main.find_dotenv = lambda *_args, **_kwargs: ""
 
 
@@ -131,10 +133,12 @@ def _isolate_config_sources(monkeypatch, tmp_path):
 
     An offline run disables ``.env`` for the whole session
     (``_disable_dotenv``), but under ``--run-live`` it is enabled, and
-    ``bootstrap_config()``'s own ``load_dotenv()`` would find the repo's
-    ``.env`` from the module's directory and configure Trac again. So the
-    switch is set here too, with the same fallback for a python-dotenv
-    that lacks it.
+    ``bootstrap_config()``'s own ``.env`` lookup (the working directory
+    upward, to the first ``.git`` or home) would find the repo's ``.env``
+    and configure Trac again. So the switch is set here too; the lookup
+    honours it before it reads the working directory. The ``find_dotenv``
+    patch is kept for a python-dotenv that lacks the switch, and covers
+    only calls that go through ``find_dotenv``.
     """
     for var in (
         "TRAC_MCP_CONFIG",
