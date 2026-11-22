@@ -313,15 +313,19 @@ async def _handle_list_instances(
         # Trac /trac_mcp_server #274: fetched with the caller's own client
         # session (its credentials, TLS settings and scope check, the same
         # resolved config as above), off the event loop, bounded like an
-        # RPC call.
+        # RPC call. The session is read inside the worker: a client's
+        # sessions are thread-local, so the loop thread's one session
+        # must not be shared by every concurrent call's worker.
         scrape_client = registry.get_client(None, identity=identity)
-        try:
-            discovered = await run_sync(
-                scrape_project_index,
-                host_root,
-                scrape_client.session,
-                (10, scrape_client.config.rpc_timeout),
+        timeout = (10, scrape_client.config.rpc_timeout)
+
+        def scrape() -> list[dict]:
+            return scrape_project_index(
+                host_root, scrape_client.session, timeout
             )
+
+        try:
+            discovered = await run_sync(scrape)
         except DestinationOutOfScope:
             discovered = []
             skipped = "skipped: the project index is outside this caller's scope"

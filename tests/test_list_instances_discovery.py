@@ -9,6 +9,7 @@ had no timeout at all.
 """
 
 import asyncio
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -82,6 +83,19 @@ def _list(registry, args=None, identity=None):
         )
 
 
+async def _call_list(registry):
+    set_instance_registry(registry)
+    client = MagicMock()
+    client.config = _config()
+    with patch(
+        "trac_mcp_server.mcp.tools.instances.caller_identity",
+        return_value=None,
+    ):
+        return await ToolRegistry(INSTANCE_SPECS).call_tool(
+            "list_instances", {}, client
+        )
+
+
 def _registry_with_session(session, config=None) -> InstanceRegistry:
     config = config or _config()
     registry = InstanceRegistry(config, {})
@@ -134,6 +148,45 @@ class TestDiscoveryOffTheLoop:
         # A blocked loop would have ticked once (before the scrape) and
         # once after; a free one ticks about every 0.05 s through 0.3 s.
         assert len(ticks) >= 4, ticks
+
+
+class TestSessionReadOnTheWorkerThread:
+    def test_the_session_is_obtained_on_the_worker_not_the_loop(self):
+        """TracClient sessions are thread-local: reading ``.session`` on
+        the loop thread would hand every concurrent call the loop
+        thread's one session."""
+        reads = []
+        session = MagicMock()
+        fetched_on = []
+
+        def get(url, **kwargs):
+            fetched_on.append(threading.get_ident())
+            return _response()
+
+        session.get.side_effect = get
+
+        class FakeClient:
+            config = _config()
+
+            @property
+            def session(self):
+                reads.append(threading.get_ident())
+                return session
+
+        registry = InstanceRegistry(_config(), {})
+        registry.get_client = MagicMock(return_value=FakeClient())
+
+        async def scenario():
+            loop_thread = threading.get_ident()
+            _list_in_loop_result = await _call_list(registry)
+            return loop_thread, _list_in_loop_result
+
+        loop_thread, result = asyncio.run(scenario())
+
+        assert "discovered" in result.structuredContent
+        assert reads, "the client's session was never read"
+        assert loop_thread not in reads, (reads, loop_thread)
+        assert reads == fetched_on
 
 
 class TestDiscoveryUsesTheClientSession:
