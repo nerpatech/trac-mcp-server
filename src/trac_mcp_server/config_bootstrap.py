@@ -11,6 +11,7 @@ logic.
 import os
 from typing import Any
 
+import dotenv.main
 from dotenv import load_dotenv
 
 from .config import Config, load_config, validate_server_config
@@ -23,6 +24,20 @@ from .instances import load_identities
 from .link_rewrites import LinkRewrites, validate_link_rewrites
 
 
+def _load_dotenv_from_cwd() -> None:
+    """Load the nearest ``.env``, searching from the working directory up.
+
+    A bare ``load_dotenv()`` calls ``find_dotenv()`` with ``usecwd=False``,
+    which walks up from the *calling module's* directory instead: an
+    editable install then read the checkout's ``.env`` wherever it was
+    started, and a site-packages install never found a project's
+    (Trac /trac_mcp_server #276). ``find_dotenv`` is resolved through the
+    ``dotenv.main`` module at call time, so a test's patch of it reaches
+    this call; ``PYTHON_DOTENV_DISABLED`` is honoured by ``load_dotenv``.
+    """
+    load_dotenv(dotenv.main.find_dotenv(usecwd=True))
+
+
 def bootstrap_config(
     cli_overrides: dict[str, Any] | None = None,
     *,
@@ -32,7 +47,8 @@ def bootstrap_config(
 
     Performs the six-step bootstrap sequence:
 
-    1. ``load_dotenv()`` — loads ``.env`` file so env vars are available
+    1. ``_load_dotenv_from_cwd()`` — loads the nearest ``.env`` (searched
+       from the working directory upward) so env vars are available
        before any reads (idempotent; safe to call multiple times).
     2. ``discover_config_files()`` — finds YAML config files in precedence
        order; if any exist, loads and merges them via
@@ -80,7 +96,7 @@ def bootstrap_config(
             code 4) for the CLI. Do NOT catch this error here.
     """
     # Step 1: Load .env early so ${VAR} interpolation in YAML can use them
-    load_dotenv()
+    _load_dotenv_from_cwd()
 
     # Step 2: Load YAML config if present, extract trac section as fallbacks
     yaml_fallbacks: dict[str, Any] | None = None
@@ -155,7 +171,7 @@ def load_local_link_rewrites() -> LinkRewrites | None:
         ValueError: a config file cannot be read or parsed, its
             ``export`` section is not a mapping, or a rule is invalid.
     """
-    load_dotenv()
+    _load_dotenv_from_cwd()
     try:
         raw = load_hierarchical_config()
     except Exception as e:
@@ -238,7 +254,7 @@ def bootstrap_server_config(
             ``local`` nor ``off``, or an unauthenticated http
             transport would bind a non-loopback host.
     """
-    load_dotenv()
+    _load_dotenv_from_cwd()
 
     yaml_server: dict[str, Any] = {}
     config_files = discover_config_files()
@@ -280,6 +296,11 @@ def bootstrap_server_config(
         if port_override is not None
         else os.getenv("TRAC_MCP_PORT")
     )
+    # An empty or blank TRAC_MCP_PORT counts as unset, like every other
+    # TRAC_MCP_* string, so ``${TRAC_MCP_PORT:-}`` keeps the YAML port.
+    # (The CLI override is an int or None and never blank.)
+    if isinstance(port_raw, str) and not port_raw.strip():
+        port_raw = None
     if port_raw is not None:
         try:
             port = int(port_raw)
@@ -381,8 +402,10 @@ def bootstrap_server_config(
             f"Invalid file_access '{file_access}': must be 'local' or 'off'"
         )
 
+    # Empty or blank counts as unset (``${VAR:-}`` in a compose file);
+    # a value from either source must be positive.
     inline_raw = os.getenv("TRAC_MCP_MAX_INLINE_BYTES")
-    if inline_raw is not None:
+    if inline_raw is not None and inline_raw.strip():
         try:
             max_inline_bytes = int(inline_raw)
         except ValueError:
@@ -390,9 +413,22 @@ def bootstrap_server_config(
                 f"Invalid TRAC_MCP_MAX_INLINE_BYTES '{inline_raw}': "
                 "must be a positive number of bytes"
             ) from None
+        inline_name, inline_shown = (
+            "TRAC_MCP_MAX_INLINE_BYTES",
+            inline_raw,
+        )
     else:
         max_inline_bytes = int(
             yaml_server.get("max_inline_bytes", 5 * 1024 * 1024)
+        )
+        inline_name, inline_shown = (
+            "max_inline_bytes",
+            str(max_inline_bytes),
+        )
+    if max_inline_bytes <= 0:
+        raise ValueError(
+            f"Invalid {inline_name} '{inline_shown}': "
+            "must be a positive number of bytes"
         )
 
     # Ticket #102: loaded once here, env-var only (see docstring) -- never

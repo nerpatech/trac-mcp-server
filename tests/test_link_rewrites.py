@@ -370,7 +370,9 @@ def test_local_read_loads_dotenv_so_interpolation_resolves(
     monkeypatch.delenv("LINKREWRITE_BASE")
     monkeypatch.setattr(
         "trac_mcp_server.config_bootstrap.load_dotenv",
-        lambda: dotenv.load_dotenv(dotenv_path=env_file),
+        lambda *_args, **_kwargs: dotenv.load_dotenv(
+            dotenv_path=env_file
+        ),
     )
     _write_config(
         isolated_config,

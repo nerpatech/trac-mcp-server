@@ -3,12 +3,16 @@
 
 from unittest.mock import patch
 
+import dotenv.main
 import pytest
 
 from trac_mcp_server.config_bootstrap import (
     bootstrap_config,
     bootstrap_server_config,
 )
+
+# The real find_dotenv, held before any test can patch the module attribute.
+_REAL_FIND_DOTENV = dotenv.main.find_dotenv
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1000,3 +1004,122 @@ def test_allowed_hosts_defaults_to_empty_list(monkeypatch):
 
     assert config.allowed_hosts == []
     assert config.allowed_origins == []
+
+
+# ---------------------------------------------------------------------------
+# .env is searched from the working directory (Trac /trac_mcp_server #276)
+# ---------------------------------------------------------------------------
+
+
+def _enable_real_dotenv(monkeypatch, tmp_path):
+    """Isolated config sources, but with the real ``.env`` search live.
+
+    The offline run disables ``.env`` (``PYTHON_DOTENV_DISABLED`` and, for
+    a python-dotenv without that switch, a patched ``find_dotenv``); put
+    both back so the lookup under test runs for real.
+    """
+    if getattr(_REAL_FIND_DOTENV, "__name__", "") == "<lambda>":
+        pytest.skip("find_dotenv was already patched at import time")
+    monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
+    monkeypatch.setattr(dotenv.main, "find_dotenv", _REAL_FIND_DOTENV)
+    monkeypatch.delenv("TRAC_IDENTITIES", raising=False)
+    # setenv then delenv records "unset", so the variable load_dotenv
+    # writes into os.environ is removed at teardown.
+    monkeypatch.setenv("TRAC_MCP_PATH", "x")
+    monkeypatch.delenv("TRAC_MCP_PATH")
+
+
+def test_dotenv_is_found_in_the_working_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-cwd-dotenv\n"
+    )
+
+    assert bootstrap_server_config().path == "/from-cwd-dotenv"
+
+
+def test_dotenv_is_found_in_a_parent_of_the_working_directory(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-parent-dotenv\n"
+    )
+    sub = isolated_config / "sub"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+
+    assert bootstrap_server_config().path == "/from-parent-dotenv"
+
+
+def test_dotenv_disabled_switch_still_wins(
+    isolated_config, monkeypatch
+):
+    _clear_server_env(monkeypatch)
+    _enable_real_dotenv(monkeypatch, isolated_config)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+    (isolated_config / ".env").write_text(
+        "TRAC_MCP_PATH=/from-cwd-dotenv\n"
+    )
+
+    assert bootstrap_server_config().path == "/mcp"
+
+
+# ---------------------------------------------------------------------------
+# Empty / non-positive settings (Trac /trac_mcp_server #276)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_empty_port_env_counts_as_unset(monkeypatch, raw):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_PORT", raw)
+    assert _bootstrap_server().port == 8080
+
+
+def test_empty_port_env_falls_back_to_yaml_port(monkeypatch):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_PORT", "")
+    assert _bootstrap_server(yaml_server={"port": 9123}).port == 9123
+
+
+@pytest.mark.parametrize("raw", ["", "  "])
+def test_empty_inline_bytes_env_counts_as_unset(monkeypatch, raw):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
+    assert _bootstrap_server().max_inline_bytes == 5 * 1024 * 1024
+    assert (
+        _bootstrap_server(
+            yaml_server={"max_inline_bytes": 1000}
+        ).max_inline_bytes
+        == 1000
+    )
+
+
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_non_positive_inline_bytes_env_names_the_setting(
+    monkeypatch, raw
+):
+    _clear_server_env(monkeypatch)
+    monkeypatch.setenv("TRAC_MCP_MAX_INLINE_BYTES", raw)
+    with pytest.raises(
+        ValueError,
+        match="TRAC_MCP_MAX_INLINE_BYTES.*must be a positive number of bytes",
+    ):
+        _bootstrap_server()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_non_positive_inline_bytes_yaml_names_the_setting(
+    monkeypatch, value
+):
+    _clear_server_env(monkeypatch)
+    with pytest.raises(
+        ValueError,
+        match="max_inline_bytes",
+    ):
+        _bootstrap_server(yaml_server={"max_inline_bytes": value})
