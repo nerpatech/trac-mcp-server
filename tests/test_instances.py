@@ -635,6 +635,96 @@ class TestMtimeReload:
             mock_reload.assert_not_called()
 
 
+class TestFailedReloadKeepsLastGoodInstances:
+    """Trac /trac_mcp_server #268 review: a reload that hits a load error
+    must not turn every later call into that error. The previous
+    declared instances stay, the error is logged once, and the next edit
+    is picked up."""
+
+    GOOD = "instances:\n  bcs:\n    url: /bcs\n"
+    BAD = (
+        "instances:\n  bcs:\n    url: /bcs\n"
+        "  other:\n    url: /other\n    username: x\n"
+        "    password: ''\n"
+    )
+
+    @staticmethod
+    def _rewrite(path, body, step):
+        path.write_text(body)
+        bumped = path.stat().st_mtime + step
+        os.utime(path, (bumped, bumped))
+
+    def _registry(self, tmp_path, monkeypatch):
+        instances_file = tmp_path / "instances.yml"
+        instances_file.write_text(self.GOOD)
+        monkeypatch.setenv("TRAC_INSTANCES", str(instances_file))
+        registry = InstanceRegistry(
+            _default_config(), load_declared_instances()
+        )
+        return instances_file, registry
+
+    def test_bad_reload_leaves_every_call_working(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        instances_file, registry = self._registry(tmp_path, monkeypatch)
+        self._rewrite(instances_file, self.BAD, 1)
+
+        with caplog.at_level(
+            "ERROR", logger="trac_mcp_server.instances"
+        ):
+            default = registry.resolve(None)
+            declared = registry.resolve("bcs")
+
+        assert default.trac_url.endswith("/trac_mcp_server")
+        assert declared.trac_url.endswith("/bcs")
+        assert registry.declared_names() == ["bcs"]
+
+    def test_error_is_logged_once_with_path_and_no_password(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        instances_file, registry = self._registry(tmp_path, monkeypatch)
+        self._rewrite(
+            instances_file,
+            self.GOOD
+            + "  other:\n    url: /other\n    password: pw-sentinel\n",
+            1,
+        )
+
+        with caplog.at_level(
+            "ERROR", logger="trac_mcp_server.instances"
+        ):
+            for _ in range(3):
+                registry.resolve(None)
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1
+        text = errors[0].getMessage()
+        assert str(instances_file) in text
+        assert "own username" in text
+        assert "pw-sentinel" not in text
+        assert "pw-sentinel" not in caplog.text
+
+    def test_fixing_the_file_is_picked_up(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        instances_file, registry = self._registry(tmp_path, monkeypatch)
+        self._rewrite(instances_file, self.BAD, 1)
+        with caplog.at_level(
+            "ERROR", logger="trac_mcp_server.instances"
+        ):
+            registry.resolve(None)
+        assert registry.declared_names() == ["bcs"]
+
+        self._rewrite(
+            instances_file,
+            self.GOOD + "  auto_pm:\n    url: /auto_pm\n",
+            2,
+        )
+        registry.resolve(None)
+
+        assert registry.declared_names() == ["auto_pm", "bcs"]
+
+
 # ---------------------------------------------------------------------------
 # Live
 # ---------------------------------------------------------------------------
@@ -713,6 +803,36 @@ class TestTracInstancesFileExplicitUsernameNeedsPassword:
                 monkeypatch,
                 "other:\n  url: /other\n  username: otheruser\n",
             )
+
+    def test_password_with_empty_username_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("UNSET_OTHER_USER", raising=False)
+        monkeypatch.setenv("OTHER_PW", "other-pw-sentinel")
+        with pytest.raises(ValueError) as excinfo:
+            self._load(
+                tmp_path,
+                monkeypatch,
+                "instances:\n  other:\n    url: /other\n"
+                "    username: ${UNSET_OTHER_USER}\n"
+                "    password: ${OTHER_PW}\n",
+            )
+        message = str(excinfo.value)
+        assert "other" in message
+        assert "instances.yml" in message
+        assert "own username" in message
+        assert "other-pw-sentinel" not in message
+
+    def test_password_with_missing_username_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        with pytest.raises(ValueError, match="own username") as excinfo:
+            self._load(
+                tmp_path,
+                monkeypatch,
+                "other:\n  url: /other\n  password: other-pw-sentinel\n",
+            )
+        assert "other-pw-sentinel" not in str(excinfo.value)
 
     def test_username_with_password_is_accepted(
         self, tmp_path, monkeypatch

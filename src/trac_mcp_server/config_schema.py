@@ -83,21 +83,23 @@ class TracConfig(BaseModel):
     model_config = {"frozen": True}
 
 
-def require_password_with_username(
+def require_credentials_pair(
     name: str, username: str | None, password: str | None, where: str
 ) -> None:
-    """Refuse a declared instance that names a username but no password.
+    """Refuse a declared instance that sets one credential without the other.
 
-    Trac /trac_mcp_server #268: credentials inherit from the default as a
-    pair, so an explicit username has no default password to fall back
-    on. A missing or empty password is almost always an unset ``${VAR}``
-    (which interpolates to ``""``); refusing it at load keeps the default
-    account's password from ever being sent to that instance's host.
-    Shared by the YAML ``instances:`` section and the ``TRAC_INSTANCES``
-    loader. Never put a password value in the message.
+    Trac /trac_mcp_server #268: credentials are set as a pair. Both set, or
+    neither (then the default's pair, or the caller's identity per #102,
+    applies). One half is almost always an unset ``${VAR}`` (which
+    interpolates to ``""``), and either half alone would be combined with
+    the default account's other half and sent to that instance's host, so
+    it is refused at load. Shared by the YAML ``instances:`` section and
+    the ``TRAC_INSTANCES`` loader. Never put a password value in the
+    message.
 
     Raises:
-        ValueError: ``username`` is set and ``password`` is missing/empty.
+        ValueError: ``username`` is set and ``password`` is missing/empty,
+            or ``password`` is set and ``username`` is missing/empty.
     """
     if username and not password:
         raise ValueError(
@@ -106,13 +108,22 @@ def require_password_with_username(
             "is never paired with the default account's. A ${VAR} that "
             "is unset interpolates to empty and is the usual cause."
         )
+    if password and not username:
+        raise ValueError(
+            f"Instance '{name}' in {where} sets a password but no "
+            "username. An explicit password needs its own username: it "
+            "is never paired with the default account's. A ${VAR} that "
+            "is unset interpolates to empty and is the usual cause."
+        )
 
 
 class InstanceConfig(BaseModel):
     """A named additional Trac instance.
 
-    Unset ``username``/``password``/``insecure`` inherit from the default
-    ``trac`` section at resolution time (see ``instances.InstanceRegistry``).
+    An unset ``insecure`` inherits from the default ``trac`` section at
+    resolution time (see ``instances.InstanceRegistry``). ``username`` and
+    ``password`` are a pair: both set, or neither (then the default's
+    pair, or the caller's identity, applies).
     """
 
     url: str = Field(
@@ -120,11 +131,19 @@ class InstanceConfig(BaseModel):
     )
     username: str | None = Field(
         default=None,
-        description="Trac username (inherits default if unset)",
+        description=(
+            "Trac username. Set together with password, or leave both "
+            "unset to use the default pair; one without the other is "
+            "refused at load"
+        ),
     )
     password: str | None = Field(
         default=None,
-        description="Trac password (inherits default if unset)",
+        description=(
+            "Trac password. Set together with username, or leave both "
+            "unset to use the default pair; one without the other is "
+            "refused at load"
+        ),
     )
     insecure: bool | None = Field(
         default=None,
@@ -336,7 +355,7 @@ class UnifiedConfig(BaseModel):
         cls, value: dict[str, InstanceConfig]
     ) -> dict[str, InstanceConfig]:
         for name, inst in value.items():
-            require_password_with_username(
+            require_credentials_pair(
                 name,
                 inst.username,
                 inst.password,

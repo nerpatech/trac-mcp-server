@@ -35,7 +35,7 @@ from .config_loader import (
     load_hierarchical_config,
     load_instances_file,
 )
-from .config_schema import build_config, require_password_with_username
+from .config_schema import build_config, require_credentials_pair
 from .core.client import TracClient
 
 logger = logging.getLogger(__name__)
@@ -157,7 +157,7 @@ def load_declared_instances() -> dict[str, InstanceSpec]:
             else {}
         )
         for name, inst in entries.items():
-            require_password_with_username(
+            require_credentials_pair(
                 name,
                 inst.get("username"),
                 inst.get("password"),
@@ -392,7 +392,24 @@ class InstanceRegistry:
         with self._lock:
             current = self._snapshot_mtimes()
             if current != self._mtimes:
-                self._declared = load_declared_instances()
+                try:
+                    declared = load_declared_instances()
+                except Exception as e:
+                    # A bad edit must not turn every call, the default
+                    # instance and ping included, into this error (Trac
+                    # /trac_mcp_server #268). Keep the last good set, and
+                    # record the mtimes so the bad file is not re-parsed
+                    # and re-logged on each call; the next edit reloads.
+                    # The message never carries a password value.
+                    logger.error(
+                        "Reloading declared instances from %s failed; "
+                        "keeping the previous instances until the file "
+                        "changes again: %s",
+                        ", ".join(str(p) for p in current),
+                        e,
+                    )
+                else:
+                    self._declared = declared
                 self._sources = _instance_source_paths()
                 self._mtimes = self._snapshot_mtimes()
 

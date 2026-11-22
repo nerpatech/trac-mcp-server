@@ -470,3 +470,35 @@ class TestInstanceExplicitUsernameNeedsPassword:
             )
         assert "hunter2-sentinel" not in str(excinfo.value)
         assert "hunter2-sentinel" not in repr(excinfo.value)
+
+
+class TestInstancePasswordNeedsUsername:
+    """Trac /trac_mcp_server #268 review: the pair rule has two halves. A
+    declared password with no username is refused at load too, instead of
+    quietly taking the default account's username and password."""
+
+    @staticmethod
+    def _build(**fields):
+        return build_config(
+            {"instances": {"other": {"url": "/other", **fields}}}
+        )
+
+    def test_password_with_empty_username_is_refused(self):
+        # An unset ${VAR} interpolates to "".
+        with pytest.raises(ValidationError) as excinfo:
+            self._build(username="", password="other-pw-sentinel")
+        message = str(excinfo.value)
+        assert "other" in message
+        assert "own username" in message
+        assert "other-pw-sentinel" not in message
+        assert "other-pw-sentinel" not in repr(excinfo.value)
+
+    def test_password_with_missing_username_is_refused(self):
+        with pytest.raises(ValidationError, match="own username"):
+            self._build(password="other-pw-sentinel")
+
+    def test_empty_password_with_empty_username_inherits(self):
+        # Both halves unset: the default's pair, as for no keys at all.
+        config = self._build(username="", password="")
+        assert not config.instances["other"].username
+        assert not config.instances["other"].password

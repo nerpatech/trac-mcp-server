@@ -629,7 +629,11 @@ async def main(config_overrides: dict | None = None):
     # Declared-instance names are needed for the `instance` schema
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
-    declared_names = sorted(load_declared_instances())
+    try:
+        declared_names = sorted(load_declared_instances())
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: Instances configuration error: {e}\n")
+        raise RuntimeError(f"Instances configuration error: {e}") from e
     specs = with_page_alias([PING_SPEC] + ALL_SPECS)
     # With OIDC per-user auth every call goes to the one configured endpoint
     # and _resolve_client rejects any other instance; advertising the
