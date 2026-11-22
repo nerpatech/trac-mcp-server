@@ -274,7 +274,17 @@ def _get(client: TracClient, url: str, timeout: float):
     """
     session = client.session
     origin = requests.Request("GET", url).prepare().url
-    response = session.get(url, timeout=timeout, allow_redirects=False)
+    # `Session.request` merges the environment (REQUESTS_CA_BUNDLE,
+    # CURL_CA_BUNDLE, proxies, cert) into the settings for one request;
+    # `Session.send`, which the later hops go through, does not. Merged
+    # once for the original url and handed to every hop, so a hop is sent
+    # with what `requests`' own redirect handling would have given it.
+    settings = session.merge_environment_settings(
+        url, {}, None, None, None
+    )
+    response = session.get(
+        url, timeout=timeout, allow_redirects=False, **settings
+    )
     hops = 0
     while response.is_redirect and response.next is not None:
         nxt = response.next
@@ -290,7 +300,7 @@ def _get(client: TracClient, url: str, timeout: float):
             )
         response.close()
         response = session.send(
-            nxt, timeout=timeout, allow_redirects=False
+            nxt, timeout=timeout, allow_redirects=False, **settings
         )
         hops += 1
     return response
@@ -393,19 +403,22 @@ def _instance_answers(
     client: TracClient,
     control_url: str,
     timeout: float,
-) -> bool:
-    """Whether the instance answers its wiki-realm control with 200.
+) -> str:
+    """How the instance answers its wiki-realm control.
 
-    A control that would leave the allowlist, or whose redirect leaves
-    the control URL's origin (ticket #267), counts as no answer -- any
-    exception does -- so the candidate degrades to unchecked rather than
-    being called missing.
+    ``"answers"``: 200. ``"redirected"``: the control's redirect left the
+    control URL's origin (ticket #267), so what is there is not this
+    probe's to report. ``"no_answer"``: anything else, including a
+    control that would leave the allowlist and any exception. Only
+    ``"answers"`` lets a provisional ``MISSING`` stand.
     """
     try:
         response = _get(client, control_url, timeout)
+    except RedirectLeftOrigin:
+        return "redirected"
     except Exception:
-        return False
-    return response.status_code == 200
+        return "no_answer"
+    return "answers" if response.status_code == 200 else "no_answer"
 
 
 def _confirm_provisional(
@@ -419,11 +432,13 @@ def _confirm_provisional(
     One control request per distinct instance, and only when something on
     that instance came back 500 -- a document whose cross-instance ticket
     links are all live costs nothing extra. Control 200: the instance is
-    up, so the 500 was evidence and the MISSING stands. Anything else: the
-    candidate degrades to ERROR, which reports as unchecked rather than as
-    a broken link (ticket #82's third acceptance row, and the one that
-    would otherwise turn one unreachable instance into a document full of
-    errors under ticket #64).
+    up, so the 500 was evidence and the MISSING stands. A control whose
+    redirect leaves its origin (ticket #267): the candidate is ``SKIPPED``
+    with :data:`REDIRECT_LEFT_ORIGIN_REASON`, like the href itself would
+    be. Anything else: the candidate degrades to ERROR, which reports as
+    unchecked rather than as a broken link (ticket #82's third acceptance
+    row, and the one that would otherwise turn one unreachable instance
+    into a document full of errors under ticket #64).
     """
     pending = {
         href: outcome
@@ -442,7 +457,7 @@ def _confirm_provisional(
             if url is not None
         }
     )
-    healthy: dict[str, bool] = {}
+    healthy: dict[str, str] = {}
     if controls:
         with ThreadPoolExecutor(
             max_workers=max(1, min(concurrency, len(controls)))
@@ -462,9 +477,17 @@ def _confirm_provisional(
 
     for href, outcome in pending.items():
         control = _control_url(href)
-        if control is None or not healthy.get(control, False):
+        answer = (
+            "no_answer" if control is None else healthy.get(control)
+        )
+        if answer == "answers":
+            continue
+        outcome["resolved_url"] = None
+        if answer == "redirected":
+            outcome["status"] = SKIPPED
+            outcome["reason"] = REDIRECT_LEFT_ORIGIN_REASON
+        else:
             outcome["status"] = ERROR
-            outcome["resolved_url"] = None
 
 
 def probe_targets(

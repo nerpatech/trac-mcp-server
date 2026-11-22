@@ -35,6 +35,7 @@ from trac_mcp_server.preview.gate import ADVISORY_CODES, is_blocking
 from trac_mcp_server.preview.targets import (
     ERROR,
     EXISTS,
+    MISSING,
     SKIPPED,
     RedirectLeftOrigin,
     _instance_answers,
@@ -57,9 +58,11 @@ class _Script(requests.adapters.BaseAdapter):
         super().__init__()
         self.routes: dict[str, tuple[int, dict[str, str], str]] = {}
         self.sent: list[str] = []
+        self.kwargs: list[dict] = []
 
     def send(self, request, **kwargs):
         self.sent.append(request.url)
+        self.kwargs.append(kwargs)
         status, headers, body = self.routes.get(
             request.url, (404, {}, "")
         )
@@ -229,6 +232,35 @@ class TestHopByHop:
         assert caught.value.url == HREF
         assert caught.value.location == f"{OTHER}/wiki/X"
 
+    def test_a_later_hop_keeps_the_environment_tls_and_proxy_settings(
+        self, monkeypatch, tmp_path
+    ):
+        """``session.send`` does not merge the environment the way
+        ``session.request`` does, so a hand-followed hop must be given
+        the settings the first request got: a corporate CA bundle named
+        in the environment applies to every hop, not just the first."""
+        bundle = str(tmp_path / "ca.pem")
+        monkeypatch.setenv("REQUESTS_CA_BUNDLE", bundle)
+        monkeypatch.setenv("CURL_CA_BUNDLE", bundle)
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+        client, script = _scripted()
+        script.routes[HREF] = _redirect(f"{BASE}/trac_test/wiki/X")
+        script.routes[f"{BASE}/trac_test/wiki/X"] = _ok()
+        probe_targets(client, [HREF], timeout=5)
+        assert script.sent == [HREF, f"{BASE}/trac_test/wiki/X"]
+        first, second = script.kwargs
+        assert first["verify"] == bundle
+        assert second["verify"] == bundle
+        assert second["proxies"] == first["proxies"]
+        assert (
+            second["proxies"].get("https")
+            == "http://proxy.example:3128"
+        )
+        assert second["cert"] == first["cert"]
+        assert second["stream"] is False
+
 
 class TestUnderAnAllowlist:
     def test_a_same_origin_hop_outside_the_allowlist_is_not_allowed(
@@ -268,14 +300,21 @@ class TestTheControl:
         client, script = _scripted()
         script.routes[self.CONTROL] = _redirect(f"{OTHER}/wiki/Y")
         script.routes[f"{OTHER}/wiki/Y"] = _ok()
-        assert _instance_answers(client, self.CONTROL, 5) is False
+        assert (
+            _instance_answers(client, self.CONTROL, 5) == "redirected"
+        )
         assert script.sent == [self.CONTROL]
+
+    def test_a_non_200_control_is_no_answer(self):
+        client, script = _scripted()
+        script.routes[self.CONTROL] = (500, {}, "")
+        assert _instance_answers(client, self.CONTROL, 5) == "no_answer"
 
     def test_a_same_origin_redirect_is_an_answer(self):
         client, script = _scripted()
         script.routes[self.CONTROL] = _redirect("/trac_test/wiki/Y")
         script.routes[f"{BASE}/trac_test/wiki/Y"] = _ok()
-        assert _instance_answers(client, self.CONTROL, 5) is True
+        assert _instance_answers(client, self.CONTROL, 5) == "answers"
 
     def test_a_provisional_missing_degrades_when_the_control_leaves(
         self,
@@ -285,8 +324,57 @@ class TestTheControl:
         script.routes[self.CONTROL] = _redirect(f"{OTHER}/wiki/Y")
         script.routes[f"{OTHER}/wiki/Y"] = _ok()
         result = probe_targets(client, [self.TICKET], timeout=5)
-        assert result[self.TICKET]["status"] == ERROR
+        assert result[self.TICKET] == {
+            "status": SKIPPED,
+            "resolved_url": None,
+            "reason": "redirect_left_origin",
+        }
         assert OTHER + "/wiki/Y" not in script.sent
+
+    def test_a_provisional_missing_with_no_answer_is_still_error(self):
+        client, script = _scripted()
+        script.routes[self.TICKET] = (500, {}, "")
+        script.routes[self.CONTROL] = (503, {}, "")
+        result = probe_targets(client, [self.TICKET], timeout=5)
+        assert result[self.TICKET] == {
+            "status": ERROR,
+            "resolved_url": None,
+        }
+
+    def test_a_provisional_missing_stands_when_the_control_answers(
+        self,
+    ):
+        client, script = _scripted()
+        script.routes[self.TICKET] = (500, {}, "")
+        script.routes[self.CONTROL] = _ok()
+        result = probe_targets(client, [self.TICKET], timeout=5)
+        assert result[self.TICKET] == {
+            "status": MISSING,
+            "resolved_url": None,
+        }
+
+    def test_the_redirected_control_reports_target_check_redirected(
+        self,
+    ):
+        client, script = _scripted()
+        script.routes[self.TICKET] = (500, {}, "")
+        script.routes[self.CONTROL] = _redirect(f"{OTHER}/wiki/Y")
+        probes = probe_targets(client, [self.TICKET], timeout=5)
+        anchor = (
+            '<p><a class="ext-link" href="' + self.TICKET + '"'
+            ' title="ticket 999999">somewhere:#999999</a></p>'
+        )
+        warnings = build_warnings(
+            markdown_source=None,
+            tracwiki="somewhere:#999999",
+            facts=extract_facts(anchor),
+            probes=probes,
+            check_targets=True,
+            source_format="tracwiki",
+        )
+        codes = [w["code"] for w in warnings]
+        assert "target_check_redirected" in codes, codes
+        assert "target_check_failed" not in codes, codes
 
 
 # ---------------------------------------------------------------------------
