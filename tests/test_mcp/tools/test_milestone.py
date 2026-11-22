@@ -6,10 +6,14 @@ and that milestone tool calls are correctly routed via ToolRegistry in server.py
 """
 
 import asyncio
+import contextlib
 import unittest
+import uuid
 import xmlrpc.client
 from datetime import datetime
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from trac_mcp_server.mcp.server import (
     PING_SPEC,
@@ -18,6 +22,7 @@ from trac_mcp_server.mcp.server import (
     set_registry,
 )
 from trac_mcp_server.mcp.tools import ALL_SPECS
+from trac_mcp_server.mcp.tools.milestone import MILESTONE_SPECS
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
 
 
@@ -806,6 +811,92 @@ class TestMilestoneToolErrors(unittest.TestCase):
         self.assertEqual(result.content[0].type, "text")
         self.assertIn("Error", result.content[0].text)
         self.assertIn("Unknown", result.content[0].text)
+
+
+# -- Live round-trip (create -> get -> list -> update -> delete) -------------
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_live_milestone_lifecycle():
+    """End-to-end on `/trac_test`: a milestone goes through every tool.
+
+    Trac /trac_mcp_server #288. The only live check of the milestone
+    tools was a standalone script that is now deleted; this is their live
+    row.
+    Calls go through ``ToolRegistry.call_tool``, as the server does, so a
+    Trac fault comes back as the error result a client would see. The
+    create runs outside the `try`, so a failed create reports its own
+    error; if a later assertion fails before the delete, `finally`
+    removes the milestone without masking that failure. A milestone this
+    row leaves behind (a killed run) is not swept: Trac keeps no
+    modification time for one (see ``tests/live_helpers.py``), so it is
+    named ``t288-<hex8>`` and removed by hand.
+    """
+    from tests.live_helpers import trac_test_client
+
+    client = trac_test_client()
+    registry = ToolRegistry(MILESTONE_SPECS)
+    name = f"t288-{uuid.uuid4().hex[:8]}"
+
+    created = await registry.call_tool(
+        "milestone_create",
+        {"name": name, "attributes": {"description": "before"}},
+        client,
+    )
+    assert not created.isError, created.content[0].text
+
+    deleted = None
+    try:
+        got = await registry.call_tool(
+            "milestone_get", {"name": name}, client
+        )
+        assert not got.isError, got.content[0].text
+        assert got.structuredContent is not None
+        assert got.structuredContent["name"] == name
+        assert got.structuredContent["description"] == "before"
+        assert got.structuredContent["completed"] is None
+
+        listed = await registry.call_tool(
+            "milestone_list", {"prefix": name}, client
+        )
+        assert not listed.isError, listed.content[0].text
+        assert listed.structuredContent == {"milestones": [name]}
+
+        updated = await registry.call_tool(
+            "milestone_update",
+            {"name": name, "attributes": {"description": "after"}},
+            client,
+        )
+        assert not updated.isError, updated.content[0].text
+
+        reread = await registry.call_tool(
+            "milestone_get", {"name": name}, client
+        )
+        assert not reread.isError, reread.content[0].text
+        assert reread.structuredContent is not None
+        assert reread.structuredContent["description"] == "after"
+
+        deleted = await registry.call_tool(
+            "milestone_delete", {"name": name}, client
+        )
+        assert not deleted.isError, deleted.content[0].text
+
+        gone = await registry.call_tool(
+            "milestone_get", {"name": name}, client
+        )
+        assert gone.isError is True
+        # An error result carries its type only as the text's first
+        # line (build_error_response has no structured form).
+        assert gone.content[0].text.startswith("Error (not_found):")
+    finally:
+        if deleted is None or deleted.isError:
+            # The body failed before the delete took effect: clean up,
+            # and let the original failure propagate rather than mask it.
+            with contextlib.suppress(Exception):
+                await registry.call_tool(
+                    "milestone_delete", {"name": name}, client
+                )
 
 
 if __name__ == "__main__":

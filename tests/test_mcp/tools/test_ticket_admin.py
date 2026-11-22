@@ -377,3 +377,108 @@ async def test_live_version_create_list_delete():
                 await _handle_enum_delete(
                     client, {"enum_type": "version", "name": name}
                 )
+
+
+# -- Live round-trips (component and severity enum) -------------------------
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_live_component_create_list_delete():
+    """End-to-end on `/trac_test`: a component is created, listed, deleted.
+
+    Trac /trac_mcp_server #288. The only live check of the component
+    tools was a standalone script that is now deleted. The create runs outside
+    the `try`; if a later assertion fails before the delete, `finally`
+    removes the component without masking that failure.
+    """
+    import contextlib
+    import uuid
+
+    from tests.live_helpers import trac_test_client
+
+    client = trac_test_client()
+    name = f"t288-comp-{uuid.uuid4().hex[:8]}"
+
+    created = await _handle_component_create(
+        client, {"name": name, "description": "t288 live row"}
+    )
+    assert not created.isError, created.content[0].text
+
+    deleted = None
+    try:
+        listed = await _handle_component_list(client, {})
+        assert not listed.isError, listed.content[0].text
+        found = [
+            c
+            for c in json.loads(listed.content[0].text)
+            if c["name"] == name
+        ]
+        assert len(found) == 1
+        assert found[0]["description"] == "t288 live row"
+
+        deleted = await _handle_component_delete(client, {"name": name})
+        assert not deleted.isError, deleted.content[0].text
+
+        after = await _handle_component_list(client, {})
+        assert not after.isError, after.content[0].text
+        assert name not in [
+            c["name"] for c in json.loads(after.content[0].text)
+        ]
+    finally:
+        if deleted is None:
+            # The body failed before the delete ran: clean up, and let
+            # the original failure propagate rather than mask it.
+            with contextlib.suppress(Exception):
+                await _handle_component_delete(client, {"name": name})
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_live_severity_enum_create_list_delete():
+    """End-to-end on `/trac_test`: a severity value is created, listed,
+    deleted (the `version` kind has its own row above).
+
+    Trac /trac_mcp_server #288. The only live check of a non-version
+    enum round-trip was a standalone script that is now deleted. Same shape as
+    the version row: create outside the `try`, `finally` cleans up only
+    when the body failed before the delete.
+    """
+    import contextlib
+    import uuid
+
+    from tests.live_helpers import trac_test_client
+
+    client = trac_test_client()
+    name = f"t288-sev-{uuid.uuid4().hex[:8]}"
+
+    created = await _handle_enum_create(
+        client, {"enum_type": "severity", "name": name}
+    )
+    assert not created.isError, created.content[0].text
+
+    deleted = None
+    try:
+        listed = await _handle_enum_list(
+            client, {"enum_type": "severity"}
+        )
+        assert not listed.isError, listed.content[0].text
+        values = json.loads(listed.content[0].text)
+        assert values.count(name) == 1
+
+        deleted = await _handle_enum_delete(
+            client, {"enum_type": "severity", "name": name}
+        )
+        assert not deleted.isError, deleted.content[0].text
+
+        after = await _handle_enum_list(
+            client, {"enum_type": "severity"}
+        )
+        assert not after.isError, after.content[0].text
+        assert name not in json.loads(after.content[0].text)
+    finally:
+        if deleted is None:
+            with contextlib.suppress(Exception):
+                await _handle_enum_delete(
+                    client, {"enum_type": "severity", "name": name}
+                )

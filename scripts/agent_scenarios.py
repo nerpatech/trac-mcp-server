@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent Scenario Tests for trac-mcp-server permission filtering. (v1.0.0)
+"""Agent Scenario Tests for trac-mcp-server permission filtering. (v2.0.0)
 
 Tests agent persona scenarios by launching trac-mcp-server with different
 permission files and verifying that tool exposure matches expectations.
@@ -20,18 +20,24 @@ Usage:
 import argparse
 import asyncio
 import logging
+import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import mcp.types as types
 from mcp.client.session import ClientSession
-from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.stdio import (
+    StdioServerParameters,
+    get_default_environment,
+    stdio_client,
+)
 
 from trac_mcp_server import __version__ as PACKAGE_VERSION
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # Locate the scenarios directory relative to this script
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -119,11 +125,57 @@ def write_expected_tools(path: Path, tools: list[str]) -> None:
     path.write_text("\n".join(sorted(tools)) + "\n")
 
 
+# The Trac connection settings the server reads (config.py). Deliberately
+# not every TRAC_* variable: TRAC_MCP_* settings choose the transport and
+# the tools offered, and must not leak from the caller's shell into the
+# subprocess this script compares against a reference.
+CONNECTION_ENV_VARS = frozenset(
+    {
+        "TRAC_URL",
+        "TRAC_USERNAME",
+        "TRAC_PASSWORD",
+        "TRAC_INSECURE",
+        "TRAC_RPC_TIMEOUT",
+    }
+)
+
+
+def build_server_params(
+    args: argparse.Namespace, environ: Mapping[str, str]
+) -> StdioServerParameters:
+    """Launch parameters for the ``trac-mcp-server`` subprocess.
+
+    ``--url``, ``--username`` and ``--insecure`` go on the command line.
+    The password never does (it would show in ``ps``); it reaches the
+    server as ``TRAC_PASSWORD`` in its environment. The subprocess gets
+    the MCP SDK's default environment plus the connection variables in
+    ``CONNECTION_ENV_VARS`` found in ``environ``: with ``env`` unset the
+    SDK passes only its defaults, so an exported ``TRAC_URL`` or
+    ``TRAC_PASSWORD`` would not arrive. Other ``TRAC_*`` variables are
+    not passed, ``TRAC_MCP_*`` above all.
+    """
+    server_args: list[str] = []
+    if args.url:
+        server_args.extend(["--url", args.url])
+    if args.username:
+        server_args.extend(["--username", args.username])
+    if args.insecure:
+        server_args.append("--insecure")
+
+    env = get_default_environment()
+    env.update(
+        {k: v for k, v in environ.items() if k in CONNECTION_ENV_VARS}
+    )
+    return StdioServerParameters(
+        command="trac-mcp-server", args=server_args, env=env
+    )
+
+
 async def run_scenario(
     name: str,
     permissions_path: Path,
     expected_tools_path: Path,
-    server_args: list[str],
+    base_params: StdioServerParameters,
     live: bool = False,
     update_refs: bool = False,
     logger: logging.Logger | None = None,
@@ -134,7 +186,8 @@ async def run_scenario(
         name: Scenario name (e.g., "readonly").
         permissions_path: Absolute path to the .permissions file.
         expected_tools_path: Absolute path to the .expected_tools.txt file.
-        server_args: Base server arguments (--url, --username, etc.).
+        base_params: Server launch parameters from build_server_params();
+            --permissions-file for this scenario is appended to its args.
         live: If True, also run safe read-only tool calls.
         update_refs: If True, write actual tools back to expected_tools.txt.
         logger: Optional logger for debug output.
@@ -145,14 +198,11 @@ async def run_scenario(
     log = logger or logging.getLogger(__name__)
 
     # Build server command with --permissions-file
-    cmd_args = list(server_args) + [
-        "--permissions-file",
-        str(permissions_path),
-    ]
-
-    server_params = StdioServerParameters(
-        command="trac-mcp-server",
-        args=cmd_args,
+    server_params = base_params.model_copy(
+        update={
+            "args": list(base_params.args)
+            + ["--permissions-file", str(permissions_path)]
+        }
     )
 
     try:
@@ -330,16 +380,8 @@ async def async_main(args: argparse.Namespace) -> int:
         print("Mode: compare (list_tools vs reference)")
     print()
 
-    # Build server args from CLI options
-    server_args: list[str] = []
-    if args.url:
-        server_args.extend(["--url", args.url])
-    if args.username:
-        server_args.extend(["--username", args.username])
-    if args.password:
-        server_args.extend(["--password", args.password])
-    if args.insecure:
-        server_args.append("--insecure")
+    # Build server launch parameters from CLI options and the environment
+    base_params = build_server_params(args, os.environ)
 
     # Run each scenario
     suite = SuiteResult()
@@ -356,7 +398,7 @@ async def async_main(args: argparse.Namespace) -> int:
             name=name,
             permissions_path=permissions_path,
             expected_tools_path=expected_tools_path,
-            server_args=server_args,
+            base_params=base_params,
             live=args.live,
             update_refs=args.update_refs,
             logger=logger,
@@ -459,7 +501,7 @@ def setup_logging(
     return logger
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Agent Scenario Tests for trac-mcp-server permission filtering",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -484,10 +526,6 @@ Examples:
     parser.add_argument(
         "--username",
         help="Override username (passed to trac-mcp-server)",
-    )
-    parser.add_argument(
-        "--password",
-        help="Override password (passed to trac-mcp-server)",
     )
     parser.add_argument(
         "--insecure",
@@ -523,7 +561,11 @@ Examples:
         help="Include timestamp in debug log filename (prevents overwrite on next run)",
     )
 
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     sys.exit(asyncio.run(async_main(args)))
 
 
