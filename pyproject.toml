@@ -52,7 +52,6 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
-    "pytest-ruff>=0.5.0",
     "pyinstaller>=6.0.0",
     # The HTML -> Markdown self-check renders the emitted Markdown (#209).
     "markdown-it-py>=3.0",
@@ -85,7 +84,6 @@ python_files = ["test_*.py"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--ruff --ruff-format"
 
 [tool.ruff]
 line-length = 72
@@ -107,7 +105,6 @@ indent-style = "space"
 exclude = ["tests/fixtures/trac_html/*.golden.md"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]  # Allow assert True/False in tests
 # B904 asks for `raise ... from err` / `from None` inside except. Either
 # changes the raised exception's __cause__/__suppress_context__, which is a
 # behaviour change in a plugin this ticket (#279) only lints, so these two
