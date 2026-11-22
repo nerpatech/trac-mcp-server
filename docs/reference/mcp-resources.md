@@ -2,6 +2,22 @@
 
 The Trac MCP Server exposes wiki pages as resources via URI templates, enabling direct content access without tool calls.
 
+`trac://wiki/{page_name}` is a resource template: a client finds it with `resources/templates/list`, not `resources/list`, which holds only the concrete `trac://wiki/_index`.
+
+## When Resources Are Served
+
+The wiki resources are served exactly when the `wiki_get` tool is, because they read the same pages and go through the same filters (Trac /trac_mcp_server #273):
+
+| Setting | `wiki_get` | Wiki resources |
+|---------|-----------|----------------|
+| No filter | served | listed and readable |
+| `--permissions-file` with `WIKI_VIEW` | served | listed and readable |
+| `--permissions-file` without `WIKI_VIEW` (e.g. the `ticket_manager` profile) | dropped | withdrawn |
+| `--read-only` | served (a read stays) | listed and readable |
+| `wiki_get` in `disabled_tools` | disabled | withdrawn |
+
+When withdrawn, `resources/list` and `resources/templates/list` return nothing, and a read of `trac://wiki/...` is refused as an unknown resource type, the way a filtered-out tool is refused as an unknown tool, so a hidden resource looks no different from a missing one.
+
 ## Resource URIs
 
 | URI Pattern | Description |
@@ -15,7 +31,7 @@ The Trac MCP Server exposes wiki pages as resources via URI templates, enabling 
 
 | Parameter | Values | Description |
 |-----------|--------|-------------|
-| `version` | Integer (1+) | Retrieve specific version instead of latest |
+| `version` | Integer (1+) | Retrieve specific version instead of latest. Anything that is not a whole number of 1 or more (`abc`, `0`, `-1`, `1.5`) returns `Error (validation_error)` |
 | `instance` | Configured name, or a path/URL on the same host | Route to another Trac instance instead of the default -- see [Multiple Instances](configuration.md#multiple-instances) |
 
 ## Examples
@@ -94,6 +110,13 @@ Similar pages: WikiStart, WikiSandbox
 Error (invalid_version): Version 99 not found for page 'WikiStart'.
 
 Hint: Use trac://wiki/WikiStart to see the latest version.
+```
+
+**Invalid version:**
+```
+Error (validation_error): version='abc' is not a version number -- it must be a whole number of 1 or more.
+
+Hint: use ?version=N with N from 1 up, or drop the version query parameter to read the latest version.
 ```
 
 **Unknown instance:**

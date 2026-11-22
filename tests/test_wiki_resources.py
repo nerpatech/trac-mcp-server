@@ -11,9 +11,11 @@ from pydantic_core import Url
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.mcp.resources.wiki import (
+    WIKI_RESOURCE_TEMPLATES,
     WIKI_RESOURCES,
     _format_page_tree,
     _parse_query_params,
+    handle_list_wiki_resource_templates,
     handle_list_wiki_resources,
     handle_read_wiki_resource,
 )
@@ -22,22 +24,23 @@ from trac_mcp_server.mcp.resources.wiki import (
 class TestWikiResourceDefinitions(unittest.TestCase):
     """Test wiki resource definitions."""
 
-    def test_wiki_resources_has_two_entries(self):
-        """Test WIKI_RESOURCES has exactly 2 resources."""
-        self.assertEqual(len(WIKI_RESOURCES), 2)
+    def test_wiki_resources_has_one_entry(self):
+        """Test WIKI_RESOURCES has exactly 1 resource: the index."""
+        self.assertEqual(len(WIKI_RESOURCES), 1)
 
-    def test_wiki_page_resource_uri(self):
-        """Test wiki page template resource URI."""
-        page_resource = WIKI_RESOURCES[0]
-        # URI is AnyUrl so compare string representation
-        self.assertIn("trac://wiki/", str(page_resource.uri))
-        self.assertIn("page_name", str(page_resource.uri))
-        self.assertEqual(page_resource.name, "Wiki Page")
-        self.assertEqual(page_resource.mimeType, "text/plain")
+    def test_wiki_page_template_uri(self):
+        """The page is a resource template, not a concrete resource."""
+        self.assertEqual(len(WIKI_RESOURCE_TEMPLATES), 1)
+        page_template = WIKI_RESOURCE_TEMPLATES[0]
+        self.assertEqual(
+            page_template.uriTemplate, "trac://wiki/{page_name}"
+        )
+        self.assertEqual(page_template.name, "Wiki Page")
+        self.assertEqual(page_template.mimeType, "text/plain")
 
     def test_wiki_index_resource_uri(self):
         """Test wiki index resource URI."""
-        index_resource = WIKI_RESOURCES[1]
+        index_resource = WIKI_RESOURCES[0]
         # URI is AnyUrl so compare string representation
         self.assertEqual(str(index_resource.uri), "trac://wiki/_index")
         self.assertEqual(index_resource.name, "Wiki Page Index")
@@ -51,7 +54,12 @@ class TestHandleListWikiResources(unittest.TestCase):
         """Test list handler returns WIKI_RESOURCES."""
         result = asyncio.run(handle_list_wiki_resources())
         self.assertEqual(result, WIKI_RESOURCES)
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result), 1)
+
+    def test_returns_wiki_resource_templates(self):
+        """Test the template handler returns WIKI_RESOURCE_TEMPLATES."""
+        result = asyncio.run(handle_list_wiki_resource_templates())
+        self.assertEqual(result, WIKI_RESOURCE_TEMPLATES)
 
 
 class TestFormatPageTree(unittest.TestCase):

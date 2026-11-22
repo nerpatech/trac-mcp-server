@@ -270,6 +270,7 @@ The registry includes a tool only if:
 | `wiki_file_push` | `WIKI_CREATE`, `WIKI_MODIFY` |
 | `wiki_file_pull` | `WIKI_VIEW` |
 | `wiki_file_detect_format` | *(none -- always available)* |
+| `convert_preview` | `WIKI_VIEW`, `TICKET_VIEW` (its render expands either realm; Trac /trac_mcp_server #273) |
 | `milestone_list` | `MILESTONE_VIEW` |
 | `milestone_get` | `MILESTONE_VIEW` |
 | `milestone_create` | `MILESTONE_CREATE` |

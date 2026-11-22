@@ -19,19 +19,10 @@ from ...core.async_utils import run_sync, run_sync_limited
 from ...core.client import TracClient
 from ..tools.errors import classify_fault, format_timestamp
 
-# Resource definitions for list_resources()
+# Concrete resources for list_resources(). The page URI is a template, not
+# a resource: it is listed by list_resource_templates() below, so a client
+# does not offer to read a page literally named "{page_name}".
 WIKI_RESOURCES = [
-    types.Resource(
-        uri="trac://wiki/{page_name}",  # type: ignore[arg-type]  # MCP AnyUrl/Url type mismatch
-        name="Wiki Page",
-        description=(
-            "Read a wiki page by name, as stored: TracWiki, "
-            "byte-for-byte. "
-            "Query param: version=N (specific version). "
-            "Example: trac://wiki/WikiStart?version=5"
-        ),
-        mimeType="text/plain",
-    ),
     types.Resource(
         uri="trac://wiki/_index",  # type: ignore[arg-type]  # MCP AnyUrl/Url type mismatch
         name="Wiki Page Index",
@@ -43,14 +34,41 @@ WIKI_RESOURCES = [
     ),
 ]
 
+# Resource templates for list_resource_templates()
+WIKI_RESOURCE_TEMPLATES = [
+    types.ResourceTemplate(
+        uriTemplate="trac://wiki/{page_name}",
+        name="Wiki Page",
+        description=(
+            "Read a wiki page by name, as stored: TracWiki, "
+            "byte-for-byte. "
+            "Query param: version=N (specific version). "
+            "Example: trac://wiki/WikiStart?version=5"
+        ),
+        mimeType="text/plain",
+    ),
+]
+
 
 async def handle_list_wiki_resources() -> list[types.Resource]:
     """List available wiki resources.
 
     Returns:
-        List of Resource objects describing wiki page templates and index.
+        List of Resource objects: the page index. The page itself is a
+        template, see ``handle_list_wiki_resource_templates``.
     """
     return WIKI_RESOURCES
+
+
+async def handle_list_wiki_resource_templates() -> list[
+    types.ResourceTemplate
+]:
+    """List available wiki resource templates.
+
+    Returns:
+        List of ResourceTemplate objects: the wiki page URI template.
+    """
+    return WIKI_RESOURCE_TEMPLATES
 
 
 async def handle_read_wiki_resource(
@@ -101,7 +119,23 @@ async def handle_read_wiki_resource(
             "trac-convert binary."
         )
     version_str = params.get("version")
-    version = int(version_str) if version_str else None
+    version = None
+    if version_str:
+        # A whole number of 1 or more, ASCII digits only: int() alone
+        # also takes " 2", "+3" and non-ASCII digits, and "0" or "-1"
+        # name no version.
+        if (
+            not (version_str.isascii() and version_str.isdigit())
+            or int(version_str) < 1
+        ):
+            return (
+                f"Error (validation_error): version={version_str!r} is "
+                "not a version number -- it must be a whole number of "
+                "1 or more.\n\nHint: use ?version=N with N from 1 up, "
+                "or drop the version query parameter to read the latest "
+                "version."
+            )
+        version = int(version_str)
 
     # Handle special _index path
     if page_name == "_index":
