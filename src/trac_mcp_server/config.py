@@ -378,6 +378,18 @@ def validate_server_config(server_config: "ServerConfig") -> None:
     )
 
 
+def get_bool_env(key: str) -> bool | None:
+    """Return True/False from env var, or None if unset.
+
+    Module level so ``config_bootstrap.resolve_logging_settings`` reads
+    ``TRAC_DEBUG`` exactly as ``load_config`` does.
+    """
+    val = os.getenv(key)
+    if val is None:
+        return None
+    return val.lower() in ("true", "1", "yes", "on")
+
+
 def load_config(
     url: str | None = None,
     username: str | None = None,
@@ -485,13 +497,6 @@ def load_config(
     )
 
     # --- Boolean fields: CLI > env > YAML > default ---
-
-    def get_bool_env(key: str) -> bool | None:
-        """Return True/False from env var, or None if unset."""
-        val = os.getenv(key)
-        if val is None:
-            return None
-        return val.lower() in ("true", "1", "yes", "on")
 
     if insecure:
         final_insecure = True

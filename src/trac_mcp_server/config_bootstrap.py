@@ -10,13 +10,19 @@ logic.
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import dotenv.main
 from dotenv import load_dotenv
 
-from .config import Config, load_config, validate_server_config
+from .config import (
+    Config,
+    get_bool_env,
+    load_config,
+    validate_server_config,
+)
 from .config_loader import (
     discover_config_files,
     load_hierarchical_config,
@@ -24,6 +30,7 @@ from .config_loader import (
 from .config_schema import ServerConfig, build_config
 from .instances import load_identities
 from .link_rewrites import LinkRewrites, validate_link_rewrites
+from .logger import LOG_LEVEL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -525,3 +532,88 @@ def bootstrap_server_config(
     validate_server_config(server_config)
 
     return server_config
+
+
+@dataclass(frozen=True)
+class LoggingSettings:
+    """What ``resolve_logging_settings`` found, ready for ``setup_logging``.
+
+    ``level`` and ``log_file`` are None when no source sets them, which
+    means "the mode default" (WARNING and the per-user state file for
+    stdio). ``log_file`` may be ``""``, meaning "no file".
+    """
+
+    debug: bool
+    level: str | None
+    log_file: str | None
+
+
+def resolve_logging_settings(
+    log_file_override: str | None,
+) -> LoggingSettings:
+    """Resolve the logging settings the server hands to ``setup_logging``
+    (Trac /trac_mcp_server #277).
+
+    - ``debug``: the ``TRAC_DEBUG`` env var (read as ``load_config``
+      reads it), else YAML ``trac.debug``, else False.
+    - ``level``: the ``LOG_LEVEL`` env var if set and not blank, else YAML
+      ``logging.level`` if the file sets it, else None. The ``logging``
+      mapping is read raw, not through ``LoggingConfig``, so that model's
+      ``INFO`` default does not count as the file setting a level and
+      override stdio's WARNING default.
+    - ``log_file``: ``log_file_override`` (``--log-file``) if not None,
+      else the ``LOG_FILE`` env var if set (even empty), else YAML
+      ``logging.file`` if the file sets it, else None. An empty or blank
+      value means no file; ``setup_logging`` applies that.
+
+    Call it after ``bootstrap_server_config``, which loads the ``.env``
+    first; this loads it too (idempotent), so it also works alone.
+
+    Raises:
+        ValueError: ``LOG_LEVEL`` or YAML ``logging.level`` is not one of
+            DEBUG, INFO, WARNING, ERROR, CRITICAL; the message names the
+            source.
+    """
+    _load_dotenv_from_cwd()
+
+    yaml_debug = False
+    yaml_logging: dict[str, Any] = {}
+    if discover_config_files():
+        raw = load_hierarchical_config()
+        yaml_debug = build_config(raw).trac.debug
+        section = raw.get("logging")
+        if isinstance(section, dict):
+            yaml_logging = section
+
+    env_debug = get_bool_env("TRAC_DEBUG")
+    debug = env_debug if env_debug is not None else bool(yaml_debug)
+
+    level: str | None = None
+    env_level = os.environ.get("LOG_LEVEL")
+    if env_level is not None and env_level.strip():
+        level = _check_level("LOG_LEVEL", env_level)
+    elif yaml_logging.get("level") is not None:
+        level = _check_level(
+            "logging.level", str(yaml_logging["level"])
+        )
+
+    if log_file_override is not None:
+        log_file: str | None = log_file_override
+    elif "LOG_FILE" in os.environ:
+        log_file = os.environ["LOG_FILE"]
+    elif yaml_logging.get("file") is not None:
+        log_file = str(yaml_logging["file"])
+    else:
+        log_file = None
+
+    return LoggingSettings(debug=debug, level=level, log_file=log_file)
+
+
+def _check_level(source: str, value: str) -> str:
+    name = value.strip().upper()
+    if name not in LOG_LEVEL_NAMES:
+        raise ValueError(
+            f"Invalid log level {value!r} from {source}: must be one of "
+            + ", ".join(LOG_LEVEL_NAMES)
+        )
+    return name

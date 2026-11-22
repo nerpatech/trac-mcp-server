@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from trac_mcp_server.config import Config
+from trac_mcp_server.mcp.errors import StartupError
 from trac_mcp_server.mcp.lifespan import server_lifespan
 
 # -------------------------------------------------------------------------
@@ -545,7 +546,7 @@ class TestServerLifespanConfigError:
             patch("trac_mcp_server.mcp.lifespan._stderr_print"),
         ):
             with pytest.raises(
-                RuntimeError, match="Configuration error"
+                StartupError, match="Configuration error"
             ):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover -- should not reach here
@@ -561,7 +562,7 @@ class TestServerLifespanConfigError:
             patch("trac_mcp_server.mcp.lifespan._stderr_print"),
         ):
             with pytest.raises(
-                RuntimeError, match="Trac URL not found"
+                StartupError, match="Trac URL not found"
             ):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
@@ -581,7 +582,7 @@ class TestServerLifespanConfigError:
                 side_effect=lambda msg: stderr_messages.append(msg),
             ),
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StartupError):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 
@@ -620,7 +621,7 @@ class TestServerLifespanConnectionError:
             ),
             patch("trac_mcp_server.mcp.lifespan._stderr_print"),
         ):
-            with pytest.raises(RuntimeError, match="connection failed"):
+            with pytest.raises(StartupError, match="connection failed"):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 
@@ -646,7 +647,7 @@ class TestServerLifespanConnectionError:
             patch("trac_mcp_server.mcp.lifespan._stderr_print"),
         ):
             with pytest.raises(
-                RuntimeError, match="Connection refused"
+                StartupError, match="Connection refused"
             ):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
@@ -676,7 +677,7 @@ class TestServerLifespanConnectionError:
                 side_effect=lambda msg: stderr_messages.append(msg),
             ),
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StartupError):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 
@@ -708,7 +709,7 @@ class TestServerLifespanConnectionError:
             ),
             patch("trac_mcp_server.mcp.lifespan._stderr_print"),
         ):
-            with pytest.raises(RuntimeError, match="connection failed"):
+            with pytest.raises(StartupError, match="connection failed"):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 
@@ -933,7 +934,7 @@ class TestStartupLinesPrintOnce:
         pkg_logger.setLevel(logging.INFO)
         pkg_logger.addHandler(logging.StreamHandler(sys.stderr))
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(StartupError):
             await _run_lifespan(
                 run_sync_effect=ConnectionError("Connection refused")
             )
@@ -950,7 +951,7 @@ class TestStartupLinesPrintOnce:
         pkg_logger.setLevel(logging.WARNING)
         pkg_logger.addHandler(logging.FileHandler(tmp_path / "s.log"))
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(StartupError):
             await _run_lifespan(
                 run_sync_effect=ConnectionError("Connection refused")
             )
@@ -979,7 +980,7 @@ class TestStartupLinesPrintOnce:
                 side_effect=ValueError("missing URL"),
             ),
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StartupError):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 
@@ -1001,7 +1002,7 @@ class TestStartupLinesPrintOnce:
                 side_effect=ValueError("missing URL"),
             ),
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(StartupError):
                 async with server_lifespan() as _:
                     pass  # pragma: no cover
 

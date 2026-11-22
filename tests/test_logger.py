@@ -16,6 +16,9 @@ import asyncio
 import io
 import json
 import logging
+import logging.handlers
+import os
+import stat
 import sys
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,10 +27,12 @@ import pytest
 
 from trac_mcp_server.logger import (
     JsonFormatter,
+    default_mcp_log_file,
     logging_reaches_stderr,
     setup_logging,
     startup_note,
 )
+from trac_mcp_server.mcp.errors import StartupError
 from trac_mcp_server.mcp.server import (
     _report_version,
     build_parser,
@@ -35,13 +40,30 @@ from trac_mcp_server.mcp.server import (
     main,
 )
 
-DEFAULT_LOG = "/tmp/trac-mcp-server.log"
-
 
 @pytest.fixture(autouse=True)
-def _clean_log_file_env(monkeypatch):
-    """cli/http/stdio all honour LOG_FILE; keep the caller's out of the tests."""
+def _clean_log_file_env(monkeypatch, tmp_path):
+    """cli/http/stdio all honour LOG_FILE; keep the caller's out of the
+    tests. The stdio default file lives under the user's state dir, so
+    HOME is a temp dir and XDG_STATE_HOME is unset: no test writes a log
+    into the real one."""
     monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+
+def _close(handlers):
+    for h in handlers:
+        h.close()
+
+
+def _mcp_file_handler(mock_basic):
+    """The one file handler stdio's file mode hands to basicConfig."""
+    handlers = mock_basic.call_args[1]["handlers"]
+    files = _file_handlers(handlers)
+    assert len(files) == 1 and len(handlers) == 1
+    return files[0]
 
 
 # ---------------------------------------------------------------------------
@@ -66,13 +88,16 @@ class TestSetupLogging:
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_mcp_mode_logs_to_file(self, mock_basic, tmp_path):
-        """MCP mode passes filename to basicConfig."""
+        """MCP mode hands a handler for the file to basicConfig."""
         log_file = str(tmp_path / "test-mcp.log")
         setup_logging(mode="mcp", log_file=log_file)
 
         mock_basic.assert_called_once()
-        kwargs = mock_basic.call_args[1]
-        assert kwargs["filename"] == log_file
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == log_file
+        finally:
+            handler.close()
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_debug_overrides_level(self, mock_basic):
@@ -149,12 +174,18 @@ class TestSetupLogging:
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_mcp_mode_default_log_file(self, mock_basic, monkeypatch):
-        """MCP mode defaults to /tmp/trac-mcp-server.log when no log_file given."""
+        """MCP mode defaults to the per-user state file when no log_file given."""
         monkeypatch.delenv("LOG_FILE", raising=False)
         setup_logging(mode="mcp")
 
-        kwargs = mock_basic.call_args[1]
-        assert kwargs["filename"] == "/tmp/trac-mcp-server.log"
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == os.path.join(
+                os.environ["HOME"],
+                ".local/state/trac-mcp-server/server.log",
+            )
+        finally:
+            handler.close()
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_mcp_default_level_is_warning(
@@ -193,24 +224,39 @@ class TestLogFileResolution:
     def test_stdio_default(self, mock_basic):
         setup_logging(mode="mcp")
 
-        kwargs = mock_basic.call_args[1]
-        assert kwargs["filename"] == DEFAULT_LOG
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == default_mcp_log_file()
+        finally:
+            handler.close()
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
-    def test_stdio_env_var_is_read(self, mock_basic, monkeypatch):
-        monkeypatch.setenv("LOG_FILE", "/x")
+    def test_stdio_env_var_is_read(
+        self, mock_basic, monkeypatch, tmp_path
+    ):
+        path = str(tmp_path / "x.log")
+        monkeypatch.setenv("LOG_FILE", path)
         setup_logging(mode="mcp")
 
-        kwargs = mock_basic.call_args[1]
-        assert kwargs["filename"] == "/x"
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == path
+        finally:
+            handler.close()
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
-    def test_stdio_arg_beats_env(self, mock_basic, monkeypatch):
-        monkeypatch.setenv("LOG_FILE", "/x")
-        setup_logging(mode="mcp", log_file="/arg")
+    def test_stdio_arg_beats_env(
+        self, mock_basic, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("LOG_FILE", str(tmp_path / "x.log"))
+        arg = str(tmp_path / "arg.log")
+        setup_logging(mode="mcp", log_file=arg)
 
-        kwargs = mock_basic.call_args[1]
-        assert kwargs["filename"] == "/arg"
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == arg
+        finally:
+            handler.close()
 
     @patch("trac_mcp_server.logger.logging.basicConfig")
     def test_stdio_empty_arg_logs_to_stderr(self, mock_basic, capsys):
@@ -331,10 +377,328 @@ class TestLogFileResolution:
             root.setLevel(saved_level)
 
 
-class TestUnopenableLogFile:
-    """main() turns an unopenable log file into a clean RuntimeError."""
+class TestDefaultLogFile:
+    """The stdio default: a per-user state file, private and rotating
+    (Trac /trac_mcp_server #277, L2). It replaces a fixed, world-readable,
+    symlink-attackable /tmp path."""
 
-    def test_names_the_path_and_raises_runtime_error(self, capsys):
+    def test_xdg_state_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        assert default_mcp_log_file() == str(
+            tmp_path / "xdg" / "trac-mcp-server" / "server.log"
+        )
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_blank_xdg_state_home_is_unset(self, monkeypatch, blank):
+        monkeypatch.setenv("XDG_STATE_HOME", blank)
+        assert default_mcp_log_file() == os.path.join(
+            os.environ["HOME"],
+            ".local",
+            "state",
+            "trac-mcp-server",
+            "server.log",
+        )
+
+    def test_home_fallback_follows_home_at_call_time(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path / "other"))
+        assert default_mcp_log_file() == str(
+            tmp_path
+            / "other"
+            / ".local"
+            / "state"
+            / "trac-mcp-server"
+            / "server.log"
+        )
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_rotating_handler_on_the_default(
+        self, mock_basic, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        setup_logging(mode="mcp")
+
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert isinstance(
+                handler, logging.handlers.RotatingFileHandler
+            )
+            assert handler.maxBytes == 5 * 1024 * 1024
+            assert handler.backupCount == 3
+            assert handler.baseFilename == default_mcp_log_file()
+        finally:
+            handler.close()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_modes_do_not_depend_on_the_umask(
+        self, mock_basic, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        old = os.umask(0)
+        try:
+            setup_logging(mode="mcp")
+        finally:
+            os.umask(old)
+
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            state_dir = tmp_path / "xdg" / "trac-mcp-server"
+            assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+            assert (
+                stat.S_IMODE(os.stat(handler.baseFilename).st_mode)
+                == 0o600
+            )
+        finally:
+            handler.close()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    def test_rotation_keeps_the_new_file_private(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr(
+            "trac_mcp_server.logger._DEFAULT_LOG_MAX_BYTES", 200
+        )
+        root = logging.getLogger()
+        saved_handlers = root.handlers[:]
+        saved_level = root.level
+        root.handlers.clear()
+        old = os.umask(0)
+        try:
+            setup_logging(mode="mcp", level="INFO")
+            for i in range(20):
+                logging.getLogger("trac_mcp_server.test277").info(
+                    "rotating line %d %s", i, "x" * 40
+                )
+            base = default_mcp_log_file()
+            assert os.path.exists(base + ".1")
+            assert stat.S_IMODE(os.stat(base).st_mode) == 0o600
+        finally:
+            os.umask(old)
+            for h in root.handlers[:]:
+                h.close()
+                root.removeHandler(h)
+            for h in saved_handlers:
+                root.addHandler(h)
+            root.setLevel(saved_level)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_explicit_file_is_created_0600_and_plain(
+        self, mock_basic, tmp_path
+    ):
+        path = tmp_path / "explicit.log"
+        old = os.umask(0)
+        try:
+            setup_logging(mode="mcp", log_file=str(path))
+        finally:
+            os.umask(old)
+
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert not isinstance(
+                handler, logging.handlers.RotatingFileHandler
+            )
+        finally:
+            handler.close()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_http_log_file_is_created_0600(self, mock_basic, tmp_path):
+        path = tmp_path / "http.log"
+        old = os.umask(0)
+        try:
+            setup_logging(mode="http", log_file=str(path))
+        finally:
+            os.umask(old)
+
+        try:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        finally:
+            _close(_file_handlers(mock_basic.call_args[1]["handlers"]))
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX modes")
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_an_existing_file_keeps_its_mode(
+        self, mock_basic, tmp_path
+    ):
+        path = tmp_path / "old.log"
+        path.write_text("")
+        path.chmod(0o640)
+        setup_logging(mode="mcp", log_file=str(path))
+
+        _close([_mcp_file_handler(mock_basic)])
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_explicit_file_in_a_missing_directory_still_raises(
+        self, mock_basic, tmp_path
+    ):
+        with pytest.raises(OSError):
+            setup_logging(
+                mode="mcp", log_file=str(tmp_path / "nope" / "x.log")
+            )
+        assert not (tmp_path / "nope").exists()
+        mock_basic.assert_not_called()
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_unopenable_default_falls_back_to_stderr(
+        self, mock_basic, monkeypatch, tmp_path, capsys
+    ):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("a file where the state dir must go")
+        monkeypatch.setenv("XDG_STATE_HOME", str(blocker))
+        setup_logging(mode="mcp")
+
+        kwargs = mock_basic.call_args[1]
+        assert "filename" not in kwargs
+        handlers = kwargs["handlers"]
+        assert len(handlers) == 1
+        assert type(handlers[0]) is logging.StreamHandler
+        assert handlers[0].stream is sys.stderr
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        lines = captured.err.splitlines()
+        assert len(lines) == 1
+        assert lines[0].startswith(
+            "WARNING: cannot open default log file "
+            f"{blocker}/trac-mcp-server/server.log: "
+        )
+        assert lines[0].endswith("; logging to stderr")
+
+    @pytest.mark.skipif(
+        os.name != "posix"
+        or (hasattr(os, "geteuid") and os.geteuid() == 0),
+        reason="needs POSIX permissions enforced",
+    )
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_read_only_state_dir_falls_back_to_stderr(
+        self, mock_basic, monkeypatch, tmp_path, capsys
+    ):
+        state = tmp_path / "xdg" / "trac-mcp-server"
+        state.mkdir(parents=True)
+        state.chmod(0o500)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg"))
+        try:
+            setup_logging(mode="mcp")
+        finally:
+            state.chmod(0o700)
+
+        handlers = mock_basic.call_args[1]["handlers"]
+        assert handlers[0].stream is sys.stderr
+        assert "cannot open default log file" in capsys.readouterr().err
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_explicit_unopenable_file_is_not_a_fallback(
+        self, mock_basic, tmp_path, capsys
+    ):
+        blocker = tmp_path / "blocker"
+        blocker.write_text("x")
+        with pytest.raises(OSError):
+            setup_logging(
+                mode="mcp", log_file=str(blocker / "sub" / "x.log")
+            )
+        assert (
+            "cannot open default log file"
+            not in capsys.readouterr().err
+        )
+
+
+class TestLevelParameter:
+    """``level`` is what main() resolves from LOG_LEVEL / YAML
+    ``logging.level``; debug beats it, it beats the LOG_LEVEL env var that
+    direct callers still get (Trac /trac_mcp_server #277)."""
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_level_sets_the_level(self, mock_basic):
+        setup_logging(mode="cli", level="ERROR")
+        assert mock_basic.call_args[1]["level"] == logging.ERROR
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_level_is_case_insensitive(self, mock_basic):
+        setup_logging(mode="cli", level="error")
+        assert mock_basic.call_args[1]["level"] == logging.ERROR
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_debug_beats_level(self, mock_basic):
+        setup_logging(mode="cli", debug=True, level="ERROR")
+        assert mock_basic.call_args[1]["level"] == logging.DEBUG
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_level_beats_env(self, mock_basic, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        setup_logging(mode="cli", level="ERROR")
+        assert mock_basic.call_args[1]["level"] == logging.ERROR
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_none_level_keeps_the_mode_default(self, mock_basic):
+        setup_logging(mode="mcp", log_file="", level=None)
+        assert mock_basic.call_args[1]["level"] == logging.WARNING
+
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_blank_env_level_is_unset(self, mock_basic, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", " ")
+        setup_logging(mode="mcp", log_file="")
+        assert mock_basic.call_args[1]["level"] == logging.WARNING
+
+
+class TestMainPassesResolvedSettings:
+    """main() resolves debug/level/file after the server config and hands
+    them to setup_logging (Trac /trac_mcp_server #277, M15)."""
+
+    def _main_kwargs(self, overrides=None):
+        with (
+            patch(
+                "trac_mcp_server.mcp.server.bootstrap_server_config",
+                return_value=SimpleNamespace(transport="http"),
+            ),
+            patch("trac_mcp_server.mcp.server.setup_logging") as setup,
+            patch(
+                "trac_mcp_server.mcp.server.load_declared_instances",
+                side_effect=ValueError("stop here"),
+            ),
+            pytest.raises(StartupError),
+        ):
+            asyncio.run(main(config_overrides=overrides))
+        return setup.call_args[1]
+
+    def test_yaml_settings_reach_setup_logging(self, isolated_config):
+        d = isolated_config / ".trac_mcp"
+        d.mkdir()
+        (d / "config.yml").write_text(
+            "trac:\n  debug: true\n"
+            "logging:\n  level: ERROR\n  file: /from/yaml.log\n"
+        )
+        kwargs = self._main_kwargs()
+        assert kwargs["debug"] is True
+        assert kwargs["level"] == "ERROR"
+        assert kwargs["log_file"] == "/from/yaml.log"
+
+    def test_log_file_override_beats_yaml(self, isolated_config):
+        d = isolated_config / ".trac_mcp"
+        d.mkdir()
+        (d / "config.yml").write_text(
+            "logging:\n  file: /from/yaml.log\n"
+        )
+        kwargs = self._main_kwargs({"log_file": "/cli.log"})
+        assert kwargs["log_file"] == "/cli.log"
+
+    def test_nothing_set_passes_the_mode_defaults(
+        self, isolated_config
+    ):
+        kwargs = self._main_kwargs()
+        assert kwargs["debug"] is False
+        assert kwargs["level"] is None
+        assert kwargs["log_file"] is None
+
+
+class TestUnopenableLogFile:
+    """main() turns an unopenable log file into a clean StartupError."""
+
+    def test_names_the_path_and_raises_startup_error(self, capsys):
         err = FileNotFoundError(
             2, "No such file or directory", "/nope/x.log"
         )
@@ -347,7 +711,7 @@ class TestUnopenableLogFile:
                 "trac_mcp_server.mcp.server.setup_logging",
                 side_effect=err,
             ),
-            pytest.raises(RuntimeError, match="/nope/x.log") as exc,
+            pytest.raises(StartupError, match="/nope/x.log") as exc,
         ):
             asyncio.run(
                 main(config_overrides={"log_file": "/nope/x.log"})
@@ -364,7 +728,7 @@ class TestUnopenableLogFile:
                 "trac_mcp_server.mcp.server.bootstrap_server_config",
                 return_value=SimpleNamespace(transport="http"),
             ),
-            pytest.raises(RuntimeError, match="Cannot open log file"),
+            pytest.raises(StartupError, match="Cannot open log file"),
         ):
             asyncio.run(main(config_overrides={"log_file": path}))
 
