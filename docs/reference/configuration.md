@@ -165,10 +165,10 @@ These govern the MCP server process itself -- transport, bind address, and auth 
 | `TRAC_MCP_DISABLED_TOOLS` | -- | Comma-separated tool names to leave out (YAML `disabled_tools`); see [Tool Architecture](tool-architecture.md#disabling-individual-tools). Replaces the YAML list; an empty value counts as unset. |
 | `TRAC_MCP_ALLOWED_HOSTS` | -- | Comma-separated `Host` headers accepted besides loopback and the bind address (`host[:port]` or `host:*`). Replaces the YAML `allowed_hosts` list; empty counts as unset. |
 | `TRAC_MCP_ALLOWED_ORIGINS` | -- | Comma-separated `Origin` headers accepted, with scheme (`http://trac-mcp:8080`). Replaces the YAML `allowed_origins` list; empty counts as unset. |
-| `TRAC_MCP_FILE_ACCESS` | `off` for `http`, `local` for `stdio` | Whether file tools may read and write paths on the server (`--file-access`, YAML `file_access`): `local` or `off`; any other value is refused at startup. |
+| `TRAC_MCP_FILE_ACCESS` | `off` for `http`, `local` for `stdio` | Whether file tools may read and write paths on the server (`--file-access`, YAML `file_access`): `local` or `off`. An empty value counts as unset (YAML, else the transport default); any other value is refused at startup. |
 | `TRAC_MCP_MAX_INLINE_BYTES` | `5242880` (5 MiB) | Largest inline file-tool result in bytes (YAML `max_inline_bytes`); must be positive, zero or negative is refused at startup, an empty value counts as unset. |
 
-An empty `TRAC_MCP_PORT` counts as unset, like every other `TRAC_MCP_*` string here: the YAML `port`, else `8080`, applies.
+An empty or blank `TRAC_MCP_PORT` counts as unset: the YAML `port`, else `8080`, applies. The same holds for `TRAC_MCP_MAX_INLINE_BYTES`.
 
 See [HTTP Transport](http-transport.md) for the full picture, including the bind-safety rule that refuses an unauthenticated non-loopback bind.
 
@@ -186,7 +186,7 @@ See [MCP Tools: Write Gate Status](mcp-tools.md#write-gate-status) for the respo
 
 ## .env File Support
 
-trac-mcp-server uses [python-dotenv](https://pypi.org/project/python-dotenv/) to load a `.env` file, searched from the working directory upward: the nearest `.env` wins. (An editable install therefore no longer reads the checkout's `.env` when started from another directory, and an installed copy reads the `.env` of its working directory.) Values from `.env` are treated as environment variables and sit between real shell env vars and config file values in the precedence order. You can use `.env` alongside a YAML config file -- for example, store non-secret settings in `config.yaml` and credentials in `.env`.
+trac-mcp-server uses [python-dotenv](https://pypi.org/project/python-dotenv/) to load a `.env` file, searched from the working directory upward: the nearest `.env` wins, and the search stops after the first directory that holds a `.git` or is your home directory, so a `.env` above either is never read. A `.env` that you do not own, or that group or others can write, is skipped with a warning (POSIX). (An editable install therefore no longer reads the checkout's `.env` when started from another directory, and an installed copy reads the `.env` of its working directory.) Values from `.env` are treated as environment variables and sit between real shell env vars and config file values in the precedence order. You can use `.env` alongside a YAML config file -- for example, store non-secret settings in `config.yaml` and credentials in `.env`.
 
 ```bash
 # .env

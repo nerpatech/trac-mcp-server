@@ -45,6 +45,6 @@ ENV TRAC_MCP_TRANSPORT=http TRAC_MCP_HOST=0.0.0.0 TRAC_MCP_PORT=8080
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=12 --start-period=15s \
-    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://localhost:%s/healthz' % os.environ.get('TRAC_MCP_PORT', '8080'))"
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://localhost:%s/healthz' % os.environ.get('TRAC_MCP_PORT') or '8080')"
 
 ENTRYPOINT ["trac-mcp-server"]

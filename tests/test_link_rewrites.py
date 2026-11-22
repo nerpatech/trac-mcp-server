@@ -357,23 +357,15 @@ def test_local_read_loads_dotenv_so_interpolation_resolves(
 ):
     """``${VAR}`` in a rule reads the environment, and trac-mcp never
     loaded .env: ``${LINKREWRITE_BASE}/wiki/`` became ``/wiki/``."""
-    import dotenv
-
-    env_file = isolated_config / "rules.env"
+    env_file = isolated_config / ".env"
     env_file.write_text("LINKREWRITE_BASE=https://trac.example\n")
     # isolated_config disables .env; enable it for this file only. The
-    # real load_dotenv finds .env from the module's directory, so point
-    # it at the tmp file. setenv then delenv records "unset" so the
-    # variable load_dotenv sets is removed at teardown.
+    # lookup finds the .env in the working directory. setenv then delenv
+    # records "unset" so the variable load_dotenv sets is removed at
+    # teardown.
     monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
     monkeypatch.setenv("LINKREWRITE_BASE", "x")
     monkeypatch.delenv("LINKREWRITE_BASE")
-    monkeypatch.setattr(
-        "trac_mcp_server.config_bootstrap.load_dotenv",
-        lambda *_args, **_kwargs: dotenv.load_dotenv(
-            dotenv_path=env_file
-        ),
-    )
     _write_config(
         isolated_config,
         "export:\n  link_rewrites:\n"

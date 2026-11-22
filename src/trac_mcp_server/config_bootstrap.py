@@ -8,7 +8,9 @@ call this helper to resolve the layered config precedence without duplicating
 logic.
 """
 
+import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import dotenv.main
@@ -23,19 +25,85 @@ from .config_schema import ServerConfig, build_config
 from .instances import load_identities
 from .link_rewrites import LinkRewrites, validate_link_rewrites
 
+logger = logging.getLogger(__name__)
+
+
+def _dotenv_disabled() -> bool:
+    """``PYTHON_DOTENV_DISABLED``, read as python-dotenv reads it."""
+    check = getattr(dotenv.main, "_load_dotenv_disabled", None)
+    if check is not None:
+        return bool(check())
+    value = os.environ.get("PYTHON_DOTENV_DISABLED")
+    return value is not None and value.casefold() in {
+        "1",
+        "true",
+        "t",
+        "yes",
+        "y",
+    }
+
+
+def _find_dotenv_bounded(start: Path) -> Path | None:
+    """The nearest ``.env`` from ``start`` upward, checking each directory
+    and then stopping after the first one that holds a ``.git`` (a
+    directory, or the file of a linked worktree) or is the home directory
+    (resolved; skipped if it cannot be). Above either, a file belongs to
+    another project or to a parent tree nobody chose (``/tmp``, say), the
+    way ``find_mcp_json`` bounds its search (Trac /trac_mcp_server #278).
+
+    On POSIX a ``.env`` that another user owns, or that group or others
+    can write, is not loaded: a warning names it and the search stops, so
+    a planted file is neither read nor stepped over for one further up.
+    """
+    try:
+        home_dir: Path | None = Path.home().resolve()
+    except (RuntimeError, OSError):
+        home_dir = None
+    for directory in [start, *start.parents]:
+        candidate = directory / ".env"
+        if candidate.is_file():
+            if os.name == "posix":
+                st = candidate.stat()
+                reason = None
+                if st.st_uid != os.getuid():
+                    reason = "it is not owned by the current user"
+                elif st.st_mode & 0o022:
+                    reason = "it is writable by group or others"
+                if reason is not None:
+                    logger.warning("Ignoring %s: %s", candidate, reason)
+                    return None
+            return candidate
+        if os.path.lexists(directory / ".git"):
+            return None
+        if home_dir is not None:
+            try:
+                if directory.resolve() == home_dir:
+                    return None
+            except (RuntimeError, OSError):
+                pass
+    return None
+
 
 def _load_dotenv_from_cwd() -> None:
-    """Load the nearest ``.env``, searching from the working directory up.
+    """Load the nearest ``.env``, searched from the working directory up
+    to the first ``.git`` or the home directory (``_find_dotenv_bounded``).
 
     A bare ``load_dotenv()`` calls ``find_dotenv()`` with ``usecwd=False``,
     which walks up from the *calling module's* directory instead: an
     editable install then read the checkout's ``.env`` wherever it was
     started, and a site-packages install never found a project's
-    (Trac /trac_mcp_server #276). ``find_dotenv`` is resolved through the
-    ``dotenv.main`` module at call time, so a test's patch of it reaches
-    this call; ``PYTHON_DOTENV_DISABLED`` is honoured by ``load_dotenv``.
+    (Trac /trac_mcp_server #276). ``find_dotenv(usecwd=True)`` would fix
+    the start but walks to ``/``, so it would load a ``.env`` planted in
+    a shared parent. ``PYTHON_DOTENV_DISABLED`` is honoured here, before
+    the working directory is touched: this walk does not go through
+    ``dotenv.main.find_dotenv``, which the offline test run patches as
+    its fallback switch.
     """
-    load_dotenv(dotenv.main.find_dotenv(usecwd=True))
+    if _dotenv_disabled():
+        return
+    path = _find_dotenv_bounded(Path(os.getcwd()))
+    if path is not None:
+        load_dotenv(path)
 
 
 def bootstrap_config(
@@ -48,7 +116,7 @@ def bootstrap_config(
     Performs the six-step bootstrap sequence:
 
     1. ``_load_dotenv_from_cwd()`` — loads the nearest ``.env`` (searched
-       from the working directory upward) so env vars are available
+       from the working directory up to the first ``.git`` or home) so env vars are available
        before any reads (idempotent; safe to call multiple times).
     2. ``discover_config_files()`` — finds YAML config files in precedence
        order; if any exist, loads and merges them via
@@ -296,8 +364,8 @@ def bootstrap_server_config(
         if port_override is not None
         else os.getenv("TRAC_MCP_PORT")
     )
-    # An empty or blank TRAC_MCP_PORT counts as unset, like every other
-    # TRAC_MCP_* string, so ``${TRAC_MCP_PORT:-}`` keeps the YAML port.
+    # An empty or blank TRAC_MCP_PORT counts as unset, so
+    # ``${TRAC_MCP_PORT:-}`` in a compose file keeps the YAML port.
     # (The CLI override is an int or None and never blank.)
     if isinstance(port_raw, str) and not port_raw.strip():
         port_raw = None

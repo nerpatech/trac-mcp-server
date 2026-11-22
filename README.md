@@ -56,7 +56,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_MCP_ALLOWED_HOSTS` | No | -- | Comma-separated `Host` headers the `http` transport accepts besides loopback and the bind address, e.g. `trac-mcp:8080` for a docker-compose service name; replaces YAML `allowed_hosts` |
 | `TRAC_MCP_ALLOWED_ORIGINS` | No | -- | Comma-separated `Origin` headers the `http` transport accepts, with scheme, e.g. `http://trac-mcp:8080`; replaces YAML `allowed_origins` |
 | `TRAC_WRITE_GATE` | No | `true` | Write gate, on by default: refuses a write whose text carries a link that does not resolve (`link_check_failed`). `0`, `false`, `no` or `off` turns it off; any other value, an empty one included, leaves it on. YAML `trac.write_gate`. See [Configuration Reference: Write gate](docs/reference/configuration.md#write-gate) |
-| `TRAC_MCP_FILE_ACCESS` | No | `off` for `http`, `local` for `stdio` | Whether file tools may read and write paths on the server: `local` or `off`. See [HTTP Transport](docs/reference/http-transport.md) |
+| `TRAC_MCP_FILE_ACCESS` | No | `off` for `http`, `local` for `stdio` | Whether file tools may read and write paths on the server: `local` or `off`. Empty counts as unset; any other value is refused at startup. See [HTTP Transport](docs/reference/http-transport.md) |
 | `TRAC_MCP_MAX_INLINE_BYTES` | No | `5242880` (5 MiB) | Largest inline file-tool result in bytes; must be positive. See [MCP Tools](docs/reference/mcp-tools.md) |
 | `TRAC_IDENTITIES` | No | -- | Path to a file mapping per-caller bearer tokens to their own Trac username/password (`http` transport only) |
 
