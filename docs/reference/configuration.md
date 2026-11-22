@@ -139,8 +139,8 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_USERNAME` | Yes | -- | Trac username for XML-RPC authentication |
 | `TRAC_PASSWORD` | Yes | -- | Trac password for XML-RPC authentication |
 | `TRAC_INSECURE` | No | `false` | Skip SSL certificate verification (development only) |
-| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`): the level is DEBUG whatever `LOG_LEVEL` or `logging.level` say. See [Logging](#logging) |
-| `LOG_LEVEL` | No | `WARNING` (stdio) / `INFO` (http) | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (any case; a blank value counts as unset). Overrides YAML `logging.level`. An unknown name stops startup naming the variable. See [Logging](#logging) |
+| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`): the level is DEBUG, and beats `LOG_LEVEL` when it is the environment variable that is true. See [Logging](#logging) |
+| `LOG_LEVEL` | No | `WARNING` (stdio) / `INFO` (http) | Log level: `DEBUG`, `INFO`, `WARNING` (`WARN`), `ERROR` or `CRITICAL` (`FATAL`), any case; a blank value counts as unset. Overrides YAML `logging.level` and `trac.debug`. An unknown name stops startup naming the variable. See [Logging](#logging) |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Maximum parallel XML-RPC requests to Trac |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
@@ -181,23 +181,26 @@ Three settings, each resolved from the same layers (Trac /trac_mcp_server #277).
 
 **Level**, highest first:
 
-1. `TRAC_DEBUG` true (or YAML `trac.debug: true`): DEBUG.
+1. The `TRAC_DEBUG` environment variable, if true: DEBUG.
 2. The `LOG_LEVEL` environment variable (a blank value counts as unset).
-3. YAML `logging.level`.
-4. The mode default: WARNING for stdio, INFO for http.
+3. YAML `trac.debug: true`: DEBUG. An explicit `TRAC_DEBUG=false` turns this off, but picks no level by itself: the next steps still apply.
+4. YAML `logging.level` (a blank value, such as a `${VAR}` that interpolated to nothing, counts as unset).
+5. The mode default: WARNING for stdio, INFO for http.
 
-`LOG_LEVEL` and `logging.level` accept DEBUG, INFO, WARNING, ERROR and CRITICAL in any case. Any other name stops startup with a message that names the source (`LOG_LEVEL` or `logging.level`). Leaving `level` out of the file is not the same as `level: INFO`: it keeps stdio at WARNING.
+So the environment always beats the config file: `LOG_LEVEL=ERROR` wins over `trac.debug: true`, and DEBUG from `TRAC_DEBUG` wins over any `LOG_LEVEL`.
+
+`LOG_LEVEL` and `logging.level` accept DEBUG, INFO, WARNING, WARN, ERROR, CRITICAL and FATAL in any case (`WARN` means WARNING and `FATAL` means CRITICAL). Any other name stops startup with a message that names the source (`LOG_LEVEL` or `logging.level`); an unknown `LOG_LEVEL` used to fall back to INFO without a word. `LOG_LEVEL` has always been read; what is new is that the config file's `trac.debug` and `logging.level` and `TRAC_DEBUG` take effect. Leaving `level` out of the file is not the same as `level: INFO`: it keeps stdio at WARNING.
 
 **File**, highest first:
 
 1. `--log-file`.
 2. The `LOG_FILE` environment variable (set but empty means no file).
 3. YAML `logging.file`.
-4. The default: for stdio, `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset or blank; for http, no file.
+4. The default: for stdio, `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset, blank or not an absolute path (the XDG spec says to ignore a relative one); for http, no file.
 
-An empty or blank value at any step means no file: stdio then logs to stderr, http logs to stderr only.
+An empty or blank value at any step means no file: stdio then logs to stderr, http logs to stderr only. A leading `~` in a path from any of the first three steps is expanded to the home directory; a relative path is resolved against the working directory the server starts in, so prefer an absolute one in a service unit.
 
-The stdio default file is created for you: its directory with mode 0700, the file with 0600, and it rotates at 5 MiB, keeping three old files (`server.log.1` to `.3`). If it cannot be created (a read-only home, say), the server prints one `WARNING: cannot open default log file ...; logging to stderr` line and carries on logging to stderr. A file you name yourself (any of the first three steps) is a plain append file, created with mode 0600 if it does not exist, never rotated and with no directory created for it; if it cannot be opened, startup stops with `ERROR: Cannot open log file`.
+The stdio default file is created for you: its directory with mode 0700, the file with 0600, and it rotates at 5 MiB, keeping three old files (`server.log.1` to `.3`). Several server processes may share it: a rollover takes a lock on `server.log.lock` beside it, so processes do not rotate each other's fresh file away. If it cannot be created (a read-only home, say), the server prints one `WARNING: cannot open default log file ...; logging to stderr` line and carries on logging to stderr. A file you name yourself (any of the first three steps) is a plain append file, created with mode 0600 if it does not exist, never rotated and with no directory created for it; if it cannot be opened, startup stops with `ERROR: Cannot open log file`.
 
 ## Write gate
 

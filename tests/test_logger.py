@@ -27,6 +27,7 @@ import pytest
 
 from trac_mcp_server.logger import (
     JsonFormatter,
+    _PrivateRotatingFileHandler,
     default_mcp_log_file,
     logging_reaches_stderr,
     setup_logging,
@@ -605,6 +606,178 @@ class TestDefaultLogFile:
             "cannot open default log file"
             not in capsys.readouterr().err
         )
+
+
+class TestXdgStateHomeMustBeAbsolute:
+    """The XDG spec: a relative XDG_STATE_HOME is invalid and ignored."""
+
+    @pytest.mark.parametrize(
+        "relative", ["state", "./state", "~/state"]
+    )
+    def test_relative_value_falls_back_to_home(
+        self, monkeypatch, relative
+    ):
+        monkeypatch.setenv("XDG_STATE_HOME", relative)
+        assert default_mcp_log_file() == os.path.join(
+            os.environ["HOME"],
+            ".local",
+            "state",
+            "trac-mcp-server",
+            "server.log",
+        )
+
+
+class TestLogFileTilde:
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_log_file_env_tilde_is_expanded(
+        self, mock_basic, monkeypatch
+    ):
+        monkeypatch.setenv("LOG_FILE", "~/t.log")
+        home = os.environ["HOME"]
+        os.makedirs(home)
+        setup_logging(mode="mcp")
+
+        handler = _mcp_file_handler(mock_basic)
+        try:
+            assert handler.baseFilename == os.path.join(home, "t.log")
+        finally:
+            handler.close()
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [("WARN", logging.WARNING), ("fatal", logging.CRITICAL)],
+    )
+    @patch("trac_mcp_server.logger.logging.basicConfig")
+    def test_warn_and_fatal_levels(self, mock_basic, name, expected):
+        setup_logging(mode="cli", level=name)
+        assert mock_basic.call_args[1]["level"] == expected
+
+
+def _record(handler, text):
+    return logging.LogRecord(
+        "t277", logging.INFO, __file__, 1, text, (), None
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock and inode checks")
+class TestRotationAcrossProcesses:
+    """Two processes share the per-user default file. Handler instances on
+    one path stand in for them: after A rotates, B still holds the
+    renamed file's descriptor. The stdlib handler then counts B's own
+    writes into that old file, rotates A's fresh file away, and fills the
+    backups with fragments."""
+
+    LINE = "x" * 59  # 60 bytes with the newline
+    MAX = 200
+
+    def _pair(self, path):
+        fmt = logging.Formatter("%(message)s")
+        handlers = []
+        for _ in range(2):
+            h = _PrivateRotatingFileHandler(
+                str(path), maxBytes=self.MAX, backupCount=3
+            )
+            h.setFormatter(fmt)
+            handlers.append(h)
+        return handlers
+
+    def _emit(self, handler, text):
+        handler.handle(_record(handler, text))
+
+    def _fill_through(self, a, path):
+        n = 0
+        while not os.path.exists(str(path) + ".1"):
+            self._emit(a, self.LINE)
+            n += 1
+            assert n < 50, "A never rotated"
+
+    def test_b_follows_a_rotation_without_rotating_again(
+        self, tmp_path
+    ):
+        path = tmp_path / "server.log"
+        a, b = self._pair(path)
+        try:
+            self._emit(b, self.LINE)
+            self._fill_through(a, path)
+            first_backup = (tmp_path / "server.log.1").read_bytes()
+
+            self._emit(b, "B-after-rotation")
+
+            assert "B-after-rotation" in path.read_text()
+            assert (
+                tmp_path / "server.log.1"
+            ).read_bytes() == first_backup
+            assert not (tmp_path / "server.log.2").exists()
+        finally:
+            a.close()
+            b.close()
+
+    def test_no_backup_is_a_fragment(self, tmp_path):
+        path = tmp_path / "server.log"
+        a, b = self._pair(path)
+        try:
+            self._emit(b, self.LINE)
+            self._fill_through(a, path)
+            for _ in range(3):
+                self._emit(b, self.LINE)
+            backups = sorted(tmp_path.glob("server.log.[0-9]"))
+            assert backups
+            for backup in backups:
+                # A rollover leaves at least maxBytes minus one line.
+                assert backup.stat().st_size >= self.MAX - 60, backup
+        finally:
+            a.close()
+            b.close()
+
+    def test_rollover_that_another_process_just_did_is_skipped(
+        self, tmp_path
+    ):
+        """Inside the lock the size is checked again: B decided to roll,
+        A rolled first, so B only reopens."""
+        path = tmp_path / "server.log"
+        a, b = self._pair(path)
+        try:
+            self._emit(b, self.LINE)
+            self._emit(b, self.LINE)
+            self._emit(b, self.LINE)
+            record = _record(b, self.LINE)
+            assert b.shouldRollover(record)
+            self._emit(a, self.LINE)  # A rolls the full file first
+            assert (tmp_path / "server.log.1").exists()
+            b.doRollover()
+            assert not (tmp_path / "server.log.2").exists()
+            assert (
+                os.fstat(b.stream.fileno()).st_ino
+                == os.stat(path).st_ino
+            )
+        finally:
+            a.close()
+            b.close()
+
+    def test_lock_file_is_private_and_next_to_the_log(self, tmp_path):
+        path = tmp_path / "server.log"
+        a, b = self._pair(path)
+        try:
+            self._emit(b, self.LINE)
+            self._fill_through(a, path)
+            lock = tmp_path / "server.log.lock"
+            assert lock.exists()
+            assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        finally:
+            a.close()
+            b.close()
+
+    def test_a_deleted_log_is_recreated(self, tmp_path):
+        path = tmp_path / "server.log"
+        a, _b = self._pair(path)
+        try:
+            self._emit(a, "before")
+            path.unlink()
+            self._emit(a, "after")
+            assert path.read_text() == "after\n"
+        finally:
+            a.close()
+            _b.close()
 
 
 class TestLevelParameter:

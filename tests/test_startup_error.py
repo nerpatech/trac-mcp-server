@@ -119,3 +119,70 @@ class TestMainRaisesStartupError:
         err = capsys.readouterr().err
         assert "ERROR: Logging configuration error" in err
         assert "LOG_LEVEL" in err
+
+
+class TestPermissionsFileError:
+    """--permissions-file was the one startup failure with no handler: an
+    unreadable or invalid file gave a traceback (Trac /trac_mcp_server
+    #277 review)."""
+
+    def _main(self, path):
+        with (
+            patch(
+                "trac_mcp_server.mcp.server.bootstrap_server_config",
+                return_value=SimpleNamespace(transport="http"),
+            ),
+            patch("trac_mcp_server.mcp.server.setup_logging"),
+            pytest.raises(
+                StartupError, match="Permissions file"
+            ) as exc,
+        ):
+            asyncio.run(
+                main(config_overrides={"permissions_file": path})
+            )
+        return exc.value
+
+    def _error_lines(self, capsys):
+        return [
+            line
+            for line in capsys.readouterr().err.splitlines()
+            if line.startswith("ERROR")
+        ]
+
+    def test_missing_file(self, capsys, tmp_path):
+        path = str(tmp_path / "nope.txt")
+        err = self._main(path)
+
+        assert isinstance(err.__cause__, OSError)
+        lines = self._error_lines(capsys)
+        assert len(lines) == 1
+        assert lines[0].startswith("ERROR: Permissions file error: ")
+        assert path in lines[0]
+
+    def test_a_directory(self, capsys, tmp_path):
+        self._main(str(tmp_path))
+        lines = self._error_lines(capsys)
+        assert len(lines) == 1
+        assert lines[0].startswith("ERROR: Permissions file error: ")
+
+    def test_invalid_permission(self, capsys, tmp_path):
+        path = tmp_path / "perm.txt"
+        path.write_text("ticket_view\n")
+        self._main(str(path))
+        lines = self._error_lines(capsys)
+        assert len(lines) == 1
+        assert "Invalid permission 'ticket_view'" in lines[0]
+
+    def test_empty_file(self, capsys, tmp_path):
+        path = tmp_path / "perm.txt"
+        path.write_text("# nothing\n")
+        self._main(str(path))
+        assert "No permissions found" in self._error_lines(capsys)[0]
+
+    def test_not_utf8(self, capsys, tmp_path):
+        path = tmp_path / "perm.txt"
+        path.write_bytes(b"\xff\xfe\x00bad\n")
+        self._main(str(path))
+        lines = self._error_lines(capsys)
+        assert len(lines) == 1
+        assert lines[0].startswith("ERROR: Permissions file error: ")

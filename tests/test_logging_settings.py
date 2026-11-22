@@ -97,7 +97,15 @@ class TestLevel:
             resolve_logging_settings(None)
         text = str(exc.value)
         assert "LOG_LEVEL" in text and "LOUD" in text
-        for name in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        for name in (
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "WARN",
+            "ERROR",
+            "CRITICAL",
+            "FATAL",
+        ):
             assert name in text
 
     def test_unknown_yaml_level_names_the_source(self, isolated_config):
@@ -107,6 +115,91 @@ class TestLevel:
         text = str(exc.value)
         assert "logging.level" in text and "loud" in text
         assert "CRITICAL" in text
+
+    @pytest.mark.parametrize(
+        ("given", "expected"),
+        [
+            ("warn", "WARNING"),
+            ("WARN", "WARNING"),
+            ("fatal", "CRITICAL"),
+            ("Fatal", "CRITICAL"),
+        ],
+    )
+    def test_warn_and_fatal_are_accepted_from_env(
+        self, monkeypatch, given, expected
+    ):
+        monkeypatch.setenv("LOG_LEVEL", given)
+        assert resolve_logging_settings(None).level == expected
+
+    def test_warn_and_fatal_are_accepted_from_yaml(
+        self, isolated_config
+    ):
+        _yaml(isolated_config, "logging:\n  level: warn\n")
+        assert resolve_logging_settings(None).level == "WARNING"
+        _yaml(isolated_config, "logging:\n  level: FATAL\n")
+        assert resolve_logging_settings(None).level == "CRITICAL"
+
+    @pytest.mark.parametrize("blank", ['""', '"  "'])
+    def test_blank_yaml_level_is_unset(self, isolated_config, blank):
+        _yaml(isolated_config, f"logging:\n  level: {blank}\n")
+        assert resolve_logging_settings(None).level is None
+
+    def test_blank_yaml_level_after_interpolation_is_unset(
+        self, isolated_config, monkeypatch
+    ):
+        monkeypatch.delenv("TRAC_TEST_LEVEL", raising=False)
+        _yaml(
+            isolated_config,
+            "logging:\n  level: ${TRAC_TEST_LEVEL:-}\n",
+        )
+        assert resolve_logging_settings(None).level is None
+
+
+class TestDebugVersusLevelPrecedence:
+    """Environment beats YAML, as configuration.md says: TRAC_DEBUG true,
+    then LOG_LEVEL, then YAML trac.debug, then YAML logging.level."""
+
+    def test_env_debug_true_beats_env_level(self, monkeypatch):
+        monkeypatch.setenv("TRAC_DEBUG", "true")
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        assert resolve_logging_settings(None).debug is True
+
+    def test_env_level_beats_yaml_debug(
+        self, isolated_config, monkeypatch
+    ):
+        _yaml(isolated_config, "trac:\n  debug: true\n")
+        monkeypatch.setenv("LOG_LEVEL", "ERROR")
+        settings = resolve_logging_settings(None)
+        assert settings.debug is False
+        assert settings.level == "ERROR"
+
+    def test_env_debug_false_disables_yaml_debug_without_a_level(
+        self, isolated_config, monkeypatch
+    ):
+        _yaml(isolated_config, "trac:\n  debug: true\n")
+        monkeypatch.setenv("TRAC_DEBUG", "false")
+        assert resolve_logging_settings(None) == LoggingSettings(
+            debug=False, level=None, log_file=None
+        )
+
+    def test_env_debug_false_still_takes_the_yaml_level(
+        self, isolated_config, monkeypatch
+    ):
+        _yaml(
+            isolated_config,
+            "trac:\n  debug: true\nlogging:\n  level: ERROR\n",
+        )
+        monkeypatch.setenv("TRAC_DEBUG", "false")
+        settings = resolve_logging_settings(None)
+        assert settings.debug is False
+        assert settings.level == "ERROR"
+
+    def test_yaml_debug_beats_yaml_level(self, isolated_config):
+        _yaml(
+            isolated_config,
+            "trac:\n  debug: true\nlogging:\n  level: ERROR\n",
+        )
+        assert resolve_logging_settings(None).debug is True
 
 
 class TestLogFile:
@@ -136,6 +229,27 @@ class TestLogFile:
         _yaml(isolated_config, "logging:\n  file: /y.log\n")
         monkeypatch.setenv("LOG_FILE", "/e.log")
         assert resolve_logging_settings("/o.log").log_file == "/o.log"
+
+    def test_tilde_is_expanded_from_yaml(self, isolated_config):
+        _yaml(isolated_config, "logging:\n  file: ~/x.log\n")
+        assert resolve_logging_settings(None).log_file == str(
+            isolated_config / "x.log"
+        )
+
+    def test_tilde_is_expanded_from_env_and_override(
+        self, isolated_config, monkeypatch
+    ):
+        monkeypatch.setenv("LOG_FILE", "~/e.log")
+        assert resolve_logging_settings(None).log_file == str(
+            isolated_config / "e.log"
+        )
+        assert resolve_logging_settings("~/o.log").log_file == str(
+            isolated_config / "o.log"
+        )
+
+    def test_relative_path_is_left_for_the_cwd(self, monkeypatch):
+        monkeypatch.setenv("LOG_FILE", "rel/x.log")
+        assert resolve_logging_settings(None).log_file == "rel/x.log"
 
     def test_empty_override_beats_env(self, monkeypatch):
         monkeypatch.setenv("LOG_FILE", "/e.log")

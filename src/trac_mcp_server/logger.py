@@ -16,6 +16,11 @@ from collections.abc import Callable
 from io import TextIOWrapper
 from typing import NamedTuple, cast
 
+try:
+    import fcntl
+except ImportError:  # not POSIX
+    fcntl = None  # type: ignore[assignment]
+
 
 class JsonFormatter(logging.Formatter):
     """Single-line JSON formatter for structured debug output.
@@ -41,13 +46,25 @@ class JsonFormatter(logging.Formatter):
 _DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 _DEFAULT_LOG_BACKUP_COUNT = 3
 
-# The level names LOG_LEVEL and YAML ``logging.level`` accept.
-LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+# The level names LOG_LEVEL and YAML ``logging.level`` accept: the
+# ``logging`` module's names, WARN and FATAL being its aliases, which the
+# old ``getattr(logging, name)`` lookup took too.
+LOG_LEVEL_NAMES = (
+    "DEBUG",
+    "INFO",
+    "WARNING",
+    "WARN",
+    "ERROR",
+    "CRITICAL",
+    "FATAL",
+)
+LOG_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
 
 
 def default_mcp_log_file() -> str:
     """The stdio default log file: ``$XDG_STATE_HOME/trac-mcp-server/
-    server.log`` when ``XDG_STATE_HOME`` is set and not blank, else
+    server.log`` when ``XDG_STATE_HOME`` is set to an absolute path (the
+    XDG spec says to ignore a relative one), else
     ``~/.local/state/trac-mcp-server/server.log``.
 
     A function, so HOME and XDG_STATE_HOME are read at call time. It
@@ -56,7 +73,7 @@ def default_mcp_log_file() -> str:
     server to append through (Trac /trac_mcp_server #277).
     """
     xdg = os.environ.get("XDG_STATE_HOME")
-    if xdg and xdg.strip():
+    if xdg and xdg.strip() and os.path.isabs(xdg):
         base = xdg
     else:
         base = os.path.join(os.path.expanduser("~"), ".local", "state")
@@ -89,7 +106,22 @@ class _PrivateFileHandler(logging.FileHandler):
 class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """A ``RotatingFileHandler`` whose file, and every file it rotates
     in, is created with mode 0600 (``doRollover`` reopens the base path
-    through ``_open``)."""
+    through ``_open``), and that is safe for several processes sharing
+    one file, as the per-user default log is.
+
+    The stdlib handler is not: it decides from ``stream.tell()``, the
+    size of what *this* handler wrote. After another process rotates,
+    this one keeps writing through its descriptor to the renamed file,
+    its count passes ``maxBytes``, and it rotates the other process's
+    fresh file away; the backups fill with fragments. Here the decision
+    is made from the base path's size, after reopening if the path no
+    longer names the open file, and a rollover runs under an exclusive
+    ``flock`` on ``<base>.lock`` (POSIX; elsewhere the stdlib behaviour)
+    that re-checks the size once held, since another process may just
+    have rolled.
+    """
+
+    _pending_len = 0
 
     def _open(self) -> TextIOWrapper:
         return cast(
@@ -102,6 +134,71 @@ class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
                 opener=_private_opener,
             ),
         )
+
+    def _reopen(self) -> None:
+        if self.stream is not None:
+            self.stream.close()
+        self.stream = self._open()
+
+    def _stream_is_current(self) -> bool:
+        """Whether the base path still names the file this handler has
+        open (another process rotated or removed it if not)."""
+        try:
+            on_disk = os.stat(self.baseFilename)
+            held = os.fstat(self.stream.fileno())
+        except OSError:
+            return False
+        return (on_disk.st_dev, on_disk.st_ino) == (
+            held.st_dev,
+            held.st_ino,
+        )
+
+    def _base_size(self) -> int:
+        try:
+            return os.stat(self.baseFilename).st_size
+        except OSError:
+            return 0
+
+    def _needs_rollover(self, pending_len: int) -> bool:
+        size = self._base_size()
+        if not size:
+            # gh-116263, as the stdlib: never roll an empty file.
+            return False
+        if size + pending_len < self.maxBytes:
+            return False
+        # bpo-45401, as the stdlib: only ever roll a regular file.
+        if os.path.exists(self.baseFilename) and not os.path.isfile(
+            self.baseFilename
+        ):
+            return False
+        return True
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        if self.stream is None:  # delay was set
+            self.stream = self._open()
+        if self.maxBytes <= 0:
+            return False
+        if not self._stream_is_current():
+            self._reopen()
+        self._pending_len = len("%s\n" % self.format(record))
+        return self._needs_rollover(self._pending_len)
+
+    def doRollover(self) -> None:
+        if fcntl is None:
+            super().doRollover()
+            return
+        lock_fd = os.open(
+            self.baseFilename + ".lock", os.O_WRONLY | os.O_CREAT, 0o600
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if self._needs_rollover(self._pending_len):
+                super().doRollover()
+            else:
+                # Another process rolled while this one waited.
+                self._reopen()
+        finally:
+            os.close(lock_fd)
 
 
 _LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
@@ -211,7 +308,9 @@ def _resolve_log_file(
         is_default = True
     if not log_file or not log_file.strip():
         return _ResolvedLogFile(None, False)
-    return _ResolvedLogFile(log_file, is_default)
+    # ``~`` and ``~user`` expand whatever the source; a relative path
+    # keeps resolving against the working directory.
+    return _ResolvedLogFile(os.path.expanduser(log_file), is_default)
 
 
 def _open_mcp_file_handler(

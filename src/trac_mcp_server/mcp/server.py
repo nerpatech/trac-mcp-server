@@ -671,7 +671,24 @@ async def main(config_overrides: dict | None = None):
     )
     allowed_permissions = None
     if permissions_file:
-        allowed_permissions = load_permissions_file(permissions_file)
+        try:
+            allowed_permissions = load_permissions_file(
+                permissions_file
+            )
+        except OSError as e:
+            reason = e.strerror or str(e)
+            where = f" ({e.filename})" if e.filename else ""
+            sys.stderr.write(
+                f"ERROR: Permissions file error: {reason}{where}\n"
+            )
+            raise StartupError(
+                f"Permissions file error: {reason}{where}"
+            ) from e
+        except ValueError as e:
+            # Bad content, and a file that is not valid UTF-8
+            # (UnicodeDecodeError is a ValueError).
+            sys.stderr.write(f"ERROR: Permissions file error: {e}\n")
+            raise StartupError(f"Permissions file error: {e}") from e
         logger.info(
             "Loaded %d permissions from %s",
             len(allowed_permissions),

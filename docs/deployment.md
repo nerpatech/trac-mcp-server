@@ -86,7 +86,7 @@ trac-mcp-server supports three configuration sources: CLI flags, environment var
 | `TRAC_USERNAME` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac username |
 | `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
-| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`); the level is DEBUG whatever `LOG_LEVEL` or `logging.level` say |
+| `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`); `TRAC_DEBUG=true` beats `LOG_LEVEL`, and `LOG_LEVEL` beats YAML `trac.debug` |
 | `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
@@ -338,5 +338,5 @@ For common issues and solutions, see [Troubleshooting Reference](reference/troub
 1. Verify Python version: `python --version` (must be 3.10+)
 2. Verify installation: `trac-mcp-server --version`
 3. Enable debug logging: set `TRAC_DEBUG=true` in your environment or `.env` file
-4. Check log file: `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset (default location for stdio; the http transport has no log file unless `--log-file`, `LOG_FILE` or `logging.file` is set)
+4. Check log file: `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset or not an absolute path (default location for stdio; the http transport has no log file unless `--log-file`, `LOG_FILE` or `logging.file` is set)
 5. Check MCP client logs for connection or startup errors
