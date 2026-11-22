@@ -703,20 +703,28 @@ class TestFindMcpJsonBound:
 
 
 def _fake_stat(monkeypatch, target: Path, **changes):
-    """Make ``os.stat(target)`` report ``changes`` (``st_uid``,
-    ``st_mode``) over the real answer; other paths are untouched."""
-    real = os.stat
+    """Make ``os.fstat`` of a descriptor opened on ``target`` report
+    ``changes`` (``st_uid``, ``st_mode``) over the real answer. The CLI
+    checks the descriptor it reads from, so the fake recognises the file
+    by device and inode; other files are untouched."""
+    real_target = os.stat(target)
+    real = os.fstat
 
-    def _stat(path, *a, **kw):
-        result = real(path, *a, **kw)
-        if str(path) != str(target):
+    def _fstat(fd):
+        result = real(fd)
+        if (result.st_dev, result.st_ino) != (
+            real_target.st_dev,
+            real_target.st_ino,
+        ):
             return result
         return SimpleNamespace(
             st_uid=changes.get("st_uid", result.st_uid),
             st_mode=changes.get("st_mode", result.st_mode),
+            st_dev=result.st_dev,
+            st_ino=result.st_ino,
         )
 
-    monkeypatch.setattr(cli.os, "stat", _stat)
+    monkeypatch.setattr(cli.os, "fstat", _fstat)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
@@ -757,7 +765,9 @@ class TestMcpJsonFileCheck:
 
     def test_a_symlink_is_checked_on_its_target(self, tmp_path):
         target = tmp_path / "real.json"
-        target.write_text(json.dumps({"mcpServers": {}}))
+        target.write_text(
+            json.dumps({"mcpServers": {"trac-http": _HTTP_ENTRY}})
+        )
         target.chmod(0o666)
         project = tmp_path / "project"
         project.mkdir()
@@ -767,27 +777,91 @@ class TestMcpJsonFileCheck:
         ):
             cli.resolve_endpoint(_ns(), project, {})
 
-    def test_a_file_that_cannot_be_checked_is_refused(
+    def test_an_unreadable_file_is_a_connect_error(
         self, tmp_path, monkeypatch
     ):
         path = _write_mcp_json(tmp_path, {"trac-http": _HTTP_ENTRY})
-        real = os.stat
-        seen = []
+        real = os.open
 
-        def _stat(p, *a, **kw):
-            # The search's is_file() is the first stat of the file; the
-            # ownership check is the second.
+        def _open(p, *a, **kw):
             if str(p) == str(path):
-                seen.append(p)
-                if len(seen) > 1:
-                    raise PermissionError("no")
+                raise PermissionError("no")
             return real(p, *a, **kw)
 
-        monkeypatch.setattr(cli.os, "stat", _stat)
+        monkeypatch.setattr(cli.os, "open", _open)
         with pytest.raises(cli.CliError) as exc:
             cli.resolve_endpoint(_ns(), tmp_path, {})
         assert exc.value.code == cli.EXIT_CONNECT_ERROR
-        assert "cannot check" in str(exc.value)
+        assert "cannot read" in str(exc.value)
+
+    def test_a_writable_file_without_the_server_is_not_checked(
+        self, tmp_path
+    ):
+        # The check guards a file whose entry is about to be used. A
+        # file with no entry for the requested server falls through to
+        # TRAC_MCP_URL as before.
+        path = _write_mcp_json(tmp_path, {"other": _HTTP_ENTRY})
+        path.chmod(0o666)
+        url, token, where = cli.resolve_endpoint(
+            _ns(),
+            tmp_path,
+            {
+                "TRAC_MCP_URL": "http://e/mcp",
+                "TRAC_MCP_AUTH_TOKEN": "t",
+            },
+        )
+        assert (url, token, where) == (
+            "http://e/mcp",
+            "t",
+            "TRAC_MCP_URL",
+        )
+
+    def test_the_content_comes_from_the_file_that_was_checked(
+        self, tmp_path, monkeypatch
+    ):
+        """One open: the owner and mode are those of the descriptor the
+        JSON is read from, so replacing the path after the open changes
+        nothing (no check-then-use gap)."""
+        path = _write_mcp_json(tmp_path, {"trac-http": _HTTP_ENTRY})
+        other = tmp_path / "swapped.json"
+        other.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "trac-http": {
+                            "type": "http",
+                            "url": "http://198.51.100.9/mcp",
+                        }
+                    }
+                }
+            )
+        )
+        other.chmod(0o600)
+        real_open, real_stat = os.open, os.stat
+        touched = []
+
+        def _swap_after_second_touch(p, result):
+            # The search's is_file() is the first touch of the file; the
+            # next one (the CLI's open, or a check by path) is followed
+            # by the swap.
+            if str(p) == str(path):
+                touched.append(p)
+                if len(touched) == 2:
+                    os.replace(other, path)
+            return result
+
+        def _open(p, *a, **kw):
+            return _swap_after_second_touch(p, real_open(p, *a, **kw))
+
+        def _stat(p, *a, **kw):
+            return _swap_after_second_touch(p, real_stat(p, *a, **kw))
+
+        monkeypatch.setattr(cli.os, "open", _open)
+        monkeypatch.setattr(cli.os, "stat", _stat)
+        url, _, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, {"TOKEN_A": "t"}
+        )
+        assert url == "http://192.0.2.1:8091/mcp"
 
 
 class TestUsingLine:
@@ -1081,16 +1155,185 @@ class TestHeadersHelperTrust:
         assert not marker.exists()
 
 
+class TestHeadersHelperTrustReview:
+    """Review fixes on the trust file (Trac /trac_mcp_server #278)."""
+
+    @staticmethod
+    def _helper_in(directory: Path, label: str, marker: Path) -> str:
+        """A relative helper command: ``python token.py`` run in the
+        directory it is found in, whose script records where it ran."""
+        (directory / "token.py").write_text(
+            "import json, os\n"
+            f"open({str(marker)!r}, 'w').write(os.getcwd())\n"
+            f'print(json.dumps({{"Authorization": "Bearer {label}"}}))\n'
+        )
+        return f"{shlex.quote(sys.executable)} token.py"
+
+    def test_a_symlinked_file_runs_its_helper_in_the_trusted_directory(
+        self, tmp_path
+    ):
+        """A clone's .mcp.json symlinked to a trusted file must not run
+        the clone's own scripts: the helper's cwd is the directory of
+        the file that was trusted."""
+        trusted = tmp_path / "trusted"
+        trusted.mkdir()
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        ran_trusted = tmp_path / "ran-trusted"
+        ran_attacker = tmp_path / "ran-attacker"
+        command = self._helper_in(trusted, "trusted-token", ran_trusted)
+        self._helper_in(clone, "attacker-token", ran_attacker)
+        target = _write_mcp_json(
+            trusted, {"trac-http": _helper_entry(command)}
+        )
+        (clone / ".mcp.json").symlink_to(target)
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), clone, dict(os.environ)
+        )
+        assert token == "trusted-token"
+        assert not ran_attacker.exists()
+        assert (
+            Path(ran_trusted.read_text()).resolve() == trusted.resolve()
+        )
+
+    def test_a_hard_link_to_a_listed_file_is_the_same_file(
+        self, tmp_path
+    ):
+        command = _helper_script(tmp_path, _PRINT_TOKEN)
+        project = tmp_path / "project"
+        project.mkdir()
+        listed = _write_mcp_json(
+            tmp_path, {"trac-http": _helper_entry(command)}, trust=False
+        )
+        os.link(listed, project / ".mcp.json")
+        _trust(str(listed))
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), project, dict(os.environ)
+        )
+        assert token == "fake-helper-token"
+
+    def test_a_symlink_loop_line_is_ignored_with_a_warning(
+        self, tmp_path, capsys
+    ):
+        path = _write_mcp_json(
+            tmp_path,
+            {
+                "trac-http": _helper_entry(
+                    _helper_script(tmp_path, _PRINT_TOKEN)
+                )
+            },
+            trust=False,
+        )
+        a, b = tmp_path / "loop-a", tmp_path / "loop-b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+        _trust(str(a), str(path.resolve()))
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, dict(os.environ)
+        )
+        assert token == "fake-helper-token"
+        assert str(a) in capsys.readouterr().err
+
+    def test_a_file_that_cannot_be_resolved_is_exit_3(
+        self, tmp_path, monkeypatch
+    ):
+        command = _helper_script(tmp_path, _PRINT_TOKEN)
+        _write_mcp_json(tmp_path, {"trac-http": _helper_entry(command)})
+        real = Path.resolve
+
+        def _resolve(self, *a, **kw):
+            if self.name == ".mcp.json":
+                raise RuntimeError("Symlink loop from " + str(self))
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "resolve", _resolve)
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert exc.value.code == cli.EXIT_CONNECT_ERROR
+        assert "cannot resolve" in str(exc.value)
+
+    def test_a_relative_xdg_config_home_is_ignored(self, tmp_path):
+        path = TestHeadersHelperTrust._untrusted(tmp_path)[0]
+        home = tmp_path / "home"
+        home.mkdir()
+        environ = {**os.environ, "XDG_CONFIG_HOME": "relative/dir"}
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, environ, home=home)
+        assert (
+            f"add the line {path.resolve()} to "
+            f"{home / '.config' / 'trac-mcp' / 'trusted-helpers'}"
+            in str(exc.value)
+        )
+
+    def test_home_comes_from_the_environ_passed_in(self, tmp_path):
+        TestHeadersHelperTrust._untrusted(tmp_path)
+        home = tmp_path / "environ-home"
+        home.mkdir()
+        environ = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "XDG_CONFIG_HOME"
+        }
+        environ["HOME"] = str(home)
+        with pytest.raises(cli.CliError) as exc:
+            cli.resolve_endpoint(_ns(), tmp_path, environ)
+        assert str(home / ".config" / "trac-mcp") in str(exc.value)
+
+    def test_a_tilde_line_is_expanded_to_the_home(self, tmp_path):
+        home = tmp_path / "home"
+        project = home / "proj"
+        project.mkdir(parents=True)
+        command = _helper_script(tmp_path, _PRINT_TOKEN)
+        _write_mcp_json(
+            project, {"trac-http": _helper_entry(command)}, trust=False
+        )
+        _trust("~/proj/.mcp.json")
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), project, dict(os.environ), home=home
+        )
+        assert token == "fake-helper-token"
+
+    def test_a_relative_line_is_ignored_with_a_warning(
+        self, tmp_path, capsys
+    ):
+        path, marker = TestHeadersHelperTrust._untrusted(tmp_path)
+        _trust("rel/to/cwd/.mcp.json", str(path.resolve()))
+        _, token, _ = cli.resolve_endpoint(
+            _ns(), tmp_path, dict(os.environ)
+        )
+        assert token == "fake-helper-token"
+        err = capsys.readouterr().err
+        assert "rel/to/cwd/.mcp.json" in err
+        assert "not an absolute path" in err
+
+    def test_a_relative_line_alone_trusts_nothing(self, tmp_path):
+        path, marker = TestHeadersHelperTrust._untrusted(tmp_path)
+        rel = os.path.relpath(path, Path.cwd())
+        _trust(rel)
+        with pytest.raises(cli.CliError, match="not trusted"):
+            cli.resolve_endpoint(_ns(), tmp_path, dict(os.environ))
+        assert not marker.exists()
+
+
 class TestExitSentOutcomeUnknown:
     """Exit 5: a write was sent and the transport failed before any
     answer came back, so it may be stored (Trac /trac_mcp_server #278).
     The real ``call_tool`` runs; only the session behind it is scripted."""
 
     @staticmethod
-    def _session(monkeypatch, *, fail_on=None, fail_open=False):
+    def _session(
+        monkeypatch,
+        *,
+        fail_on=None,
+        fail_open=False,
+        error=None,
+        fail_on_exit=False,
+    ):
         """Patch ``_mcp_session``: tool calls answer OK, except
-        ``fail_on`` (a tool name) which raises a transport error;
-        ``fail_open`` makes opening the session itself fail."""
+        ``fail_on`` (a tool name) which raises ``error`` (default a
+        transport error); ``fail_open`` makes opening the session itself
+        fail; ``fail_on_exit`` makes leaving the session (teardown) fail
+        after the calls answered."""
         import contextlib
 
         import httpx
@@ -1101,7 +1344,7 @@ class TestExitSentOutcomeUnknown:
             async def call_tool(self, name, arguments):
                 calls.append(name)
                 if name == fail_on:
-                    raise httpx.ReadError("connection reset")
+                    raise error or httpx.ReadError("connection reset")
                 return SimpleNamespace(
                     isError=False,
                     content=[
@@ -1115,6 +1358,8 @@ class TestExitSentOutcomeUnknown:
             if fail_open:
                 raise httpx.ConnectError("refused")
             yield _Session()
+            if fail_on_exit:
+                raise httpx.ReadError("stream reset at teardown")
 
         monkeypatch.setattr(cli, "_mcp_session", _open)
         return calls
@@ -1176,6 +1421,92 @@ class TestExitSentOutcomeUnknown:
         assert "may be stored" in err
         assert "before retrying" in err
         assert "http://x/mcp" in err
+
+    @staticmethod
+    def _create(tmp_path):
+        return TestExitSentOutcomeUnknown._main(
+            tmp_path,
+            "ticket-create",
+            "--summary",
+            "s",
+            "--description-file",
+            "BODY",
+        )
+
+    def test_a_failure_after_the_write_was_answered_is_still_5(
+        self, tmp_path, monkeypatch
+    ):
+        """The flag is sticky: a failure of the session teardown after
+        the write's answer came back may not turn into a retryable 3."""
+        self._session(monkeypatch, fail_on_exit=True)
+        assert self._create(tmp_path) == cli.EXIT_SENT_OUTCOME_UNKNOWN
+
+    def test_a_broken_pipe_reporting_the_answer_is_5(
+        self, tmp_path, monkeypatch
+    ):
+        # `trac-mcp wiki-push P f | head -0`: the write is stored and the
+        # print of its answer fails.
+        self._session(monkeypatch)
+
+        def _broken(result):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        monkeypatch.setattr(cli, "_report", _broken)
+        assert self._create(tmp_path) == cli.EXIT_SENT_OUTCOME_UNKNOWN
+
+    def test_a_cli_error_after_the_write_keeps_its_own_code(
+        self, tmp_path, monkeypatch
+    ):
+        self._session(monkeypatch)
+
+        def _incomplete(result):
+            raise cli.CliError("read-back", cli.EXIT_STORED_INCOMPLETE)
+
+        monkeypatch.setattr(cli, "_report", _incomplete)
+        assert self._create(tmp_path) == cli.EXIT_STORED_INCOMPLETE
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_a_refused_write_request_stays_3(
+        self, tmp_path, monkeypatch, status
+    ):
+        import httpx
+
+        response = httpx.Response(
+            status, request=httpx.Request("POST", "http://x/mcp")
+        )
+        error = httpx.HTTPStatusError(
+            "refused", request=response.request, response=response
+        )
+        self._session(monkeypatch, fail_on="ticket_create", error=error)
+        assert self._create(tmp_path) == cli.EXIT_CONNECT_ERROR
+
+    @pytest.mark.parametrize("status", [500, 502, 504])
+    def test_a_proxy_error_after_the_send_is_5(
+        self, tmp_path, monkeypatch, status
+    ):
+        import httpx
+
+        response = httpx.Response(
+            status, request=httpx.Request("POST", "http://x/mcp")
+        )
+        error = httpx.HTTPStatusError(
+            "bad gateway", request=response.request, response=response
+        )
+        self._session(monkeypatch, fail_on="ticket_create", error=error)
+        assert self._create(tmp_path) == cli.EXIT_SENT_OUTCOME_UNKNOWN
+
+    def test_the_sdks_session_terminated_stays_3(
+        self, tmp_path, monkeypatch
+    ):
+        # What the SDK raises for a 404 on a request.
+        from mcp.shared.exceptions import McpError
+        from mcp.types import ErrorData
+
+        error = McpError(
+            ErrorData(code=32600, message="Session terminated")
+        )
+        self._session(monkeypatch, fail_on="ticket_create", error=error)
+        assert self._create(tmp_path) == cli.EXIT_CONNECT_ERROR
 
     def test_a_failure_before_the_write_is_sent_stays_3(
         self, tmp_path, monkeypatch, capsys

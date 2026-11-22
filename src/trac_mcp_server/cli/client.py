@@ -75,8 +75,9 @@ EXIT_CONNECT_ERROR = (
 # #140). Distinct from EXIT_TOOL_ERROR, which means nothing was stored:
 # a caller that retries on 1 must not retry on 4, or it writes twice.
 EXIT_STORED_INCOMPLETE = 4
-# A write's request was sent and the transport failed before any answer
-# came back (Trac /trac_mcp_server #278): the server may have stored it.
+# A write's request was sent and the run then failed without a CliError
+# of its own (Trac /trac_mcp_server #278): no answer came back, or it
+# could not be reported. The server may have stored it.
 # Distinct from EXIT_CONNECT_ERROR, which a caller may retry blindly
 # because nothing was sent, and from EXIT_TOOL_ERROR, which means the
 # server answered that nothing was stored: a caller must check the
@@ -149,9 +150,15 @@ def expand_vars(value: str, environ: Mapping[str, str]) -> str:
     return _VAR_RE.sub(_sub, value)
 
 
-def _home_dir(home: Path | None) -> Path | None:
+def _home_dir(
+    home: Path | None, environ: Mapping[str, str] | None = None
+) -> Path | None:
+    """The home directory: the ``home`` argument, else ``HOME`` of
+    ``environ`` when it is set, else ``Path.home()``."""
     if home is not None:
         return home
+    if environ is not None and environ.get("HOME"):
+        return Path(environ["HOME"])
     try:
         return Path.home()
     except RuntimeError:  # no HOME and no passwd entry
@@ -169,7 +176,10 @@ def find_mcp_json(start: Path, home: Path | None = None) -> Path | None:
     """
     home_dir = _home_dir(home)
     if home_dir is not None:
-        home_dir = home_dir.resolve()
+        try:
+            home_dir = home_dir.resolve()
+        except (RuntimeError, OSError):
+            home_dir = None
     for directory in [start, *start.parents]:
         candidate = directory / ".mcp.json"
         if candidate.is_file():
@@ -181,20 +191,15 @@ def find_mcp_json(start: Path, home: Path | None = None) -> Path | None:
     return None
 
 
-def _check_file_is_yours(path: Path, what: str) -> None:
-    """Refuse ``path`` unless this user owns it and neither group nor
-    others can write it (POSIX; elsewhere there is no such check). A
-    symlink is checked on its target. A file anyone else can edit is a
-    file whose content, a ``headersHelper`` command included, is not
-    the operator's."""
+def _check_stat_is_yours(st: Any, path: Path, what: str) -> None:
+    """Refuse (CliError, exit 3) a file whose ``st`` says another user
+    owns it or group/others can write it (POSIX; elsewhere there is no
+    such check). Applied to the ``fstat`` of the descriptor the file was
+    read from, so what is checked is what was read. A file anyone else
+    can edit is a file whose content, a ``headersHelper`` command
+    included, is not the operator's."""
     if os.name != "posix":
         return
-    try:
-        st = os.stat(path)
-    except OSError as e:
-        raise CliError(
-            f"cannot check {what} {path}: {e}", EXIT_CONNECT_ERROR
-        ) from None
     if st.st_uid != os.getuid():
         raise CliError(
             f"refusing {what} {path}: it is not owned by you (uid "
@@ -210,47 +215,112 @@ def _check_file_is_yours(path: Path, what: str) -> None:
         )
 
 
+def _read_once(path: Path) -> tuple[str, Any]:
+    """The text of ``path`` and the ``fstat`` of the descriptor it was
+    read from: one ``open``, so a path swapped afterwards changes
+    neither what is read nor what is checked. A symlink is followed.
+    OSError and ValueError (undecodable text) are the caller's."""
+    fd = os.open(path, os.O_RDONLY)
+    with os.fdopen(fd, "r") as f:
+        st = os.fstat(f.fileno())
+        return f.read(), st
+
+
+def _resolve(path: Path) -> Path:
+    """``path.resolve()``, a CliError (exit 3) when it cannot be (a
+    symlink loop raises RuntimeError, an unreadable parent OSError)."""
+    try:
+        return path.resolve()
+    except (RuntimeError, OSError) as e:
+        raise CliError(
+            f"cannot resolve {path}: {e}", EXIT_CONNECT_ERROR
+        ) from None
+
+
 def _trust_file_path(
     environ: Mapping[str, str], home: Path | None
 ) -> Path:
-    """``${XDG_CONFIG_HOME:-~/.config}/trac-mcp/trusted-helpers``."""
+    """``${XDG_CONFIG_HOME:-~/.config}/trac-mcp/trusted-helpers``. A
+    relative ``XDG_CONFIG_HOME`` is ignored, as the XDG specification
+    says."""
     base = environ.get("XDG_CONFIG_HOME")
-    if base:
+    if base and os.path.isabs(base):
         return Path(base) / "trac-mcp" / "trusted-helpers"
-    home_dir = _home_dir(home)
+    home_dir = _home_dir(home, environ)
     if home_dir is None:
         raise CliError(
-            "cannot find the trust file: XDG_CONFIG_HOME is unset and "
-            "the home directory is unknown",
+            "cannot find the trust file: XDG_CONFIG_HOME is unset (or "
+            "relative) and the home directory is unknown",
             EXIT_CONNECT_ERROR,
         )
     return home_dir / ".config" / "trac-mcp" / "trusted-helpers"
 
 
-def _helper_is_trusted(mcp_json: Path, trust_file: Path) -> bool:
-    """Whether ``mcp_json``'s real path is one of the lines of the trust
-    file: absolute paths, one per line, blank lines and ``#`` comments
-    ignored, surrounding whitespace stripped, each compared by real
-    path. A missing trust file trusts nothing; one that is not yours or
-    is writable by others is refused (CliError), since whoever can edit
-    it can grant themselves a command to run."""
-    if not trust_file.is_file():
-        return False
-    _check_file_is_yours(trust_file, "trust file")
+def _trust_line_path(line: str, home_dir: Path | None) -> Path | None:
+    """The path a trust-file line names: absolute as written, or with a
+    leading ``~`` expanded; None for anything else (or an expansion
+    that is impossible)."""
+    if line == "~" or line.startswith("~/"):
+        return None if home_dir is None else home_dir / line[2:]
+    if line.startswith("~"):
+        try:
+            return Path(line).expanduser()
+        except RuntimeError:
+            return None
+    return Path(line)
+
+
+def _warn_trust_line(trust_file: Path, line: str, why: str) -> None:
+    print(
+        f"trac-mcp: warning: ignoring line '{_printable(line)[:200]}' of "
+        f"{trust_file}: {why}",
+        file=sys.stderr,
+    )
+
+
+def _helper_is_trusted(
+    mcp_stat: Any, trust_file: Path, home_dir: Path | None
+) -> bool:
+    """Whether the file ``mcp_stat`` describes (the ``fstat`` of the
+    descriptor the ``.mcp.json`` was read from) is one of the files the
+    trust file lists: absolute paths (a leading ``~`` is the home
+    directory), one per line, blank lines and ``#`` comments ignored,
+    surrounding whitespace stripped. Identity is ``(st_dev, st_ino)``
+    against the ``os.stat`` of each line, not path strings, so a symlink
+    or hard link to a listed file is that file. Any other line is
+    ignored with a warning on stderr (a line naming no file is not one).
+    A missing trust file trusts nothing; one that is not yours or is
+    writable by others is refused (CliError), since whoever can edit it
+    can grant themselves a command to run."""
     try:
-        lines = trust_file.read_text().splitlines()
+        text, st = _read_once(trust_file)
+    except FileNotFoundError:
+        return False
     except (OSError, ValueError) as e:
         raise CliError(
             f"cannot read trust file {trust_file}: {e}",
             EXIT_CONNECT_ERROR,
         ) from None
-    real = mcp_json.resolve()
-    for line in lines:
+    _check_stat_is_yours(st, trust_file, "trust file")
+    wanted = (mcp_stat.st_dev, mcp_stat.st_ino)
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        listed = Path(line)
-        if listed.is_absolute() and listed.resolve() == real:
+        listed = _trust_line_path(line, home_dir)
+        if listed is None or not listed.is_absolute():
+            _warn_trust_line(trust_file, line, "not an absolute path")
+            continue
+        try:
+            listed_stat = os.stat(listed)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError) as e:
+            _warn_trust_line(
+                trust_file, line, f"cannot be resolved ({e})"
+            )
+            continue
+        if (listed_stat.st_dev, listed_stat.st_ino) == wanted:
             return True
     return False
 
@@ -294,11 +364,13 @@ def _run_headers_helper(
     url: str,
     mcp_json: Path,
     environ: Mapping[str, str],
+    cwd: Path | None = None,
 ) -> dict[str, str]:
     """Run an entry's ``headersHelper`` the way Claude Code does and
     return the headers it printed.
 
-    The command goes through a shell, in the ``.mcp.json``'s directory,
+    The command goes through a shell, in ``cwd`` (default: the
+    ``.mcp.json``'s directory),
     with the caller's environment plus ``CLAUDE_CODE_MCP_SERVER_NAME`` and
     ``CLAUDE_CODE_MCP_SERVER_URL``, a timeout of
     ``HEADERS_HELPER_TIMEOUT_S`` and no stdin. Its stdout is a credential,
@@ -319,7 +391,7 @@ def _run_headers_helper(
         proc = subprocess.Popen(
             command,
             shell=True,
-            cwd=mcp_json.parent,
+            cwd=cwd if cwd is not None else mcp_json.parent,
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -400,20 +472,23 @@ def _printable(text: str) -> str:
 
 def _require_trusted_helper(
     mcp_json: Path,
+    resolved: Path,
+    mcp_stat: Any,
     server: str,
     environ: Mapping[str, str],
-    home: Path | None,
+    home_dir: Path | None,
 ) -> None:
-    """Refuse (exit 3) unless ``mcp_json`` is in the trust file, telling
-    the operator the exact line to add. Runs nothing."""
-    trust_file = _trust_file_path(environ, home)
-    if _helper_is_trusted(mcp_json, trust_file):
+    """Refuse (exit 3) unless the file ``mcp_stat`` describes is in the
+    trust file, telling the operator the exact line to add. Runs
+    nothing."""
+    trust_file = _trust_file_path(environ, home_dir)
+    if _helper_is_trusted(mcp_stat, trust_file, home_dir):
         return
     raise CliError(
         f"{mcp_json}: its headersHelper is not trusted (server "
         f"'{server}'), so it was not run -- a command in a cloned "
         "tree's file would run as you. If you wrote or have read it, "
-        f"add the line {mcp_json.resolve()} to {trust_file}",
+        f"add the line {resolved} to {trust_file}",
         EXIT_CONNECT_ERROR,
     )
 
@@ -446,19 +521,20 @@ def resolve_endpoint(
     if args.url:
         return args.url, _token_from_env(args, environ), WHERE_URL_FLAG
 
-    mcp_json = find_mcp_json(cwd, home)
+    home_dir = _home_dir(home, environ)
+    mcp_json = find_mcp_json(cwd, home_dir)
     if mcp_json is not None:
-        _check_file_is_yours(mcp_json, ".mcp.json")
         try:
-            servers = json.loads(mcp_json.read_text()).get(
-                "mcpServers", {}
-            )
-        except (OSError, json.JSONDecodeError) as e:
+            text, mcp_stat = _read_once(mcp_json)
+            servers = json.loads(text).get("mcpServers", {})
+        except (OSError, ValueError) as e:
             raise CliError(
                 f"cannot read {mcp_json}: {e}", EXIT_CONNECT_ERROR
             ) from None
         entry = servers.get(args.server)
         if entry is not None:
+            # Only a file whose entry is used has to be yours.
+            _check_stat_is_yours(mcp_stat, mcp_json, ".mcp.json")
             print(
                 f"trac-mcp: using {mcp_json} (server {args.server})",
                 file=sys.stderr,
@@ -489,8 +565,18 @@ def resolve_endpoint(
                             EXIT_CONNECT_ERROR,
                         )
                     if helper.strip():
+                        # Trust is decided on the file that was read,
+                        # and the command runs in that file's own
+                        # directory: a symlinked .mcp.json must not run
+                        # the scripts of the tree the link sits in.
+                        resolved = _resolve(mcp_json)
                         _require_trusted_helper(
-                            mcp_json, args.server, environ, home
+                            mcp_json,
+                            resolved,
+                            mcp_stat,
+                            args.server,
+                            environ,
+                            home_dir,
                         )
                         # Not expand_vars'd: the shell expands it.
                         printed = _run_headers_helper(
@@ -499,6 +585,7 @@ def resolve_endpoint(
                             url=url,
                             mcp_json=mcp_json,
                             environ=environ,
+                            cwd=resolved.parent,
                         )
                         # The helper's headers win a name collision.
                         for key, value in printed.items():
@@ -565,12 +652,20 @@ async def _mcp_session(url: str, token: str | None):
 
 
 class _WriteState:
-    """Whether a write's request is out and unanswered (Trac
-    /trac_mcp_server #278). One per run, made by :func:`main`; the
-    ``_write_state`` variable carries it into :func:`call_tool` through
-    the event loop's task, which shares the object."""
+    """What this run has sent (Trac /trac_mcp_server #278). One per
+    run, made by :func:`main`; the ``_write_state`` variable carries it
+    into :func:`call_tool` through the event loop's task, which shares
+    the object.
 
-    unanswered: bool = False
+    ``sent`` is set just before a write's request goes out and is never
+    cleared: whatever fails afterwards in the run (the answer's
+    transport, the session's teardown, a closed pipe while the answer is
+    printed), a write may be stored. ``in_flight`` is true only while
+    that request has no result yet, so a refusal of the request itself
+    can be told from a later failure."""
+
+    sent: bool = False
+    in_flight: bool = False
 
 
 _write_state: contextvars.ContextVar[_WriteState | None] = (
@@ -583,17 +678,18 @@ async def call_tool(
 ):
     """Open one MCP session, call one tool, return its CallToolResult.
 
-    For a write (``WRITE_TOOLS``) the run's :class:`_WriteState` says
-    "sent, unanswered" from just before the request until the result is
-    back, so a transport failure in between is told apart by
-    :func:`main` from one before anything was sent."""
+    For a write (``WRITE_TOOLS``) the run's :class:`_WriteState` records
+    that a write was sent, from just before the request, so
+    :func:`main` can tell a failure after that from one before anything
+    was sent."""
     async with _mcp_session(url, token) as session:
         state = _write_state.get() if name in WRITE_TOOLS else None
         if state is not None:
-            state.unanswered = True
+            state.sent = True
+            state.in_flight = True
         result = await session.call_tool(name, arguments)
         if state is not None:
-            state.unanswered = False
+            state.in_flight = False
         return result
 
 
@@ -1975,6 +2071,25 @@ def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _refused_before_processing(exc: BaseException) -> bool:
+    """Whether ``exc`` is the server or a proxy refusing a request
+    outright (HTTP 401, 403 or 404, which the SDK reports for a 404 as
+    a "Session terminated" error), so the request was not processed and
+    nothing was stored. Any other failure, a 502 or 504 included, may
+    follow the daemon having processed it."""
+    import httpx
+    from mcp.shared.exceptions import McpError
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (401, 403, 404)
+    if isinstance(exc, McpError):
+        return (
+            exc.error.code == 32600
+            and exc.error.message == "Session terminated"
+        )
+    return False
+
+
 def main(
     argv: list[str] | None = None,
     cwd: Path | None = None,
@@ -2014,10 +2129,13 @@ def main(
             if isinstance(cause, CliError):
                 raise cause from None
             failure = f"call to {url} (from {where}) failed: {_describe(cause)}"
-            if state.unanswered:
+            if state.sent and not (
+                state.in_flight and _refused_before_processing(cause)
+            ):
                 raise CliError(
                     f"{failure}. The write was sent and no answer came "
-                    "back, so it may be stored: check before retrying "
+                    "back, or it could not be reported, so it may be "
+                    "stored: check before retrying "
                     f"(exit {EXIT_SENT_OUTCOME_UNKNOWN})",
                     EXIT_SENT_OUTCOME_UNKNOWN,
                 ) from None
