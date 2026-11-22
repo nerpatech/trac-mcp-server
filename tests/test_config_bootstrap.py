@@ -119,10 +119,13 @@ def test_yaml_only_returns_yaml_source_label(monkeypatch, tmp_path):
 _OIDC_RPC_URL = "https://trac.example.com/trac-api/login/xmlrpc"
 
 
-def _bootstrap_oidc(monkeypatch, tmp_path, *, env_url, yaml_url):
+def _bootstrap_oidc(
+    monkeypatch, tmp_path, *, env_url, yaml_url, server=True
+):
     """bootstrap_config() with a Trac URL, no TRAC_USERNAME/TRAC_PASSWORD,
     and the OIDC RPC URL in the environment, the YAML ``server`` section,
-    both or neither."""
+    both or neither. ``server`` is the daemon's call (lifespan.py); False
+    is the CLI's (cli/convert.py), which has no OIDC path."""
     _clear_trac_env(monkeypatch)
     monkeypatch.delenv("TRAC_MCP_OIDC_RPC_URL", raising=False)
     monkeypatch.setenv("TRAC_URL", _VALID_TRAC_URL)
@@ -143,20 +146,48 @@ def _bootstrap_oidc(monkeypatch, tmp_path, *, env_url, yaml_url):
             return_value=raw,
         ),
     ):
-        return bootstrap_config(None)
+        return bootstrap_config(None, oidc_rpc_url_from_yaml=server)
 
 
 def test_oidc_rpc_url_only_in_yaml_is_oidc_only(monkeypatch, tmp_path):
     """Trac /trac_mcp_server #269 (L19): bootstrap_server_config() resolves
-    the URL from the env var or YAML ``server.oidc_rpc_url``; bootstrap_config()
-    read only the env var, so a YAML-only deployment still demanded
-    TRAC_USERNAME/TRAC_PASSWORD and was not ``oidc_only``."""
+    the URL from the env var or YAML ``server.oidc_rpc_url``; the server's
+    bootstrap_config() read only the env var, so a YAML-only deployment
+    still demanded TRAC_USERNAME/TRAC_PASSWORD and was not ``oidc_only``."""
     config, _ = _bootstrap_oidc(
         monkeypatch, tmp_path, env_url=False, yaml_url=True
     )
     assert config.oidc_only is True
     assert config.username == ""
     assert config.password == ""
+
+
+def test_cli_bootstrap_ignores_a_yaml_only_oidc_rpc_url(
+    monkeypatch, tmp_path
+):
+    """The CLI (cli/convert.py) has no OIDC path: a YAML-only
+    ``server.oidc_rpc_url`` must not relax its credential requirement, as
+    before #269."""
+    with pytest.raises(ValueError, match="Trac username not found"):
+        _bootstrap_oidc(
+            monkeypatch,
+            tmp_path,
+            env_url=False,
+            yaml_url=True,
+            server=False,
+        )
+
+
+def test_cli_bootstrap_still_honours_the_env_var(monkeypatch, tmp_path):
+    """What the CLI did before #269: the env var relaxed the check."""
+    config, _ = _bootstrap_oidc(
+        monkeypatch,
+        tmp_path,
+        env_url=True,
+        yaml_url=False,
+        server=False,
+    )
+    assert config.oidc_only is True
 
 
 def test_oidc_rpc_url_only_in_env_is_oidc_only(monkeypatch, tmp_path):
@@ -195,7 +226,7 @@ def test_oidc_rpc_url_in_yaml_keeps_real_credentials_selftest(
             return_value=raw,
         ),
     ):
-        config, _ = bootstrap_config(None)
+        config, _ = bootstrap_config(None, oidc_rpc_url_from_yaml=True)
     assert config.oidc_only is False
     assert config.username == _VALID_USERNAME
 

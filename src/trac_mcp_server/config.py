@@ -8,8 +8,8 @@ Precedence (highest to lowest):
 
 Environment variables:
     TRAC_URL: Trac instance URL (required)
-    TRAC_USERNAME: Trac username (required, unless TRAC_MCP_OIDC_RPC_URL is set)
-    TRAC_PASSWORD: Trac password (required, unless TRAC_MCP_OIDC_RPC_URL is set)
+    TRAC_USERNAME: Trac username (required, unless an OIDC RPC URL is set)
+    TRAC_PASSWORD: Trac password (required, unless an OIDC RPC URL is set)
     TRAC_INSECURE: Skip SSL verification (optional, default: false)
     TRAC_MAX_PARALLEL_REQUESTS: Max parallel XML-RPC requests (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
@@ -17,7 +17,10 @@ Environment variables:
     TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint
         (optional). When set, TRAC_USERNAME/TRAC_PASSWORD are not required --
         this deployment mode never uses a shared service-account identity;
-        see mcp/oidc.py and docs/reference/http-transport.md.
+        see mcp/oidc.py and docs/reference/http-transport.md. On the server
+        startup path (``bootstrap_config(..., oidc_rpc_url_from_yaml=True)``)
+        the YAML ``server.oidc_rpc_url`` does the same when the variable is
+        unset; the CLI reads the variable only (Trac /trac_mcp_server #269).
     TRAC_ALLOWED_INSTANCES: Comma-separated instances the default identity may
         reach, each a ``/path`` on the TRAC_URL host or an absolute http(s) URL
         (optional, default: unrestricted; ticket #110)
@@ -56,7 +59,8 @@ class Config:
     # and rpc_url_override are set per-request on a *synthesized* Config for
     # one caller's own token -- never on the shared default Config. oidc_only
     # marks the shared default Config as loaded without a service-account
-    # identity (TRAC_MCP_OIDC_RPC_URL was set instead), which relaxes
+    # identity (TRAC_MCP_OIDC_RPC_URL was set instead, or on the server
+    # startup path the YAML ``server.oidc_rpc_url``), which relaxes
     # username/password validation and skips the startup connectivity
     # self-test, since there are no credentials to test with.
     bearer_token: str | None = None

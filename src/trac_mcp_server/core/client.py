@@ -1141,7 +1141,7 @@ class TracClient:
             reporter = attrs.get("reporter", self.config.username)
             try:
                 existing_id = self._find_recently_created_ticket(
-                    summary, reporter, sent_at
+                    summary, description, reporter, sent_at
                 )
             except Exception:
                 # Nothing is known about the outcome. Surface the original
@@ -1170,37 +1170,67 @@ class TracClient:
     # enough to absorb the timeout itself plus client/server clock skew.
     _CREATE_MATCH_WINDOW_SECONDS = 600
 
+    @staticmethod
+    def _query_value(value: str) -> str | None:
+        """``value`` escaped for a Trac query clause, or ``None`` when it
+        cannot be queried exactly (Trac /trac_mcp_server #269).
+
+        Trac's ``Query.from_string`` does not URL-decode: it splits
+        clauses on an unescaped ``&`` and alternatives on an unescaped
+        ``|`` and removes only the ``\\&`` and ``\\|`` escapes, which is
+        what this writes. It has no escape for a backslash and replaces a
+        literal ``$USER`` with the logged-in user's name, so a value
+        holding either is not representable.
+        """
+        if "\\" in value or "$USER" in value:
+            return None
+        return value.replace("|", r"\|").replace("&", r"\&")
+
     def _find_recently_created_ticket(
-        self, summary: str, reporter: str | None, sent_at: float
+        self,
+        summary: str,
+        description: str,
+        reporter: str | None,
+        sent_at: float,
     ) -> int | None:
         """
-        Look for a ticket matching ``summary`` among ``reporter``'s recent
-        tickets, to establish whether a timed-out create actually landed.
+        Look for the ticket a timed-out create sent, to establish whether
+        it actually landed.
 
-        Only tickets created at or after ``sent_at`` (minus a skew
-        allowance) count as a match, so an unrelated older ticket that
-        happens to share the summary is not mistaken for this one.
+        The query is by exact summary, plus the reporter when it is known
+        and non-empty. tracrpc's ``ticket.create`` sets the reporter to
+        the authenticated user and then applies the caller's attributes,
+        so a supplied ``reporter`` is stored as given and an unsupplied
+        one is the authenticated user, which an OIDC client (username
+        ``""``) does not know: it leaves the clause out. A reporter Trac
+        cannot query exactly (see ``_query_value``) is left out the same
+        way.
+
+        A candidate matches only if its summary AND description equal
+        what was sent and it was created at or after ``sent_at`` (minus a
+        skew allowance), so an older ticket, or another user's, that
+        merely shares the summary is not mistaken for this one.
 
         Returns the matching ticket id, or None if the search completed
-        and found no plausible match. Exceptions from the search itself
-        propagate: "could not check" and "checked, nothing there" lead to
-        different messages and must not be conflated.
+        and found no match. Exceptions from the search itself propagate:
+        "could not check" and "checked, nothing there" lead to different
+        messages and must not be conflated. A summary that cannot be
+        queried exactly is "could not check" (``ValueError``).
         """
-        # Trac /trac_mcp_server #269. An OIDC client has no username (Trac
-        # records the token's user as reporter), so there is nothing to
-        # filter on: the summary and creation time below decide. A reporter
-        # goes into the query escaped, not URL-encoded: Query.from_string
-        # does not URL-decode, it splits clauses on an unescaped "&" and
-        # alternatives on an unescaped "|" and removes only the "\&" and
-        # "\|" escapes.
-        reporter_clause = ""
-        if reporter:
-            escaped = reporter.replace("|", r"\|").replace("&", r"\&")
-            reporter_clause = f"reporter={escaped}&"
+        escaped_summary = self._query_value(summary)
+        if escaped_summary is None:
+            raise ValueError(
+                "the summary holds a backslash or $USER, which a Trac "
+                "query cannot match exactly"
+            )
+        query = f"summary={escaped_summary}"
+        escaped_reporter = (
+            self._query_value(reporter) if reporter else None
+        )
+        if escaped_reporter:
+            query += f"&reporter={escaped_reporter}"
         ticket_ids = self._rpc_request(
-            "ticket",
-            "query",
-            f"{reporter_clause}order=id&desc=1&max=20",
+            "ticket", "query", f"{query}&order=id&desc=1&max=20"
         )
 
         cutoff = sent_at - self._CREATE_MATCH_WINDOW_SECONDS
@@ -1210,7 +1240,10 @@ class TracClient:
             except Exception:
                 continue
             attrs = ticket_data[3]
-            if attrs.get("summary") != summary:
+            if (
+                attrs.get("summary") != summary
+                or attrs.get("description") != description
+            ):
                 continue
             created = self._parse_trac_time(ticket_data[1])
             # Unparseable timestamp: keep the match rather than claim the

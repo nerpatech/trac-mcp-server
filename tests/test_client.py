@@ -3,6 +3,7 @@ import socket
 import xmlrpc.client
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
+from xml.sax.saxutils import escape as xml_escape
 
 import pytest
 import requests
@@ -522,7 +523,14 @@ def _query_response(*ids):
     return r
 
 
-def _ticket_get_response(tid, summary, created="20260812T12:00:00"):
+def _ticket_get_response(
+    tid,
+    summary,
+    created="20260812T12:00:00",
+    description="Test description",
+):
+    summary = xml_escape(summary)
+    description = xml_escape(description)
     r = Mock()
     r.status_code = 200
     r.content = f"""<?xml version="1.0"?>
@@ -540,6 +548,10 @@ def _ticket_get_response(tid, summary, created="20260812T12:00:00"):
                 <member>
                   <name>summary</name>
                   <value><string>{summary}</string></value>
+                </member>
+                <member>
+                  <name>description</name>
+                  <value><string>{description}</string></value>
                 </member>
               </struct>
             </value>
@@ -627,25 +639,47 @@ def test_create_ticket_timeout_ignores_older_ticket_with_same_summary(
     assert "most likely was not created" in str(exc_info.value)
 
 
-def _timeout_query_sent(
-    mock_post, mock_time, config, *, ids=(), attrs=None
+_OIDC_CONFIG = dict(
+    trac_url="https://trac.example.com/trac",
+    username="",
+    password="",
+    bearer_token="per-user-token",
+)
+
+
+def _timeout_run(
+    mock_post,
+    mock_time,
+    config,
+    *,
+    summary="Test ticket",
+    found=(),
+    attrs=None,
 ):
-    """Run a create that times out, return the ticket.query string sent."""
+    """Run a create that times out, then answer the recovery query with
+    ``found`` (``(id, summary, description, created)`` rows).
+
+    Returns ``(query, error)``: the ticket.query string sent (``None``
+    when no query was sent) and the exception create_ticket raised."""
     mock_time.return_value = float(_NOW_EPOCH)
     responses = [
         requests.exceptions.ReadTimeout("Read timed out."),
-        _query_response(*ids),
+        _query_response(*[row[0] for row in found]),
     ]
     responses += [
-        _ticket_get_response(i, "Test ticket", "20260812T12:00:05")
-        for i in ids
+        _ticket_get_response(tid, summ, created, description)
+        for tid, summ, description, created in found
     ]
     mock_post.side_effect = responses
     client = TracClient(config)
-    with pytest.raises(TicketCreateTimeout) as exc_info:
+    with pytest.raises(
+        (TicketCreateTimeout, requests.exceptions.Timeout)
+    ) as exc_info:
         client.create_ticket(
-            "Test ticket", "Test description", attributes=attrs
+            summary, "Test description", attributes=attrs
         )
+    if mock_post.call_count == 1:
+        return None, exc_info.value
     (params,), method = xmlrpc.client.loads(
         mock_post.call_args_list[1][1]["data"]
     )
@@ -655,53 +689,145 @@ def _timeout_query_sent(
 
 @patch("trac_mcp_server.core.client.time.time")
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_create_ticket_timeout_query_names_a_plain_reporter(
+def test_create_ticket_timeout_query_has_summary_and_known_reporter(
     mock_post, mock_time, mock_config
 ):
-    params, _ = _timeout_query_sent(mock_post, mock_time, mock_config)
-    assert params == "reporter=testuser&order=id&desc=1&max=20"
+    """Trac /trac_mcp_server #269: the recovery query is by exact summary,
+    narrowed by the reporter when it is known (the configured username)."""
+    params, _ = _timeout_run(mock_post, mock_time, mock_config)
+    assert (
+        params
+        == "summary=Test ticket&reporter=testuser&order=id&desc=1&max=20"
+    )
 
 
 @patch("trac_mcp_server.core.client.time.time")
 @patch("trac_mcp_server.core.client.requests.Session.post")
-def test_create_ticket_timeout_query_escapes_reporter_for_trac(
+def test_create_ticket_timeout_query_uses_a_supplied_reporter(
     mock_post, mock_time, mock_config
 ):
-    """Trac /trac_mcp_server #269 (L10): Query.from_string does not
-    URL-decode; it splits on an unescaped ``&`` and ``|`` and removes
-    only the ``\\&`` and ``\\|`` escapes."""
-    params, _ = _timeout_query_sent(
+    """tracrpc stores a supplied ``reporter`` as given, so it is the one
+    to query, not the configured username."""
+    params, _ = _timeout_run(
         mock_post,
         mock_time,
         mock_config,
-        attrs={"reporter": "a&b|c"},
+        attrs={"reporter": "someone"},
     )
-    assert params == "reporter=a\\&b\\|c&order=id&desc=1&max=20"
+    assert (
+        params
+        == "summary=Test ticket&reporter=someone&order=id&desc=1&max=20"
+    )
 
 
-@pytest.mark.parametrize("empty", ["", None])
+@pytest.mark.parametrize("attrs", [None, {"reporter": ""}])
 @patch("trac_mcp_server.core.client.time.time")
 @patch("trac_mcp_server.core.client.requests.Session.post")
 def test_create_ticket_timeout_query_without_reporter_for_oidc(
-    mock_post, mock_time, empty
+    mock_post, mock_time, attrs
 ):
-    """Trac /trac_mcp_server #269 (L9): an OIDC client has username="" but
-    Trac records the token's user as reporter, so ``reporter=`` would
-    match nothing and a landed create would be reported as lost."""
-    config = Config(
-        trac_url="https://trac.example.com/trac",
-        username="",
-        password="",
-        bearer_token="per-user-token",
+    """An OIDC client has username="" while Trac records the token's user
+    as reporter, so a ``reporter=`` clause would match nothing and a
+    landed create would be reported as lost. The summary clause stays, so
+    the query is not "the newest tickets of everyone"."""
+    config = Config(**_OIDC_CONFIG)
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        config,
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+        attrs=attrs,
     )
-    attrs = None if empty is None else {"reporter": empty}
-    params, error = _timeout_query_sent(
-        mock_post, mock_time, config, ids=(10,), attrs=attrs
-    )
-    assert params == "order=id&desc=1&max=20"
-    assert "reporter" not in params
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
     assert error.ticket_id == 10
     assert "created anyway as #10" in str(error)
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_escapes_summary_and_reporter(
+    mock_post, mock_time, mock_config
+):
+    """Query.from_string does not URL-decode: it splits clauses on an
+    unescaped ``&`` and alternatives on an unescaped ``|`` and removes
+    only the ``\\&`` and ``\\|`` escapes."""
+    params, _ = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        summary="a&b|c",
+        attrs={"reporter": "x&y|z"},
+    )
+    assert params == (
+        "summary=a\\&b\\|c&reporter=x\\&y\\|z&order=id&desc=1&max=20"
+    )
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_ignores_same_summary_other_description(
+    mock_post, mock_time, mock_config
+):
+    """Another ticket (another user's, say) with the same summary but a
+    different description is not this create: matching on the summary
+    alone would say "created anyway, do not retry" for a create that
+    never landed."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        found=[
+            (
+                7,
+                "Test ticket",
+                "A different description",
+                "20260812T12:00:05",
+            )
+        ],
+    )
+    assert error.ticket_id is None
+    assert "most likely was not created" in str(error)
+
+
+@pytest.mark.parametrize("summary", ["a\\b", "cost $USER", "$USER"])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_unqueryable_summary_reraises_timeout(
+    mock_post, mock_time, mock_config, summary
+):
+    """Trac has no escape for a backslash and substitutes a literal
+    ``$USER``, so such a summary cannot be queried exactly: the outcome
+    is unknown, the original timeout is surfaced, and no query is sent."""
+    params, error = _timeout_run(
+        mock_post, mock_time, mock_config, summary=summary
+    )
+    assert params is None
+    assert mock_post.call_count == 1
+    assert isinstance(error, requests.exceptions.ReadTimeout)
+    assert not isinstance(error, TicketCreateTimeout)
+
+
+@pytest.mark.parametrize("reporter", ["a\\b", "$USER", "me$USER"])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_unqueryable_reporter_is_dropped(
+    mock_post, mock_time, mock_config, reporter
+):
+    """An unescapable reporter only loses its clause; the summary and
+    description still decide."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": reporter},
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+    )
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
+    assert error.ticket_id == 10
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")

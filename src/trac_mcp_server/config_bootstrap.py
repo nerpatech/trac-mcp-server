@@ -25,6 +25,8 @@ from .link_rewrites import LinkRewrites, validate_link_rewrites
 
 def bootstrap_config(
     cli_overrides: dict[str, Any] | None = None,
+    *,
+    oidc_rpc_url_from_yaml: bool = False,
 ) -> tuple[Config, list[str]]:
     """Load configuration with CLI > env > YAML > defaults precedence.
 
@@ -52,6 +54,16 @@ def bootstrap_config(
             from the dict fall through to env vars / YAML / defaults.
             Pass ``None`` or ``{}`` when no CLI overrides are present;
             both are treated identically (no "CLI arguments" source label).
+        oidc_rpc_url_from_yaml: Set by the server's startup path only
+            (``mcp/lifespan.py``). The OIDC RPC URL that relaxes the
+            username/password requirement is then resolved as
+            ``bootstrap_server_config()`` resolves it: the
+            ``TRAC_MCP_OIDC_RPC_URL`` env var, else YAML
+            ``server.oidc_rpc_url`` (Trac /trac_mcp_server #269). The
+            default is for the CLI (``cli/convert.py``), which has no OIDC
+            path: only the env var counts, as it always did, so a
+            YAML-only ``server.oidc_rpc_url`` leaves its credential
+            requirement in force.
 
     Returns:
         A two-tuple ``(config, sources)`` where:
@@ -90,14 +102,18 @@ def bootstrap_config(
             yaml_fallbacks["link_rewrites"] = list(
                 unified.export.link_rewrites
             )
-        # Trac /trac_mcp_server #269: bootstrap_server_config() resolves
-        # the OIDC RPC URL from the env var or this key, and so must the
-        # credential check below.
         yaml_oidc_rpc_url = unified.server.oidc_rpc_url
         sources.append(f"config file: {config_files[0]}")
 
     # Step 3: Single call to load_config with all sources merged
     overrides = cli_overrides or {}
+    # Only the server path passes the resolved value (see the argument's
+    # docstring); otherwise load_config reads the env var itself.
+    oidc_kwargs: dict[str, Any] = {}
+    if oidc_rpc_url_from_yaml:
+        oidc_kwargs["oidc_rpc_url"] = (
+            os.getenv("TRAC_MCP_OIDC_RPC_URL") or yaml_oidc_rpc_url
+        )
     config = load_config(
         url=overrides.get("url"),
         username=overrides.get("username"),
@@ -105,9 +121,7 @@ def bootstrap_config(
         insecure=overrides.get("insecure", False),
         debug=overrides.get("debug", False),
         yaml_fallbacks=yaml_fallbacks,
-        oidc_rpc_url=(
-            os.getenv("TRAC_MCP_OIDC_RPC_URL") or yaml_oidc_rpc_url
-        ),
+        **oidc_kwargs,
     )
 
     # Step 4-6: Build source labels
