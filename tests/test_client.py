@@ -3,6 +3,7 @@ import socket
 import xmlrpc.client
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
+from xml.sax.saxutils import escape as xml_escape
 
 import pytest
 import requests
@@ -522,7 +523,14 @@ def _query_response(*ids):
     return r
 
 
-def _ticket_get_response(tid, summary, created="20260812T12:00:00"):
+def _ticket_get_response(
+    tid,
+    summary,
+    created="20260812T12:00:00",
+    description="Test description",
+):
+    summary = xml_escape(summary)
+    description = xml_escape(description)
     r = Mock()
     r.status_code = 200
     r.content = f"""<?xml version="1.0"?>
@@ -540,6 +548,10 @@ def _ticket_get_response(tid, summary, created="20260812T12:00:00"):
                 <member>
                   <name>summary</name>
                   <value><string>{summary}</string></value>
+                </member>
+                <member>
+                  <name>description</name>
+                  <value><string>{description}</string></value>
                 </member>
               </struct>
             </value>
@@ -625,6 +637,483 @@ def test_create_ticket_timeout_ignores_older_ticket_with_same_summary(
 
     assert exc_info.value.ticket_id is None
     assert "most likely was not created" in str(exc_info.value)
+
+
+_OIDC_CONFIG = dict(
+    trac_url="https://trac.example.com/trac",
+    username="",
+    password="",
+    bearer_token="per-user-token",
+)
+
+
+def _timeout_run(
+    mock_post,
+    mock_time,
+    config,
+    *,
+    summary="Test ticket",
+    description="Test description",
+    found=(),
+    attrs=None,
+):
+    """Run a create that times out, then answer the recovery query with
+    ``found`` (``(id, summary, description, created)`` rows).
+
+    Returns ``(query, error)``: the ticket.query string sent (``None``
+    when no query was sent) and the exception create_ticket raised."""
+    mock_post.reset_mock()
+    mock_time.return_value = float(_NOW_EPOCH)
+    responses = [
+        requests.exceptions.ReadTimeout("Read timed out."),
+        _query_response(*[row[0] for row in found]),
+    ]
+    responses += [
+        _ticket_get_response(tid, summ, created, description)
+        for tid, summ, description, created in found
+    ]
+    mock_post.side_effect = responses
+    client = TracClient(config)
+    with pytest.raises(
+        (TicketCreateTimeout, requests.exceptions.Timeout)
+    ) as exc_info:
+        client.create_ticket(summary, description, attributes=attrs)
+    if mock_post.call_count == 1:
+        return None, exc_info.value
+    (params,), method = xmlrpc.client.loads(
+        mock_post.call_args_list[1][1]["data"]
+    )
+    assert method == "ticket.query"
+    return params, exc_info.value
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_has_summary_and_known_reporter(
+    mock_post, mock_time, mock_config
+):
+    """Trac /trac_mcp_server #269: the recovery query is by exact summary,
+    narrowed by the reporter when it is known (the configured username)."""
+    params, _ = _timeout_run(mock_post, mock_time, mock_config)
+    assert (
+        params
+        == "summary=Test ticket&reporter=testuser&order=id&desc=1&max=20"
+    )
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_uses_a_supplied_reporter(
+    mock_post, mock_time, mock_config
+):
+    """tracrpc stores a supplied ``reporter`` as given, so it is the one
+    to query, not the configured username."""
+    params, _ = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": "someone"},
+    )
+    assert (
+        params
+        == "summary=Test ticket&reporter=someone&order=id&desc=1&max=20"
+    )
+
+
+@pytest.mark.parametrize("attrs", [None, {"reporter": ""}])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_without_reporter_for_oidc(
+    mock_post, mock_time, attrs
+):
+    """An OIDC client has username="" while Trac records the token's user
+    as reporter, so a ``reporter=`` clause would match nothing and a
+    landed create would be reported as lost. The summary clause stays, so
+    the query is not "the newest tickets of everyone"."""
+    config = Config(**_OIDC_CONFIG)
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        config,
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+        attrs=attrs,
+    )
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
+    assert error.ticket_id == 10
+    assert "created anyway as #10" in str(error)
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_query_escapes_summary_and_reporter(
+    mock_post, mock_time, mock_config
+):
+    """Query.from_string does not URL-decode: it splits clauses on an
+    unescaped ``&`` and alternatives on an unescaped ``|`` and removes
+    only the ``\\&`` and ``\\|`` escapes."""
+    params, _ = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        summary="a&b|c",
+        attrs={"reporter": "x&y|z"},
+    )
+    assert params == (
+        "summary=a\\&b\\|c&reporter=x\\&y\\|z&order=id&desc=1&max=20"
+    )
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_ignores_same_summary_other_description(
+    mock_post, mock_time, mock_config
+):
+    """Another ticket (another user's, say) with the same summary but a
+    different description is not this create: matching on the summary
+    alone would say "created anyway, do not retry" for a create that
+    never landed."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        found=[
+            (
+                7,
+                "Test ticket",
+                "A different description",
+                "20260812T12:00:05",
+            )
+        ],
+    )
+    assert error.ticket_id is None
+    assert "most likely was not created" in str(error)
+
+
+@pytest.mark.parametrize(
+    "sent", ["Test ticket ", " Test ticket", "\t Test ticket \n"]
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_matches_the_summary_as_trac_stores_it(
+    mock_post, mock_time, mock_config, sent
+):
+    """Trac strips a summary on create (``Ticket.__setitem__`` calls
+    ``value.strip()`` for every field that is not a textarea; observed
+    live on /trac_test with a trailing space). The recovery queries and
+    compares the stripped summary, else a create that landed is
+    reported as lost and a retry makes a duplicate."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        summary=sent,
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+    )
+    assert (
+        params
+        == "summary=Test ticket&reporter=testuser&order=id&desc=1&max=20"
+    )
+    assert error.ticket_id == 10
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_strips_a_supplied_reporter_like_trac(
+    mock_post, mock_time, mock_config
+):
+    """The same ``Ticket.__setitem__`` strip applies to ``reporter``."""
+    params, _ = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": " someone "},
+    )
+    assert (
+        params
+        == "summary=Test ticket&reporter=someone&order=id&desc=1&max=20"
+    )
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_whitespace_reporter_has_no_clause(
+    mock_post, mock_time, mock_config
+):
+    """A reporter that strips to nothing is stored empty: unknown."""
+    params, _ = _timeout_run(
+        mock_post, mock_time, mock_config, attrs={"reporter": "  "}
+    )
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
+
+
+@pytest.mark.parametrize(
+    "description", ["body\n", "  body  ", "line one\n\nline two\n"]
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_compares_the_description_unstripped(
+    mock_post, mock_time, mock_config, description
+):
+    """The description is a textarea: Trac keeps it as sent (no strip),
+    so it is compared exactly, whitespace included."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=description,
+        found=[(10, "Test ticket", description, "20260812T12:00:05")],
+    )
+    assert error.ticket_id == 10
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=description,
+        found=[
+            (
+                10,
+                "Test ticket",
+                description.strip(),
+                "20260812T12:00:05",
+            )
+        ],
+    )
+    assert error.ticket_id is None
+
+
+@pytest.mark.parametrize(
+    ("sent", "stored"),
+    [
+        ("one\r\ntwo\r\n", "one\ntwo\n"),
+        ("one\rtwo\r", "one\ntwo\n"),
+        ("a\r\n\r\nb\rc\nd", "a\n\nb\nc\nd"),
+    ],
+    ids=["crlf", "lone-cr", "mixed"],
+)
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_compares_descriptions_with_eol_normalised(
+    mock_post, mock_time, mock_config, sent, stored
+):
+    """The XML-RPC request is XML, whose end-of-line handling turns
+    ``\\r\\n`` and a lone ``\\r`` into ``\\n`` before Trac sees the text
+    (observed live on /trac_test: a CRLF description is stored with LF).
+    A sent CR/CRLF description must match its stored LF form."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description=sent,
+        found=[(10, "Test ticket", stored, "20260812T12:00:05")],
+    )
+    assert error.ticket_id == 10
+
+
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_eol_normalising_keeps_other_differences(
+    mock_post, mock_time, mock_config
+):
+    """Only line endings are folded: other differences still mismatch."""
+    _, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        description="one\r\ntwo\r\n",
+        found=[(10, "Test ticket", "one\ntwo", "20260812T12:00:05")],
+    )
+    assert error.ticket_id is None
+
+
+@pytest.mark.parametrize("summary", ["a\\b", "cost $USER", "$USER"])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_unqueryable_summary_reraises_timeout(
+    mock_post, mock_time, mock_config, summary
+):
+    """Trac has no escape for a backslash and substitutes a literal
+    ``$USER``, so such a summary cannot be queried exactly: the outcome
+    is unknown, the original timeout is surfaced, and no query is sent."""
+    params, error = _timeout_run(
+        mock_post, mock_time, mock_config, summary=summary
+    )
+    assert params is None
+    assert mock_post.call_count == 1
+    assert isinstance(error, requests.exceptions.ReadTimeout)
+    assert not isinstance(error, TicketCreateTimeout)
+
+
+@pytest.mark.parametrize("reporter", ["a\\b", "$USER", "me$USER"])
+@patch("trac_mcp_server.core.client.time.time")
+@patch("trac_mcp_server.core.client.requests.Session.post")
+def test_create_ticket_timeout_unqueryable_reporter_is_dropped(
+    mock_post, mock_time, mock_config, reporter
+):
+    """An unescapable reporter only loses its clause; the summary and
+    description still decide."""
+    params, error = _timeout_run(
+        mock_post,
+        mock_time,
+        mock_config,
+        attrs={"reporter": reporter},
+        found=[
+            (10, "Test ticket", "Test description", "20260812T12:00:05")
+        ],
+    )
+    assert params == "summary=Test ticket&order=id&desc=1&max=20"
+    assert error.ticket_id == 10
+
+
+@pytest.mark.live
+class TestFindRecentlyCreatedTicketLive:
+    """Requires --run-live and TRAC_URL/USERNAME/PASSWORD. Creates a few
+    throwaway tickets on /trac_test and deletes each in a ``finally``.
+
+    Trac /trac_mcp_server #269: the create-timeout recovery rests on how
+    Trac parses ``summary=<value>`` (exact match, ``\\&`` and ``\\|``
+    escapes) in a ``ticket.query`` string. That was reasoned from Trac's
+    source; these rows observe it, with a real create and the real
+    finder, called directly with the ``sent_at`` a timed-out create
+    would have noted.
+    """
+
+    @staticmethod
+    def _create(client, summary, description):
+        import time
+
+        sent_at = time.time()
+        return client.create_ticket(summary, description), sent_at
+
+    def test_finds_a_ticket_with_ampersand_and_pipe_in_the_summary(
+        self,
+    ):
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 a & b | c {run}"
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            # An OIDC caller's reporter is unknown (""): no reporter
+            # clause; and a known one: both clauses.
+            assert (
+                client._find_recently_created_ticket(
+                    summary, description, "", sent_at
+                )
+                == tid
+            )
+            assert (
+                client._find_recently_created_ticket(
+                    summary,
+                    description,
+                    client.config.username,
+                    sent_at,
+                )
+                == tid
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    def test_a_description_differing_by_one_character_is_no_match(self):
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 a & b | c {run}"
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            for reporter in ("", client.config.username):
+                assert (
+                    client._find_recently_created_ticket(
+                        summary, description + "x", reporter, sent_at
+                    )
+                    is None
+                )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    @pytest.mark.parametrize(
+        "pad", ["trailing", "leading"], ids=["trailing", "leading"]
+    )
+    def test_a_summary_with_edge_whitespace_is_found_as_trac_stores_it(
+        self, pad
+    ):
+        """Trac strips a summary on create (``Ticket.__setitem__``,
+        ``value.strip()``; observed live with a trailing space), so the
+        finder must query and compare the stripped summary. The stored
+        value is in the failure message."""
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        core = f"t269 {pad} space {run}"
+        summary = core + " " if pad == "trailing" else " " + core
+        description = f"Ticket 269 live finder row, run {run}."
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            stored = client.get_ticket(tid)[3]["summary"]
+            found = client._find_recently_created_ticket(
+                summary, description, "", sent_at
+            )
+            assert found == tid, (
+                f"Trac stored the summary as {stored!r} (sent "
+                f"{summary!r}); the finder returned {found!r}"
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
+
+    @pytest.mark.parametrize(
+        "ending",
+        ["\n", "  ", "\r\n", "\r\nsecond line\r\n"],
+        ids=["lf", "spaces", "crlf", "crlf-lines"],
+    )
+    def test_a_description_is_found_as_trac_stores_it(self, ending):
+        """Trac's source keeps a description as sent (a textarea is not
+        strip()ped), so the finder compares it exactly. A ``\\r`` in it
+        is the open question: Python's XML-RPC client sends it raw, and
+        an XML parser on the server may fold ``\\r\\n`` to ``\\n`` before
+        Trac sees it. The stored value is in the failure message; the
+        row asserts the finder returns the id."""
+        import uuid
+
+        from tests.live_helpers import trac_test_client
+
+        client = trac_test_client()
+        run = uuid.uuid4().hex[:8]
+        summary = f"t269 description ending {run}"
+        description = f"Ticket 269 live finder row, run {run}.{ending}"
+        tid = None
+        try:
+            tid, sent_at = self._create(client, summary, description)
+            stored = client.get_ticket(tid)[3]["description"]
+            found = client._find_recently_created_ticket(
+                summary, description, "", sent_at
+            )
+            assert found == tid, (
+                f"Trac stored the description as {stored!r} (sent "
+                f"{description!r}); the finder returned {found!r}"
+            )
+        finally:
+            if tid is not None:
+                client.delete_ticket(tid)
 
 
 @patch("trac_mcp_server.core.client.requests.Session.post")

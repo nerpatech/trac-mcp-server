@@ -149,6 +149,7 @@ class TestServerLifespanSuccess:
                     insecure=True,
                     debug=False,
                     yaml_fallbacks=None,
+                    oidc_rpc_url=None,
                 )
 
     async def test_startup_without_overrides_calls_load_config(self):
@@ -181,6 +182,7 @@ class TestServerLifespanSuccess:
                     insecure=False,
                     debug=False,
                     yaml_fallbacks=None,
+                    oidc_rpc_url=None,
                 )
 
 

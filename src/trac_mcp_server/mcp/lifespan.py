@@ -73,7 +73,9 @@ async def server_lifespan(
     # CLI args > env vars (.env loaded first) > YAML config > defaults
     try:
         overrides = config_overrides or {}
-        config, sources = bootstrap_config(overrides)
+        config, sources = bootstrap_config(
+            overrides, oidc_rpc_url_from_yaml=True
+        )
         source_desc = ", ".join(sources) if sources else "defaults"
         _note(
             "Configuration loaded from: %s",
