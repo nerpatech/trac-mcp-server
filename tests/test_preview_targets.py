@@ -66,6 +66,7 @@ def _mock_client(
     def fake_get(url, timeout=None, allow_redirects=None):
         status, body = responses[url]
         resp = MagicMock()
+        resp.is_redirect = False
         resp.status_code = status
         resp.text = body
         resp.url = (resolved or {}).get(url, url)
@@ -467,6 +468,7 @@ class TestConcurrentProbe(unittest.TestCase):
             # least 4 fetches are genuinely in flight together.
             barrier.wait()
             resp = MagicMock()
+            resp.is_redirect = False
             resp.status_code = 200
             resp.text = EXISTING_PAGE_STUB
             resp.url = url
@@ -553,6 +555,7 @@ class TestTicketRealmProbe(unittest.TestCase):
             if url == CONTROL_URL:
                 raise OSError("no route to host")
             resp = MagicMock()
+            resp.is_redirect = False
             resp.status_code = 500
             resp.text = ""
             resp.url = url
