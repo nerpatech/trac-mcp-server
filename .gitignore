@@ -65,6 +65,3 @@ scripts/*log
 
 # OpenCode pilot scratch files (plans/outputs, not source)
 .opencode-pilot/
-
-# scripts/test_trac.py --output ./test-report.md writes here
-/test-report.md
