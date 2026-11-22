@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from trac_mcp_server import __version__
+from trac_mcp_server.mcp.errors import StartupError
 from trac_mcp_server.mcp.server import build_parser, server
 from trac_mcp_server.version import format_server_version, release_sha
 
@@ -201,7 +202,7 @@ def test_file_access_flag_rejects_unknown_value(capsys):
 class TestBadDeclaredInstancesAtStartup:
     """Trac /trac_mcp_server #268 review: a TRAC_INSTANCES entry that
     fails the load check ends startup with one ERROR line and the same
-    RuntimeError (exit 1 from run()) a bad server config gets, not a
+    StartupError (exit 1 from run()) a bad server config gets, not a
     traceback."""
 
     def test_one_error_line_and_a_runtime_error(self, capsys):
@@ -222,7 +223,7 @@ class TestBadDeclaredInstancesAtStartup:
                 side_effect=err,
             ),
             pytest.raises(
-                RuntimeError, match="Instance 'other'"
+                StartupError, match="Instance 'other'"
             ) as exc,
         ):
             asyncio.run(main())

@@ -147,20 +147,26 @@ TRAC_DEBUG=true
 
 **Config file (`.trac_mcp/config.yaml`):**
 ```yaml
-logging:
-  level: DEBUG
+trac:
+  debug: true
 ```
 
-When enabled, the server writes detailed debug output to the log file (stdio) or to stderr (http, i.e. the service log), and to a file only when one is configured with `--log-file` or `LOG_FILE`.
+To pick a level without turning on full debug output, set `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`; `WARN` and `FATAL` also work) or `logging.level` in the config file. The order is `TRAC_DEBUG` true in the environment, then `LOG_LEVEL`, then YAML `trac.debug`, then `logging.level`; the default is WARNING for stdio and INFO for http. An unknown level name stops startup with a message naming where it came from. See [Logging](configuration.md#logging).
+
+When enabled, the server writes detailed debug output to the log file (stdio) or to stderr (http, i.e. the service log), and to a file only when one is configured with `--log-file`, `LOG_FILE` or `logging.file`.
 
 ## Log File Locations
 
 | Mode | Default Location |
 |------|------------------|
-| MCP Server (stdio) | `/tmp/trac-mcp-server.log` |
-| MCP Server (http) | none; logs to stderr (a file only with `--log-file` or `LOG_FILE`) |
+| MCP Server (stdio) | `$XDG_STATE_HOME/trac-mcp-server/server.log`, or `~/.local/state/trac-mcp-server/server.log` when `XDG_STATE_HOME` is unset or not an absolute path |
+| MCP Server (http) | none; logs to stderr (a file only with `--log-file`, `LOG_FILE` or `logging.file`) |
 
-`--log-file` wins over the `LOG_FILE` environment variable. An empty value (`--log-file ""` or `LOG_FILE=`) disables the file; stdio then logs to stderr.
+`--log-file` wins over the `LOG_FILE` environment variable, which wins over `logging.file` in the config file. An empty value (`--log-file ""` or `LOG_FILE=`) disables the file; stdio then logs to stderr.
+
+The stdio default file is private (directory 0700, file 0600) and rotates at 5 MiB, keeping three old files. If the server cannot create it, it prints one `WARNING: cannot open default log file ...; logging to stderr` line and logs to stderr instead. A file you name that cannot be opened stops startup with `ERROR: Cannot open log file`.
+
+Before this changed, the stdio default was `/tmp/trac-mcp-server.log`; a log left there by an older version is not read or removed.
 
 **Custom MCP log location:**
 ```bash

@@ -9,9 +9,17 @@ stderr logging, with an optional companion log file).
 
 import json
 import logging
+import logging.handlers
 import os
 import sys
 from collections.abc import Callable
+from io import TextIOWrapper
+from typing import NamedTuple, cast
+
+try:
+    import fcntl
+except ImportError:  # not POSIX
+    fcntl = None  # type: ignore[assignment]
 
 
 class JsonFormatter(logging.Formatter):
@@ -33,7 +41,165 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, default=str)
 
 
-DEFAULT_MCP_LOG_FILE = "/tmp/trac-mcp-server.log"
+# The default stdio log file rotates; an explicit path is left to its owner
+# (logrotate, say) and stays a plain append file.
+_DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+_DEFAULT_LOG_BACKUP_COUNT = 3
+
+# The level names LOG_LEVEL and YAML ``logging.level`` accept: the
+# ``logging`` module's names, WARN and FATAL being its aliases, which the
+# old ``getattr(logging, name)`` lookup took too.
+LOG_LEVEL_NAMES = (
+    "DEBUG",
+    "INFO",
+    "WARNING",
+    "WARN",
+    "ERROR",
+    "CRITICAL",
+    "FATAL",
+)
+LOG_LEVEL_ALIASES = {"WARN": "WARNING", "FATAL": "CRITICAL"}
+
+
+def default_mcp_log_file() -> str:
+    """The stdio default log file: ``$XDG_STATE_HOME/trac-mcp-server/
+    server.log`` when ``XDG_STATE_HOME`` is set to an absolute path (the
+    XDG spec says to ignore a relative one), else
+    ``~/.local/state/trac-mcp-server/server.log``.
+
+    A function, so HOME and XDG_STATE_HOME are read at call time. It
+    replaced a fixed ``/tmp`` path, where any local user could read the
+    log (it carries Trac page text at DEBUG) or plant a symlink for the
+    server to append through (Trac /trac_mcp_server #277).
+    """
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg and xdg.strip() and os.path.isabs(xdg):
+        base = xdg
+    else:
+        base = os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.path.join(base, "trac-mcp-server", "server.log")
+
+
+def _private_opener(path: str, flags: int) -> int:
+    """``open()``'s opener: ``os.open`` with mode 0600, so the mode of a
+    file this code creates never depends on the umask. An existing file
+    keeps its mode."""
+    return os.open(path, flags, 0o600)
+
+
+class _PrivateFileHandler(logging.FileHandler):
+    """A ``FileHandler`` that creates its file with mode 0600."""
+
+    def _open(self) -> TextIOWrapper:
+        return cast(
+            TextIOWrapper,
+            open(
+                self.baseFilename,
+                self.mode,
+                encoding=self.encoding,
+                errors=self.errors,
+                opener=_private_opener,
+            ),
+        )
+
+
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A ``RotatingFileHandler`` whose file, and every file it rotates
+    in, is created with mode 0600 (``doRollover`` reopens the base path
+    through ``_open``), and that is safe for several processes sharing
+    one file, as the per-user default log is.
+
+    The stdlib handler is not: it decides from ``stream.tell()``, the
+    size of what *this* handler wrote. After another process rotates,
+    this one keeps writing through its descriptor to the renamed file,
+    its count passes ``maxBytes``, and it rotates the other process's
+    fresh file away; the backups fill with fragments. Here the decision
+    is made from the base path's size, after reopening if the path no
+    longer names the open file, and a rollover runs under an exclusive
+    ``flock`` on ``<base>.lock`` (POSIX; elsewhere the stdlib behaviour)
+    that re-checks the size once held, since another process may just
+    have rolled.
+    """
+
+    _pending_len = 0
+
+    def _open(self) -> TextIOWrapper:
+        return cast(
+            TextIOWrapper,
+            open(
+                self.baseFilename,
+                self.mode,
+                encoding=self.encoding,
+                errors=self.errors,
+                opener=_private_opener,
+            ),
+        )
+
+    def _reopen(self) -> None:
+        if self.stream is not None:
+            self.stream.close()
+        self.stream = self._open()
+
+    def _stream_is_current(self) -> bool:
+        """Whether the base path still names the file this handler has
+        open (another process rotated or removed it if not)."""
+        try:
+            on_disk = os.stat(self.baseFilename)
+            held = os.fstat(self.stream.fileno())
+        except OSError:
+            return False
+        return (on_disk.st_dev, on_disk.st_ino) == (
+            held.st_dev,
+            held.st_ino,
+        )
+
+    def _base_size(self) -> int:
+        try:
+            return os.stat(self.baseFilename).st_size
+        except OSError:
+            return 0
+
+    def _needs_rollover(self, pending_len: int) -> bool:
+        size = self._base_size()
+        if not size:
+            # gh-116263, as the stdlib: never roll an empty file.
+            return False
+        if size + pending_len < self.maxBytes:
+            return False
+        # bpo-45401, as the stdlib: only ever roll a regular file.
+        if os.path.exists(self.baseFilename) and not os.path.isfile(
+            self.baseFilename
+        ):
+            return False
+        return True
+
+    def shouldRollover(self, record: logging.LogRecord) -> bool:
+        if self.stream is None:  # delay was set
+            self.stream = self._open()
+        if self.maxBytes <= 0:
+            return False
+        if not self._stream_is_current():
+            self._reopen()
+        self._pending_len = len("%s\n" % self.format(record))
+        return self._needs_rollover(self._pending_len)
+
+    def doRollover(self) -> None:
+        if fcntl is None:
+            super().doRollover()
+            return
+        lock_fd = os.open(
+            self.baseFilename + ".lock", os.O_WRONLY | os.O_CREAT, 0o600
+        )
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if self._needs_rollover(self._pending_len):
+                super().doRollover()
+            else:
+                # Another process rolled while this one waited.
+                self._reopen()
+        finally:
+            os.close(lock_fd)
+
 
 _LOG_FORMAT = "[%(asctime)s] [%(levelname)s] %(message)s"
 _LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
@@ -116,20 +282,66 @@ def startup_note(
         emit(line)
 
 
-def _resolve_log_file(mode: str, log_file: str | None) -> str | None:
-    """Return the log file path to use, or None for "no log file".
+class _ResolvedLogFile(NamedTuple):
+    path: str | None
+    is_default: bool
+
+
+def _resolve_log_file(
+    mode: str, log_file: str | None
+) -> _ResolvedLogFile:
+    """Return the log file path to use (None for "no log file") and
+    whether it is the built-in default.
 
     Order: the ``log_file`` argument if given, then the ``LOG_FILE``
     environment variable if it is set (even to empty), then the built-in
-    default: ``/tmp/trac-mcp-server.log`` for "mcp" (stdio), none for
+    default: ``default_mcp_log_file()`` for "mcp" (stdio), none for
     "cli"/"http". An empty or whitespace-only value at either step means
-    "no log file".
+    "no log file". ``main()`` passes ``--log-file``, else ``LOG_FILE``,
+    else YAML ``logging.file`` as ``log_file``.
     """
+    is_default = False
     if log_file is None:
         log_file = os.environ.get("LOG_FILE")
-    if log_file is None:
-        log_file = DEFAULT_MCP_LOG_FILE if mode == "mcp" else None
-    return log_file if log_file and log_file.strip() else None
+    if log_file is None and mode == "mcp":
+        log_file = default_mcp_log_file()
+        is_default = True
+    if not log_file or not log_file.strip():
+        return _ResolvedLogFile(None, False)
+    # ``~`` and ``~user`` expand whatever the source; a relative path
+    # keeps resolving against the working directory.
+    return _ResolvedLogFile(os.path.expanduser(log_file), is_default)
+
+
+def _open_mcp_file_handler(
+    resolved: _ResolvedLogFile,
+) -> logging.Handler | None:
+    """The handler for stdio's log file, or None to log to stderr.
+
+    The default path gets its directory created (mode 0700), rotation,
+    and a stderr fallback if it cannot be opened (a read-only home, say):
+    the operator did not choose it, so failing to start over it would be
+    wrong. An explicit path is opened as given, and an ``OSError`` from
+    it propagates: ``main()`` turns it into a startup failure.
+    """
+    assert resolved.path is not None
+    path = resolved.path
+    if not resolved.is_default:
+        return _PrivateFileHandler(path, mode="a")
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        return _PrivateRotatingFileHandler(
+            path,
+            mode="a",
+            maxBytes=_DEFAULT_LOG_MAX_BYTES,
+            backupCount=_DEFAULT_LOG_BACKUP_COUNT,
+        )
+    except OSError as e:
+        _print_stderr(
+            f"WARNING: cannot open default log file {path}: "
+            f"{e.strerror or e}; logging to stderr"
+        )
+        return None
 
 
 def setup_logging(
@@ -137,6 +349,7 @@ def setup_logging(
     debug: bool = False,
     log_file: str | None = None,
     debug_format: str = "text",
+    level: str | None = None,
 ) -> None:
     """
     Configure logging based on execution mode.
@@ -145,44 +358,69 @@ def setup_logging(
         mode: "mcp" for stdio transport: file logging by default, and
             never stdout; "cli" or "http" for stderr logging (with an
             optional companion log file).
-        debug: If True, overrides LOG_LEVEL to DEBUG.
+        debug: If True, the level is DEBUG whatever ``level`` and
+            LOG_LEVEL say.
         log_file: Log file path (overrides LOG_FILE env var). An empty
-            string means no log file.
+            string means no log file. ``main()`` resolves ``--log-file``,
+            LOG_FILE and YAML ``logging.file`` into this argument.
         debug_format: "text" (default) or "json" for structured output.
+        level: Level name (DEBUG, INFO, WARNING, ERROR, CRITICAL), any
+            case. ``main()`` resolves LOG_LEVEL and YAML ``logging.level``
+            into this argument. None, or a blank string, falls through to
+            the LOG_LEVEL environment variable, then the mode default.
+
+    Level precedence: ``debug``, then ``level``, then the LOG_LEVEL
+    environment variable (so a direct caller still gets it), then the
+    mode default.
 
     Environment variables:
-        LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR).
-                   Default: WARNING for MCP mode, INFO for CLI mode.
+        LOG_LEVEL: Logging level (DEBUG, INFO, WARNING, ERROR), used when
+                   ``level`` is None. Default: WARNING for MCP mode,
+                   INFO for CLI mode.
         LOG_FILE: Log file path, used when ``log_file`` is None; set to
-                  an empty string for no log file. Default:
-                  /tmp/trac-mcp-server.log for MCP (stdio) mode, no file
-                  for CLI and http mode. In MCP mode with no log file,
+                  an empty string for no log file. Default: the
+                  per-user state file (``default_mcp_log_file()``,
+                  rotating, private) for MCP (stdio) mode, no file for
+                  CLI and http mode. In MCP mode with no log file,
                   logging goes to stderr (never stdout).
-    """
-    # Determine log level from environment or defaults
-    default_level = "WARNING" if mode == "mcp" else "INFO"
-    env_level = os.getenv("LOG_LEVEL", default_level).upper()
 
-    # debug parameter overrides environment
+    Raises:
+        OSError: an explicitly chosen log file cannot be opened. An
+            unopenable default file does not raise: it logs to stderr
+            after one warning line.
+    """
+    default_level = "WARNING" if mode == "mcp" else "INFO"
     if debug:
         log_level = logging.DEBUG
     else:
-        log_level = getattr(logging, env_level, logging.INFO)
+        name = level
+        if name is None or not name.strip():
+            name = os.environ.get("LOG_LEVEL")
+        if name is None or not name.strip():
+            name = default_level
+        log_level = getattr(logging, name.strip().upper(), logging.INFO)
 
-    final_log_file = _resolve_log_file(mode, log_file)
+    resolved = _resolve_log_file(mode, log_file)
+    final_log_file = resolved.path
 
-    if mode == "mcp" and final_log_file:
+    file_handler_for_mcp = (
+        _open_mcp_file_handler(resolved)
+        if mode == "mcp" and final_log_file
+        else None
+    )
+
+    if file_handler_for_mcp is not None:
         # MCP mode: Log to file to avoid stdout contamination
         # stdio transport uses stdout for JSON-RPC messages
+        file_handler_for_mcp.setFormatter(
+            logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT)
+        )
         logging.basicConfig(
-            level=log_level,
-            format=_LOG_FORMAT,
-            datefmt=_LOG_DATEFMT,
-            filename=final_log_file,
-            filemode="a",
+            level=log_level, handlers=[file_handler_for_mcp]
         )
     elif mode == "mcp":
-        # MCP mode with the log file disabled: stderr, never stdout
+        # MCP mode with no log file (disabled, or the default one could
+        # not be opened): stderr, never stdout
         # (stdout carries JSON-RPC; the stdio spec allows stderr logs)
         stderr_handler = logging.StreamHandler(sys.stderr)
         stderr_handler.setFormatter(
@@ -206,7 +444,7 @@ def setup_logging(
         handlers.append(stderr_handler)
 
         if final_log_file:
-            file_handler = logging.FileHandler(final_log_file, mode="a")
+            file_handler = _PrivateFileHandler(final_log_file, mode="a")
             if debug_format == "json":
                 file_handler.setFormatter(
                     JsonFormatter(datefmt="%Y-%m-%d %H:%M:%S")

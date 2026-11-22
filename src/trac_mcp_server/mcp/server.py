@@ -24,7 +24,10 @@ from mcp.server.models import InitializationOptions
 from pydantic_core import Url
 
 from .. import __version__
-from ..config_bootstrap import bootstrap_server_config
+from ..config_bootstrap import (
+    bootstrap_server_config,
+    resolve_logging_settings,
+)
 from ..config_schema import ServerConfig
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
@@ -36,13 +39,14 @@ from ..instances import (
     load_declared_instances,
 )
 from ..instances import caller_identity as _caller_identity
-from ..logger import DEFAULT_MCP_LOG_FILE, setup_logging, startup_note
+from ..logger import setup_logging, startup_note
 from ..version import (
     check_version_consistency,
     cli_version,
     format_server_version,
     release_sha,
 )
+from .errors import StartupError
 from .http_app import run_http
 from .lifespan import server_lifespan
 from .oidc import OidcClientCache, extract_bearer_token
@@ -623,7 +627,15 @@ async def main(config_overrides: dict | None = None):
         server_config = bootstrap_server_config(config_overrides)
     except ValueError as e:
         sys.stderr.write(f"ERROR: Server configuration error: {e}\n")
-        raise RuntimeError(f"Server configuration error: {e}") from e
+        raise StartupError(f"Server configuration error: {e}") from e
+
+    # Debug, level and file come from env and YAML as well as --log-file.
+    # This runs after bootstrap_server_config, which loads the .env.
+    try:
+        logging_settings = resolve_logging_settings(log_file)
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: Logging configuration error: {e}\n")
+        raise StartupError(f"Logging configuration error: {e}") from e
 
     # Setup logging: MCP mode for stdio (file only, never stdout, since
     # stdio_server() uses stdout for JSON-RPC); stderr+file for http.
@@ -634,14 +646,16 @@ async def main(config_overrides: dict | None = None):
             mode="mcp"
             if server_config.transport == "stdio"
             else "http",
-            log_file=log_file,
+            debug=logging_settings.debug,
+            level=logging_settings.level,
+            log_file=logging_settings.log_file,
         )
     except OSError as e:
         reason = e.strerror or str(e)
         sys.stderr.write(
             f"ERROR: Cannot open log file {e.filename}: {reason}\n"
         )
-        raise RuntimeError(
+        raise StartupError(
             f"Cannot open log file {e.filename}: {reason}"
         ) from e
 
@@ -657,7 +671,24 @@ async def main(config_overrides: dict | None = None):
     )
     allowed_permissions = None
     if permissions_file:
-        allowed_permissions = load_permissions_file(permissions_file)
+        try:
+            allowed_permissions = load_permissions_file(
+                permissions_file
+            )
+        except OSError as e:
+            reason = e.strerror or str(e)
+            where = f" ({e.filename})" if e.filename else ""
+            sys.stderr.write(
+                f"ERROR: Permissions file error: {reason}{where}\n"
+            )
+            raise StartupError(
+                f"Permissions file error: {reason}{where}"
+            ) from e
+        except ValueError as e:
+            # Bad content, and a file that is not valid UTF-8
+            # (UnicodeDecodeError is a ValueError).
+            sys.stderr.write(f"ERROR: Permissions file error: {e}\n")
+            raise StartupError(f"Permissions file error: {e}") from e
         logger.info(
             "Loaded %d permissions from %s",
             len(allowed_permissions),
@@ -671,7 +702,7 @@ async def main(config_overrides: dict | None = None):
         declared_names = sorted(load_declared_instances())
     except ValueError as e:
         sys.stderr.write(f"ERROR: Instances configuration error: {e}\n")
-        raise RuntimeError(f"Instances configuration error: {e}") from e
+        raise StartupError(f"Instances configuration error: {e}") from e
     specs = with_page_alias([PING_SPEC] + ALL_SPECS)
     # With OIDC per-user auth every call goes to the one configured endpoint
     # and _resolve_client rejects any other instance; advertising the
@@ -818,9 +849,11 @@ must not be piped manually. This does not apply to --transport http.
     parser.add_argument(
         "--log-file",
         default=None,
-        help="Log file path (default: the LOG_FILE env var, else "
-        f"{DEFAULT_MCP_LOG_FILE} for stdio and no file for http; pass an "
-        "empty string to disable the file)",
+        help="Log file path (default: the LOG_FILE env var, else the "
+        "logging.file config setting, else "
+        "$XDG_STATE_HOME/trac-mcp-server/server.log, or "
+        "~/.local/state/trac-mcp-server/server.log, for stdio and no "
+        "file for http; pass an empty string to disable the file)",
     )
     parser.add_argument(
         "--permissions-file",
@@ -939,8 +972,9 @@ def run() -> None:
                 else None
             )
         )
-    except RuntimeError:
-        # Error already printed to stderr by lifespan manager
+    except StartupError:
+        # Already printed to stderr where it was raised. Any other
+        # RuntimeError is a bug and keeps its traceback.
         sys.exit(1)
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)

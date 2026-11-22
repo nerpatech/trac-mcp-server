@@ -11,6 +11,7 @@ from ..core.async_utils import init_semaphore, run_sync
 from ..core.client import TracClient
 from ..instances import InstanceRegistry, load_declared_instances
 from ..logger import startup_note
+from .errors import StartupError
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ async def server_lifespan(
         Dict with 'client' key containing the initialized TracClient
 
     Raises:
-        RuntimeError: If configuration is invalid or Trac connection fails.
+        StartupError: If configuration is invalid or Trac connection
+            fails (the reason is already on stderr).
     """
     _note(
         "MCP server starting...", printed="Trac MCP Server starting..."
@@ -97,7 +99,7 @@ async def server_lifespan(
                 "  Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set.",
             ],
         )
-        raise RuntimeError(
+        raise StartupError(
             f"Configuration error: {e}. Ensure TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD are set."
         ) from e
 
@@ -153,7 +155,7 @@ async def server_lifespan(
                     "  Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD.",
                 ],
             )
-            raise RuntimeError(
+            raise StartupError(
                 f"Trac connection failed: {e}. Check TRAC_URL, TRAC_USERNAME, TRAC_PASSWORD."
             ) from e
 
