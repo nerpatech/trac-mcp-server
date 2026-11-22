@@ -15,10 +15,13 @@ instances (``instances:`` on a ``TRAC_IDENTITIES`` entry, or
 """
 
 import dataclasses
+import logging
 import os
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from .config import (
@@ -32,8 +35,10 @@ from .config_loader import (
     load_hierarchical_config,
     load_instances_file,
 )
-from .config_schema import build_config
+from .config_schema import build_config, require_credentials_pair
 from .core.client import TracClient
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,26 @@ class InstanceNotAllowedError(ValueError):
     ``ValueError`` so the existing dispatch sites' ``except ValueError``
     catches it; they map it to the ``instance_not_allowed`` error type.
     """
+
+
+class IdentityRequiredError(RuntimeError):
+    """An HTTP request reached tool dispatch without an authenticated identity.
+
+    Trac /trac_mcp_server #268. Raised by :func:`caller_identity` when
+    identities are configured on the serving app but the request carries
+    no ``scope["trac_auth"]`` mark from ``BearerAuthMiddleware``. Not a
+    ``ValueError``: the dispatch sites' ``except ValueError`` clauses map
+    instance-resolution errors to ``unknown_instance``/``validation_error``,
+    and this must never read as one of those. Each call site catches it by
+    name and answers a ``permission_denied`` tool error.
+    """
+
+
+# Name of the attribute on the Starlette app's ``state`` that records
+# whether per-caller identities are configured (Trac /trac_mcp_server
+# #268). Set by ``mcp/http_app.build_http_app``, read by
+# :func:`caller_identity` through the request's own ``scope["app"]``.
+IDENTITIES_CONFIGURED_STATE = "trac_identities_configured"
 
 
 def _host_root(url: str) -> str:
@@ -132,6 +157,12 @@ def load_declared_instances() -> dict[str, InstanceSpec]:
             else {}
         )
         for name, inst in entries.items():
+            require_credentials_pair(
+                name,
+                inst.get("username"),
+                inst.get("password"),
+                f"TRAC_INSTANCES file {env_path}",
+            )
             declared[name] = InstanceSpec(
                 name=name,
                 url=inst["url"],
@@ -263,6 +294,18 @@ def caller_identity() -> "Identity | None":
       instance's own configured credentials, exactly as before this
       ticket.
 
+    Raises :class:`IdentityRequiredError` (Trac /trac_mcp_server #268,
+    defence in depth): over http, when identities are configured on the
+    serving app but the request carries no ``scope["trac_auth"]`` mark.
+    ``BearerAuthMiddleware`` marks every request it admits (``"static"``
+    or ``"identity"``) and 401s the rest, so an unmarked request means
+    the middleware did not run -- and handing it ``None`` would mean the
+    default credentials. The "identities are configured" fact is read
+    off ``scope["app"].state`` (set by ``build_http_app``): the request's
+    own app, so it needs no module global and cannot be stale across two
+    apps in one process, and it does not depend on the middleware that
+    is being cross-checked.
+
     NOTE: relies on the mcp SDK setting ``request_context.request`` to
     the Starlette ``Request`` handling the in-flight message (see
     ``streamable_http.py``'s three
@@ -278,7 +321,27 @@ def caller_identity() -> "Identity | None":
     request = context.request
     if request is None:
         return None
-    return request.scope.get("trac_identity")
+    scope = request.scope
+    if scope.get("trac_auth") is None and _identities_configured(scope):
+        logger.warning(
+            "Refusing a request that reached tool dispatch with no "
+            "authentication mark although per-caller identities are "
+            "configured (%s %s)",
+            scope.get("method", "?"),
+            scope.get("path", "?"),
+        )
+        raise IdentityRequiredError(
+            "This request carried no authenticated identity, so it is "
+            "not served with the server's default credentials."
+        )
+    return scope.get("trac_identity")
+
+
+def _identities_configured(scope: Mapping[str, Any]) -> bool:
+    """Whether the app serving ``scope`` has per-caller identities."""
+    app = scope.get("app")
+    state = getattr(app, "state", None)
+    return bool(getattr(state, IDENTITIES_CONFIGURED_STATE, False))
 
 
 class InstanceRegistry:
@@ -329,7 +392,24 @@ class InstanceRegistry:
         with self._lock:
             current = self._snapshot_mtimes()
             if current != self._mtimes:
-                self._declared = load_declared_instances()
+                try:
+                    declared = load_declared_instances()
+                except Exception as e:
+                    # A bad edit must not turn every call, the default
+                    # instance and ping included, into this error (Trac
+                    # /trac_mcp_server #268). Keep the last good set, and
+                    # record the mtimes so the bad file is not re-parsed
+                    # and re-logged on each call; the next edit reloads.
+                    # The message never carries a password value.
+                    logger.error(
+                        "Reloading declared instances from %s failed; "
+                        "keeping the previous instances until the file "
+                        "changes again: %s",
+                        ", ".join(str(p) for p in current),
+                        e,
+                    )
+                else:
+                    self._declared = declared
                 self._sources = _instance_source_paths()
                 self._mtimes = self._snapshot_mtimes()
 
@@ -503,11 +583,20 @@ class InstanceRegistry:
         # not named here is inherited from the default, including ones
         # added later. The field-by-field copy dropped write_gate, so the
         # #64 kill switch never reached synthesized configs (ticket #117).
+        # Credentials inherit as a PAIR (Trac /trac_mcp_server #268): an
+        # explicit username goes with the password passed alongside it,
+        # never the default's; no username inherits both. Load-time
+        # validation refuses a declared username without a password, and
+        # validate_config() below refuses the empty one that would result.
+        if username:
+            pair = (username, password or "")
+        else:
+            pair = (self._default.username, self._default.password)
         config = dataclasses.replace(
             self._default,
             trac_url=url,
-            username=username or self._default.username,
-            password=password or self._default.password,
+            username=pair[0],
+            password=pair[1],
             insecure=(
                 insecure
                 if insecure is not None

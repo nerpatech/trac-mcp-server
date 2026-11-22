@@ -29,6 +29,7 @@ from ..config_schema import ServerConfig
 from ..core.async_utils import run_sync
 from ..core.client import TracClient
 from ..instances import (
+    IdentityRequiredError,
     InstanceNotAllowedError,
     InstanceRegistry,
     UnknownInstanceError,
@@ -55,6 +56,7 @@ from .tools import (
     build_error_response,
     load_permissions_file,
 )
+from .tools.errors import IDENTITY_REQUIRED_ACTION
 from .tools.file_io import set_file_access
 from .tools.instance_echo import annotate
 from .tools.instances import set_instance_registry
@@ -326,6 +328,8 @@ async def handle_read_resource(uri: Url) -> str:
         instance = _instance_from_query(uri.query)
         try:
             client = await _resolve_client(instance)
+        except IdentityRequiredError as e:
+            return f"Error (permission_denied): {e}\n\nAction: {IDENTITY_REQUIRED_ACTION}"
         except ValueError as e:
             error_type = _instance_error_type(e)
             return f"Error ({error_type}): {e}\n\nAction: Call list_instances to see what is reachable."
@@ -408,6 +412,12 @@ async def handle_call_tool(
                 "Call list_instances to see what is reachable.",
             )
         client = None
+    except IdentityRequiredError as e:
+        # Trac /trac_mcp_server #268: never the default credentials. Not
+        # a ValueError, so it is not read as an instance-resolution error.
+        return build_error_response(
+            "permission_denied", str(e), IDENTITY_REQUIRED_ACTION
+        )
     except ValueError as e:
         corrective_action = (
             "Set the 'Authorization: Bearer <token>' header to your own "
@@ -619,7 +629,11 @@ async def main(config_overrides: dict | None = None):
     # Declared-instance names are needed for the `instance` schema
     # description; this is a cheap, side-effect-free re-parse of the same
     # YAML the lifespan will load momentarily (no live connection required).
-    declared_names = sorted(load_declared_instances())
+    try:
+        declared_names = sorted(load_declared_instances())
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: Instances configuration error: {e}\n")
+        raise RuntimeError(f"Instances configuration error: {e}") from e
     specs = with_page_alias([PING_SPEC] + ALL_SPECS)
     # With OIDC per-user auth every call goes to the one configured endpoint
     # and _resolve_client rejects any other instance; advertising the

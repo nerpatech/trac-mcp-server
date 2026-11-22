@@ -14,6 +14,14 @@ import mcp.types as types
 
 from ...core.faults import classify_fault
 
+# Corrective action for an ``instances.IdentityRequiredError`` (Trac
+# /trac_mcp_server #268): the request got past transport auth without
+# ever being marked as authenticated. Shared by every site that catches it.
+IDENTITY_REQUIRED_ACTION = (
+    "Send 'Authorization: Bearer <token>' with a token this server "
+    "accepts; the request is not served without one."
+)
+
 
 def build_error_response(
     error_type: str, message: str, corrective_action: str

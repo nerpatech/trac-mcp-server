@@ -15,10 +15,12 @@ from unittest.mock import MagicMock, patch
 
 import mcp.types as types
 
+from trac_mcp_server.instances import IdentityRequiredError
 from trac_mcp_server.mcp.server import (
     PING_SPEC,
     _caller_identity,
     handle_call_tool,
+    handle_read_resource,
     set_registry,
 )
 from trac_mcp_server.mcp.tools import ALL_SPECS
@@ -72,3 +74,48 @@ class TestCallerIdentityOutsideARequest:
             None, identity=None
         )
         assert not result.isError
+
+
+class TestIdentityRequiredAtDispatch:
+    """Trac /trac_mcp_server #268 (L27): the refusal ``caller_identity``
+    raises for an unmarked request becomes an error response, never a
+    crash and never the default credentials."""
+
+    def setup_method(self):
+        _init_registry()
+
+    def teardown_method(self):
+        _clear_registry()
+
+    @patch(
+        "trac_mcp_server.mcp.server._caller_identity",
+        side_effect=IdentityRequiredError("no authenticated identity"),
+    )
+    @patch("trac_mcp_server.mcp.server.get_instances")
+    def test_call_tool_returns_a_permission_denied_error(
+        self, mock_get_instances, _mock_identity
+    ):
+        result = asyncio.run(handle_call_tool("ping", {}))
+
+        assert result.isError
+        text = result.content[0].text
+        assert text.startswith("Error (permission_denied):")
+        assert "no authenticated identity" in text
+        mock_get_instances.return_value.get_client.assert_not_called()
+
+    @patch(
+        "trac_mcp_server.mcp.server._caller_identity",
+        side_effect=IdentityRequiredError("no authenticated identity"),
+    )
+    @patch("trac_mcp_server.mcp.server.get_instances")
+    def test_read_resource_returns_a_permission_denied_error(
+        self, mock_get_instances, _mock_identity
+    ):
+        from pydantic_core import Url
+
+        text = asyncio.run(
+            handle_read_resource(Url("trac://wiki/WikiStart"))
+        )
+
+        assert text.startswith("Error (permission_denied):")
+        mock_get_instances.return_value.get_client.assert_not_called()

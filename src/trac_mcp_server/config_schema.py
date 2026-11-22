@@ -83,11 +83,47 @@ class TracConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+def require_credentials_pair(
+    name: str, username: str | None, password: str | None, where: str
+) -> None:
+    """Refuse a declared instance that sets one credential without the other.
+
+    Trac /trac_mcp_server #268: credentials are set as a pair. Both set, or
+    neither (then the default's pair, or the caller's identity per #102,
+    applies). One half is almost always an unset ``${VAR}`` (which
+    interpolates to ``""``), and either half alone would be combined with
+    the default account's other half and sent to that instance's host, so
+    it is refused at load. Shared by the YAML ``instances:`` section and
+    the ``TRAC_INSTANCES`` loader. Never put a password value in the
+    message.
+
+    Raises:
+        ValueError: ``username`` is set and ``password`` is missing/empty,
+            or ``password`` is set and ``username`` is missing/empty.
+    """
+    if username and not password:
+        raise ValueError(
+            f"Instance '{name}' in {where} sets a username but no "
+            "password. An explicit username needs its own password: it "
+            "is never paired with the default account's. A ${VAR} that "
+            "is unset interpolates to empty and is the usual cause."
+        )
+    if password and not username:
+        raise ValueError(
+            f"Instance '{name}' in {where} sets a password but no "
+            "username. An explicit password needs its own username: it "
+            "is never paired with the default account's. A ${VAR} that "
+            "is unset interpolates to empty and is the usual cause."
+        )
+
+
 class InstanceConfig(BaseModel):
     """A named additional Trac instance.
 
-    Unset ``username``/``password``/``insecure`` inherit from the default
-    ``trac`` section at resolution time (see ``instances.InstanceRegistry``).
+    An unset ``insecure`` inherits from the default ``trac`` section at
+    resolution time (see ``instances.InstanceRegistry``). ``username`` and
+    ``password`` are a pair: both set, or neither (then the default's
+    pair, or the caller's identity, applies).
     """
 
     url: str = Field(
@@ -95,11 +131,19 @@ class InstanceConfig(BaseModel):
     )
     username: str | None = Field(
         default=None,
-        description="Trac username (inherits default if unset)",
+        description=(
+            "Trac username. Set together with password, or leave both "
+            "unset to use the default pair; one without the other is "
+            "refused at load"
+        ),
     )
     password: str | None = Field(
         default=None,
-        description="Trac password (inherits default if unset)",
+        description=(
+            "Trac password. Set together with username, or leave both "
+            "unset to use the default pair; one without the other is "
+            "refused at load"
+        ),
     )
     insecure: bool | None = Field(
         default=None,
@@ -305,7 +349,23 @@ class UnifiedConfig(BaseModel):
     instances: dict[str, InstanceConfig] = Field(default_factory=dict)
     export: ExportConfig = Field(default_factory=ExportConfig)
 
-    model_config = {"frozen": True}
+    @field_validator("instances")
+    @classmethod
+    def _check_instance_credentials(
+        cls, value: dict[str, InstanceConfig]
+    ) -> dict[str, InstanceConfig]:
+        for name, inst in value.items():
+            require_credentials_pair(
+                name,
+                inst.username,
+                inst.password,
+                "the 'instances' section",
+            )
+        return value
+
+    # The default error text echoes the offending input, which here holds
+    # every instance's password; hide it (Trac /trac_mcp_server #268).
+    model_config = {"frozen": True, "hide_input_in_errors": True}
 
 
 # ---------------------------------------------------------------------------

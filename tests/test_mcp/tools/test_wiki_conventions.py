@@ -22,6 +22,7 @@ from trac_mcp_server.core.client import (
     WikiPageStoredReadbackFailed,
 )
 from trac_mcp_server.instances import (
+    IdentityRequiredError,
     InstanceNotAllowedError,
     UnknownInstanceError,
 )
@@ -247,7 +248,11 @@ def _run(client, registry="unset", identity="ID"):
     patches = [
         patch(
             "trac_mcp_server.mcp.tools.wiki_conventions.caller_identity",
-            return_value=identity,
+            **(
+                {"side_effect": identity}
+                if isinstance(identity, Exception)
+                else {"return_value": identity}
+            ),
         )
     ]
     if registry != "unset":
@@ -404,6 +409,23 @@ class TestHandler:
             "message": str(error),
         }
         assert len(out["templates"]) == 2
+
+    def test_unauthenticated_request_is_reported_not_given_default_creds(
+        self,
+    ):
+        """Trac /trac_mcp_server #268: ``caller_identity`` refusing an
+        unmarked request is reported on the style page record, and the
+        registry is never asked for a client."""
+        client = FakeClient(
+            {"WikiStart": (AGENT + "\n", 1), **TEMPLATES}
+        )
+        registry = _registry(client)
+        error = IdentityRequiredError("no authenticated identity")
+        out = _run(client, registry, identity=error)
+        assert out["style_page"]["available"] is False
+        assert out["style_page"]["reason"] == "permission_denied"
+        assert out["style_page"]["message"] == str(error)
+        registry.get_client.assert_not_called()
 
     def test_registry_none_is_unknown_instance(self):
         client = FakeClient({"WikiStart": (AGENT + "\n", 1)})

@@ -237,9 +237,18 @@ instances:
     url: /bcs                 # relative -- resolved against the default host
   other-host:
     url: https://other.example.com/trac
-    username: other-user      # unset fields (username/password/insecure)
-    password: other-pass      # inherit from the default `trac:` section
+    username: other-user      # username and password are a pair: set both,
+    password: other-pass      # or neither (then the default's pair is used)
 ```
+
+`username` and `password` are set as a pair: both set, or neither. With
+neither, the instance uses the default `trac:` pair (or, over HTTP, the
+caller's identity per ticket #102). A username without a password, or a
+password without a username, is refused when the config loads, so one
+account's half is never combined with the default account's other half and
+sent to that instance's host. An unset `${VAR}` interpolates to an empty
+string and is the usual cause. `insecure` still inherits from the default
+when unset.
 
 Instances can also be declared out-of-band via a `TRAC_INSTANCES` file (YAML
 or JSON), pointed to by the `TRAC_INSTANCES` environment variable -- either

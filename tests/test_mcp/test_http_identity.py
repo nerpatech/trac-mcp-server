@@ -38,7 +38,8 @@ from mcp.server import Server
 from trac_mcp_server import __version__
 from trac_mcp_server.config import Config
 from trac_mcp_server.config_schema import ServerConfig
-from trac_mcp_server.instances import Identity
+from trac_mcp_server.instances import Identity, IdentityRequiredError
+from trac_mcp_server.mcp import http_app
 from trac_mcp_server.mcp import server as server_module
 from trac_mcp_server.mcp.http_app import build_http_app
 
@@ -154,7 +155,10 @@ def _make_identity_probe_server() -> Server:
         # Read through the module, not a bound-at-import-time reference,
         # so the seeded-defect test below (which monkeypatches the
         # module attribute) actually changes what this handler sees.
-        identity = server_module._caller_identity()
+        try:
+            identity = server_module._caller_identity()
+        except IdentityRequiredError:
+            return [types.TextContent(type="text", text="refused")]
         text = identity.name if identity is not None else "none"
         return [types.TextContent(type="text", text=text)]
 
@@ -339,6 +343,61 @@ class TestConcurrentSessionsHermetic:
                 body = json.loads(data_line)
                 text = body["result"]["content"][0]["text"]
                 assert text == "bob"
+
+        anyio.run(_body)
+
+
+class TestAuthMarkOverRealApp:
+    """Trac /trac_mcp_server #268 (L27), through the real Starlette app,
+    real uvicorn and the SDK client: the auth mark and the app's
+    identities flag reach ``caller_identity`` the way production wires
+    them."""
+
+    def test_static_and_identity_calls_both_resolve(self):
+        async def _body():
+            port = _free_port()
+            with _running_app(
+                _make_identity_probe_server(),
+                _probe_server_config(port),
+            ) as base_url:
+                static = await _call_tool(
+                    base_url, _LEGACY_TOKEN, "whoami", {}
+                )
+                identity = await _call_tool(
+                    base_url, _TOKEN_A, "whoami", {}
+                )
+                assert static.content[0].text == "none"
+                assert identity.content[0].text == "alice"
+
+        anyio.run(_body)
+
+    def test_request_that_skipped_the_middleware_is_refused(
+        self, monkeypatch
+    ):
+        """With identities configured, a request that reaches dispatch
+        without the middleware's mark is refused, not handed the default
+        credentials. The middleware is swapped for a pass-through to
+        stand in for a reordering or removal of it."""
+
+        class _PassThrough:
+            def __init__(self, app, token=None, identities=None):
+                self._app = app
+
+            async def __call__(self, scope, receive, send):
+                await self._app(scope, receive, send)
+
+        monkeypatch.setattr(
+            http_app, "BearerAuthMiddleware", _PassThrough
+        )
+
+        async def _body():
+            port = _free_port()
+            with _running_app(
+                _make_identity_probe_server(),
+                _probe_server_config(port),
+            ) as base_url:
+                result = await _call_tool(base_url, None, "whoami", {})
+                assert result.content[0].text == "refused"
 
         anyio.run(_body)
 

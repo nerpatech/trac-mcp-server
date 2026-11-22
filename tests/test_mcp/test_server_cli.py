@@ -5,6 +5,9 @@ config override building, stdio transport setup and version display.
 """
 
 import argparse
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -193,3 +196,44 @@ def test_file_access_flag_accepts_local_and_off():
 def test_file_access_flag_rejects_unknown_value(capsys):
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--file-access", "on"])
+
+
+class TestBadDeclaredInstancesAtStartup:
+    """Trac /trac_mcp_server #268 review: a TRAC_INSTANCES entry that
+    fails the load check ends startup with one ERROR line and the same
+    RuntimeError (exit 1 from run()) a bad server config gets, not a
+    traceback."""
+
+    def test_one_error_line_and_a_runtime_error(self, capsys):
+        from trac_mcp_server.mcp.server import main
+
+        err = ValueError(
+            "Instance 'other' in TRAC_INSTANCES file x.yml sets a "
+            "username but no password."
+        )
+        with (
+            patch(
+                "trac_mcp_server.mcp.server.bootstrap_server_config",
+                return_value=SimpleNamespace(transport="http"),
+            ),
+            patch("trac_mcp_server.mcp.server.setup_logging"),
+            patch(
+                "trac_mcp_server.mcp.server.load_declared_instances",
+                side_effect=err,
+            ),
+            pytest.raises(
+                RuntimeError, match="Instance 'other'"
+            ) as exc,
+        ):
+            asyncio.run(main())
+
+        assert exc.value.__cause__ is err
+        stderr = capsys.readouterr().err
+        error_lines = [
+            line
+            for line in stderr.splitlines()
+            if line.startswith("ERROR")
+        ]
+        assert error_lines == [
+            "ERROR: Instances configuration error: " + str(err)
+        ]

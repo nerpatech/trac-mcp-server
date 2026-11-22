@@ -24,6 +24,7 @@ from ...converters.common import blank_code_fences
 from ...core.async_utils import run_sync_limited
 from ...core.client import TracClient
 from ...instances import (
+    IdentityRequiredError,
     InstanceNotAllowedError,
     UnknownInstanceError,
     caller_identity,
@@ -183,6 +184,12 @@ async def _read_style_page(
         try:
             target = registry.get_client(
                 path, identity=caller_identity()
+            )
+        except IdentityRequiredError as exc:
+            # Trac /trac_mcp_server #268: reported like the other
+            # refusals, never served with the default credentials.
+            return _style_unavailable(
+                path, page, "permission_denied", str(exc)
             )
         except InstanceNotAllowedError as exc:
             return _style_unavailable(
