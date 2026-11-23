@@ -578,3 +578,61 @@ async def test_comment_lookup_budget_is_charged_the_running_time(
 
     assert posted.number is None
     assert posted.failure == "changelog read timed out"
+
+
+async def test_deadline_does_not_wait_for_a_thread_in_the_default_pool():
+    """Review item 4: with the loop's default executor saturated by
+    ``run_local`` work, a slot holder still gets a thread at once, so
+    ``run_sync_deadline(0.3, fast)`` succeeds. (On the default executor
+    it queued behind the blocked thread and timed out.)"""
+    import concurrent.futures
+
+    init_semaphore(2)
+    loop = asyncio.get_running_loop()
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(pool)
+    release = threading.Event()
+    blocker = asyncio.ensure_future(
+        async_utils.run_local(release.wait, 10)
+    )
+    await asyncio.sleep(0.1)
+    try:
+        value = await asyncio.wait_for(
+            async_utils.run_sync_deadline(0.3, lambda: 42), TIMEOUT
+        )
+    finally:
+        release.set()
+        await asyncio.wait_for(blocker, TIMEOUT)
+        pool.shutdown(wait=False)
+
+    assert value == 42
+
+
+async def test_comment_lookup_wall_cap_ends_a_starved_queue(
+    monkeypatch,
+):
+    """Review item 1: with the slot held for 1.5 s, a wall cap of 0.4 s
+    (running budget 10 s) ends the lookup with the scan's timeout
+    failure about then, instead of waiting out the queue."""
+    init_semaphore(1)
+    monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 10.0)
+    monkeypatch.setattr(
+        ticket_write, "_COMMENT_LOOKUP_WALL_TIMEOUT", 0.4
+    )
+    client, new_ts = _lookup_client(0.05, 0.05)
+
+    holder = asyncio.ensure_future(run_sync(time.sleep, 1.5))
+    await asyncio.sleep(0.05)
+    started = time.monotonic()
+    posted = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+    took = time.monotonic() - started
+    await asyncio.wait_for(holder, TIMEOUT)
+
+    assert posted.number is None
+    assert posted.failure == "changelog read timed out"
+    assert 0.3 < took < 1.0

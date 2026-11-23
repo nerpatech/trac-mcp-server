@@ -246,59 +246,112 @@ async def test_gather_limited_uninitialised_is_a_plain_gather():
     assert peak == 5
 
 
-async def test_gather_limited_first_failure_cancels_and_closes_the_rest():
-    """The first exception propagates, in-flight items are cancelled and
-    the coroutines that never started are closed (no "never awaited")."""
+async def test_gather_limited_attempts_every_item_then_raises_the_first():
+    """Item 2 of 6 raises: all 6 still run to completion, nothing is
+    cancelled, the first exception in time propagates afterwards, and no
+    "never awaited" or "exception never retrieved" is logged."""
     init_semaphore(2)
-    started: list[int] = []
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    loop.set_exception_handler(lambda _loop, ctx: reported.append(ctx))
+    finished: list[int] = []
     cancelled: list[int] = []
 
     async def item(i):
-        started.append(i)
         try:
-            if i == 0:
-                await asyncio.sleep(0.05)
-                raise ValueError("boom")
-            await asyncio.sleep(5)
+            # Item 1 fails first in time; item 3 fails later.
+            await asyncio.sleep(0.05 if i == 1 else 0.1)
+            if i in (1, 3):
+                raise ValueError(f"boom {i}")
+            finished.append(i)
+            return i
         except asyncio.CancelledError:
             cancelled.append(i)
             raise
+
+    coros = [item(i) for i in range(6)]
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(ValueError, match="boom 1"):
+                await asyncio.wait_for(gather_limited(coros), 15)
+            del coros
+            gc.collect()
+        await asyncio.sleep(0.05)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+
+    assert sorted(finished) == [0, 2, 4, 5]
+    assert cancelled == []
+    assert reported == []
+    assert [
+        w for w in caught if issubclass(w.category, RuntimeWarning)
+    ] == []
+
+
+async def test_gather_limited_uninitialised_attempts_every_item_too():
+    async_utils._semaphore = None
+    ran: list[int] = []
+
+    async def item(i):
+        await asyncio.sleep(0.02)
+        ran.append(i)
+        if i == 2:
+            raise ValueError("boom")
         return i
 
-    coros = [item(i) for i in range(10)]
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(ValueError, match="boom"):
-            await asyncio.wait_for(gather_limited(coros), 15)
-        del coros
-        gc.collect()
+    with pytest.raises(ValueError, match="boom"):
+        await asyncio.wait_for(
+            gather_limited([item(i) for i in range(6)]), 15
+        )
 
-    assert started == [0, 1]
-    assert cancelled == [1]
-    never_awaited = [
-        w for w in caught if issubclass(w.category, RuntimeWarning)
-    ]
-    assert never_awaited == []
+    assert sorted(ran) == [0, 1, 2, 3, 4, 5]
 
 
-async def test_gather_limited_closes_unstarted_coroutines():
-    """Held references: the unstarted coroutines are in the closed
-    state after the failure, not merely collected."""
+async def test_gather_limited_cancelled_caller_closes_unstarted_items():
     init_semaphore(1)
 
-    async def fail():
-        raise ValueError("boom")
+    async def slow():
+        await asyncio.sleep(5)
 
     async def never():
         return 1
 
     unstarted = [never() for _ in range(3)]
-    with pytest.raises(ValueError):
-        await asyncio.wait_for(gather_limited([fail(), *unstarted]), 15)
+    task = asyncio.ensure_future(gather_limited([slow(), *unstarted]))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
     assert [inspect.getcoroutinestate(c) for c in unstarted] == [
         inspect.CORO_CLOSED
     ] * 3
+
+
+async def test_rpc_threads_come_from_a_dedicated_pool_of_n():
+    """Slotted calls run on their own N-thread executor, not the loop's
+    default one."""
+    init_semaphore(2)
+
+    name = await asyncio.wait_for(
+        run_sync(lambda: threading.current_thread().name), 15
+    )
+
+    assert name.startswith("trac-rpc")
+    assert async_utils._rpc_executor._max_workers == 2
+
+
+async def test_reinit_replaces_the_executor_and_stops_the_old_one():
+    init_semaphore(1)
+    old = async_utils._rpc_executor
+    init_semaphore(1)
+
+    assert async_utils._rpc_executor is not old
+    with pytest.raises(RuntimeError):
+        old.submit(lambda: None)
+    assert await asyncio.wait_for(run_sync(_sync_add, 1, 2), 15) == 3
 
 
 async def test_run_sync_slot_is_held_until_the_thread_ends():

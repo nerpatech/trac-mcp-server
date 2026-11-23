@@ -1,6 +1,7 @@
 """Async utilities for bridging sync XML-RPC calls to async MCP handlers."""
 
 import asyncio
+import concurrent.futures
 import contextvars
 import functools
 import logging
@@ -20,13 +21,27 @@ _semaphore: asyncio.Semaphore | None = None
 # batch through this many workers, so a batch holds at most this many
 # places in the semaphore's queue.
 _max_parallel: int = 0
+# The threads of slotted calls. A slot is held until its thread ends, so
+# at most N threads are ever in use, and a call that holds a slot gets a
+# thread at once: it never waits behind ``run_local`` work in the loop's
+# default executor, so a ``run_sync_deadline`` timer measures the call and
+# not a thread queue. None until init_semaphore.
+_rpc_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 
 def init_semaphore(max_parallel: int = 2) -> None:
-    """Initialize the concurrency semaphore. Call once at server startup."""
-    global _semaphore, _max_parallel
+    """Initialize the concurrency semaphore and the executor its calls
+    run on. Call once at server startup."""
+    global _semaphore, _max_parallel, _rpc_executor
+    previous = _rpc_executor
     _semaphore = asyncio.Semaphore(max_parallel)
     _max_parallel = max_parallel
+    _rpc_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=max_parallel, thread_name_prefix="trac-rpc"
+    )
+    if previous is not None:
+        # In-flight calls finish on the old executor; it takes no more.
+        previous.shutdown(wait=False)
     logger.info(
         "Trac request semaphore initialized: max_parallel=%d",
         max_parallel,
@@ -58,6 +73,7 @@ async def _start_in_slot(
     attached, so cancellation cannot land in between and leak the slot.
     """
     semaphore = _semaphore
+    executor = _rpc_executor
     assert semaphore is not None
     await semaphore.acquire()
     try:
@@ -66,7 +82,8 @@ async def _start_in_slot(
         ctx = contextvars.copy_context()
         fut: asyncio.Future[T] = (
             asyncio.get_running_loop().run_in_executor(
-                None, functools.partial(ctx.run, func, *args, **kwargs)
+                executor,
+                functools.partial(ctx.run, func, *args, **kwargs),
             )
         )
     except BaseException:
@@ -238,18 +255,23 @@ async def run_local(
 async def gather_limited(
     coros: Sequence[Coroutine[Any, Any, T]],
 ) -> list[T]:
-    """Run coroutines concurrently, at most N at a time.
+    """Run every coroutine to completion, at most N at a time.
 
     Bounds nothing itself: the coroutines do, through run_sync_limited
-    (which takes a slot of the asyncio semaphore, like run_sync). But
-    with the semaphore initialized the batch runs through N worker
-    tasks (N = the semaphore's size), each pulling the next coroutine
-    when its last one is done, so a batch holds at most N places in the
-    semaphore's queue and a single call from another caller waits about
-    one item, not the whole batch. Uninitialized: a plain gather.
-    Returns results in order. Exceptions propagate from the first
-    failure; the workers are cancelled and the coroutines not yet
-    started are closed.
+    (which takes a slot of the asyncio semaphore, like run_sync). The
+    batch runs through N worker tasks (N = the semaphore's size; with
+    the semaphore uninitialized, one per coroutine), each pulling the
+    next coroutine when its last one is done, so a batch holds at most
+    N places in the semaphore's queue and a single call from another
+    caller waits about one item, not the whole batch.
+
+    Every coroutine is attempted: a failure does not cancel the items in
+    flight or skip the ones not yet started (batch handlers promise that
+    every item is attempted, and a cancelled item's thread may still have
+    created its ticket). When all are done, the exception that was
+    raised first in time, if any, is raised. Results are in input order.
+    Cancelling the caller cancels the workers and closes the coroutines
+    that never started.
 
     Args:
         coros: Sequence of coroutines to run concurrently.
@@ -257,21 +279,29 @@ async def gather_limited(
     Returns:
         List of results in the same order as input coroutines.
     """
-    if _semaphore is None or _max_parallel < 1:
-        return list(await asyncio.gather(*coros))
     items = list(coros)
+    if _semaphore is not None and _max_parallel >= 1:
+        n = _max_parallel
+    else:
+        n = len(items)
     results: list[Any] = [None] * len(items)
     pending = iter(range(len(items)))
+    first_error: Exception | None = None
 
     async def worker() -> None:
+        nonlocal first_error
         # ``pending`` is shared; next() and the await it feeds are not
         # separated by a suspension point, so no item is taken twice.
         for i in pending:
-            results[i] = await items[i]
+            try:
+                results[i] = await items[i]
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
 
     workers = [
         asyncio.ensure_future(worker())
-        for _ in range(min(_max_parallel, len(items)))
+        for _ in range(min(n, len(items)))
     ]
     try:
         await asyncio.gather(*workers)
@@ -282,4 +312,6 @@ async def gather_limited(
         for i in pending:
             items[i].close()
         raise
+    if first_error is not None:
+        raise first_error
     return results

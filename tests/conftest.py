@@ -126,9 +126,16 @@ def _restore_async_semaphore():
 
     saved = async_utils._semaphore
     saved_size = async_utils._max_parallel
+    saved_executor = async_utils._rpc_executor
     yield
+    # ``init_semaphore`` makes a thread pool too: stop any a test made
+    # (the one it replaced was already shut down by the next init).
+    made = async_utils._rpc_executor
+    if made is not None and made is not saved_executor:
+        made.shutdown(wait=False)
     async_utils._semaphore = saved
     async_utils._max_parallel = saved_size
+    async_utils._rpc_executor = saved_executor
 
 
 @pytest.fixture

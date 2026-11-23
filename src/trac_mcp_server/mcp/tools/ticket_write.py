@@ -6,6 +6,7 @@ and structured error responses. Content is TracWiki and is stored
 byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
+import asyncio
 import re
 import xmlrpc.client
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,13 @@ from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 # (#124). The write has already landed by then, so a slow read costs the
 # number, never the write.
 _COMMENT_LOOKUP_TIMEOUT = 10.0
+# The same lookup is also capped in WALL-CLOCK time, queue for a slot
+# included (#275). ``_COMMENT_LOOKUP_TIMEOUT`` counts only the time its
+# RPCs run, so on its own a starved queue could hold ``ticket_update``
+# past the MCP client's timeout, and the agent would retry and post the
+# comment twice. Sized above the running budget so it fires only when
+# the queue, not Trac's answer, is what is slow.
+_COMMENT_LOOKUP_WALL_TIMEOUT = 30.0
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -986,6 +994,30 @@ async def _comment_from_plugin(
 
 
 async def _find_posted_comment(
+    client: TracClient,
+    ticket_id: int,
+    comment: str,
+    update_result: Any,
+    new_ts: str | None,
+) -> _PostedComment:
+    """Find the comment a ``ticket.update`` just posted, in at most
+    ``_COMMENT_LOOKUP_WALL_TIMEOUT`` seconds of wall-clock time.
+
+    Past that cap the answer is the scan's own timeout failure
+    ("changelog read timed out"). The work is cancelled: a call still
+    queued for a slot never sends, and one already running keeps its
+    slot until its thread ends. See ``_lookup_posted_comment``.
+    """
+    try:
+        async with asyncio.timeout(_COMMENT_LOOKUP_WALL_TIMEOUT):
+            return await _lookup_posted_comment(
+                client, ticket_id, comment, update_result, new_ts
+            )
+    except TimeoutError:
+        return _PostedComment(failure="changelog read timed out")
+
+
+async def _lookup_posted_comment(
     client: TracClient,
     ticket_id: int,
     comment: str,
