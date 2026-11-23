@@ -31,9 +31,8 @@ from trac.web.chrome import web_context as _real_web_context
 
 
 def _install_tracrpc_stub():
-    if (
-        "tracrpc.api" in sys.modules
-    ):  # pragma: no cover - real one present
+    # The real tracrpc is present, so no stub is needed.
+    if "tracrpc.api" in sys.modules:  # pragma: no cover
         return
 
     class IXMLRPCHandler(Interface):
