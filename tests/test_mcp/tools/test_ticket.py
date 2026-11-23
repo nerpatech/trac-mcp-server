@@ -12,6 +12,7 @@ import mcp.types as types
 import pytest
 
 from trac_mcp_server.config import Config
+from trac_mcp_server.core.async_utils import RunBudget
 from trac_mcp_server.core.client import TicketCreateTimeout, TracClient
 from trac_mcp_server.mcp.tools import TICKET_TOOLS
 from trac_mcp_server.mcp.tools.registry import ToolRegistry
@@ -1732,9 +1733,16 @@ def _deadline_over(run_sync_stub):
     queue the real one skips does not exist in these tests)."""
 
     async def deadline(timeout, func, *a, **kw):
-        return await asyncio.wait_for(
-            run_sync_stub(func, *a, **kw), timeout
-        )
+        budget = timeout if isinstance(timeout, RunBudget) else None
+        seconds = budget.remaining if budget else timeout
+        started = time.monotonic()
+        try:
+            return await asyncio.wait_for(
+                run_sync_stub(func, *a, **kw), seconds
+            )
+        finally:
+            if budget:
+                budget.spend(time.monotonic() - started)
 
     return deadline
 
@@ -3015,7 +3023,7 @@ class TestCommentLookupViaPlugin(unittest.TestCase):
                 5.0,
             ),
             patch(
-                "trac_mcp_server.mcp.tools.ticket_write.asyncio.wait_for",
+                "asyncio.wait_for",
                 recording_wait_for,
             ),
         ):

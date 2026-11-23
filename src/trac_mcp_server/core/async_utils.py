@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import functools
 import logging
+import time
 from typing import Any, Callable, Coroutine, Sequence, TypeVar
 
 T = TypeVar("T")
@@ -113,8 +114,25 @@ async def run_sync(
     return await asyncio.shield(fut)
 
 
+class RunBudget:
+    """Seconds of RUNNING time left to a group of ``run_sync_deadline``
+    calls that share one deadline.
+
+    Pass it as the ``timeout``: each call gets ``remaining`` seconds and
+    spends what its function really ran (measured inside the thread, so
+    the time spent queued for a slot is never charged), or all it was
+    given when it timed out.
+    """
+
+    def __init__(self, total: float) -> None:
+        self.remaining = total
+
+    def spend(self, seconds: float) -> None:
+        self.remaining -= seconds
+
+
 async def run_sync_deadline(
-    timeout: float,
+    timeout: "float | RunBudget",
     func: Callable[..., T],
     *args: Any,
     **kwargs: Any,
@@ -128,8 +146,12 @@ async def run_sync_deadline(
     and time out calls that never started; this does not. A timed-out
     call keeps its slot until its thread ends, as in ``run_sync``.
 
+    ``timeout`` may be a ``RunBudget``: the call then gets its
+    ``remaining`` seconds and charges it the time ``func`` ran.
+
     Args:
-        timeout: Seconds ``func`` may run once it holds a slot
+        timeout: Seconds ``func`` may run once it holds a slot, or a
+            ``RunBudget`` shared with other calls
         func: Synchronous function to call
         *args: Positional arguments for func
         **kwargs: Keyword arguments for func
@@ -137,12 +159,31 @@ async def run_sync_deadline(
     Returns:
         Result of func(*args, **kwargs)
     """
-    if _semaphore is None:
-        return await asyncio.wait_for(
-            asyncio.to_thread(func, *args, **kwargs), timeout
-        )
-    fut = await _start_in_slot(func, args, kwargs)
-    return await asyncio.wait_for(asyncio.shield(fut), timeout)
+    budget = timeout if isinstance(timeout, RunBudget) else None
+    seconds = budget.remaining if budget is not None else timeout
+    ran: list[float] = []
+    run = func
+    if budget is not None:
+
+        def run(*a: Any, **kw: Any) -> Any:
+            started = time.monotonic()
+            try:
+                return func(*a, **kw)
+            finally:
+                ran.append(time.monotonic() - started)
+
+    try:
+        if _semaphore is None:
+            return await asyncio.wait_for(
+                asyncio.to_thread(run, *args, **kwargs), seconds
+            )
+        fut = await _start_in_slot(run, args, kwargs)
+        return await asyncio.wait_for(asyncio.shield(fut), seconds)
+    finally:
+        if budget is not None:
+            # Its thread has ended: what it ran. Still running (timed
+            # out or cancelled): the whole of what it was given.
+            budget.spend(ran[0] if ran else seconds)
 
 
 async def run_sync_limited(

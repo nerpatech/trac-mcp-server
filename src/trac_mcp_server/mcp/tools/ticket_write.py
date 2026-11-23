@@ -6,7 +6,6 @@ and structured error responses. Content is TracWiki and is stored
 byte-for-byte -- no converter sits in this path (ticket #69).
 """
 
-import asyncio
 import re
 import xmlrpc.client
 from collections.abc import Awaitable, Callable
@@ -15,7 +14,7 @@ from typing import Any, NamedTuple
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync, run_sync_deadline
+from ...core.async_utils import RunBudget, run_sync, run_sync_deadline
 from ...core.client import (
     TicketCreateTimeout,
     TicketUpdateConflict,
@@ -934,12 +933,13 @@ async def _comment_from_plugin(
     ticket_id: int,
     comment: str,
     new_ts: str | None,
-    timeout: float,
+    budget: RunBudget,
 ) -> _PostedComment | None:
     """The posted comment as the plugin's ``ticket.getChangeAt`` names it,
     or None when the changelog scan has to answer instead.
 
-    ``timeout`` is what is left of the read-back's one deadline.
+    ``budget`` is what is left of the read-back's one deadline; the call
+    charges it the time its RPC ran.
 
     The answer is taken only when it is certainly this write's. tracrpc's
     ``ticket.update`` reads ``_ts`` back from the database AFTER saving,
@@ -954,11 +954,11 @@ async def _comment_from_plugin(
     timeout -- gives None, and the scan then reports a genuine mismatch
     itself or fails cleanly. So this path never reports a mismatch.
     """
-    if new_ts is None or timeout <= 0:
+    if new_ts is None or budget.remaining <= 0:
         return None
     try:
         found = await run_sync_deadline(
-            timeout, client.get_ticket_change_at, ticket_id, new_ts
+            budget, client.get_ticket_change_at, ticket_id, new_ts
         )
     except Exception:
         return None
@@ -1002,7 +1002,9 @@ async def _find_posted_comment(
     used only when its author and text are this write's (see
     ``_comment_from_plugin`` for why: the ``_ts`` read-back race); in
     every other case the whole changelog is read and scanned. Plugin and
-    scan share ONE deadline, ``_COMMENT_LOOKUP_TIMEOUT`` in all.
+    scan share ONE budget of running time, ``_COMMENT_LOOKUP_TIMEOUT``
+    in all: each RPC is charged the time it ran, not the time it spent
+    queued for a slot (``RunBudget``).
 
     The scan cannot count the number from the changelog, because a
     description-only edit consumes one too; it is read off the row.
@@ -1010,15 +1012,9 @@ async def _find_posted_comment(
     the update's second; if several remain (another write of ours in the
     same second) the text sent picks among them.
     """
-    deadline = (
-        asyncio.get_running_loop().time() + _COMMENT_LOOKUP_TIMEOUT
-    )
+    budget = RunBudget(_COMMENT_LOOKUP_TIMEOUT)
     via_plugin = await _comment_from_plugin(
-        client,
-        ticket_id,
-        comment,
-        new_ts,
-        deadline - asyncio.get_running_loop().time(),
+        client, ticket_id, comment, new_ts, budget
     )
     if via_plugin is not None:
         return via_plugin
@@ -1026,12 +1022,11 @@ async def _find_posted_comment(
     epoch = _update_change_epoch(update_result, new_ts)
     if epoch is None:
         return _PostedComment(failure="no change time in Trac's reply")
-    remaining = deadline - asyncio.get_running_loop().time()
-    if remaining <= 0:
+    if budget.remaining <= 0:
         return _PostedComment(failure="changelog read timed out")
     try:
         changelog = await run_sync_deadline(
-            remaining, client.get_ticket_changelog, ticket_id
+            budget, client.get_ticket_changelog, ticket_id
         )
     except TimeoutError:
         return _PostedComment(failure="changelog read timed out")

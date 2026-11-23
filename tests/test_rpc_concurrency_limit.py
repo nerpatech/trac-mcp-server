@@ -20,6 +20,7 @@ import asyncio
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -33,6 +34,7 @@ from trac_mcp_server.core.async_utils import (
     run_sync_limited,
 )
 from trac_mcp_server.core.client import TracClient
+from trac_mcp_server.mcp.tools import ticket_write
 
 OK_BODY = (
     b"<?xml version='1.0'?><methodResponse><params><param>"
@@ -499,3 +501,80 @@ async def test_a_batch_does_not_starve_a_single_call(server):
     assert single_took < batch_took / 3, (
         f"single call took {single_took:.2f}s of a {batch_took:.2f}s batch"
     )
+
+
+def _lookup_client(plugin_seconds: float, scan_seconds: float):
+    """A client for ``_find_posted_comment``: no plugin (it answers
+    ``None`` after ``plugin_seconds``), a changelog holding the comment
+    (after ``scan_seconds``). Real semaphore and threads, no HTTP."""
+    epoch = 1_793_631_099
+    row = [
+        time.strftime("%Y%m%dT%H:%M:%S", time.gmtime(epoch)),
+        "agent_rpc",
+        "comment",
+        "7",
+        "hello",
+        1,
+    ]
+
+    def change_at(ticket_id, new_ts):
+        time.sleep(plugin_seconds)
+
+    def changelog(ticket_id):
+        time.sleep(scan_seconds)
+        return [row]
+
+    client = SimpleNamespace(
+        config=SimpleNamespace(username="agent_rpc"),
+        get_ticket_change_at=change_at,
+        get_ticket_changelog=changelog,
+    )
+    return client, str(epoch * 1_000_000 + 123456)
+
+
+async def test_comment_lookup_budget_does_not_count_the_queue(
+    monkeypatch,
+):
+    """Review follow-up to item 2: the comment lookup's one budget
+    (patched to 0.5 s) is charged for the time its two RPCs RUN, not for
+    the 0.8 s they wait behind a slow call. Both are fast once they get
+    the slot, so the comment is found (with the budget measured from
+    the start, the scan found 0 s left and reported "changelog read
+    timed out")."""
+    init_semaphore(1)
+    monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 0.5)
+    client, new_ts = _lookup_client(0.05, 0.05)
+
+    holder = asyncio.ensure_future(run_sync(time.sleep, 0.8))
+    await asyncio.sleep(0.05)
+    posted = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+    await asyncio.wait_for(holder, TIMEOUT)
+
+    assert posted.failure is None
+    assert posted.number == 7
+
+
+async def test_comment_lookup_budget_is_charged_the_running_time(
+    monkeypatch,
+):
+    """The running time still counts: a plugin call that runs 0.4 s of a
+    0.5 s budget leaves the scan 0.1 s, and a scan that needs 0.3 s
+    times out ("changelog read timed out"), queue or no queue."""
+    init_semaphore(1)
+    monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 0.5)
+    client, new_ts = _lookup_client(0.4, 0.3)
+
+    posted = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+
+    assert posted.number is None
+    assert posted.failure == "changelog read timed out"
