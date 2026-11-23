@@ -58,6 +58,9 @@ def _sub_bracket_syntax(repl, text: str) -> str:
             break
         if text.startswith("]]", stop.start()):
             match = _BRACKET_SYNTAX_RE.match(text, start)
+            # Cannot miss: no `]` or newline in (start+2, stop), and
+            # `]]` at stop -- exactly what the pattern requires.
+            assert match is not None
             parts.append(text[done:start])
             parts.append(repl(match))
             done = pos = match.end()
