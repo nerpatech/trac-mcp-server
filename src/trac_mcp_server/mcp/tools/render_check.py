@@ -373,7 +373,9 @@ async def _probe_all_sections(
 ) -> dict[str, dict]:
     if not check_targets:
         return {}
-    all_facts = [extract_facts(s.html) for s in sections]
+    all_facts = [
+        await run_sync(extract_facts, s.html) for s in sections
+    ]
     probeable: list[str] = []
     for facts in all_facts:
         probeable.extend(
@@ -729,7 +731,9 @@ async def _handle_ticket_render_check(
         client, sections, check_targets, target_cap
     )
     section_results = [
-        _section_result(s, probes, check_targets, include_html)
+        await run_sync(
+            _section_result, s, probes, check_targets, include_html
+        )
         for s in sections
     ]
     return _document_response(
@@ -762,7 +766,13 @@ async def _handle_wiki_render_check(
         client, sections, check_targets, target_cap
     )
     section_results = [
-        _section_result(section, probes, check_targets, include_html)
+        await run_sync(
+            _section_result,
+            section,
+            probes,
+            check_targets,
+            include_html,
+        )
     ]
     return _document_response(
         f"wiki/{page_name}", section_results, probes

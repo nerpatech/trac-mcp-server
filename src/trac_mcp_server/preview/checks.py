@@ -88,6 +88,33 @@ _MARKDOWN_LINK_PARTS_RE = re.compile(
     r"\[(?P<label>[^\]\n]+)\]\((?P<target>[^)\n]+)\)"
 )
 
+# Prefix starts (ticket #289). The scheme-prefix regexes below
+# (`_PREFIX_TICKET_RE`, `_PREFIX_REALM_RE`, `_REALM_REF_RE`) read an
+# unbounded `[\w.+-]*` after a letter. Their `\b` holds before every
+# letter that follows a `.`, `+` or `-`, so on a run like `a.a.a.a...` the
+# scan restarted at each `a`, ran to the end of the run, found no `:` and
+# backtracked: quadratic. `(?<![\w.+-])` before the letter that starts a
+# prefix makes a prefix start only where its run starts, and each run is
+# scanned once. Longer prefixes keep working (a cap on the length cut a
+# long dotted one down to its tail: `org.xxx...x.tr:#12` matched `tr:#12`).
+#
+# The accepted differences, all of them: a prefix is no longer recognised
+# (1) when `-`, `.` or `+` comes right before it (`a -rookery:#3 b` used
+# to warn; the run `-rookery` is headed by a `-`), (2) when its run is
+# headed by a digit, `_` or a non-ASCII letter (`1a.b:#3` matched
+# `b:#3`, `é.trac:#3` matched `trac:#3`; `_REALM_REF_RE` falls back to its
+# realm), and (3) when it follows a match that ends in digits
+# (`a:#1.b:#2` matches only the first: `.b` continues the run, and Trac
+# reads `a:#1.b:#2` as one link anyway). Trac's own InterTrac prefixes
+# start with a letter. The store corpus (3,158 documents) showed no
+# difference for any of the four regexes.
+#
+# `_URL_RUN_RE` (the URL form of the scoped-comment blanking) does the
+# opposite, since it BLANKS and over-blanking is the safe direction: it
+# starts at the head of the run and takes the whole run up to `://`
+# (`[\w+.-]*://\S+`), so it blanks a superset of what the old `\b[A-Za-z]`
+# form did, and `-https://` and `1.https://` are blanked too.
+
 # A `prefix:#N` token -- the only shape that distinguishes an unconfigured
 # InterTrac ticket prefix (row 16, must warn) from an ordinary colon-shaped
 # token that happens to produce no anchor (row 10, must stay silent). See
@@ -100,7 +127,7 @@ _MARKDOWN_LINK_PARTS_RE = re.compile(
 # realm). Its narrowness is what makes the two calibration rows fall out
 # for free -- a bare backticked `#87` has no prefix, and a placeholder
 # `prefix:#N` has no digits.
-_PREFIX_TICKET_RE = re.compile(r"\b[A-Za-z][\w.+-]*:#\d+\b")
+_PREFIX_TICKET_RE = re.compile(r"(?<![\w.+-])[A-Za-z][\w.+-]*:#\d+\b")
 
 # Ticket #105. `PR #100`, `pull request #100`, `merge request #100` --
 # GitHub/GitLab vocabulary that reads as a ticket number when written
@@ -124,10 +151,15 @@ _PR_NUMBER_AS_TICKET_RE = re.compile(
 # `comment:1` fragment the bare pattern would otherwise match (found by
 # #108's store sweep, on a description the create path would refuse).
 _TICKET_COMMENT_SCOPED_RE = re.compile(
-    r"\bticket:\d+#comment:\d+\b"
-    r"|\bcomment:\d+:[A-Za-z]+:\d+\b"
-    r"|\b[A-Za-z][\w+.-]*://\S+"
+    r"\bticket:\d+#comment:\d+\b|\bcomment:\d+:[A-Za-z]+:\d+\b"
 )
+# The URL form is a regex of its own, run over the original text beside
+# this one and the two blankings merged (`_blank_union`, ticket #289): in
+# one alternation a URL that follows a scoped form directly
+# (`ticket:1#comment:2-https://h/x`) lost its start, since the first match
+# ends inside the run the URL's lookbehind needs to see begin; one after
+# the other, a blanked scoped form cut a URL's `\S+` short.
+_URL_RUN_RE = re.compile(r"(?<![\w+.-])[\w+.-]*://\S+")
 _BARE_COMMENT_REF_RE = re.compile(r"\bcomment:(\d+)\b")
 
 # Opt-out pragma (ticket #58). A document that DOCUMENTS this syntax has
@@ -227,7 +259,7 @@ _PREFIX_REALM_RE = re.compile(
     r"(?<=\[)"
     + _PREFIX_REALM_HEAD
     + r"(?:[^\s`\]]+|(?=\]))"
-    + r"|\b"
+    + r"|(?<![\w.+-])"
     + _PREFIX_REALM_HEAD
     + r"[^\s`]+"
 )
@@ -522,10 +554,8 @@ _WIKI_HREF_PAGE_RE = re.compile(r"/wiki/(.+)\Z")
 # count, which turns an advisory back into an error and so returns the
 # anchor to today's behaviour. Under-blanking is what would hide a real
 # dead link.
-_MACRO_LINK_RE = re.compile(r"\[\[.*?\]\]", re.DOTALL)
-_BRACKET_LINK_RE = re.compile(r"\[[^\]\n]*\]")
 _REALM_REF_RE = re.compile(
-    r"\b(?:[A-Za-z][\w.+-]*:)?"
+    r"\b(?:(?<![\w.+-])[A-Za-z][\w.+-]*:)?"
     rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):\S+"
 )
 
@@ -542,6 +572,87 @@ def _blank_preserving_layout(match: re.Match[str]) -> str:
     return "".join("\n" if ch == "\n" else " " for ch in match.group(0))
 
 
+_NON_NEWLINE_RE = re.compile(r"[^\n]")
+
+
+def _blank_union(
+    text: str, patterns: tuple[re.Pattern[str], ...]
+) -> str:
+    """``text`` with every span any of ``patterns`` matches blanked, each
+    pattern run over the original text (a span of one never hides another's
+    start, as it does in a single alternation), layout preserved."""
+    blanked = [p.sub(_blank_preserving_layout, text) for p in patterns]
+    return "".join(
+        " " if any(b[i] != ch for b in blanked) else ch
+        for i, ch in enumerate(text)
+    )
+
+
+def _blank_delimited(text: str, opener: str, closer: str) -> str:
+    """``text`` with every ``opener ... closer`` span blanked (layout
+    preserved, see `_blank_preserving_layout`), in one linear pass.
+
+    The spans are exactly those of ``re.sub(opener + ".*?" + closer,
+    ..., text, flags=re.DOTALL)``: each opener takes the nearest closer
+    after it, and scanning resumes after that closer. Ticket #289: the
+    regex form was quadratic on an unclosed opener repeated, since every
+    opener rescanned to the end of the text for a closer that is not
+    there. When one opener has no closer after it, no later opener has
+    one either, so the scan stops.
+    """
+    parts: list[str] = []
+    done = 0
+    pos = 0
+    while True:
+        start = text.find(opener, pos)
+        if start == -1:
+            break
+        close = text.find(closer, start + len(opener))
+        if close == -1:
+            break
+        end = close + len(closer)
+        parts.append(text[done:start])
+        parts.append(_NON_NEWLINE_RE.sub(" ", text[start:end]))
+        done = end
+        pos = end
+    parts.append(text[done:])
+    return "".join(parts)
+
+
+_BRACKET_STOP_RE = re.compile(r"[\]\n]")
+
+
+def _blank_bracket_links(text: str) -> str:
+    """``text`` with every ``[...]`` that holds no ``]`` or newline
+    blanked (layout preserved), in one linear pass: the spans of the
+    regex ``\\[[^\\]\\n]*\\]`` substituted over the text.
+
+    An opener whose label reaches a newline or the end of the text
+    without a ``]`` fails, and so does every opener between it and that
+    stop (each reaches the same stop), so the scan resumes at the stop
+    rather than one character on (ticket #289)."""
+    parts: list[str] = []
+    done = 0
+    pos = 0
+    while True:
+        start = text.find("[", pos)
+        if start == -1:
+            break
+        stop = _BRACKET_STOP_RE.search(text, start + 1)
+        if stop is None:
+            break
+        if text[stop.start()] == "]":
+            end = stop.end()
+            parts.append(text[done:start])
+            parts.append(_NON_NEWLINE_RE.sub(" ", text[start:end]))
+            done = end
+            pos = end
+        else:
+            pos = stop.start()
+    parts.append(text[done:])
+    return "".join(parts)
+
+
 def _bare_autolink_counts(tracwiki: str) -> dict[str, int]:
     """How many times each auto-linkable page name occurs BARE in the
     source -- outside code, outside link syntax, and unescaped.
@@ -553,8 +664,9 @@ def _bare_autolink_counts(tracwiki: str) -> dict[str, int]:
     its own.
     """
     scan = blank_inline_code_spans(blank_code_fences(tracwiki))
-    for pattern in (_MACRO_LINK_RE, _BRACKET_LINK_RE, _REALM_REF_RE):
-        scan = pattern.sub(_blank_preserving_layout, scan)
+    scan = _blank_delimited(scan, "[[", "]]")
+    scan = _blank_bracket_links(scan)
+    scan = _REALM_REF_RE.sub(_blank_preserving_layout, scan)
 
     counts: dict[str, int] = {}
     for match in _BARE_AUTOLINK_RE.finditer(scan):
@@ -1061,8 +1173,8 @@ def _check_dangling_comment_ref(
     if known_comment_numbers is None:
         return []
     scan_text = blank_inline_code_spans(blank_code_fences(tracwiki))
-    scan_text = _TICKET_COMMENT_SCOPED_RE.sub(
-        _blank_preserving_layout, scan_text
+    scan_text = _blank_union(
+        scan_text, (_TICKET_COMMENT_SCOPED_RE, _URL_RUN_RE)
     )
     warnings = []
     for match in _BARE_COMMENT_REF_RE.finditer(scan_text):
@@ -1535,12 +1647,6 @@ def _check_unconfigured_intertrac_prefix(
     return warnings
 
 
-# Inline `{{{...}}}` anywhere on a line (`blank_code_fences` blanks only
-# line-start fences). Over-blanking is the safe direction here: it only
-# lowers the set of skippable shapes.
-_INLINE_BRACES_RE = re.compile(r"\{\{\{.*?\}\}\}", re.DOTALL)
-
-
 def _escaped_bracket_shapes(tracwiki: str) -> Counter[str]:
     """The bracket shapes the source escapes with Trac's `!`, counted
     (ticket #250).
@@ -1578,21 +1684,115 @@ def _escaped_bracket_shapes(tracwiki: str) -> Counter[str]:
     ticket summary) and is not in the page source.
     """
     scan = blank_inline_code_spans(blank_code_fences(tracwiki))
-    for pattern in (_INLINE_BRACES_RE, _MACRO_LINK_RE):
-        scan = pattern.sub(_blank_preserving_layout, scan)
+    # Inline `{{{...}}}` anywhere on a line (`blank_code_fences` blanks
+    # only line-start fences). Over-blanking is the safe direction here:
+    # it only lowers the set of skippable shapes.
+    scan = _blank_delimited(scan, "{{{", "}}}")
+    scan = _blank_delimited(scan, "[[", "]]")
     shapes: Counter[str] = Counter()
+    # Both shapes end at a `]` and hold no newline (every part of
+    # `_QUOTED_BRACKET_LINK_RE` and `_NUMERIC_BRACKET_LINK_RE` excludes
+    # one), so a `!` with no `]` before the next newline cannot start
+    # either, and neither match is attempted there: their labels and tails
+    # read to the end of the line, and `!['a' ` repeated was quadratic
+    # (ticket #289). The next `]` and the next newline are found once and
+    # reused until the scan passes them, so the checks cost a find per
+    # stretch of text, not per `!`.
+    size = len(scan)
+    close = newline = -1
     pos = scan.find("!")
     while pos != -1:
-        for shape_re in (
-            _QUOTED_BRACKET_LINK_RE,
-            _NUMERIC_BRACKET_LINK_RE,
-        ):
-            shape = shape_re.match(scan, pos + 1)
-            if shape is not None:
-                shapes[shape.group(0)] += 1
-                break
+        if newline < pos + 1:
+            found = scan.find("\n", pos + 1)
+            newline = found if found != -1 else size
+        if close < pos + 2:
+            found = scan.find("]", pos + 2)
+            close = found if found != -1 else size
+        if close < newline:
+            for shape_re in (
+                _QUOTED_BRACKET_LINK_RE,
+                _NUMERIC_BRACKET_LINK_RE,
+            ):
+                shape = shape_re.match(scan, pos + 1)
+                if shape is not None:
+                    shapes[shape.group(0)] += 1
+                    break
         pos = scan.find("!", pos + 1)
     return shapes
+
+
+_DEST_STOP_RE = re.compile(r"[)\n]")
+
+
+class _MarkdownLinkSearch:
+    """``_MARKDOWN_LINK_RE.search(text, pos)`` in linear time, kept between
+    searches (ticket #289).
+
+    The regex is quadratic on a bracket opener repeated with no `]`
+    after it: every `[` rescans to the next stop. An opener fails when its
+    label stops at a newline or the end, or at a `]` not followed by `(`,
+    or when the destination is empty or stops at a newline or the end
+    instead of `)`. Every opener between it and that label stop reaches
+    the same stop and the same destination, so it fails the same way and
+    the scan resumes at the stop. The label's stop and the destination's
+    stop are remembered (one stop serves every start between the first
+    start and the stop), and kept across `find` calls, so a caller that
+    restarts one character after each match it skips
+    (`first_literal_link_match`) does not rescan a destination that runs
+    to the end of the line for every restart. `find` returns spans, since
+    building a `re.Match` (or slicing the text) per match would itself be
+    as long as the match; `search` builds the match for one span.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._label_from = self._label_to = -1
+        self._dest_from = self._dest_to = -1
+
+    def find(self, pos: int = 0) -> tuple[int, int, int] | None:
+        """``(start, label_end, end)`` of the first match from ``pos``:
+        the match is ``text[start:end]`` and its first `]` is at
+        ``label_end``; or None."""
+        text = self.text
+        size = len(text)
+        while True:
+            start = text.find("[", pos)
+            if start == -1:
+                return None
+            label_from = start + 1
+            if not self._label_from <= label_from <= self._label_to:
+                stop = _BRACKET_STOP_RE.search(text, label_from)
+                self._label_from = label_from
+                self._label_to = stop.start() if stop else size
+            label_end = self._label_to
+            if label_end == size:
+                return None
+            if (
+                text[label_end] == "]"
+                and label_end > start + 1
+                and text.startswith("(", label_end + 1)
+            ):
+                dest = label_end + 2
+                if not self._dest_from <= dest <= self._dest_to:
+                    found = _DEST_STOP_RE.search(text, dest)
+                    self._dest_from = dest
+                    self._dest_to = found.start() if found else size
+                end = self._dest_to
+                if dest < end and text[end : end + 1] == ")":
+                    return start, label_end, end + 1
+            pos = label_end
+
+
+def _search_markdown_link(
+    text: str, pos: int = 0
+) -> re.Match[str] | None:
+    """``_MARKDOWN_LINK_RE.search(text, pos)``, in linear time (see
+    `_MarkdownLinkSearch`). The match is built by the regex itself, at the
+    opener found."""
+    found = _MarkdownLinkSearch(text).find(pos)
+    if found is None:
+        return None
+    return _MARKDOWN_LINK_RE.match(text, found[0])
 
 
 def first_literal_link_match(
@@ -1612,18 +1812,22 @@ def first_literal_link_match(
     replay it.
     """
     escaped = _escaped_bracket_shapes(tracwiki)
+    search = _MarkdownLinkSearch(prose)
     pos = 0
     while True:
-        match = _MARKDOWN_LINK_RE.search(prose, pos)
-        if match is None:
+        found = search.find(pos)
+        if found is None:
             return None
-        text = match.group(0)
-        bracket = text[: text.index("]") + 1]
+        start, label_end, _ = found
+        # The bracket part: `[` up to the first `]`, which is at
+        # `label_end` (the label holds none). No match object or slice of
+        # the whole match is built for a skipped match.
+        bracket = prose[start : label_end + 1]
         if escaped[bracket] > 0:
             escaped[bracket] -= 1
-            pos = match.start() + 1
+            pos = start + 1
             continue
-        return match
+        return _MARKDOWN_LINK_RE.match(prose, start)
 
 
 def _check_literal_markup_in_render(

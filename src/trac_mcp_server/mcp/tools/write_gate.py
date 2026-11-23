@@ -142,7 +142,8 @@ async def _run_checks(
     extraction and probing able to raise past it, which is the same
     partial-coverage mistake in miniature."""
     rendered_html = await run_sync(client.wiki_to_html, content)
-    facts = extract_facts(rendered_html)
+    # Parsing and the checks run off the event loop (ticket #289).
+    facts = await run_sync(extract_facts, rendered_html)
 
     probes: dict[str, dict] = {}
     probeable = [
@@ -153,7 +154,8 @@ async def _run_checks(
             probe_targets, client, probeable, target_cap
         )
 
-    return build_warnings(
+    return await run_sync(
+        build_warnings,
         markdown_source=None,
         tracwiki=content,
         facts=facts,

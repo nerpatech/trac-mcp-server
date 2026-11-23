@@ -235,7 +235,9 @@ async def _handle_convert_preview(
         tracwiki = content
     else:
         try:
-            conversion = convert_with_warnings(content, flavor=flavor)
+            conversion = await run_sync(
+                convert_with_warnings, content, flavor=flavor
+            )
         except ValueError as e:
             # The converter refuses input it cannot represent (ticket #63).
             # Caught here rather than left to propagate: the dispatcher maps
@@ -257,7 +259,7 @@ async def _handle_convert_preview(
             markdown_source = conversion.normalised_source
 
     rendered_html = await run_sync(client.wiki_to_html, tracwiki)
-    facts = extract_facts(rendered_html)
+    facts = await run_sync(extract_facts, rendered_html)
 
     probes: dict[str, dict] = {}
     if check_targets:
@@ -285,7 +287,10 @@ async def _handle_convert_preview(
     if ticket_id is not None and "comment:" in tracwiki:
         comment_numbers = await known_comment_numbers(client, ticket_id)
 
-    warnings = build_warnings(
+    # Off the event loop (ticket #289): the checks scan the whole
+    # document and this runs on a shared daemon's loop.
+    warnings = await run_sync(
+        build_warnings,
         markdown_source=markdown_source,
         tracwiki=tracwiki,
         facts=facts,

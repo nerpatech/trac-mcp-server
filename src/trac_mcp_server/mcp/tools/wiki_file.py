@@ -498,7 +498,9 @@ async def _handle_push(
         # because they have a filename to go on, and removed the
         # Markdown path from every inline tool), so nothing else is
         # watching it.
-        losses = find_code_block_indentation_loss(checked, wiki_content)
+        losses = await run_sync(
+            find_code_block_indentation_loss, checked, wiki_content
+        )
         if losses:
             return build_error_response(
                 "validation_error",
@@ -520,11 +522,11 @@ async def _handle_push(
         if "list_item_split" not in _allowed_codes(
             checked, wiki_content
         ):
+            splits = await run_sync(
+                find_list_item_splits, checked, flavor=flavor
+            )
             warnings.extend(
-                describe_list_item_split(split)
-                for split in find_list_item_splits(
-                    checked, flavor=flavor
-                )
+                describe_list_item_split(split) for split in splits
             )
     else:
         # Already TracWiki — pass through
