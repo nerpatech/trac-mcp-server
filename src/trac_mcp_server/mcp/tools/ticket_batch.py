@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 TICKET_BATCH_TOOLS = [
     types.Tool(
         name="ticket_batch_create",
-        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are TracWiki and are stored byte-for-byte.",
+        description="Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Concurrent calls to Trac are bounded by TRAC_MAX_PARALLEL_REQUESTS. Descriptions are TracWiki and are stored byte-for-byte.",
         annotations=types.ToolAnnotations(
             readOnlyHint=False,
             destructiveHint=False,

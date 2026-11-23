@@ -41,7 +41,7 @@ Configuration via environment variables, `.env` file, or YAML config file (`.tra
 | `TRAC_PASSWORD` | Yes, unless `TRAC_MCP_OIDC_RPC_URL` is set | -- | Trac password |
 | `TRAC_INSECURE` | No | `false` | Skip SSL verification (development only) |
 | `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`); `TRAC_DEBUG=true` beats `LOG_LEVEL`, and `LOG_LEVEL` beats YAML `trac.debug` |
-| `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max parallel XML-RPC requests |
+| `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max concurrent XML-RPC calls to Trac per server process, across all instances and callers (the write gate's link probes have their own per-write cap) |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Max items per batch operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |

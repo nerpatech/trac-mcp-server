@@ -352,8 +352,9 @@ async def known_comment_numbers(
     undefined order, so the numbers max+1 .. max+``pending_writes`` are
     all possible for this write's own comment. The default, 1, is every
     single write. ``runner`` runs the changelog call: the batch tools
-    pass ``run_sync_limited`` so the lookups honour
-    TRAC_MAX_PARALLEL_REQUESTS.
+    pass ``run_sync_limited`` so the lookups also count
+    against the batch's thread limit (every RPC is bounded by
+    TRAC_MAX_PARALLEL_REQUESTS at ``TracClient._rpc_call`` regardless).
 
     Every ``ticket.update`` call -- even a comment-less field edit --
     consumes the next number in sequence (``ticket_comment.py``'s
