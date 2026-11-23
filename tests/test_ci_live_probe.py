@@ -149,14 +149,33 @@ def test_no_arguments_still_runs_the_probe_then_pytest(layout):
     assert "DAEMON SMOKE" not in result.stdout
 
 
-def _stub_pytest_exiting(layout, code):
+def test_a_probe_that_crashes_is_exit_2_not_1(layout):
+    # Any non-zero exit of the probe is "could not run", not only its own
+    # sys.exit(2) paths: a .env that is not UTF-8 makes load_dotenv raise
+    # UnicodeDecodeError, which Python exits 1 on (Trac #279).
+    tmp_path, _child, script, env = layout
+    (tmp_path / "parent" / ".env").write_bytes(b"TRAC_URL=\xff\xfe\n")
+    result = _run(tmp_path, script, env)
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "UnicodeDecodeError" in result.stderr
+    assert "NOT run" in result.stderr
+    assert "STUB-PYTEST-RAN" not in result.stdout
+
+
+def _stub_pytest_exiting(layout, code, output="STUB-PYTEST-RAN"):
     tmp_path, _child, script, env = layout
     (tmp_path / "parent" / ".env").write_text(
         _dotenv("http://fake.invalid")
     )
     stub = tmp_path / "bin" / "pytest"
-    stub.write_text(f'#!/bin/sh\necho "STUB-PYTEST-RAN"\nexit {code}\n')
-    return _run(tmp_path, script, env)
+    stub.write_text(f'#!/bin/sh\necho "{output}"\nexit {code}\n')
+    # The script keeps a copy of pytest's output in a mktemp file to read
+    # its verdict; a TMPDIR of our own shows that file is removed after.
+    scratch = tmp_path / "tmpdir"
+    scratch.mkdir()
+    result = _run(tmp_path, script, {**env, "TMPDIR": str(scratch)})
+    assert list(scratch.iterdir()) == [], "temp file left behind"
+    return result
 
 
 def test_a_failing_live_suite_is_exit_1(layout):
@@ -174,3 +193,23 @@ def test_a_live_suite_that_did_not_complete_is_exit_2(layout, code):
     assert result.returncode == 2
     assert "STUB-PYTEST-RAN" in result.stdout
     assert "=== Live checks passed ===" not in result.stdout
+
+
+@pytest.mark.parametrize("count", ["1 error", "3 errors"])
+def test_a_collection_error_is_exit_1(layout, count):
+    # pytest also exits 2 when a test module fails to import. That is a
+    # broken change, not a broken environment, so it is a failure (Trac
+    # #279). The line is pytest's own summary, streamed through unchanged.
+    line = f"!!!!!!! Interrupted: {count} during collection !!!!!!!"
+    result = _stub_pytest_exiting(layout, 2, output=line)
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    assert line in result.stdout
+    assert "=== Live checks passed ===" not in result.stdout
+
+
+def test_an_interruption_without_collection_errors_stays_exit_2(layout):
+    line = "!!!!!!! KeyboardInterrupt !!!!!!!"
+    result = _stub_pytest_exiting(layout, 2, output=line)
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert line in result.stdout
+    assert "NOT run" in result.stderr

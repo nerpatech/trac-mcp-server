@@ -18,11 +18,14 @@
 #
 # Exit codes, the same three states in both modes:
 #   0  the live suite ran and passed.
-#   1  the live suite ran and FAILED (pytest's own exit 1).
+#   1  the live suite ran and FAILED: pytest's own exit 1, or its exit 2
+#      when the output reports errors during collection (a test module
+#      that does not import is a broken change).
 #   2  the live suite could NOT run, so there is no verdict: a tool this
-#      script calls is not on PATH, the live credentials are missing (or
-#      python-dotenv is), pytest stopped before giving a verdict (its exits
-#      2 to 5: interrupted, internal error, usage error, no tests
+#      script calls is not on PATH, the credential probe exited non-zero
+#      for any reason (missing credentials or python-dotenv, an unreadable
+#      .env), pytest stopped before giving a verdict (any other exit 2, or
+#      3 to 5: interrupted, internal error, usage error, no tests
 #      collected), or the command line was bad. A caller that treats 1 as
 #      "fix the change" and 2 as "fix the environment" can rely on this.
 #
@@ -41,8 +44,9 @@
 # http://mcp.example.org:8092 (a trailing /mcp or / is accepted). The bearer
 # token comes from $TRAC_MCP_AUTH_TOKEN_STAGE, or the variable --token-env
 # names, and is never printed. The exit code is the smoke script's: 0
-# passed, 1 a check failed (an unreachable daemon included), 2 not run (no
-# token, bad URL, a refused --instance). It needs no .env and no Trac
+# passed, 1 a check failed, 2 not run (no token, bad URL, a refused
+# --instance, or a daemon that cannot be reached at all: connection
+# refused, DNS failure, no answer from /healthz). It needs no .env and no Trac
 # credentials. It WRITES a wiki page and a ticket, always to the instance
 # named by --instance (default /trac_test), passed on every call and never
 # the daemon's own default, which on the shared daemon is a production
@@ -63,6 +67,8 @@ set -e
 # (127) from deep inside that reads like a broken change. Exit 2: not run.
 # GitHub's runner has no .venv, so the fix is a PATH one, not a path to
 # .venv/bin. --daemon execs only python; the live suite needs pytest too.
+# The fix repeats this run's arguments, quoted: a bare ./ci-live.sh would
+# run the full live suite, not the --daemon smoke that was asked for.
 if [ "$#" -eq 0 ]; then
     needed="python pytest"
 else
@@ -75,7 +81,12 @@ for tool in $needed; do
     fi
 done
 if [ -n "$missing" ]; then
-    echo "ci-live.sh: not on PATH: $missing. Fix: PATH=<checkout>/.venv/bin:\$PATH ./ci-live.sh" >&2
+    rerun="./ci-live.sh"
+    if [ "$#" -gt 0 ]; then
+        rerun="$rerun $(printf '%q ' "$@")"
+        rerun="${rerun% }"
+    fi
+    echo "ci-live.sh: not on PATH: $missing. Fix: PATH=<checkout>/.venv/bin:\$PATH $rerun" >&2
     exit 2
 fi
 
@@ -139,15 +150,18 @@ echo "=== Live credentials ==="
 # (conftest.py loads it under --run-live), then the environment. Testing
 # shell variables alone would tell a developer with a working .env that they
 # have no credentials.
-# A non-zero exit here aborts the script under `set -e`, before pytest, and
-# is always 2 (cannot run), never 1 (failed): no test has run.
+# Any non-zero exit here ends the script before pytest with 2 (cannot run),
+# never 1 (failed): no test has run. That covers the probe's own
+# sys.exit(2) paths and anything else that stops it, e.g. load_dotenv
+# raising UnicodeDecodeError on a .env that is not UTF-8 (Python's exit 1).
 #
 # Ticket #102 adds a second required pair, TRAC_USERNAME_2/TRAC_PASSWORD_2 --
 # the second real Trac account (auto_pm) the multi-identity live test needs
 # to prove two identities land as two different Trac usernames. Missing it
 # must fail this same way, before pytest ever runs -- not skip silently the
 # way a bare @pytest.mark.live would (that shape is exactly what #81 fixed).
-python - <<'PY'
+probe_rc=0
+python - <<'PY' || probe_rc=$?
 import os
 import sys
 
@@ -197,15 +211,28 @@ if missing:
 print(f"TRAC_URL={os.environ['TRAC_URL']} as {os.environ['TRAC_USERNAME']}")
 print(f"Second identity: {os.environ['TRAC_USERNAME_2']}")
 PY
+if [ "$probe_rc" -ne 0 ]; then
+    echo "ci-live.sh: the credential probe exited $probe_rc. The live suite was NOT run -- this is not a passing result." >&2
+    exit 2
+fi
 
 echo ""
 echo "=== Full Suite (offline + live) ==="
-# pytest's exit 1 is a failed run and stays 1; its 2 to 5 (interrupted,
-# internal error, usage error, nothing collected) are no verdict, so 2. The
-# `|| live_rc=$?` keeps `set -e` from ending the script before the mapping.
-live_rc=0
-pytest tests/ -q --run-live || live_rc=$?
+# pytest's exit 1 is a failed run and stays 1. Its exit 2 is a failure too
+# when the output reports errors during collection (a test module that does
+# not import); any other 2 (interrupted) and 3 to 5 (internal error, usage
+# error, nothing collected) are no verdict, so 2. The output is tee'd to a
+# temp file to read that line while it still streams; the pipeline's status
+# is tee's, so `set -e` does not end the script before the mapping, and
+# PIPESTATUS holds pytest's. ci.sh's step() maps pytest the same way.
+live_log="$(mktemp)"
+trap 'rm -f "$live_log"' EXIT
+pytest tests/ -q --run-live | tee "$live_log"
+live_rc="${PIPESTATUS[0]}"
 if [ "$live_rc" -eq 1 ]; then
+    exit 1
+elif [ "$live_rc" -eq 2 ] && grep -Eq 'errors? during collection' "$live_log"; then
+    echo "ci-live.sh: pytest could not collect the suite (errors during collection). This is a failure of the change." >&2
     exit 1
 elif [ "$live_rc" -ne 0 ]; then
     echo "ci-live.sh: pytest exited $live_rc before giving a verdict. The live suite was NOT run to completion -- this is not a passing result." >&2

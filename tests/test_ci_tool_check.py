@@ -1,7 +1,8 @@
 """ci.sh and ci-live.sh refuse to start without the tools they call
 (Trac /trac_mcp_server #279, L34).
 
-Both scripts call python, ruff, pyright and pytest by bare name, so a shell
+Both scripts call python, ruff, pyright and pytest by bare name (and the
+build.sh ci.sh runs calls pip and pyinstaller), so a shell
 whose PATH lacks the venv fails deep inside, with a bare "command not found"
 (exit 127) that reads like a broken change. They now check first, print one
 line naming what is missing and the fix, and exit 2: the "cannot run" state
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.skipif(
     BASH is None, reason="bash is not on PATH"
 )
 
-CI_TOOLS = ("python", "ruff", "pyright", "pytest")
+CI_TOOLS = ("python", "ruff", "pyright", "pytest", "pip", "pyinstaller")
 
 
 def _path_with(tmp_path, *tools):
@@ -48,7 +49,7 @@ def _run(script, tmp_path, *tools, args=()):
     )
 
 
-def test_ci_sh_with_no_tools_is_exit_2_naming_all_four(tmp_path):
+def test_ci_sh_with_no_tools_is_exit_2_naming_every_tool(tmp_path):
     result = _run("ci.sh", tmp_path)
     assert result.returncode == 2, (result.stdout, result.stderr)
     assert _named_missing(result.stderr) == list(CI_TOOLS)
@@ -94,3 +95,69 @@ def test_ci_live_sh_daemon_mode_needs_python_not_pytest(tmp_path):
     )
     assert result.returncode == 2, (result.stdout, result.stderr)
     assert _named_missing(result.stderr) == ["python"]
+
+
+# The "Fix:" hint is the command the caller ran, PATH prefixed, with its
+# arguments shell-quoted: a bare ./ci-live.sh would run the full live suite
+# instead of the --daemon smoke the caller asked for (Trac #279).
+
+
+def _fix_hint(stderr):
+    return stderr.split("Fix: ", 1)[1].strip()
+
+
+def test_ci_live_sh_fix_hint_repeats_the_daemon_arguments(tmp_path):
+    result = _run(
+        "ci-live.sh",
+        tmp_path,
+        args=(
+            "--daemon",
+            "http://host:8092",
+            "--expect-sha",
+            "abc1234",
+        ),
+    )
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert _fix_hint(result.stderr) == (
+        "PATH=<checkout>/.venv/bin:$PATH ./ci-live.sh "
+        "--daemon http://host:8092 --expect-sha abc1234"
+    )
+
+
+def test_ci_live_sh_fix_hint_quotes_what_the_shell_would_split(
+    tmp_path,
+):
+    result = _run(
+        "ci-live.sh",
+        tmp_path,
+        args=("--daemon", "http://h:1", "--token-env", "A B"),
+    )
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert _fix_hint(result.stderr) == (
+        "PATH=<checkout>/.venv/bin:$PATH ./ci-live.sh "
+        "--daemon http://h:1 --token-env A\\ B"
+    )
+
+
+def test_ci_live_sh_fix_hint_without_arguments_is_the_bare_command(
+    tmp_path,
+):
+    result = _run("ci-live.sh", tmp_path)
+    assert _fix_hint(result.stderr) == (
+        "PATH=<checkout>/.venv/bin:$PATH ./ci-live.sh"
+    )
+
+
+def test_ci_sh_fix_hint_repeats_its_arguments(tmp_path):
+    result = _run("ci.sh", tmp_path, args=("--some", "x y"))
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert _fix_hint(result.stderr) == (
+        "PATH=<checkout>/.venv/bin:$PATH ./ci.sh --some x\\ y"
+    )
+
+
+def test_ci_sh_fix_hint_without_arguments_is_the_bare_command(tmp_path):
+    result = _run("ci.sh", tmp_path)
+    assert _fix_hint(result.stderr) == (
+        "PATH=<checkout>/.venv/bin:$PATH ./ci.sh"
+    )
