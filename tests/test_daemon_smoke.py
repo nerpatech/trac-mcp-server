@@ -7,8 +7,8 @@ test can reach. What these tests pin is everything that does not need one:
 * the shell dispatch (no args keeps the old path, ``--daemon`` skips the
   probe and pytest, a bad argument is usage + exit 2), by running the real
   ``ci-live.sh`` by subprocess like ``test_ci_live_probe.py``;
-* the three-state exit contract -- not run (2) before any network call,
-  failed (1) for an unreachable daemon, the token never printed;
+* the three-state exit contract -- not run (2) before any network call
+  and for an unreachable daemon, the token never printed;
 * the pure helpers (URL normalisation, the tool comparison, scrubbing);
 * all six checks end to end, over the SDK's real streamable-HTTP client and
   a real uvicorn server (``Rules/testing/RealSubstrateNotMocks``), against
@@ -208,6 +208,41 @@ def test_run_smoke_refuses_an_expectation_that_is_not_a_sha(given):
             given,
         )
     assert out.getvalue() == ""
+
+
+# An unreachable daemon is "could not run" (2), not a failed check (1): no
+# check got an answer to judge (Trac #279). A daemon that answers, however
+# wrongly, is still judged (test_healthz_must_still_say_status_ok).
+
+
+def test_a_refused_connection_on_healthz_is_not_run():
+    out = io.StringIO()
+    code = anyio.run(
+        smoke.run_smoke,
+        f"http://127.0.0.1:{_closed_port()}",
+        TOKEN,
+        out,
+    )
+    assert code == smoke.EXIT_NOT_RUN, out.getvalue()
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith(
+        "FAIL 1 healthz: cannot reach the daemon: "
+    )
+    assert lines[-1].startswith("DAEMON SMOKE NOT RUN at check 1: ")
+
+
+def test_a_healthz_that_never_answers_is_not_run(listener, monkeypatch):
+    # The listener accepts the connection (the kernel does, from its
+    # backlog) and never replies, so this is the read timeout, not a
+    # refused connect.
+    monkeypatch.setattr(smoke, "HTTP_TIMEOUT", 0.5)
+    port = listener.getsockname()[1]
+    out = io.StringIO()
+    code = anyio.run(
+        smoke.run_smoke, f"http://127.0.0.1:{port}", TOKEN, out
+    )
+    assert code == smoke.EXIT_NOT_RUN, out.getvalue()
+    assert "FAIL 1 healthz: cannot reach the daemon: " in out.getvalue()
 
 
 def test_compare_tools_reports_missing_and_extra_sorted():
@@ -1046,7 +1081,8 @@ def test_token_env_value_is_used_when_set(shell_env):
         "--token-env",
         "CUSTOM_SMOKE_TOKEN",
     )
-    assert result.returncode == 1, (result.stdout, result.stderr)
+    # 2: the token was read and the network tried, but nothing answered.
+    assert result.returncode == 2, (result.stdout, result.stderr)
     assert "FAIL 1 healthz" in result.stdout
 
 
@@ -1087,17 +1123,21 @@ def test_daemon_mode_skips_the_probe_and_pytest(shell_env):
 
 
 @pytestmark_shell
-def test_an_unreachable_daemon_fails_at_check_1_and_hides_the_token(
+def test_an_unreachable_daemon_is_not_run_at_check_1_and_hides_the_token(
     shell_env,
 ):
+    # Nothing answered, so there is no verdict on the release: exit 2,
+    # "could not run", not 1 (Trac #279).
     tmp_path, env, _marker = shell_env
     env[DEFAULT_ENV] = TOKEN
     result = _ci_live(
         tmp_path, env, "--daemon", f"http://127.0.0.1:{_closed_port()}"
     )
-    assert result.returncode == 1, (result.stdout, result.stderr)
-    assert "FAIL 1 healthz" in result.stdout
-    assert "DAEMON SMOKE FAILED at check 1" in result.stdout
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert "FAIL 1 healthz: cannot reach the daemon" in result.stdout
+    assert "DAEMON SMOKE NOT RUN at check 1" in result.stdout
+    assert "this is not a passing result" in result.stdout
+    assert "DAEMON SMOKE FAILED" not in result.stdout
     assert "PASS" not in result.stdout
     assert TOKEN not in result.stdout + result.stderr
 
@@ -1451,7 +1491,8 @@ def test_the_flag_lets_another_instance_through_to_the_network(
         "/auto_pm",
         "--allow-instance-writes",
     )
-    assert result.returncode == 1, (result.stdout, result.stderr)
+    # 2: the flag let it reach the network, where nothing answered.
+    assert result.returncode == 2, (result.stdout, result.stderr)
     assert "FAIL 1 healthz" in result.stdout
 
 
