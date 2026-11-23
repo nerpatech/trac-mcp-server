@@ -781,8 +781,8 @@ def _bracket_rule(
     delimiters as token boundaries, which 3.4 leaves in the source
     (`delimiters_end_token`).
 
-    What mistune's scanner is given is only a gate (`_bracket_gate`: the
-    opener and the character after it), not the shape's own pattern, and
+    What mistune's scanner is given is only a gate (`_QUOTED_BRACKET_GATE`
+    and `_NUMERIC_BRACKET_GATE`: the opener and the character after it), not the shape's own pattern, and
     this function matches the shape (`shape_re`) at the opener itself,
     but only when a `]` lies before the next newline, which every shape
     needs. A pattern in mistune's combined regex is tried at every `[` of
@@ -2402,6 +2402,19 @@ _GEMINI_HINT = (
 )
 
 
+_HTML_TAG_OPEN_RE = re.compile(r"<[a-zA-Z]")
+
+
+def _has_html_tag(text: str) -> bool:
+    """Whether ``re.search(r"<[a-zA-Z][^>]*>", text)`` matches, in linear
+    time (ticket #289): it restarted at every `<a` and read to the end of
+    the text when no `>` followed. It needs a `>` after the opener's
+    letter, so the first `<letter` is enough: with no `>` after it, no
+    later opener has one either."""
+    opener = _HTML_TAG_OPEN_RE.search(text)
+    return opener is not None and text.find(">", opener.end()) != -1
+
+
 def convert_with_warnings(
     markdown_text: str,
     *,
@@ -2430,7 +2443,7 @@ def convert_with_warnings(
     # Tables are now fully supported via mistune table plugin
 
     # Check for HTML tags
-    if re.search(r"<[a-zA-Z][^>]*>", markdown_text):
+    if _has_html_tag(markdown_text):
         warnings.append(
             "HTML tags detected - these may not render correctly in TracWiki."
         )

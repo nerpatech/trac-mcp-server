@@ -1724,44 +1724,75 @@ def _escaped_bracket_shapes(tracwiki: str) -> Counter[str]:
 _DEST_STOP_RE = re.compile(r"[)\n]")
 
 
+class _MarkdownLinkSearch:
+    """``_MARKDOWN_LINK_RE.search(text, pos)`` in linear time, kept between
+    searches (ticket #289).
+
+    The regex is quadratic on a bracket opener repeated with no `]`
+    after it: every `[` rescans to the next stop. An opener fails when its
+    label stops at a newline or the end, or at a `]` not followed by `(`,
+    or when the destination is empty or stops at a newline or the end
+    instead of `)`. Every opener between it and that label stop reaches
+    the same stop and the same destination, so it fails the same way and
+    the scan resumes at the stop. The label's stop and the destination's
+    stop are remembered (one stop serves every start between the first
+    start and the stop), and kept across `find` calls, so a caller that
+    restarts one character after each match it skips
+    (`first_literal_link_match`) does not rescan a destination that runs
+    to the end of the line for every restart. `find` returns spans, since
+    building a `re.Match` (or slicing the text) per match would itself be
+    as long as the match; `search` builds the match for one span.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._label_from = self._label_to = -1
+        self._dest_from = self._dest_to = -1
+
+    def find(self, pos: int = 0) -> tuple[int, int, int] | None:
+        """``(start, label_end, end)`` of the first match from ``pos``:
+        the match is ``text[start:end]`` and its first `]` is at
+        ``label_end``; or None."""
+        text = self.text
+        size = len(text)
+        while True:
+            start = text.find("[", pos)
+            if start == -1:
+                return None
+            label_from = start + 1
+            if not self._label_from <= label_from <= self._label_to:
+                stop = _BRACKET_STOP_RE.search(text, label_from)
+                self._label_from = label_from
+                self._label_to = stop.start() if stop else size
+            label_end = self._label_to
+            if label_end == size:
+                return None
+            if (
+                text[label_end] == "]"
+                and label_end > start + 1
+                and text.startswith("(", label_end + 1)
+            ):
+                dest = label_end + 2
+                if not self._dest_from <= dest <= self._dest_to:
+                    found = _DEST_STOP_RE.search(text, dest)
+                    self._dest_from = dest
+                    self._dest_to = found.start() if found else size
+                end = self._dest_to
+                if dest < end and text[end : end + 1] == ")":
+                    return start, label_end, end + 1
+            pos = label_end
+
+
 def _search_markdown_link(
     text: str, pos: int = 0
 ) -> re.Match[str] | None:
-    """``_MARKDOWN_LINK_RE.search(text, pos)``, in linear time.
-
-    The regex is quadratic on a bracket opener repeated with no `]`
-    after it (ticket #289): every `[` rescans to the next stop. An opener
-    fails when its label stops at a newline or the end, or at a `]` not
-    followed by `(`, or when the destination is empty or stops at a
-    newline or the end instead of `)`. Every opener between it and that
-    label stop reaches the same stop and the same destination, so it
-    fails the same way and the scan resumes at the stop. The destination's
-    stop is remembered across openers (one stop serves every start
-    between the first start and the stop). A match is built by the
-    regex itself, at the opener found here.
-    """
-    dest_from = dest_to = -1
-    while True:
-        start = text.find("[", pos)
-        if start == -1:
-            return None
-        stop = _BRACKET_STOP_RE.search(text, start + 1)
-        if stop is None:
-            return None
-        label_end = stop.start()
-        if (
-            text[label_end] == "]"
-            and label_end > start + 1
-            and text.startswith("(", label_end + 1)
-        ):
-            dest = label_end + 2
-            if not dest_from <= dest <= dest_to:
-                found = _DEST_STOP_RE.search(text, dest)
-                dest_from = dest
-                dest_to = found.start() if found else len(text)
-            if dest < dest_to and text[dest_to : dest_to + 1] == ")":
-                return _MARKDOWN_LINK_RE.match(text, start)
-        pos = label_end
+    """``_MARKDOWN_LINK_RE.search(text, pos)``, in linear time (see
+    `_MarkdownLinkSearch`). The match is built by the regex itself, at the
+    opener found."""
+    found = _MarkdownLinkSearch(text).find(pos)
+    if found is None:
+        return None
+    return _MARKDOWN_LINK_RE.match(text, found[0])
 
 
 def first_literal_link_match(
@@ -1781,18 +1812,22 @@ def first_literal_link_match(
     replay it.
     """
     escaped = _escaped_bracket_shapes(tracwiki)
+    search = _MarkdownLinkSearch(prose)
     pos = 0
     while True:
-        match = _search_markdown_link(prose, pos)
-        if match is None:
+        found = search.find(pos)
+        if found is None:
             return None
-        text = match.group(0)
-        bracket = text[: text.index("]") + 1]
+        start, label_end, _ = found
+        # The bracket part: `[` up to the first `]`, which is at
+        # `label_end` (the label holds none). No match object or slice of
+        # the whole match is built for a skipped match.
+        bracket = prose[start : label_end + 1]
         if escaped[bracket] > 0:
             escaped[bracket] -= 1
-            pos = match.start() + 1
+            pos = start + 1
             continue
-        return match
+        return _MARKDOWN_LINK_RE.match(prose, start)
 
 
 def _check_literal_markup_in_render(

@@ -117,6 +117,7 @@ def test_build_warnings_grows_linearly_on_hostile_input(unit):
 # the bracket shapes' patterns inside mistune's combined scanner.
 CONVERTER_UNITS = {
     **HOSTILE_UNITS,
+    "html tag opener": "<a",
     "numeric bracket slash": "[1/",
     "quoted bracket space": "['a' ",
     "scheme in a bracket": "[a:",
@@ -145,6 +146,44 @@ def test_convert_with_warnings_grows_linearly_on_hostile_input(unit):
         f"the full-size run ({n} repetitions) took {big:.2f}s of CPU time "
         f"(ceiling {CPU_CEILING_S}s); growth was {ratio:.1f}x"
     )
+
+
+# `first_literal_link_match` when every match is skipped: the render holds
+# `['a'](` many times and the stored source escapes each of them, so each
+# match is skipped and the search restarts one character on. The prose
+# comes from the facts, so the input is built (and parsed) outside the
+# timed call.
+
+
+def _every_match_skipped(count):
+    tracwiki = "!['a'](" * count + ")"
+    facts = extract_facts("<p>" + "['a'](" * count + ")</p>")
+    return tracwiki, facts
+
+
+def _skipped_warnings(source):
+    tracwiki, facts = source
+    return build_warnings(
+        markdown_source=None,
+        tracwiki=tracwiki,
+        facts=facts,
+        probes={},
+        check_targets=False,
+        source_format="tracwiki",
+    )
+
+
+def test_build_warnings_grows_linearly_when_every_link_match_is_skipped():
+    n = FULL_SIZE // len("!['a'](")
+    ratio, small, big = _growth(
+        _skipped_warnings, _every_match_skipped, n, repeats=REPEATS
+    )
+    assert ratio < GROWTH_LIMIT, (
+        f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
+        f"(limit {GROWTH_LIMIT}x): {small:.4f}s at {n // GROWTH_FACTOR} "
+        f"repetitions, {big:.4f}s at {n} repetitions"
+    )
+    assert big < CPU_CEILING_S
 
 
 # -- 2. Each rewritten scan matches the regex it replaced ---------------------
@@ -359,6 +398,68 @@ def test_first_literal_link_match_equals_the_old_loop_on_the_corpus():
             assert (new is None) == (old is None), (text, tracwiki)
             if old is not None:
                 assert new.span() == old.span(), (text, tracwiki)
+
+
+SKIP_PIECES = [
+    "!['a'](",
+    "['a'](",
+    "['a' x](",
+    "![0](",
+    "[0](",
+    "[docs](",
+    ")",
+    "(",
+    "]",
+    "[",
+    "!",
+    "'a'",
+    " ",
+    "\n",
+    "x",
+]
+
+
+def test_first_literal_link_match_equals_the_old_loop_when_matches_are_skipped():
+    rng = random.Random(2892)
+    skipped = 0
+    for _ in range(6000):
+        prose = "".join(
+            rng.choice(SKIP_PIECES) for _ in range(rng.randint(0, 24))
+        )
+        tracwiki = "".join(
+            rng.choice(SKIP_PIECES) for _ in range(rng.randint(0, 24))
+        )
+        old = _old_first_literal_link_match(prose, tracwiki)
+        new = checks.first_literal_link_match(prose, tracwiki)
+        assert (new is None) == (old is None), (prose, tracwiki)
+        if old is not None:
+            assert new.span() == old.span(), (prose, tracwiki)
+            skipped += old.start() > 0
+    assert skipped > 200
+
+
+def test_has_html_tag_equals_the_old_search():
+    rng = random.Random(2893)
+    pieces = [
+        "<",
+        ">",
+        "a",
+        "Z",
+        "1",
+        " ",
+        "\n",
+        "</",
+        "<a",
+        "<1",
+        "/>",
+    ]
+    for _ in range(20000):
+        text = "".join(
+            rng.choice(pieces) for _ in range(rng.randint(0, 16))
+        )
+        assert converter._has_html_tag(text) == bool(
+            re.search(r"<[a-zA-Z][^>]*>", text)
+        ), repr(text)
 
 
 # The scheme-prefix regexes: equal to the old unbounded ones, except
