@@ -24,6 +24,9 @@ from tests.test_converter_flavors import (
     _as_build,
     _growth,
 )
+from trac_mcp_server.converters.markdown_to_tracwiki import (
+    convert_with_warnings,
+)
 from trac_mcp_server.mcp.tools import (
     convert_preview,
     render_check,
@@ -92,6 +95,39 @@ def test_build_warnings_grows_linearly_on_hostile_input(unit):
     n = FULL_SIZE // len(unit)
     ratio, small, big = _growth(
         _warnings, _as_build(unit), n, repeats=REPEATS
+    )
+    assert ratio < GROWTH_LIMIT, (
+        f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
+        f"(limit {GROWTH_LIMIT}x): {small:.4f}s at {n // GROWTH_FACTOR} "
+        f"repetitions, {big:.4f}s at {n} repetitions"
+    )
+    assert big < CPU_CEILING_S, (
+        f"the full-size run ({n} repetitions) took {big:.2f}s of CPU time "
+        f"(ceiling {CPU_CEILING_S}s); growth was {ratio:.1f}x"
+    )
+
+
+# The same inputs through the Markdown converter (what `convert_preview`
+# and `wiki_file_push` run), plus the shapes of its own scheme regexes.
+# `[1/` and `['a' ` (mistune's own cost, pure Python) are #259's, not here.
+CONVERTER_UNITS = {
+    **HOSTILE_UNITS,
+    "scheme in a bracket": "[a:",
+    "realm in a bracket": "[a:wiki:",
+}
+
+
+def _convert(source):
+    return convert_with_warnings(source)
+
+
+@pytest.mark.parametrize(
+    "unit", list(CONVERTER_UNITS.values()), ids=list(CONVERTER_UNITS)
+)
+def test_convert_with_warnings_grows_linearly_on_hostile_input(unit):
+    n = FULL_SIZE // len(unit)
+    ratio, small, big = _growth(
+        _convert, _as_build(unit), n, repeats=REPEATS
     )
     assert ratio < GROWTH_LIMIT, (
         f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
@@ -459,6 +495,133 @@ def test_a_prefix_no_longer_starts_inside_a_run_with_a_non_letter_head(
     assert (found.group(0) if found else None) == new_hit
 
 
+OLD_SINGLE_BRACKET_LINK_RE = re.compile(
+    r"\[(?:[A-Za-z][\w+.-]*:)+[^\s\]]+(?:[ \t]+[^\]\n]+)?\](?!\()"
+)
+OLD_BARE_TRACLINK_RE = re.compile(
+    r"\b(?:[A-Za-z][\w.+-]*:)?"
+    rf"(?:{'|'.join(sorted(checks.TRACLINK_SCHEMES))}):"
+    r"[^\s\]]+"
+)
+
+SINGLE_BRACKET_PIECES = [
+    "[",
+    "[",
+    "]",
+    "]",
+    "(",
+    ")",
+    ":",
+    ":",
+    " ",
+    " ",
+    "\t",
+    "\n",
+    "\r",
+    "a",
+    "a:",
+    "b1",
+    "1",
+    ".",
+    "+",
+    "-",
+    "#",
+    "/",
+    "wiki:",
+    "[a:",
+    "[a:b ",
+    "](",
+]
+
+
+def _single_bracket_corpus():
+    rng = random.Random(289)
+    cases = [
+        "[a:b]",
+        "[a:b c]",
+        "[a:b c](d)",
+        "[a:b](c)",
+        "[a:]",
+        "[a: b]",
+        "[a:b ]",
+        "[a:b  ]",
+        "[a:b\n]",
+        "[a:b c\n]",
+        "[a:b\tc]",
+        "[a:b\rc]",
+        "[a:b:c:]",
+        "[a:b:c: d]",
+        "[[a:b]]",
+        "[[a:b c]",
+        "x [a:b c] y [d:e] [f:g",
+        "[a:[b:c d]",
+        "[a[b:c d]",
+        "[1a:b]",
+        "[:a]",
+        "[a.b+c-d:e]",
+        "[a:b c]d",
+        "[a:b c]]",
+        "[a:b ]]",
+    ]
+    for _ in range(20000):
+        parts = [
+            rng.choice(SINGLE_BRACKET_PIECES)
+            for _ in range(rng.randint(0, 24))
+        ]
+        cases.append("".join(parts))
+    return cases
+
+
+SINGLE_BRACKET_CORPUS = _single_bracket_corpus()
+
+
+def test_converter_single_bracket_sub_equals_the_old_regex_sub():
+    def repl(match):
+        return "<" + match.group(0) + ">"
+
+    hits = 0
+    for text in SINGLE_BRACKET_CORPUS:
+        old = OLD_SINGLE_BRACKET_LINK_RE.sub(repl, text)
+        hits += old != text
+        assert converter._sub_single_bracket_link(repl, text) == old, (
+            repr(text)
+        )
+    assert hits > 1000
+
+
+@pytest.mark.parametrize(
+    "name", ["_BARE_TRACLINK_RE", "_ESCAPE_SKIP_RE"]
+)
+def test_converter_scheme_regexes_equal_the_old_ones(name):
+    new = getattr(converter, name)
+    old = OLD_BARE_TRACLINK_RE
+    if name == "_ESCAPE_SKIP_RE":
+        old = re.compile(
+            f"(?i:{converter._URL_IN_TEXT_RE.pattern})|{old.pattern}"
+        )
+    compared = 0
+    for text in PREFIX_CORPUS:
+        if _has_run_with_a_non_letter_head(text):
+            continue
+        compared += 1
+        assert [m.span() for m in new.finditer(text)] == [
+            m.span() for m in old.finditer(text)
+        ], repr(text)
+    assert compared > 300
+
+
+def test_converter_bare_traclink_loses_a_prefix_inside_a_non_letter_run():
+    assert OLD_BARE_TRACLINK_RE.search("1a.b:wiki:X").group(0) == (
+        "b:wiki:X"
+    )
+    assert converter._BARE_TRACLINK_RE.search("1a.b:wiki:X").group(
+        0
+    ) == ("wiki:X")
+    assert converter._BARE_TRACLINK_RE.search("changelog:Page") is None
+    text = f"{LONG_DOTTED}:wiki:Page"
+    assert converter._BARE_TRACLINK_RE.search(text).group(0) == text
+
+
 LONG_DOTTED = "org." + "x" * 62 + ".tr"
 
 
@@ -497,8 +660,8 @@ def test_the_realm_reference_regex_still_starts_at_a_word_boundary():
 # that records the thread it ran on, which must not be the loop's.
 
 
-def _record_threads(monkeypatch, module, names):
-    seen = {}
+def _record_threads(monkeypatch, module, names, seen=None):
+    seen = {} if seen is None else seen
     for name in names:
         real = getattr(module, name)
 
@@ -600,3 +763,98 @@ async def test_ticket_render_check_runs_section_results_off_the_loop(
     assert not result.isError, result.content
     _assert_off_loop(seen, names)
     assert len(seen["_section_result"]) == 2
+
+
+async def test_wiki_file_push_runs_the_converter_and_its_checks_off_the_loop(
+    monkeypatch,
+):
+    class StopHere(Exception):
+        pass
+
+    async def stop(*args, **kwargs):
+        raise StopHere
+
+    from trac_mcp_server.mcp.tools import wiki_file
+
+    monkeypatch.setattr(wiki_file, "gate_or_refuse", stop)
+    seen = _record_threads(
+        monkeypatch,
+        wiki_file,
+        ["find_code_block_indentation_loss", "find_list_item_splits"],
+    )
+    _record_threads(
+        monkeypatch, converter, ["convert_with_warnings"], seen
+    )
+
+    with pytest.raises(StopHere):
+        await wiki_file._handle_push(
+            _fake_client(),
+            {
+                "page_name": "P",
+                "content": "# T\n\n- a\n  - b\n\n  c\n",
+                "format": "markdown",
+            },
+        )
+
+    _assert_off_loop(
+        seen,
+        [
+            "convert_with_warnings",
+            "find_code_block_indentation_loss",
+            "find_list_item_splits",
+        ],
+    )
+
+
+# -- 4. A hostile preview does not stall the event loop -----------------------
+#
+# `run_sync` alone does not protect the loop: a regex call holds the GIL
+# for its whole run, so a quadratic one stalls every other task however it
+# is called. That is why the regexes themselves had to be linear, and why
+# the ratio tests above are the real guard. This is the end-to-end check:
+# a ticker task runs on the loop while `convert_preview` handles hostile
+# input, and the longest gap between its ticks stays far under the seconds
+# the quadratic regexes held the loop for (12.5 s for an 84 KB input). The
+# bound is deliberately generous (one second, against about 0.3 s of CPU
+# in all and a few milliseconds per GIL switch) so a busy host does not
+# flake it.
+
+LOOP_STALL_LIMIT_S = 1.0
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["[" * 65536, "a." * 32768, "[a:" * 21845],
+    ids=["lone bracket", "dotted prefix run", "scheme in a bracket"],
+)
+async def test_a_hostile_convert_preview_does_not_stall_the_loop(
+    source,
+):
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    gaps = []
+    stop = False
+
+    async def ticker():
+        last = loop.time()
+        while not stop:
+            await asyncio.sleep(0.005)
+            now = loop.time()
+            gaps.append(now - last)
+            last = now
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0.05)
+    result = await convert_preview._handle_convert_preview(
+        _fake_client(), {"content": source, "check_targets": False}
+    )
+    stop = True
+    await task
+
+    assert not result.isError, result.content
+    assert len(gaps) > 5
+    assert max(gaps) < LOOP_STALL_LIMIT_S, (
+        f"the loop stalled for {max(gaps):.2f}s "
+        f"(limit {LOOP_STALL_LIMIT_S}s)"
+    )

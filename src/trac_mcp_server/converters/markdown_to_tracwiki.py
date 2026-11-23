@@ -136,8 +136,15 @@ _URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?)://\S+", re.IGNORECASE)
 # textually indistinguishable from prose such as `Note:SomeThing`, and
 # the store's own rule requires the explicit `wiki:` realm for a wiki
 # page anyway.
+#
+# The prefix starts only at the head of its `[\w.+-]` run (`(?<![\w.+-])`;
+# the `\b` stays for the no-prefix branch, or `log:` would match inside
+# `changelog:`). Unguarded, `a.a.a...` restarted the scan at every `a` and
+# ran to the end of the run: quadratic (ticket #289). The same guard as in
+# `preview/checks.py`; a prefix no longer starts partway through a run
+# whose head is not a letter (`1a.b:wiki:X` read `b:wiki:X`).
 _BARE_TRACLINK_RE = re.compile(
-    r"\b(?:[A-Za-z][\w.+-]*:)?"
+    r"\b(?:(?<![\w.+-])[A-Za-z][\w.+-]*:)?"
     rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):"
     r"[^\s\]]+"
 )
@@ -173,6 +180,93 @@ _ESCAPE_SKIP_RE = re.compile(
 _SINGLE_BRACKET_LINK_RE = re.compile(
     r"\[(?:[A-Za-z][\w+.-]*:)+[^\s\]]+(?:[ \t]+[^\]\n]+)?\](?!\()"
 )
+_SINGLE_BRACKET_SCHEME_RE = re.compile(r"[A-Za-z][\w+.-]*")
+_SINGLE_BRACKET_TARGET_STOP_RE = re.compile(r"[\s\]]")
+_SINGLE_BRACKET_LABEL_STOP_RE = re.compile(r"[\]\n]")
+
+
+def _sub_single_bracket_link(repl, text: str) -> str:
+    r"""`_SINGLE_BRACKET_LINK_RE.sub(repl, text)` in linear time (#289).
+
+    The regex restarts at every `[` and reads to the end of a whitespace-
+    free run, so `[a:` repeated was quadratic (16 s at 48 KB). What an
+    opener at `start` needs, and why a failed one lets the scan skip ahead:
+
+    * A scheme group first: a letter, a run of `[\w+.-]`, then `:`. The
+      run holds no `[`, so a failure here (no letter, or the run ends
+      without `:`) resumes at the character that ended it: no `[` lies
+      between.
+    * Then a target `[^\s\]]+` of at least one character. It cannot
+      backtrack to a shorter one (the next element is `]` or whitespace,
+      neither of which the target holds), and every further scheme group
+      is inside it (their characters are target characters), so it ends
+      at `stop`, the first whitespace or `]` after the first group.
+    * Then either `]` at `stop`, or a space or tab there and a label
+      `[^\]\n]+` of at least one character that ends at the first `]` or
+      newline `end` after it (a shorter label would have to end on a
+      character that is not `]`; one more whitespace in the run makes no
+      difference). `(?!\()` then refuses a `(` right after that `]`.
+
+    Whether that last step succeeds depends on `stop` alone. Every opener
+    between `start` and `stop` has the same `stop`, so if the step fails
+    for `start` it fails for all of them, whatever their scheme groups
+    look like, and the scan resumes at `stop` (never a `[`). The label's
+    end is remembered: one scan serves every `stop` inside it. If there is
+    no whitespace or `]` after the first group, no later opener has one
+    either, and the scan ends. A match is built by the regex itself at the
+    opener found here.
+    """
+    parts: list[str] = []
+    done = 0
+    pos = 0
+    label_from = label_to = -1
+    while True:
+        start = text.find("[", pos)
+        if start == -1:
+            break
+        scheme = _SINGLE_BRACKET_SCHEME_RE.match(text, start + 1)
+        if scheme is None:
+            pos = start + 1
+            continue
+        if not text.startswith(":", scheme.end()):
+            pos = scheme.end()
+            continue
+        first_group_end = scheme.end() + 1
+        found = _SINGLE_BRACKET_TARGET_STOP_RE.search(
+            text, first_group_end
+        )
+        if found is None:
+            break
+        stop = found.start()
+        ok = False
+        if stop > first_group_end:
+            if text[stop] == "]":
+                ok = not text.startswith("(", stop + 1)
+            elif text[stop] in " \t":
+                if not label_from <= stop + 1 <= label_to:
+                    end_found = _SINGLE_BRACKET_LABEL_STOP_RE.search(
+                        text, stop + 1
+                    )
+                    label_from = stop + 1
+                    label_to = (
+                        end_found.start() if end_found else len(text)
+                    )
+                ok = (
+                    label_to > stop + 1
+                    and text[label_to : label_to + 1] == "]"
+                    and not text.startswith("(", label_to + 1)
+                )
+        if ok:
+            match = _SINGLE_BRACKET_LINK_RE.match(text, start)
+            # Cannot miss: the steps above are the pattern's.
+            assert match is not None
+            parts.append(text[done:start])
+            parts.append(repl(match))
+            done = pos = match.end()
+        else:
+            pos = stop
+    parts.append(text[done:])
+    return "".join(parts)
 
 
 # The character references CommonMark decodes in text (spec section
@@ -302,7 +396,7 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
 
     text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
     text = _sub_bracket_syntax(stash_literal, text)
-    text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
+    text = _sub_single_bracket_link(stash_literal, text)
     return text, placeholders
 
 
