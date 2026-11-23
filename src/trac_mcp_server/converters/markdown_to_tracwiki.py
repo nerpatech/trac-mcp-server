@@ -41,6 +41,31 @@ _SLUG_WS_RE = re.compile(r"\s+")
 # macro/link name that happens to be CamelCase-shaped (e.g. [[PageOutline]])
 # never has the CamelCase pass below stuff a `!` inside the brackets.
 _BRACKET_SYNTAX_RE = re.compile(r"\[\[[^\]\n]*\]\]")
+_BRACKET_SYNTAX_STOP_RE = re.compile(r"[\]\n]")
+
+
+def _sub_bracket_syntax(repl, text: str) -> str:
+    """`_BRACKET_SYNTAX_RE.sub(repl, text)` in linear time (#289)."""
+    parts: list[str] = []
+    done = 0
+    pos = 0
+    while True:
+        start = text.find("[[", pos)
+        if start == -1:
+            break
+        stop = _BRACKET_SYNTAX_STOP_RE.search(text, start + 2)
+        if stop is None:
+            break
+        if text.startswith("]]", stop.start()):
+            match = _BRACKET_SYNTAX_RE.match(text, start)
+            parts.append(text[done:start])
+            parts.append(repl(match))
+            done = pos = match.end()
+        else:
+            pos = stop.start()
+    parts.append(text[done:])
+    return "".join(parts)
+
 
 # Info string of the fence the removed TracWiki -> Markdown converter wrote
 # around source it could not convert (#214 deleted that converter). Markdown
@@ -273,7 +298,7 @@ def _stash_bracket_syntax(markdown_text: str) -> tuple[str, list[str]]:
         return f"`\x00WK{len(placeholders) - 1}\x00`"
 
     text = _CODE_SPAN_RE.sub(stash_code_span, markdown_text)
-    text = _BRACKET_SYNTAX_RE.sub(stash_literal, text)
+    text = _sub_bracket_syntax(stash_literal, text)
     text = _SINGLE_BRACKET_LINK_RE.sub(stash_literal, text)
     return text, placeholders
 

@@ -8,6 +8,7 @@ every rewritten scan against the regex it replaced (kept here as test-local
 constants), and a check that the checks run off the event loop.
 """
 
+import importlib
 import random
 import re
 import threading
@@ -56,6 +57,12 @@ HOSTILE_UNITS = {
     "bang bracket zero": "![0",
 }
 
+# The package re-exports the function `markdown_to_tracwiki` under the
+# module's name, so the module is imported by path.
+converter = importlib.import_module(
+    "trac_mcp_server.converters.markdown_to_tracwiki"
+)
+
 FACTS = extract_facts("<div><p>x</p></div>")
 
 
@@ -70,32 +77,8 @@ def _warnings(source):
     )
 
 
-# Still quadratic after #289's changes to `preview/checks.py`, in code the
-# ticket's brief did not cover: the converter's `_BRACKET_SYNTAX_RE`
-# (`\[\[[^\]\n]*\]\]`, stashed by `_check_list_item_split` ->
-# `find_list_item_splits`) restarts at every `[[` and runs to the end of
-# the line. Measured at 8 KB -> 64 KB: `[` 68x, `[[x|` 49x. Strict, so
-# the fix of that regex turns these into XPASS failures: remove the marks.
-CONVERTER_STILL_QUADRATIC = {"lone bracket", "double bracket pipe"}
-
-
 @pytest.mark.parametrize(
-    "unit",
-    [
-        pytest.param(
-            unit,
-            id=name,
-            marks=(
-                pytest.mark.xfail(
-                    strict=True,
-                    reason="converter _BRACKET_SYNTAX_RE is quadratic",
-                )
-                if name in CONVERTER_STILL_QUADRATIC
-                else ()
-            ),
-        )
-        for name, unit in HOSTILE_UNITS.items()
-    ],
+    "unit", list(HOSTILE_UNITS.values()), ids=list(HOSTILE_UNITS)
 )
 def test_build_warnings_grows_linearly_on_hostile_input(unit):
     n = FULL_SIZE // len(unit)
@@ -203,6 +186,31 @@ def test_blank_delimited_brace_spans_equal_the_old_regex():
         assert checks._blank_delimited(
             text, "{{{", "}}}"
         ) == _old_blank(OLD_INLINE_BRACES_RE, text), repr(text)
+
+
+def _old_sub_bracket_syntax(repl, text):
+    return converter._BRACKET_SYNTAX_RE.sub(repl, text)
+
+
+def test_converter_bracket_syntax_sub_equals_the_old_regex_sub():
+    def repl(match):
+        return "<" + match.group(0) + ">"
+
+    cases = CORPUS + [
+        "[[",
+        "[[]]",
+        "[[a]]]",
+        "[[a]" + "]",
+        "[[a\n]]",
+        "[[[a]]",
+        "[[a]] [[b]] [[c",
+        "[[a]b]]",
+        "x[[a|b]]y[[",
+    ]
+    for text in cases:
+        assert converter._sub_bracket_syntax(repl, text) == (
+            _old_sub_bracket_syntax(repl, text)
+        ), repr(text)
 
 
 def test_blank_bracket_links_equal_the_old_regex():
@@ -486,3 +494,31 @@ async def test_render_check_runs_its_checks_off_the_loop(monkeypatch):
     _assert_off_loop(seen, names)
     # `_probe_all_sections` and `_section_result` each parse the section.
     assert len(seen["extract_facts"]) == 2
+
+
+async def test_ticket_render_check_runs_section_results_off_the_loop(
+    monkeypatch,
+):
+    sections = [
+        RenderedSection(
+            kind=kind,
+            ref=ref,
+            html="<p>x</p>",
+            tracwiki="x",
+            source_paired=True,
+        )
+        for kind, ref in (("description", None), ("comment", "1"))
+    ]
+    monkeypatch.setattr(
+        render_check, "fetch_ticket_sections", lambda *a, **k: sections
+    )
+    names = ["extract_facts", "_section_result"]
+    seen = _record_threads(monkeypatch, render_check, names)
+
+    result = await render_check._handle_ticket_render_check(
+        _fake_client(), {"ticket_id": 1, "check_targets": True}
+    )
+
+    assert not result.isError, result.content
+    _assert_off_loop(seen, names)
+    assert len(seen["_section_result"]) == 2
