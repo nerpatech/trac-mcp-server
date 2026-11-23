@@ -14,21 +14,12 @@ import mcp.types as types
 
 from ...core.async_utils import gather_limited, run_sync_limited
 from ...core.client import TracClient
-from ...preview.targets import DEFAULT_TARGET_CAP
 from .constants import DEFAULT_TICKET_TYPE
 from .errors import build_error_response
 from .registry import ToolSpec
 from .source_format import reject_removed_conversion_args
 from .ticket_write import apply_workflow_fields, workflow_field_refusal
-from .write_gate import (
-    NEW_TARGET_ATTACHMENT_NAMES,
-    NEW_TICKET_COMMENT_NUMBERS,
-    TARGET_CAP_SCHEMA,
-    attachment_names_for_ticket,
-    check_write,
-    gate_enabled,
-    gate_off_lines,
-)
+from .write_gate import TARGET_CAP_SCHEMA, gate_item, gate_off_lines
 
 logger = logging.getLogger(__name__)
 
@@ -204,24 +195,23 @@ async def _handle_batch_create(
         # failures, and a batch is not all-or-nothing today. Making one
         # broken link refuse nineteen good tickets would be a new
         # behaviour smuggled in under a link check.
-        if gate_enabled(client):
-            outcome = await check_write(
-                client,
-                description,
-                field="description",
-                recheck_with="ticket_render_check",
-                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
-                known_comment_numbers=NEW_TICKET_COMMENT_NUMBERS,
-                # Ticket #113: nothing is attached to a ticket that
-                # does not exist yet.
-                attachment_names=NEW_TARGET_ATTACHMENT_NAMES,
-            )
-            if outcome.refused:
-                return {
-                    "index": index,
-                    "summary": summary,
-                    "error": outcome.refusal_text,
-                }
+        #
+        # Through gate_item, as the single tools go through
+        # gate_or_refuse (ticket #271), so a written item keeps the
+        # UNCHECKED note and advisory findings the gate produced.
+        gated = await gate_item(
+            client,
+            {"description": description},
+            args,
+            recheck_with="ticket_render_check",
+            new_ticket=True,
+        )
+        if gated.refused:
+            return {
+                "index": index,
+                "summary": summary,
+                "error": gated.refusal_text,
+            }
 
         try:
             # Stored as written -- no conversion step (#69).
@@ -249,7 +239,11 @@ async def _handle_batch_create(
                 ticket_type,
                 attributes,
             )
-            return {"id": ticket_id, "summary": summary}
+            return {
+                "id": ticket_id,
+                "summary": summary,
+                "notes": gated.lines,
+            }
         except Exception as e:
             return {
                 "index": index,
@@ -261,9 +255,20 @@ async def _handle_batch_create(
         [_create_one(i, t) for i, t in enumerate(tickets)]
     )
 
-    created = [r for r in results if "id" in r]
+    written = [r for r in results if "id" in r]
     failed = [r for r in results if "error" in r]
     total = len(tickets)
+
+    # `notes` is internal: it becomes `item_notes`, and `created` keeps
+    # the shape it always had.
+    created = [
+        {k: v for k, v in r.items() if k != "notes"} for r in written
+    ]
+    item_notes = [
+        {"id": r["id"], "notes": r["notes"]}
+        for r in written
+        if r["notes"]
+    ]
 
     # Build text response
     lines = [
@@ -272,8 +277,10 @@ async def _handle_batch_create(
     if created:
         lines.append("")
         lines.append("Created:")
-        for item in created:
+        for item, entry in zip(created, written, strict=True):
             lines.append(f"  - #{item['id']}: {item['summary']}")
+            for note in entry["notes"]:
+                lines.append(f"    {note}")
     if failed:
         lines.append("")
         lines.append("Failed:")
@@ -298,6 +305,9 @@ async def _handle_batch_create(
             # Claude Code shows structuredContent in preference to the
             # text block, so the note rides here too.
             "gate_notes": off,
+            # Ticket #271: per written item, the gate's UNCHECKED note
+            # and advisory findings. Always present.
+            "item_notes": item_notes,
         },
     )
 
@@ -404,28 +414,18 @@ async def _handle_batch_update(
             return {"id": ticket_id, "error": refusal_text}
 
         # Per item, for the reason spelled out in _create_one.
-        if gate_enabled(client):
-            comment_text = update_data.get("comment", "")
-            # Ticket #113: this ticket's attachments, fetched only when
-            # the comment mentions one.
-            attachment_names = (
-                await attachment_names_for_ticket(client, ticket_id)
-                if comment_text and "attachment:" in comment_text
-                else None
-            )
-            outcome = await check_write(
-                client,
-                comment_text,
-                field="comment",
-                recheck_with="ticket_render_check",
-                target_cap=args.get("target_cap", DEFAULT_TARGET_CAP),
-                attachment_names=attachment_names,
-            )
-            if outcome.refused:
-                return {
-                    "id": ticket_id,
-                    "error": outcome.refusal_text,
-                }
+        # The comment numbers (#105) and this ticket's attachments
+        # (#113) are fetched by gate_item, only when the comment
+        # mentions one (ticket #271).
+        gated = await gate_item(
+            client,
+            {"comment": update_data.get("comment", "")},
+            args,
+            recheck_with="ticket_render_check",
+            ticket_id=ticket_id,
+        )
+        if gated.refused:
+            return {"id": ticket_id, "error": gated.refusal_text}
 
         try:
             # Stored as written -- no conversion step (#69).
@@ -465,8 +465,12 @@ async def _handle_batch_update(
                 client.update_ticket, ticket_id, comment, attributes
             )
             if warning:
-                return {"id": ticket_id, "warning": warning}
-            return {"id": ticket_id}
+                return {
+                    "id": ticket_id,
+                    "warning": warning,
+                    "notes": gated.lines,
+                }
+            return {"id": ticket_id, "notes": gated.lines}
         except Exception as e:
             return {
                 "id": update_data.get("ticket_id", 0),
@@ -490,6 +494,8 @@ async def _handle_batch_update(
             lines.append(f"  - #{item['id']}")
             if "warning" in item:
                 lines.append(f"    {item['warning']}")
+            for note in item["notes"]:
+                lines.append(f"    {note}")
     if failed:
         lines.append("")
         lines.append("Failed:")
@@ -517,6 +523,12 @@ async def _handle_batch_update(
             # Claude Code shows structuredContent in preference to the
             # text block, so the note rides here too.
             "gate_notes": off,
+            # Ticket #271, as in _handle_batch_create.
+            "item_notes": [
+                {"id": r["id"], "notes": r["notes"]}
+                for r in updated
+                if r["notes"]
+            ],
         },
     )
 

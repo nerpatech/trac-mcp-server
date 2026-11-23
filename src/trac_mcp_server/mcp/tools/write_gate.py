@@ -318,7 +318,7 @@ def write_gate_line(write_gate: bool) -> str:
 def gate_off_lines(client: TracClient) -> list[str]:
     """``[GATE_OFF_LINE]`` when the gate is off, else ``[]``.
 
-    For the batch tools, which call :func:`check_write` per item and so
+    For the batch tools, which call :func:`gate_item` per item and so
     never pass through :func:`gate_or_refuse`; they append this once per
     call, not once per item -- it describes the daemon, not an item.
     """
@@ -449,17 +449,33 @@ async def attachment_names(
     return None
 
 
-async def attachment_names_for_ticket(
-    client: TracClient, ticket_id: int
-) -> frozenset[str] | None:
-    """:func:`attachment_names` for a caller that gates through
-    :func:`check_write` directly (the batch tools)."""
-    return await attachment_names(
-        client, wiki_page=None, ticket_id=ticket_id, new_ticket=False
-    )
+class GateItemResult:
+    """What :func:`gate_item` decided about one write (ticket #271).
+
+    ``refusal`` is the ready-to-return error response of the FIRST
+    refusing field, ``refusal_text`` the same message without the
+    envelope (the batch tools report a refused item in their own
+    per-item ``error`` field), and ``lines`` the render-failed note and
+    advisory findings of a write that went through -- empty when the
+    write was refused, as ``gate_or_refuse`` has always returned them.
+    """
+
+    def __init__(
+        self,
+        refusal: types.CallToolResult | None = None,
+        refusal_text: str = "",
+        lines: list[str] | None = None,
+    ):
+        self.refusal = refusal
+        self.refusal_text = refusal_text
+        self.lines = lines if lines is not None else []
+
+    @property
+    def refused(self) -> bool:
+        return self.refusal is not None
 
 
-async def gate_or_refuse(
+async def gate_item(
     client: TracClient,
     fields: dict[str, str | None],
     args: dict,
@@ -468,12 +484,16 @@ async def gate_or_refuse(
     ticket_id: int | None = None,
     new_ticket: bool = False,
     wiki_page: str | None = None,
-) -> tuple[types.CallToolResult | None, list[str]]:
+) -> GateItemResult:
     """Gate several fields of one write, refusing on the first failure.
 
-    The common shape for a handler: pass the fields this call is
-    writing, get back either a refusal to return immediately, or the
-    advisory lines to append to a successful response.
+    Ticket #271: the body of :func:`gate_or_refuse`, split out so the
+    batch tools, which gate once per item, get the same behaviour as a
+    single write -- the comment-number and attachment lookups, and the
+    UNCHECKED note and advisory findings of a written item. They used
+    to call :func:`check_write` directly and read only ``refused``, so
+    a written item lost the lines the single tools return and a batch
+    comment never ran ``dangling_comment_ref``.
 
     Fields are checked in the order given, and the FIRST refusal wins
     rather than all of them being collected. Each check costs a render
@@ -507,13 +527,14 @@ async def gate_or_refuse(
     Omitted by every caller with no target (milestone): no lookup, and
     those links stay errors.
 
-    With the gate off (ticket #153) nothing is checked and the one line
-    returned is :data:`GATE_OFF_LINE`, on every call, whether or not
-    this write carries any text: the line reports the daemon's state,
-    and a field-only edit is the cheapest write on which to notice it.
+    With the gate off (ticket #153) nothing is checked and the result
+    carries no refusal and NO lines: unlike :func:`gate_or_refuse`, this
+    does not say :data:`GATE_OFF_LINE`, because a batch reports the
+    daemon's state once per call (:func:`gate_off_lines`), not once per
+    item.
     """
     if not gate_enabled(client):
-        return None, [GATE_OFF_LINE]
+        return GateItemResult()
 
     target_cap = args.get("target_cap", DEFAULT_TARGET_CAP)
     comment_numbers: frozenset[int] | None = None
@@ -550,6 +571,46 @@ async def gate_or_refuse(
             attachment_names=attached_names,
         )
         if outcome.refused:
-            return outcome.refusal, []
+            return GateItemResult(
+                refusal=outcome.refusal,
+                refusal_text=outcome.refusal_text,
+            )
         lines.extend(outcome.summary_lines())
-    return None, lines
+    return GateItemResult(lines=lines)
+
+
+async def gate_or_refuse(
+    client: TracClient,
+    fields: dict[str, str | None],
+    args: dict,
+    *,
+    recheck_with: str | None,
+    ticket_id: int | None = None,
+    new_ticket: bool = False,
+    wiki_page: str | None = None,
+) -> tuple[types.CallToolResult | None, list[str]]:
+    """Gate the fields of one write for a single-write handler.
+
+    The common shape for a handler: pass the fields this call is
+    writing, get back either a refusal to return immediately, or the
+    advisory lines to append to a successful response. The checks, and
+    what each parameter means, are :func:`gate_item`'s.
+
+    With the gate off (ticket #153) nothing is checked and the one line
+    returned is :data:`GATE_OFF_LINE`, on every call, whether or not
+    this write carries any text: the line reports the daemon's state,
+    and a field-only edit is the cheapest write on which to notice it.
+    """
+    if not gate_enabled(client):
+        return None, [GATE_OFF_LINE]
+
+    result = await gate_item(
+        client,
+        fields,
+        args,
+        recheck_with=recheck_with,
+        ticket_id=ticket_id,
+        new_ticket=new_ticket,
+        wiki_page=wiki_page,
+    )
+    return result.refusal, result.lines

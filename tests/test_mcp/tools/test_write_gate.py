@@ -1089,7 +1089,7 @@ BATCH_PATHS = [
 
 @pytest.mark.parametrize("name,call", BATCH_PATHS)
 def test_153_batch_tools_say_so_once_per_call(name, call):
-    """The batch tools gate per item through check_write, never through
+    """The batch tools gate per item through gate_item, never through
     gate_or_refuse, so they append the line themselves -- once, since
     it describes the daemon rather than any one item."""
     client = _gate_off_client()
@@ -1260,6 +1260,232 @@ def test_113_batch_update_keeps_its_strictness_when_the_list_raises():
     assert "0/2 succeeded, 2 failed" in _batch_update_attachment_text(
         client
     )
+
+
+# ---------------------------------------------------------------------
+# Ticket #271. The batch tools used to read only `outcome.refused` off
+# each item's check, so a written item lost the UNCHECKED note and the
+# advisory findings that the single-ticket tools return, and a batch
+# comment never ran `dangling_comment_ref` (no comment numbers were
+# fetched). Both now gate through `gate_item`.
+# ---------------------------------------------------------------------
+
+
+def _create_items(client, descriptions, **extra):
+    """Batch-create one ticket per description. Summaries are the item
+    index, and the created ids are 100 + index so a note can be tied to
+    its item. Returns ``(result, expected_ids)``."""
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.side_effect = lambda fn, summary, *a, **k: (
+            100 + int(summary)
+        )
+        result = asyncio.run(
+            _handle_batch_create(
+                client,
+                {
+                    "tickets": [
+                        {"summary": str(i), "description": d}
+                        for i, d in enumerate(descriptions)
+                    ],
+                    **extra,
+                },
+            )
+        )
+    return result, [100 + i for i in range(len(descriptions))]
+
+
+def _update_items(client, comments, **extra):
+    """Batch-update tickets 1..n, one comment each. Returns
+    ``(result, expected_ids)``."""
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.return_value = None
+        result = asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": i + 1, "comment": c}
+                        for i, c in enumerate(comments)
+                    ],
+                    **extra,
+                },
+            )
+        )
+    return result, [i + 1 for i in range(len(comments))]
+
+
+BATCH_ITEM_PATHS = [
+    ("ticket_batch_create", _create_items),
+    ("ticket_batch_update", _update_items),
+]
+
+UNCONFIGURED_PREFIX_HTML = "<p>\nSee nosuchprefix:#12 here.\n</p>\n"
+UNCONFIGURED_PREFIX_SOURCE = "See nosuchprefix:#12 here."
+
+
+def _lines_under(text, item_line_prefix):
+    """The indented lines directly beneath the item line that starts
+    with ``item_line_prefix``."""
+    lines = text.split("\n")
+    start = next(
+        i
+        for i, ln in enumerate(lines)
+        if ln.startswith(item_line_prefix)
+    )
+    under = []
+    for ln in lines[start + 1 :]:
+        if not ln.startswith("    "):
+            break
+        under.append(ln)
+    return under
+
+
+def test_271_batch_update_refuses_a_dangling_comment_ref_per_item():
+    """`_update_one` passed no `known_comment_numbers`, so a bare
+    `comment:N` in a batch comment was never checked. The refused item
+    is reported in `failed` with the gate's text and its sibling is
+    still written (the shape of the create-side row above)."""
+    client = _client()
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+
+    def render(content):
+        if "comment:99" in content:
+            return DANGLING_COMMENT_HTML
+        return CLEAN_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    result, _ = _update_items(
+        client, [DANGLING_COMMENT_SOURCE, CLEAN_SOURCE]
+    )
+
+    text = _text(result)
+    assert "1/2 succeeded, 1 failed" in text, text
+    assert "dangling_comment_ref" in text
+    sc = result.structuredContent
+    assert [f["id"] for f in sc["failed"]] == [1]
+    assert "dangling_comment_ref" in sc["failed"][0]["error"]
+    assert sc["updated"] == [2]
+
+
+def test_271_batch_update_allows_a_ref_to_an_existing_comment():
+    """The other half: `comment:2` names a comment ticket 1 holds, so
+    fetching the numbers must not refuse it."""
+    client = _client("<p>\nSee comment:2 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+
+    result, _ = _update_items(
+        client, ["See comment:2 for context."] * 2
+    )
+
+    assert "2/2 succeeded" in _text(result), _text(result)
+    assert result.structuredContent["failed"] == []
+    client.get_ticket_changelog.assert_called()
+
+
+@pytest.mark.parametrize("name,call", BATCH_ITEM_PATHS)
+def test_271_batch_item_says_unchecked_when_the_render_fails(
+    name, call
+):
+    client = _client()
+    client.wiki_to_html.side_effect = xmlrpc.client.Fault(1, "boom")
+
+    result, ids = call(client, [BROKEN_SOURCE, BROKEN_SOURCE])
+
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    sc = result.structuredContent
+    assert [n["id"] for n in sc["item_notes"]] == ids
+    for entry, item_id in zip(sc["item_notes"], ids, strict=True):
+        assert len(entry["notes"]) == 1
+        assert "UNCHECKED" in entry["notes"][0]
+        assert (
+            "Re-check it with ticket_render_check." in entry["notes"][0]
+        )
+        under = _lines_under(text, f"  - #{item_id}")
+        assert under == [f"    {entry['notes'][0]}"], text
+
+
+@pytest.mark.parametrize("name,call", BATCH_ITEM_PATHS)
+def test_271_batch_item_reports_an_advisory_finding(name, call):
+    """Only the second item carries the advisory input, so the note is
+    attached to it alone, in result order."""
+    client = _client()
+
+    def render(content):
+        if "nosuchprefix" in content:
+            return UNCONFIGURED_PREFIX_HTML
+        return CLEAN_HTML
+
+    client.wiki_to_html.side_effect = render
+
+    result, ids = call(
+        client, [CLEAN_SOURCE, UNCONFIGURED_PREFIX_SOURCE]
+    )
+
+    text = _text(result)
+    assert "2/2 succeeded" in text, text
+    sc = result.structuredContent
+    assert [n["id"] for n in sc["item_notes"]] == [ids[1]]
+    (note,) = sc["item_notes"][0]["notes"]
+    assert note.startswith("- [warning] unconfigured_intertrac_prefix:")
+    assert _lines_under(text, f"  - #{ids[1]}") == [f"    {note}"]
+    assert _lines_under(text, f"  - #{ids[0]}") == []
+
+
+@pytest.mark.parametrize("name,call", BATCH_ITEM_PATHS)
+def test_271_batch_item_notes_empty_when_the_gate_is_off(name, call):
+    """With the gate off the per-call GATE_OFF_LINE (gate_notes) says
+    so once; no item carries a note of its own."""
+    client = _gate_off_client()
+
+    result, _ = call(client, [BROKEN_SOURCE, BROKEN_SOURCE])
+
+    sc = result.structuredContent
+    assert sc["item_notes"] == []
+    assert sc["gate_notes"] == [GATE_OFF_LINE]
+    assert _text(result).count(GATE_OFF_LINE) == 1
+    client.wiki_to_html.assert_not_called()
+
+
+@pytest.mark.parametrize("name,call", BATCH_ITEM_PATHS)
+def test_271_batch_item_notes_empty_when_there_is_nothing_to_report(
+    name, call
+):
+    result, _ = call(_client(CLEAN_HTML), [CLEAN_SOURCE, CLEAN_SOURCE])
+
+    assert "2/2 succeeded" in _text(result)
+    assert result.structuredContent["item_notes"] == []
+
+
+def test_271_gate_item_gate_off_returns_no_lines_and_no_refusal():
+    """`gate_or_refuse` owns the gate-off line; `gate_item` stays
+    silent so a batch can append GATE_OFF_LINE once per call."""
+    from trac_mcp_server.mcp.tools.write_gate import gate_item
+
+    client = _gate_off_client()
+    item = asyncio.run(
+        gate_item(
+            client,
+            {"comment": BROKEN_SOURCE},
+            {},
+            recheck_with="ticket_render_check",
+            ticket_id=1,
+        )
+    )
+    assert item.refusal is None
+    assert not item.refused
+    assert item.refusal_text == ""
+    assert item.lines == []
+    client.wiki_to_html.assert_not_called()
 
 
 # ---------------------------------------------------------------------
