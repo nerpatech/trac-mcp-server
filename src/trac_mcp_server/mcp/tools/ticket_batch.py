@@ -8,6 +8,7 @@ infrastructure.
 """
 
 import logging
+from collections import Counter
 from typing import Any
 
 import mcp.types as types
@@ -205,6 +206,7 @@ async def _handle_batch_create(
             args,
             recheck_with="ticket_render_check",
             new_ticket=True,
+            runner=run_sync_limited,
         )
         if gated.refused:
             return {
@@ -398,6 +400,14 @@ async def _handle_batch_update(
     if format_error is not None:
         return format_error
 
+    # Ticket #271: every ticket.update consumes a comment number, and the
+    # items run concurrently in an undefined order, so an item may be
+    # any of the Nth writes to its ticket. Items without a ticket_id
+    # write nothing and are not counted.
+    writes_per_ticket = Counter(
+        u.get("ticket_id") for u in updates if u.get("ticket_id")
+    )
+
     async def _update_one(update_data: dict) -> dict[str, Any]:
         ticket_id = update_data.get("ticket_id")
         if not ticket_id:
@@ -423,6 +433,8 @@ async def _handle_batch_update(
             args,
             recheck_with="ticket_render_check",
             ticket_id=ticket_id,
+            pending_writes=writes_per_ticket[ticket_id],
+            runner=run_sync_limited,
         )
         if gated.refused:
             return {"id": ticket_id, "error": gated.refusal_text}

@@ -1045,6 +1045,25 @@ def test_153_a_write_with_no_text_still_says_so():
     assert GATE_OFF_LINE in _text(result)
 
 
+def _lookups_then(client, default):
+    """A stand-in for the batch tools' `run_sync_limited`: the gate's
+    own read lookups (changelog, attachment lists) run for real against
+    the mock client, which they now go through that runner for (ticket
+    #271); every other call -- the write itself -- returns `default`."""
+    lookups = (
+        client.get_ticket_changelog,
+        client.list_ticket_attachments,
+        client.list_wiki_attachments,
+    )
+
+    def run(fn, *args, **kwargs):
+        if fn in lookups:
+            return fn(*args, **kwargs)
+        return default
+
+    return run
+
+
 def _batch_create(client, description):
     with patch(
         "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
@@ -1067,7 +1086,7 @@ def _batch_update(client, comment):
     with patch(
         "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
     ) as run_sync:
-        run_sync.return_value = None
+        run_sync.side_effect = _lookups_then(client, None)
         return asyncio.run(
             _handle_batch_update(
                 client,
@@ -1208,7 +1227,7 @@ def test_batch_update_refuses_one_item_and_writes_the_rest():
     with patch(
         "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
     ) as run_sync:
-        run_sync.return_value = None
+        run_sync.side_effect = _lookups_then(client, None)
         result = asyncio.run(
             _handle_batch_update(
                 client,
@@ -1230,7 +1249,7 @@ def _batch_update_attachment_text(client):
     with patch(
         "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
     ) as run_sync:
-        run_sync.return_value = None
+        run_sync.side_effect = _lookups_then(client, None)
         result = asyncio.run(
             _handle_batch_update(
                 client,
@@ -1302,7 +1321,7 @@ def _update_items(client, comments, **extra):
     with patch(
         "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
     ) as run_sync:
-        run_sync.return_value = None
+        run_sync.side_effect = _lookups_then(client, None)
         result = asyncio.run(
             _handle_batch_update(
                 client,
@@ -1486,6 +1505,164 @@ def test_271_gate_item_gate_off_returns_no_lines_and_no_refusal():
     assert item.refusal_text == ""
     assert item.lines == []
     client.wiki_to_html.assert_not_called()
+
+
+def _three_comment_changelog():
+    return [
+        ["2026-09-01 00:00:00", "alice", "comment", str(n), "hi"]
+        for n in (1, 2, 3)
+    ]
+
+
+def _batch_update_on_one_ticket(client, items):
+    """`items` is a list of (ticket_id, comment). One handler call."""
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.side_effect = _lookups_then(client, None)
+        return asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": t, "comment": c} for t, c in items
+                    ]
+                },
+            )
+        )
+
+
+def test_271_batch_update_lookups_go_through_run_sync_limited():
+    """The changelog fetch honours TRAC_MAX_PARALLEL_REQUESTS: a batch
+    must not send one unbounded `ticket.changeLog` per item."""
+    client = _client("<p>\nSee comment:2 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+
+    def limited(fn, *a, **k):
+        if fn is client.get_ticket_changelog:
+            return _TWO_PRIOR_COMMENTS_CHANGELOG
+        return None
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.side_effect = limited
+        result = asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {
+                            "ticket_id": 1,
+                            "comment": "See comment:2 for context.",
+                        }
+                    ]
+                },
+            )
+        )
+
+    assert "1/1 succeeded" in _text(result), _text(result)
+    assert client.get_ticket_changelog in [
+        c.args[0] for c in run_sync.call_args_list
+    ]
+    # Run through the limited runner, not directly in a thread.
+    client.get_ticket_changelog.assert_not_called()
+
+
+def test_271_batch_update_attachment_lookup_goes_through_run_sync_limited():
+    client = _client(ATTACHMENT_HTML)
+    client.list_ticket_attachments = MagicMock(
+        return_value=[("x.jpg", "d", 1, 0, "u")]
+    )
+
+    def limited(fn, *a, **k):
+        if fn is client.list_ticket_attachments:
+            return [("x.jpg", "d", 1, 0, "u")]
+        return None
+
+    with patch(
+        "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
+    ) as run_sync:
+        run_sync.side_effect = limited
+        result = asyncio.run(
+            _handle_batch_update(
+                client,
+                {
+                    "updates": [
+                        {"ticket_id": 1, "comment": ATTACHMENT_SOURCE}
+                    ]
+                },
+            )
+        )
+
+    assert "1/1 succeeded" in _text(result), _text(result)
+    client.list_ticket_attachments.assert_not_called()
+
+
+def test_271_two_items_on_one_ticket_do_not_refuse_the_second_comment_ref():
+    """Each item reads the changelog before either writes, and every
+    `ticket.update` consumes a comment number, so with two items on a
+    ticket holding 3 comments the second item may be comment 5."""
+    client = _client("<p>\nSee comment:5 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_three_comment_changelog()
+    )
+
+    result = _batch_update_on_one_ticket(
+        client, [(5, "A"), (5, "See comment:5 for context.")]
+    )
+
+    assert "2/2 succeeded" in _text(result), _text(result)
+
+
+def test_271_one_item_on_a_ticket_still_refuses_the_number_after_its_own():
+    client = _client("<p>\nSee comment:5 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_three_comment_changelog()
+    )
+
+    result = _batch_update_on_one_ticket(
+        client, [(5, "See comment:5 for context.")]
+    )
+
+    assert "0/1 succeeded" in _text(result), _text(result)
+    assert "dangling_comment_ref" in _text(result)
+
+
+def test_271_an_item_without_a_ticket_id_is_not_counted_as_a_write():
+    client = _client("<p>\nSee comment:5 for context.\n</p>\n")
+    client.get_ticket_changelog = MagicMock(
+        return_value=_three_comment_changelog()
+    )
+
+    result = _batch_update_on_one_ticket(
+        client, [(0, "A"), (5, "See comment:5 for context.")]
+    )
+
+    assert "dangling_comment_ref" in _text(result), _text(result)
+    assert [f["id"] for f in result.structuredContent["failed"]] == [
+        0,
+        5,
+    ]
+
+
+def test_271_known_comment_numbers_counts_pending_writes():
+    from trac_mcp_server.mcp.tools.write_gate import (
+        known_comment_numbers,
+    )
+
+    client = _client()
+    client.get_ticket_changelog = MagicMock(
+        return_value=_TWO_PRIOR_COMMENTS_CHANGELOG
+    )
+    assert asyncio.run(known_comment_numbers(client, 1)) == frozenset(
+        {1, 2, 3}
+    )
+    assert asyncio.run(
+        known_comment_numbers(client, 1, pending_writes=3)
+    ) == frozenset({1, 2, 3, 4, 5})
 
 
 # ---------------------------------------------------------------------

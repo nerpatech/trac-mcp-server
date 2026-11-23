@@ -43,6 +43,8 @@ A render that fails does not refuse the write.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import mcp.types as types
 
@@ -332,10 +334,24 @@ NEW_TICKET_COMMENT_NUMBERS: frozenset[int] = frozenset()
 
 
 async def known_comment_numbers(
-    client: TracClient, ticket_id: int
+    client: TracClient,
+    ticket_id: int,
+    *,
+    pending_writes: int = 1,
+    runner: Callable[..., Awaitable[Any]] = run_sync,
 ) -> frozenset[int] | None:
     """Ticket #105. The comment numbers ``ticket_id`` has right now,
     plus the number this write's own comment will become.
+
+    Ticket #271: ``pending_writes`` is how many ``ticket.update`` calls
+    on this ticket may land before the comment being checked does -- the
+    one being checked included. A batch with several items on one
+    ticket reads the changelog before any of them writes, in an
+    undefined order, so the numbers max+1 .. max+``pending_writes`` are
+    all possible for this write's own comment. The default, 1, is every
+    single write. ``runner`` runs the changelog call: the batch tools
+    pass ``run_sync_limited`` so the lookups honour
+    TRAC_MAX_PARALLEL_REQUESTS.
 
     Every ``ticket.update`` call -- even a comment-less field edit --
     consumes the next number in sequence (``ticket_comment.py``'s
@@ -358,9 +374,7 @@ async def known_comment_numbers(
     check simply does not run rather than refusing on a guess.
     """
     try:
-        changelog = await run_sync(
-            client.get_ticket_changelog, ticket_id
-        )
+        changelog = await runner(client.get_ticket_changelog, ticket_id)
     except Exception:
         return None
 
@@ -381,7 +395,9 @@ async def known_comment_numbers(
         max_cnum = max(max_cnum, cnum)
         if newvalue:
             known.add(cnum)
-    known.add(max_cnum + 1)
+    known.update(
+        range(max_cnum + 1, max_cnum + 1 + max(pending_writes, 1))
+    )
     return frozenset(known)
 
 
@@ -399,6 +415,7 @@ async def attachment_names(
     wiki_page: str | None,
     ticket_id: int | None,
     new_ticket: bool,
+    runner: Callable[..., Awaitable[Any]] = run_sync,
 ) -> frozenset[str] | None:
     """Ticket #113. The file names attached to the target of this write,
     or ``None`` for no context.
@@ -412,12 +429,15 @@ async def attachment_names(
 
     Also used by ``convert_preview`` (#126) when the caller names the
     page or ticket the draft is for.
+
+    ``runner`` (ticket #271) runs the list call, as in
+    :func:`known_comment_numbers`.
     """
     if new_ticket:
         return NEW_TARGET_ATTACHMENT_NAMES
     try:
         if wiki_page is not None:
-            listed = await run_sync(
+            listed = await runner(
                 client.list_wiki_attachments, wiki_page
             )
             prefix = wiki_page + "/"
@@ -427,7 +447,7 @@ async def attachment_names(
                 if isinstance(item, str) and item.startswith(prefix)
             )
         if ticket_id is not None:
-            listed = await run_sync(
+            listed = await runner(
                 client.list_ticket_attachments, ticket_id
             )
             return frozenset(
@@ -484,6 +504,8 @@ async def gate_item(
     ticket_id: int | None = None,
     new_ticket: bool = False,
     wiki_page: str | None = None,
+    pending_writes: int = 1,
+    runner: Callable[..., Awaitable[Any]] = run_sync,
 ) -> GateItemResult:
     """Gate several fields of one write, refusing on the first failure.
 
@@ -527,6 +549,13 @@ async def gate_item(
     Omitted by every caller with no target (milestone): no lookup, and
     those links stay errors.
 
+    ``pending_writes`` and ``runner``, ticket #271, are for the batch
+    tools: how many writes to this ticket may land first (see
+    :func:`known_comment_numbers`), and the runner for the changelog and
+    attachment lookups -- ``run_sync_limited``, so they honour the
+    parallel-request limit. Both reach those two lookups only; the
+    render and probe path is :func:`check_write`'s.
+
     With the gate off (ticket #153) nothing is checked and the result
     carries no refusal and NO lines: unlike :func:`gate_or_refuse`, this
     does not say :data:`GATE_OFF_LINE`, because a batch reports the
@@ -543,7 +572,12 @@ async def gate_item(
     elif ticket_id is not None and any(
         content and "comment:" in content for content in fields.values()
     ):
-        comment_numbers = await known_comment_numbers(client, ticket_id)
+        comment_numbers = await known_comment_numbers(
+            client,
+            ticket_id,
+            pending_writes=pending_writes,
+            runner=runner,
+        )
 
     attached_names: frozenset[str] | None = None
     if (
@@ -557,6 +591,7 @@ async def gate_item(
             wiki_page=wiki_page,
             ticket_id=ticket_id,
             new_ticket=new_ticket,
+            runner=runner,
         )
 
     lines: list[str] = []
