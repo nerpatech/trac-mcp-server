@@ -3,9 +3,11 @@
 Several regexes in `preview/checks.py` restarted a scan at every opener
 and ran to the end of the text, so one-line hostile input cost O(n**2):
 one 84 KB `convert_preview` froze the shared daemon's event loop for 12.5 s.
-This file holds the ratio check over those inputs, equivalence tests of
-every rewritten scan against the regex it replaced (kept here as test-local
-constants), and a check that the checks run off the event loop.
+This file holds the ratio check over those inputs (through `build_warnings`
+and through the converter), equivalence tests of every rewritten scan
+against the regex it replaced (kept here as test-local constants), checks
+that the handlers run the converter and the checks off the event loop, and
+a loop-stall test.
 """
 
 import importlib
@@ -41,16 +43,16 @@ from trac_mcp_server.preview.live import RenderedSection
 #
 # Same method as tests/test_converter_flavors.py section 5 (the ratio check
 # of #243; its constants and `_growth` are imported, see there for the
-# measured margins): CPU time of the input against the same input
-# GROWTH_FACTOR times smaller, minimum of 3 runs, plus an absolute ceiling.
-# Measured before the fix, at 4 KB -> 16 KB (a linear ratio is about 4):
-# `x [[ y\n` 10.9x, `a {{{b\n` 15.6x, `[` 14.7x, `[x ` 12.4x, `[[x|`
-# 15.1x, `a.` 17.4x, `![` / `!['` / `![0` 10-13x.
+# measured margins), at the sizes written below: the CPU time of a 64 KB
+# input (FULL_SIZE) against the same input GROWTH_FACTOR (8) times smaller,
+# minimum of REPEATS (7) runs, plus an absolute ceiling. A linear case reads
+# about 8 (5.7 to 12.9 measured), a quadratic one about 60 (47 to 88 measured
+# on the code before #289).
 
 FULL_SIZE = 64 * 1024
 
 # The small inputs take a few milliseconds, so on a busy host a minimum
-# of 3 runs sometimes read 17x for a linear case; 7 runs do not.
+# of 3 runs read 17x once for a linear case; 7 runs do not.
 REPEATS = 7
 
 HOSTILE_UNITS = {
@@ -66,6 +68,8 @@ HOSTILE_UNITS = {
     "bang bracket": "![",
     "bang bracket quote": "!['",
     "bang bracket zero": "![0",
+    "bang bracket quote and space": "!['a' ",
+    "bang bracket zero slash": "![0/",
 }
 
 # The package re-exports the function `markdown_to_tracwiki` under the
@@ -109,9 +113,12 @@ def test_build_warnings_grows_linearly_on_hostile_input(unit):
 
 # The same inputs through the Markdown converter (what `convert_preview`
 # and `wiki_file_push` run), plus the shapes of its own scheme regexes.
-# `[1/` and `['a' ` (mistune's own cost, pure Python) are #259's, not here.
+# `[1/` and `['a' ` were thought to be mistune's own cost (#259); they were
+# the bracket shapes' patterns inside mistune's combined scanner.
 CONVERTER_UNITS = {
     **HOSTILE_UNITS,
+    "numeric bracket slash": "[1/",
+    "quoted bracket space": "['a' ",
     "scheme in a bracket": "[a:",
     "realm in a bracket": "[a:wiki:",
 }
@@ -362,13 +369,11 @@ def test_first_literal_link_match_equals_the_old_loop_on_the_corpus():
 
 PREFIX_PAIRS = [
     (OLD_PREFIX_TICKET_RE, checks._PREFIX_TICKET_RE),
-    (OLD_TICKET_COMMENT_SCOPED_RE, checks._TICKET_COMMENT_SCOPED_RE),
     (OLD_PREFIX_REALM_RE, checks._PREFIX_REALM_RE),
     (OLD_REALM_REF_RE, checks._REALM_REF_RE),
 ]
 PREFIX_IDS = [
     "prefix_ticket",
-    "comment_scoped",
     "prefix_realm",
     "realm_ref",
 ]
@@ -458,13 +463,6 @@ def test_prefix_regexes_equal_the_old_ones(old, new):
             None,
         ),
         (
-            OLD_TICKET_COMMENT_SCOPED_RE,
-            checks._TICKET_COMMENT_SCOPED_RE,
-            "1a.b://x",
-            "b://x",
-            None,
-        ),
-        (
             OLD_PREFIX_REALM_RE,
             checks._PREFIX_REALM_RE,
             "1a.b:wiki:X",
@@ -481,7 +479,6 @@ def test_prefix_regexes_equal_the_old_ones(old, new):
     ],
     ids=[
         "prefix_ticket",
-        "comment_scoped",
         "prefix_realm",
         "realm_ref",
     ],
@@ -493,6 +490,274 @@ def test_a_prefix_no_longer_starts_inside_a_run_with_a_non_letter_head(
     assert old.search(text).group(0) == old_hit
     found = new.search(text)
     assert (found.group(0) if found else None) == new_hit
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a -rookery:#3 b",
+        "a +rookery:#3 b",
+        "a .rookery:#3 b",
+        "\u00e9.trac:#3",
+        "_a.trac:#3",
+        "a:#1.b:#2",
+    ],
+)
+def test_the_prefix_regex_drops_what_the_comment_documents(text):
+    # The accepted differences of #289, as written in checks.py.
+    old = [m.group(0) for m in OLD_PREFIX_TICKET_RE.finditer(text)]
+    new = [m.group(0) for m in checks._PREFIX_TICKET_RE.finditer(text)]
+    assert len(new) < len(old), (old, new)
+
+
+# `_TICKET_COMMENT_SCOPED_RE` only BLANKS, so its URL alternative takes the
+# whole run up to `://`: a superset of what the old `\b[A-Za-z]` form took.
+
+URL_HEADS = ["-", ".", "+", "1.", "9", "_", ""]
+
+
+@pytest.mark.parametrize("head", URL_HEADS)
+def test_a_url_after_a_non_letter_head_is_not_a_dangling_comment(head):
+    tracwiki = f"see {head}https://h/t/ticket/5#comment:99 x"
+    found = build_warnings(
+        markdown_source=None,
+        tracwiki=tracwiki,
+        facts=FACTS,
+        probes={},
+        check_targets=False,
+        source_format="tracwiki",
+        known_comment_numbers=frozenset({1}),
+    )
+    assert [
+        w for w in found if w["code"] == "dangling_comment_ref"
+    ] == []
+
+
+def _blanked_indices(text, blank):
+    return {
+        i
+        for i, (a, b) in enumerate(zip(text, blank(text), strict=True))
+        if a != b
+    }
+
+
+def test_the_url_blanking_covers_the_old_alternation():
+    cases = list(PREFIX_CORPUS) + [
+        f"see {head}https://h/t/ticket/5#comment:99 x"
+        for head in URL_HEADS
+    ]
+    cases += [
+        "ticket:1#comment:2-http+a://-]`b1.[://://ticket.",
+        "ticket:1#comment:2-https://h/x#comment:3",
+        "comment:1:ticket:2.https://h/x",
+    ]
+
+    def old_blank(text):
+        return OLD_TICKET_COMMENT_SCOPED_RE.sub(
+            checks._blank_preserving_layout, text
+        )
+
+    def new_blank(text):
+        return checks._blank_union(
+            text,
+            (checks._TICKET_COMMENT_SCOPED_RE, checks._URL_RUN_RE),
+        )
+
+    differing = 0
+    for text in cases:
+        old = _blanked_indices(text, old_blank)
+        new = _blanked_indices(text, new_blank)
+        assert old <= new, (text, sorted(old - new))
+        differing += old != new
+    assert differing > 10
+
+
+# `_escaped_bracket_shapes` skips the match at a `!` with no `]` before the
+# next newline: neither shape can match there. Same Counter as trying every
+# `!`, on strings full of quotes, numbers, `!`, `]` and newlines.
+
+ESCAPE_PIECES = [
+    "!",
+    "!",
+    "[",
+    "]",
+    "'",
+    '"',
+    "a",
+    "0",
+    "1",
+    "/",
+    "?",
+    "#",
+    " ",
+    "\n",
+    "(",
+    ")",
+    "!['a'",
+    "![0",
+    "['k']",
+    "[12/p]",
+    "`",
+]
+
+
+def _old_escaped_bracket_shapes(tracwiki):
+    scan = checks.blank_inline_code_spans(
+        checks.blank_code_fences(tracwiki)
+    )
+    scan = checks._blank_delimited(scan, "{{{", "}}}")
+    scan = checks._blank_delimited(scan, "[[", "]]")
+    shapes = checks.Counter()
+    pos = scan.find("!")
+    while pos != -1:
+        for shape_re in (
+            checks._QUOTED_BRACKET_LINK_RE,
+            checks._NUMERIC_BRACKET_LINK_RE,
+        ):
+            shape = shape_re.match(scan, pos + 1)
+            if shape is not None:
+                shapes[shape.group(0)] += 1
+                break
+        pos = scan.find("!", pos + 1)
+    return shapes
+
+
+def test_escaped_bracket_shapes_equal_trying_every_bang():
+    rng = random.Random(289)
+    cases = [
+        "!['a' ",
+        "!['a' ]",
+        "!['a' \n]",
+        "x!['a']!['b'] ![0] ![0/p]",
+        "!\n['a']",
+        "![0/\n]",
+    ]
+    for _ in range(20000):
+        parts = [
+            rng.choice(ESCAPE_PIECES) for _ in range(rng.randint(0, 30))
+        ]
+        cases.append("".join(parts))
+    counted = 0
+    for text in cases:
+        old = _old_escaped_bracket_shapes(text)
+        counted += bool(old)
+        assert checks._escaped_bracket_shapes(text) == old, repr(text)
+    assert counted > 1000
+
+
+# The converter hands mistune only a gate for the bracket shapes and matches
+# the shape inside the rule (`_bracket_rule`), so the scan is not quadratic.
+# Same output as registering the shapes' own patterns with mistune, which is
+# what it did before: compared on Markdown full of shapes, links, images and
+# reference definitions.
+
+CONVERT_PIECES = [
+    "!",
+    "[",
+    "]",
+    "(",
+    ")",
+    "'",
+    '"',
+    "a",
+    "0",
+    "1",
+    "/",
+    "?",
+    "#",
+    " ",
+    " ",
+    "\n",
+    "\n\n",
+    ":",
+    "['k']",
+    "[0]",
+    "[12/p]",
+    "![0]",
+    "[a](b)",
+    "![i](u)",
+    "`",
+    "*",
+    "_",
+    "<",
+    "http://h/x",
+    "[1:3]",
+    "[a b]",
+    "- ",
+    "> ",
+    "[x]: y\n",
+    "WikiWord",
+    "\\",
+]
+
+
+def _convert_corpus():
+    rng = random.Random(2891)
+    cases = [
+        "['a' ",
+        "!['a' ",
+        "![0/",
+        "x['k'] y",
+        "x[0] y[12/p] z",
+        "[a](b) ['q'](u) [0](v)",
+        "['a'](x)",
+        "['a' b](x)",
+        "[r]: u\n\n['r'] [0] [r]",
+        "a:['a'] b ![0]",
+        "* ['a'] [0]\n  - x[1]",
+    ]
+    for _ in range(3000):
+        parts = [
+            rng.choice(CONVERT_PIECES)
+            for _ in range(rng.randint(0, 30))
+        ]
+        cases.append("".join(parts))
+    return cases
+
+
+def test_the_bracket_gate_converts_like_the_shapes_own_patterns(
+    monkeypatch,
+):
+    corpus = _convert_corpus()
+
+    def convert_all():
+        out = []
+        for text in corpus:
+            result = convert_with_warnings(text)
+            out.append((result.text, result.warnings))
+        return out
+
+    gated = convert_all()
+
+    def own_patterns(md):
+        prefix = converter._REGISTER_PREFIX
+        md.inline.register(
+            "quoted_bracket",
+            prefix + converter._QUOTED_BRACKET_LINK_RE.pattern,
+            converter._parse_quoted_bracket,
+            before="link",
+        )
+        md.inline.register(
+            "numeric_bracket",
+            prefix + converter._NUMERIC_BRACKET_LINK_RE.pattern,
+            converter._parse_numeric_bracket,
+            before="link",
+        )
+
+    plugins = [
+        p
+        for p in converter._MISTUNE_PLUGINS
+        if p
+        not in (
+            converter._quoted_bracket_links,
+            converter._numeric_bracket_links,
+        )
+    ]
+    monkeypatch.setattr(
+        converter, "_MISTUNE_PLUGINS", [*plugins, own_patterns]
+    )
+    assert convert_all() == gated
+    assert sum("![" in text for text, _ in gated) > 500
 
 
 OLD_SINGLE_BRACKET_LINK_RE = re.compile(
@@ -635,9 +900,7 @@ def test_a_long_dotted_prefix_matches_whole():
         m.group(0) for m in checks._PREFIX_REALM_RE.finditer(text)
     ] == [f"{LONG_DOTTED}:wiki:Page"]
     text = f"{LONG_DOTTED}://host/x"
-    assert (
-        checks._TICKET_COMMENT_SCOPED_RE.search(text).group(0) == text
-    )
+    assert checks._URL_RUN_RE.search(text).group(0) == text
     text = f"{LONG_DOTTED}:wiki:Page"
     assert checks._REALM_REF_RE.search(text).group(0) == text
 

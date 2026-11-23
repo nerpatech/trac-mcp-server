@@ -89,19 +89,31 @@ _MARKDOWN_LINK_PARTS_RE = re.compile(
 )
 
 # Prefix starts (ticket #289). The scheme-prefix regexes below
-# (`_PREFIX_TICKET_RE`, `_PREFIX_REALM_RE`, `_REALM_REF_RE`, and the URL
-# alternative of `_TICKET_COMMENT_SCOPED_RE`) read an unbounded
-# `[\w.+-]*` after a letter. Their `\b` holds before every letter that
-# follows a `.`, `+` or `-`, so on a run like `a.a.a.a...` the scan
-# restarted at each `a`, ran to the end of the run, found no `:` and
+# (`_PREFIX_TICKET_RE`, `_PREFIX_REALM_RE`, `_REALM_REF_RE`) read an
+# unbounded `[\w.+-]*` after a letter. Their `\b` holds before every
+# letter that follows a `.`, `+` or `-`, so on a run like `a.a.a.a...` the
+# scan restarted at each `a`, ran to the end of the run, found no `:` and
 # backtracked: quadratic. `(?<![\w.+-])` before the letter that starts a
 # prefix makes a prefix start only where its run starts, and each run is
 # scanned once. Longer prefixes keep working (a cap on the length cut a
 # long dotted one down to its tail: `org.xxx...x.tr:#12` matched `tr:#12`).
-# The one behaviour change: a prefix can no longer start partway through a
-# `[\w.+-]` run whose head is not a letter. `1a.b:#3` used to match
-# `b:#3`; it matches nothing now (`_REALM_REF_RE` falls back to its
-# realm). Trac's own InterTrac prefixes start with a letter.
+#
+# The accepted differences, all of them: a prefix is no longer recognised
+# (1) when `-`, `.` or `+` comes right before it (`a -rookery:#3 b` used
+# to warn; the run `-rookery` is headed by a `-`), (2) when its run is
+# headed by a digit, `_` or a non-ASCII letter (`1a.b:#3` matched
+# `b:#3`, `é.trac:#3` matched `trac:#3`; `_REALM_REF_RE` falls back to its
+# realm), and (3) when it follows a match that ends in digits
+# (`a:#1.b:#2` matches only the first: `.b` continues the run, and Trac
+# reads `a:#1.b:#2` as one link anyway). Trac's own InterTrac prefixes
+# start with a letter. The store corpus (3,158 documents) showed no
+# difference for any of the four regexes.
+#
+# `_URL_RUN_RE` (the URL form of the scoped-comment blanking) does the
+# opposite, since it BLANKS and over-blanking is the safe direction: it
+# starts at the head of the run and takes the whole run up to `://`
+# (`[\w+.-]*://\S+`), so it blanks a superset of what the old `\b[A-Za-z]`
+# form did, and `-https://` and `1.https://` are blanked too.
 
 # A `prefix:#N` token -- the only shape that distinguishes an unconfigured
 # InterTrac ticket prefix (row 16, must warn) from an ordinary colon-shaped
@@ -139,10 +151,15 @@ _PR_NUMBER_AS_TICKET_RE = re.compile(
 # `comment:1` fragment the bare pattern would otherwise match (found by
 # #108's store sweep, on a description the create path would refuse).
 _TICKET_COMMENT_SCOPED_RE = re.compile(
-    r"\bticket:\d+#comment:\d+\b"
-    r"|\bcomment:\d+:[A-Za-z]+:\d+\b"
-    r"|(?<![\w+.-])[A-Za-z][\w+.-]*://\S+"
+    r"\bticket:\d+#comment:\d+\b|\bcomment:\d+:[A-Za-z]+:\d+\b"
 )
+# The URL form is a regex of its own, run over the original text beside
+# this one and the two blankings merged (`_blank_union`, ticket #289): in
+# one alternation a URL that follows a scoped form directly
+# (`ticket:1#comment:2-https://h/x`) lost its start, since the first match
+# ends inside the run the URL's lookbehind needs to see begin; one after
+# the other, a blanked scoped form cut a URL's `\S+` short.
+_URL_RUN_RE = re.compile(r"(?<![\w+.-])[\w+.-]*://\S+")
 _BARE_COMMENT_REF_RE = re.compile(r"\bcomment:(\d+)\b")
 
 # Opt-out pragma (ticket #58). A document that DOCUMENTS this syntax has
@@ -556,6 +573,19 @@ def _blank_preserving_layout(match: re.Match[str]) -> str:
 
 
 _NON_NEWLINE_RE = re.compile(r"[^\n]")
+
+
+def _blank_union(
+    text: str, patterns: tuple[re.Pattern[str], ...]
+) -> str:
+    """``text`` with every span any of ``patterns`` matches blanked, each
+    pattern run over the original text (a span of one never hides another's
+    start, as it does in a single alternation), layout preserved."""
+    blanked = [p.sub(_blank_preserving_layout, text) for p in patterns]
+    return "".join(
+        " " if any(b[i] != ch for b in blanked) else ch
+        for i, ch in enumerate(text)
+    )
 
 
 def _blank_delimited(text: str, opener: str, closer: str) -> str:
@@ -1143,8 +1173,8 @@ def _check_dangling_comment_ref(
     if known_comment_numbers is None:
         return []
     scan_text = blank_inline_code_spans(blank_code_fences(tracwiki))
-    scan_text = _TICKET_COMMENT_SCOPED_RE.sub(
-        _blank_preserving_layout, scan_text
+    scan_text = _blank_union(
+        scan_text, (_TICKET_COMMENT_SCOPED_RE, _URL_RUN_RE)
     )
     warnings = []
     for match in _BARE_COMMENT_REF_RE.finditer(scan_text):
@@ -1660,16 +1690,33 @@ def _escaped_bracket_shapes(tracwiki: str) -> Counter[str]:
     scan = _blank_delimited(scan, "{{{", "}}}")
     scan = _blank_delimited(scan, "[[", "]]")
     shapes: Counter[str] = Counter()
+    # Both shapes end at a `]` and hold no newline (every part of
+    # `_QUOTED_BRACKET_LINK_RE` and `_NUMERIC_BRACKET_LINK_RE` excludes
+    # one), so a `!` with no `]` before the next newline cannot start
+    # either, and neither match is attempted there: their labels and tails
+    # read to the end of the line, and `!['a' ` repeated was quadratic
+    # (ticket #289). The next `]` and the next newline are found once and
+    # reused until the scan passes them, so the checks cost a find per
+    # stretch of text, not per `!`.
+    size = len(scan)
+    close = newline = -1
     pos = scan.find("!")
     while pos != -1:
-        for shape_re in (
-            _QUOTED_BRACKET_LINK_RE,
-            _NUMERIC_BRACKET_LINK_RE,
-        ):
-            shape = shape_re.match(scan, pos + 1)
-            if shape is not None:
-                shapes[shape.group(0)] += 1
-                break
+        if newline < pos + 1:
+            found = scan.find("\n", pos + 1)
+            newline = found if found != -1 else size
+        if close < pos + 2:
+            found = scan.find("]", pos + 2)
+            close = found if found != -1 else size
+        if close < newline:
+            for shape_re in (
+                _QUOTED_BRACKET_LINK_RE,
+                _NUMERIC_BRACKET_LINK_RE,
+            ):
+                shape = shape_re.match(scan, pos + 1)
+                if shape is not None:
+                    shapes[shape.group(0)] += 1
+                    break
         pos = scan.find("!", pos + 1)
     return shapes
 

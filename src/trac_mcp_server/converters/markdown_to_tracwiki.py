@@ -141,8 +141,11 @@ _URL_IN_TEXT_RE = re.compile(r"(?:https?|ftps?)://\S+", re.IGNORECASE)
 # the `\b` stays for the no-prefix branch, or `log:` would match inside
 # `changelog:`). Unguarded, `a.a.a...` restarted the scan at every `a` and
 # ran to the end of the run: quadratic (ticket #289). The same guard as in
-# `preview/checks.py`; a prefix no longer starts partway through a run
-# whose head is not a letter (`1a.b:wiki:X` read `b:wiki:X`).
+# `preview/checks.py`, with the same accepted differences: a prefix is no
+# longer recognised when `-`, `.` or `+` comes right before it
+# (`a -x:wiki:P`), when its run is headed by a digit, `_` or a non-ASCII
+# letter (`1a.b:wiki:X` read `b:wiki:X`, `é.x:wiki:P` read `x:wiki:P`;
+# the realm alone still matches). The store corpus showed no difference.
 _BARE_TRACLINK_RE = re.compile(
     r"\b(?:(?<![\w.+-])[A-Za-z][\w.+-]*:)?"
     rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):"
@@ -679,8 +682,52 @@ _NUMERIC_BRACKET_LINK_RE = re.compile(
 )
 
 
+def _closes_before_newline(state: Any, opener: int) -> bool:
+    """Whether a `]` lies between the `[` at `opener` and the next newline
+    of `state.src` (a bracket shape ends at one and holds no newline). The
+    next `]` and the next newline are found once and kept on the state
+    while the opener's position stays inside the stretch they were found
+    for, so a line of many openers costs one find, not one per opener."""
+    src = state.src
+    cache = getattr(state, "_tracwiki_stops", None)
+    if cache is None or cache[0] is not src:
+        cache = [src, -1, -1, -1, -1]
+        state._tracwiki_stops = cache
+    newline_from = opener + 1
+    close_from = opener + 2
+    if not cache[3] <= newline_from <= cache[4]:
+        found = src.find("\n", newline_from)
+        cache[3], cache[4] = (
+            newline_from,
+            found if found != -1 else len(src),
+        )
+    if not cache[1] <= close_from <= cache[2]:
+        found = src.find("]", close_from)
+        cache[1], cache[2] = (
+            close_from,
+            found if found != -1 else len(src),
+        )
+    return cache[2] < cache[4]
+
+
+_BRACKET_RULES = ("quoted_bracket", "numeric_bracket")
+
+
+def _other_rules(
+    inline: Any, gate: re.Match[str], state: Any
+) -> int | None:
+    """What mistune would have done at `gate` had no bracket-shape rule
+    matched there: the first of the other rules that matches at the same
+    position (the link rule, which takes every `[`), or None."""
+    rules = [r for r in inline.rules if r not in _BRACKET_RULES]
+    m = inline.compile_sc(rules).match(state.src, gate.start())
+    if m is None:
+        return None
+    return inline.parse_method(m, state)
+
+
 def _bracket_rule(
-    token_type: str,
+    token_type: str, shape_re: re.Pattern[str]
 ) -> Callable[[Any, re.Match[str], Any], int | None]:
     """Build an inline rule: a Trac bracket-link shape in prose becomes a
     `token_type` token, which the renderer writes with Trac's `!` escape
@@ -733,13 +780,39 @@ def _bracket_rule(
     renderer writes like the shape. The scheme-run check skips emphasis
     delimiters as token boundaries, which 3.4 leaves in the source
     (`delimiters_end_token`).
+
+    What mistune's scanner is given is only a gate (`_bracket_gate`: the
+    opener and the character after it), not the shape's own pattern, and
+    this function matches the shape (`shape_re`) at the opener itself,
+    but only when a `]` lies before the next newline, which every shape
+    needs. A pattern in mistune's combined regex is tried at every `[` of
+    a line, and a shape's label or tail reads to the end of the line when
+    no `]` follows: `['a' ` repeated was quadratic inside one `re` call
+    (ticket #289, which holds the GIL). Where there is no shape, the rules
+    after this one are asked (`_other_rules`), which is what mistune did
+    when the shape's pattern did not match.
     """
+    full_re = re.compile(_REGISTER_PREFIX + shape_re.pattern)
+
+    def match_shape(
+        inline: Any, m: re.Match[str], state: Any
+    ) -> re.Match[str] | None:
+        src = state.src
+        opener = m.start() + (
+            1 if src.startswith("!", m.start()) else 0
+        )
+        if not _closes_before_newline(state, opener):
+            return None
+        return full_re.match(src, m.start())
 
     if _DEFERRED_LINK_CLOSE:
 
         def deferred_rule(
-            inline: Any, m: re.Match[str], state: Any
+            inline: Any, gate: re.Match[str], state: Any
         ) -> int | None:
+            m = match_shape(inline, gate, state)
+            if m is None:
+                return _other_rules(inline, gate, state)
             src = state.src
             br = m.start()
             raw = m.group(0)
@@ -768,7 +841,12 @@ def _bracket_rule(
 
         return deferred_rule
 
-    def rule(inline: Any, m: re.Match[str], state: Any) -> int | None:
+    def rule(
+        inline: Any, gate: re.Match[str], state: Any
+    ) -> int | None:
+        m = match_shape(inline, gate, state)
+        if m is None:
+            return _other_rules(inline, gate, state)
         if not state.in_link:
             link_m = _LINK_OPEN_RE.match(state.src, m.start())
             assert link_m is not None
@@ -786,8 +864,19 @@ def _bracket_rule(
 # Under mistune 3.4+ the rules also match a leading `!` (see `_bracket_rule`).
 _REGISTER_PREFIX = "!?" if _DEFERRED_LINK_CLOSE else ""
 
-_parse_quoted_bracket = _bracket_rule("quoted_bracket")
-_parse_numeric_bracket = _bracket_rule("numeric_bracket")
+# What mistune's scanner is given for each rule (`_bracket_rule`): the
+# opener and the one character after it that tells the two shapes apart (a
+# quote opens a quoted target; a numeric one starts with anything else but
+# `]` or a newline). The shape itself is matched by the rule.
+_QUOTED_BRACKET_GATE = _REGISTER_PREFIX + r"""\[(?=["'])"""
+_NUMERIC_BRACKET_GATE = _REGISTER_PREFIX + r"""\[(?=[^\]\n"'])"""
+
+_parse_quoted_bracket = _bracket_rule(
+    "quoted_bracket", _QUOTED_BRACKET_LINK_RE
+)
+_parse_numeric_bracket = _bracket_rule(
+    "numeric_bracket", _NUMERIC_BRACKET_LINK_RE
+)
 
 
 def _quoted_bracket_links(md: Any) -> None:
@@ -795,7 +884,7 @@ def _quoted_bracket_links(md: Any) -> None:
     `link`."""
     md.inline.register(
         "quoted_bracket",
-        _REGISTER_PREFIX + _QUOTED_BRACKET_LINK_RE.pattern,
+        _QUOTED_BRACKET_GATE,
         _parse_quoted_bracket,
         before="link",
     )
@@ -806,7 +895,7 @@ def _numeric_bracket_links(md: Any) -> None:
     `link`."""
     md.inline.register(
         "numeric_bracket",
-        _REGISTER_PREFIX + _NUMERIC_BRACKET_LINK_RE.pattern,
+        _NUMERIC_BRACKET_GATE,
         _parse_numeric_bracket,
         before="link",
     )
