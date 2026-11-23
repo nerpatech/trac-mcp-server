@@ -17,8 +17,9 @@ Environment variables:
         probes and the live-preview page fetch are not counted;
         ticket_render_check's ticket-page fetch runs together with that
         tool's RPCs and is counted; ping is not counted. A batch occupies at
-        most N slots at a time, so single calls from other callers interleave
-        (optional, default: 5)
+        most N slots at a time, so single calls from other callers interleave.
+        A call that waits more than 30 s for a slot fails with server_busy and
+        nothing is sent (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
     TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint

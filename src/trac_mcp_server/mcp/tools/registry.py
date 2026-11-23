@@ -21,6 +21,7 @@ from typing import Any
 
 import mcp.types as types
 
+from ...core.async_utils import TracBusyError
 from ...core.client import TracClient, WikiPageStoredReadbackFailed
 from ...core.scope import DestinationOutOfScope
 
@@ -174,6 +175,15 @@ class ToolRegistry:
                 f"{e} The page WAS stored.",
                 f"Do not retry the write; check the page with "
                 f"wiki_get(page_name='{e.page_name}').",
+            )
+        except TracBusyError as e:
+            # Trac /trac_mcp_server #275: no request slot freed up in
+            # time, so the call was never sent. Not server_error's "retry
+            # later": a retry is safe, and this says so.
+            return build_error_response(
+                "server_busy",
+                str(e),
+                "Retry the call in a little while; it was not sent.",
             )
         except ValueError as e:
             return build_error_response(

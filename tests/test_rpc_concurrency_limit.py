@@ -28,6 +28,7 @@ import requests
 from trac_mcp_server.config import Config
 from trac_mcp_server.core import async_utils
 from trac_mcp_server.core.async_utils import (
+    TracBusyError,
     gather_limited,
     init_semaphore,
     run_sync,
@@ -137,6 +138,28 @@ def _client(server: _Server, **kwargs) -> TracClient:
     return TracClient(config)
 
 
+async def _wait_until(predicate, limit: float = 5.0) -> None:
+    """Poll ``predicate`` until true; fail (not hang) after ``limit``."""
+    deadline = time.monotonic() + limit
+    while not predicate():
+        assert time.monotonic() < deadline, (
+            "condition never became true"
+        )
+        await asyncio.sleep(0.01)
+
+
+def _hold_slot(seconds: float):
+    """A call that holds a slot for ``seconds``. Returns the call's
+    future and an Event set once its thread is running."""
+    started = threading.Event()
+
+    def hold():
+        started.set()
+        time.sleep(seconds)
+
+    return asyncio.ensure_future(run_sync(hold)), started
+
+
 async def test_run_sync_rpc_calls_are_bounded_by_the_limit(server):
     """8 concurrent ``run_sync`` calls under a limit of 2 never have
     more than 2 requests in flight (unbounded: 8)."""
@@ -227,7 +250,9 @@ async def test_queued_calls_park_no_thread_and_local_work_runs(server):
         asyncio.ensure_future(run_sync(queued_rpc, n))
         for n in range(1, 6)
     ]
-    await asyncio.sleep(0.2)
+    # Let every queued call run up to where it waits for the slot.
+    for _ in range(50):
+        await asyncio.sleep(0)
 
     assert entered == [], (
         "queued calls entered a thread before the slot"
@@ -266,8 +291,14 @@ async def test_call_cancelled_while_queued_sends_nothing(server):
         await asyncio.wait_for(run_sync(client.get_ticket, 1), 0.1)
 
     await asyncio.wait_for(slow, TIMEOUT)
-    # A thread abandoned by the timeout would send its request about now.
-    await asyncio.sleep(0.4)
+    # A thread abandoned by the timeout would be queued on the (one
+    # thread) RPC pool; this marker runs after it, so by now it has sent.
+    await asyncio.wait_for(
+        asyncio.get_running_loop().run_in_executor(
+            async_utils._rpc_executor, lambda: None
+        ),
+        TIMEOUT,
+    )
 
     assert len(server.paths) == 1
     assert server.peak == 1
@@ -472,34 +503,40 @@ async def test_deadline_uninitialised_runs_and_times_out(server):
 
 async def test_a_batch_does_not_starve_a_single_call(server):
     """Review item 3: a 20-item batch through ``gather_limited`` (limit
-    2, 0.2 s each, about 2 s in all) puts at most 2 items in the
-    semaphore's queue at a time, so a single ``run_sync`` call started
-    just after waits about one item, not the batch."""
+    2) puts at most 2 items in the semaphore's queue at a time, so a
+    single ``run_sync`` call that arrives while it runs is served before
+    the batch's last item even starts (queued behind the whole batch it
+    would be served after it)."""
     init_semaphore(2)
     client = _client(server)
+    events: list[tuple[str, int]] = []
 
-    batch_started = time.monotonic()
+    def batch_item(n):
+        events.append(("start", n))
+        value = client.get_ticket(n)
+        events.append(("end", n))
+        return value
+
+    def single():
+        events.append(("start", 99))
+        value = client.get_ticket(99)
+        events.append(("end", 99))
+        return value
+
     batch = asyncio.ensure_future(
         gather_limited(
-            [run_sync_limited(client.get_ticket, n) for n in range(20)]
+            [run_sync_limited(batch_item, n) for n in range(20)]
         )
     )
-    await asyncio.sleep(0.3)
+    await _wait_until(lambda: ("start", 0) in events)
 
-    single_started = time.monotonic()
-    assert (
-        await asyncio.wait_for(run_sync(client.get_ticket, 99), TIMEOUT)
-        == 1
-    )
-    single_took = time.monotonic() - single_started
-
+    assert await asyncio.wait_for(run_sync(single), TIMEOUT) == 1
     await asyncio.wait_for(batch, TIMEOUT)
-    batch_took = time.monotonic() - batch_started
 
     assert len(server.paths) == 21
     assert server.peak <= 2
-    assert single_took < batch_took / 3, (
-        f"single call took {single_took:.2f}s of a {batch_took:.2f}s batch"
+    assert events.index(("end", 99)) < events.index(("start", 19)), (
+        "the single call waited for the whole batch"
     )
 
 
@@ -545,8 +582,8 @@ async def test_comment_lookup_budget_does_not_count_the_queue(
     monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 0.5)
     client, new_ts = _lookup_client(0.05, 0.05)
 
-    holder = asyncio.ensure_future(run_sync(time.sleep, 0.8))
-    await asyncio.sleep(0.05)
+    holder, started = _hold_slot(0.8)
+    await _wait_until(started.is_set)
     posted = await asyncio.wait_for(
         ticket_write._find_posted_comment(
             client, 1, "hello", None, new_ts
@@ -592,10 +629,14 @@ async def test_deadline_does_not_wait_for_a_thread_in_the_default_pool():
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     loop.set_default_executor(pool)
     release = threading.Event()
-    blocker = asyncio.ensure_future(
-        async_utils.run_local(release.wait, 10)
-    )
-    await asyncio.sleep(0.1)
+    blocked = threading.Event()
+
+    def block():
+        blocked.set()
+        release.wait(10)
+
+    blocker = asyncio.ensure_future(async_utils.run_local(block))
+    await _wait_until(blocked.is_set)
     try:
         value = await asyncio.wait_for(
             async_utils.run_sync_deadline(0.3, lambda: 42), TIMEOUT
@@ -611,9 +652,10 @@ async def test_deadline_does_not_wait_for_a_thread_in_the_default_pool():
 async def test_comment_lookup_wall_cap_ends_a_starved_queue(
     monkeypatch,
 ):
-    """Review item 1: with the slot held for 1.5 s, a wall cap of 0.4 s
-    (running budget 10 s) ends the lookup with the scan's timeout
-    failure about then, instead of waiting out the queue."""
+    """Review item 1: with the slot held, a wall cap of 0.4 s (running
+    budget 10 s) ends a lookup that is still waiting for its slot, with
+    the "no request slot" failure, while the slot is still held (it did
+    not wait out the queue)."""
     init_semaphore(1)
     monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 10.0)
     monkeypatch.setattr(
@@ -621,18 +663,196 @@ async def test_comment_lookup_wall_cap_ends_a_starved_queue(
     )
     client, new_ts = _lookup_client(0.05, 0.05)
 
-    holder = asyncio.ensure_future(run_sync(time.sleep, 1.5))
-    await asyncio.sleep(0.05)
-    started = time.monotonic()
+    holder, started = _hold_slot(3)
+    await _wait_until(started.is_set)
     posted = await asyncio.wait_for(
         ticket_write._find_posted_comment(
             client, 1, "hello", None, new_ts
         ),
         TIMEOUT,
     )
-    took = time.monotonic() - started
+    still_held = not holder.done()
     await asyncio.wait_for(holder, TIMEOUT)
 
     assert posted.number is None
-    assert posted.failure == "changelog read timed out"
-    assert 0.3 < took < 1.0
+    assert posted.failure == ticket_write._LOOKUP_NO_SLOT
+    assert still_held, "the lookup returned only after the slot freed"
+
+
+async def test_comment_lookup_wall_cap_on_a_running_read_says_timed_out(
+    monkeypatch,
+):
+    """The cap firing while a read is RUNNING (the slot is free, the
+    changelog is slow) is "changelog read timed out", not "no slot"."""
+    init_semaphore(1)
+    monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 10.0)
+    monkeypatch.setattr(
+        ticket_write, "_COMMENT_LOOKUP_WALL_TIMEOUT", 0.4
+    )
+    client, new_ts = _lookup_client(0.01, 2.0)
+
+    posted = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+
+    assert posted.number is None
+    assert posted.failure == ticket_write._LOOKUP_TIMED_OUT
+
+
+async def test_a_call_that_gets_no_slot_raises_busy_and_sends_nothing(
+    server, monkeypatch
+):
+    """Operator decision, review-4 item 1: a call that waits longer than
+    ``SLOT_WAIT_TIMEOUT`` (patched to 0.3 s) for a slot raises
+    ``TracBusyError`` and the server never receives its request."""
+    init_semaphore(1)
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
+    client = _client(server)
+
+    server.delay = 1.0
+    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
+    await _wait_until(lambda: bool(server.paths))
+
+    with pytest.raises(
+        TracBusyError, match="TRAC_MAX_PARALLEL_REQUESTS"
+    ):
+        await asyncio.wait_for(run_sync(client.get_ticket, 1), TIMEOUT)
+    assert not slow.done(), "the slot was free: it did not wait"
+
+    await asyncio.wait_for(slow, TIMEOUT)
+    assert len(server.paths) == 1
+    assert server.peak == 1
+
+
+async def test_a_busy_timeout_leaks_no_permit(server, monkeypatch):
+    """After the slow call ends, a new call runs, and several calls
+    that timed out waiting left the limit exactly 1 (peak 1)."""
+    init_semaphore(1)
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
+    client = _client(server)
+
+    server.delay = 0.8
+    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
+    await _wait_until(lambda: bool(server.paths))
+    for n in range(1, 4):
+        with pytest.raises(TracBusyError):
+            await asyncio.wait_for(
+                run_sync(client.get_ticket, n), TIMEOUT
+            )
+    await asyncio.wait_for(slow, TIMEOUT)
+
+    server.delay = 0.1
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 10.0)
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            run_sync(client.get_ticket, 10),
+            run_sync(client.get_ticket, 11),
+        ),
+        TIMEOUT,
+    )
+
+    assert results == [1, 1]
+    assert len(server.paths) == 3
+    assert server.peak == 1
+
+
+async def test_the_tool_handler_reports_busy_as_server_busy(
+    server, monkeypatch
+):
+    """Through the real dispatcher and ``ticket_update`` against the
+    local server: busy comes back as the ``server_busy`` error, and the
+    update itself was never sent."""
+    from trac_mcp_server.mcp.tools import ALL_SPECS
+    from trac_mcp_server.mcp.tools.registry import ToolRegistry
+
+    init_semaphore(1)
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
+    client = _client(server)
+    registry = ToolRegistry(ALL_SPECS)
+
+    server.delay = 1.0
+    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
+    await _wait_until(lambda: bool(server.paths))
+
+    result = await asyncio.wait_for(
+        registry.call_tool(
+            "ticket_update", {"ticket_id": 1, "comment": "hi"}, client
+        ),
+        TIMEOUT,
+    )
+    await asyncio.wait_for(slow, TIMEOUT)
+
+    assert result.isError
+    text = result.content[0].text
+    assert text.startswith("Error (server_busy):")
+    assert "nothing was sent" in text
+    assert len(server.paths) == 1
+
+
+async def test_run_sync_deadline_with_nothing_left_raises_at_once(
+    server,
+):
+    """A float timeout <= 0, or a spent budget, raises a timeout at once:
+    no thread, nothing sent, the budget untouched."""
+    init_semaphore(1)
+    client = _client(server)
+    spent = async_utils.RunBudget(0.0)
+    behind = async_utils.RunBudget(-1.5)
+
+    for timeout in (0, -1.0):
+        with pytest.raises(asyncio.TimeoutError):
+            await async_utils.run_sync_deadline(
+                timeout, client.get_ticket, 1
+            )
+    with pytest.raises(asyncio.TimeoutError):
+        await async_utils.run_sync_deadline(spent, client.get_ticket, 1)
+    with pytest.raises(asyncio.TimeoutError):
+        await async_utils.run_sync_deadline(
+            behind, client.get_ticket, 1
+        )
+
+    assert server.paths == []
+    assert spent.remaining == 0.0
+    assert behind.remaining == -1.5
+    # Nor did it take a slot.
+    assert (
+        await asyncio.wait_for(run_sync(client.get_ticket, 2), TIMEOUT)
+        == 1
+    )
+
+
+async def test_comment_lookup_distinguishes_no_slot_from_a_slow_read(
+    monkeypatch,
+):
+    """A lookup phase that gets no slot within ``SLOT_WAIT_TIMEOUT`` (0.2 s)
+    says so ("server busy"), where a read that ran too long says "changelog
+    read timed out" (running budget 0.3 s, read takes 1 s)."""
+    init_semaphore(1)
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
+    monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 0.3)
+    client, new_ts = _lookup_client(0.01, 1.0)
+
+    holder, started = _hold_slot(1.0)
+    await _wait_until(started.is_set)
+    busy = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+    await asyncio.wait_for(holder, TIMEOUT)
+    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 10.0)
+    slow = await asyncio.wait_for(
+        ticket_write._find_posted_comment(
+            client, 1, "hello", None, new_ts
+        ),
+        TIMEOUT,
+    )
+
+    assert busy.failure == ticket_write._LOOKUP_NO_SLOT
+    assert slow.failure == ticket_write._LOOKUP_TIMED_OUT
+    assert "busy" in ticket_write._LOOKUP_NO_SLOT
+    assert "busy" not in ticket_write._LOOKUP_TIMED_OUT

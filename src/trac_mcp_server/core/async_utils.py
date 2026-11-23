@@ -11,6 +11,30 @@ from typing import Any, Callable, Coroutine, Sequence, TypeVar
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
+# How long a call waits for a request slot before giving up (Trac
+# /trac_mcp_server #275). Read at call time. A write that waited without
+# limit could outlive its MCP client's timeout, and the client's retry
+# would then post it twice; past this, the call fails with TracBusyError
+# and nothing was sent.
+SLOT_WAIT_TIMEOUT = 30.0
+
+
+class TracBusyError(Exception):
+    """No request slot freed up within ``SLOT_WAIT_TIMEOUT``.
+
+    Raised before the call reaches a thread, so nothing was sent to
+    Trac and retrying is safe. The tool dispatcher reports it as
+    ``server_busy``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            f"no request slot (TRAC_MAX_PARALLEL_REQUESTS) freed up "
+            f"within {SLOT_WAIT_TIMEOUT:g} s; nothing was sent to "
+            f"Trac, so retrying is safe"
+        )
+
+
 # Module-level semaphore, initialized at server startup. Ticket #275: it
 # is the bound on concurrent XML-RPC calls to Trac, one per server
 # process, shared by every instance and every caller. ``run_sync`` waits
@@ -31,7 +55,13 @@ _rpc_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 def init_semaphore(max_parallel: int = 2) -> None:
     """Initialize the concurrency semaphore and the executor its calls
-    run on. Call once at server startup."""
+    run on. Call once per process, at server startup.
+
+    Re-initialising while calls are queued on the old semaphore is not
+    supported (production calls this once, in the server's lifespan):
+    such a call would submit to the executor this shut down. Calls
+    already running when it is called finish on the old executor.
+    """
     global _semaphore, _max_parallel, _rpc_executor
     previous = _rpc_executor
     _semaphore = asyncio.Semaphore(max_parallel)
@@ -59,6 +89,29 @@ def _slot_released(
         fut.exception()
 
 
+async def _acquire_slot(semaphore: asyncio.Semaphore) -> None:
+    """Wait up to ``SLOT_WAIT_TIMEOUT`` for a slot; TracBusyError after.
+
+    The acquire runs as its own task so that a timeout or cancellation
+    that races its completion can give the permit back: if the task had
+    already finished (``cancel()`` is False) it holds a permit nobody
+    will release, and this releases it. That does not depend on how the
+    running Python's ``wait_for`` handles the race.
+    """
+    acquiring = asyncio.ensure_future(semaphore.acquire())
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(acquiring), SLOT_WAIT_TIMEOUT
+        )
+    except BaseException as exc:
+        if not acquiring.cancel() and not acquiring.cancelled():
+            semaphore.release()
+        # One class from 3.11; two on 3.10.
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            raise TracBusyError() from None
+        raise
+
+
 async def _start_in_slot(
     func: Callable[..., T], args: tuple, kwargs: dict
 ) -> "asyncio.Future[T]":
@@ -75,7 +128,7 @@ async def _start_in_slot(
     semaphore = _semaphore
     executor = _rpc_executor
     assert semaphore is not None
-    await semaphore.acquire()
+    await _acquire_slot(semaphore)
     try:
         # What asyncio.to_thread does: the caller's context variables
         # travel into the thread.
@@ -145,6 +198,10 @@ class RunBudget:
 
     def __init__(self, total: float) -> None:
         self.remaining = total
+        # True while a call using this budget waits for its slot (set
+        # when it starts waiting, cleared when it gets one), so a caller
+        # that cancels it can tell "no slot yet" from "slow RPC".
+        self.waiting = False
 
     def spend(self, seconds: float) -> None:
         self.remaining -= seconds
@@ -184,6 +241,9 @@ async def run_sync_deadline(
         budget, seconds = timeout, timeout.remaining
     else:
         budget, seconds = None, timeout
+    if seconds is not None and seconds <= 0:
+        # Nothing left to run in: no thread, no charge, nothing sent.
+        raise asyncio.TimeoutError()
     ran: list[float] = []
     run = func
     if budget is not None:
@@ -200,7 +260,11 @@ async def run_sync_deadline(
             return await asyncio.wait_for(
                 asyncio.to_thread(run, *args, **kwargs), seconds
             )
+        if budget is not None:
+            budget.waiting = True
         fut = await _start_in_slot(run, args, kwargs)
+        if budget is not None:
+            budget.waiting = False
         return await asyncio.wait_for(asyncio.shield(fut), seconds)
     finally:
         if budget is not None:
@@ -271,7 +335,11 @@ async def gather_limited(
     created its ticket). When all are done, the exception that was
     raised first in time, if any, is raised. Results are in input order.
     Cancelling the caller cancels the workers and closes the coroutines
-    that never started.
+    that never started. A ``BaseException`` that is not an ``Exception``
+    raised inside an item (an inner ``CancelledError``, say) is treated
+    the same way, as if the caller had been cancelled: items in flight
+    are cancelled and unstarted ones closed. Python 3.10 cannot tell
+    the two apart.
 
     Args:
         coros: Sequence of coroutines to run concurrently.
