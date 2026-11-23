@@ -15,7 +15,7 @@ from typing import Any, NamedTuple
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_sync, run_sync_deadline
 from ...core.client import (
     TicketCreateTimeout,
     TicketUpdateConflict,
@@ -957,9 +957,8 @@ async def _comment_from_plugin(
     if new_ts is None or timeout <= 0:
         return None
     try:
-        found = await asyncio.wait_for(
-            run_sync(client.get_ticket_change_at, ticket_id, new_ts),
-            timeout=timeout,
+        found = await run_sync_deadline(
+            timeout, client.get_ticket_change_at, ticket_id, new_ts
         )
     except Exception:
         return None
@@ -1031,9 +1030,8 @@ async def _find_posted_comment(
     if remaining <= 0:
         return _PostedComment(failure="changelog read timed out")
     try:
-        changelog = await asyncio.wait_for(
-            run_sync(client.get_ticket_changelog, ticket_id),
-            timeout=remaining,
+        changelog = await run_sync_deadline(
+            remaining, client.get_ticket_changelog, ticket_id
         )
     except TimeoutError:
         return _PostedComment(failure="changelog read timed out")

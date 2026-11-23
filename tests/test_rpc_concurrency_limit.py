@@ -26,7 +26,12 @@ import requests
 
 from trac_mcp_server.config import Config
 from trac_mcp_server.core import async_utils
-from trac_mcp_server.core.async_utils import init_semaphore, run_sync
+from trac_mcp_server.core.async_utils import (
+    gather_limited,
+    init_semaphore,
+    run_sync,
+    run_sync_limited,
+)
 from trac_mcp_server.core.client import TracClient
 
 OK_BODY = (
@@ -50,6 +55,10 @@ class _Server:
         self.routes: dict[str, tuple[int, dict[str, str]]] = {}
         self.paths: list[str] = []
         self.delay = DELAY
+        # When set, a request waits here (up to 5 s) before it sleeps:
+        # the barrier only opens once ``parties`` requests are in flight
+        # together, so "the limit is used" does not depend on timing.
+        self.rendezvous: threading.Barrier | None = None
         self._lock = threading.Lock()
         self._in_flight = 0
         self.peak = 0
@@ -66,7 +75,10 @@ class _Server:
                     srv._in_flight += 1
                     srv.peak = max(srv.peak, srv._in_flight)
                     delay = srv.delay
+                    rendezvous = srv.rendezvous
                 try:
+                    if rendezvous is not None:
+                        rendezvous.wait(timeout=5)
                     time.sleep(delay)
                     status, headers = srv.routes.get(
                         self.path, (200, {})
@@ -128,6 +140,10 @@ async def test_run_sync_rpc_calls_are_bounded_by_the_limit(server):
     more than 2 requests in flight (unbounded: 8)."""
     init_semaphore(2)
     client = _client(server)
+    # Bounded, not serialised: each pair of requests waits for its
+    # partner, so the limit is used (a lone request breaks the barrier
+    # after 5 s and the call fails).
+    server.rendezvous = threading.Barrier(2)
 
     await asyncio.wait_for(
         asyncio.gather(
@@ -138,8 +154,6 @@ async def test_run_sync_rpc_calls_are_bounded_by_the_limit(server):
 
     assert len(server.paths) == 8
     assert server.peak <= 2
-    # Bounded, not serialised: the limit is used.
-    assert server.peak == 2
 
 
 async def test_limit_is_shared_by_every_client(server):
@@ -349,6 +363,8 @@ async def test_uninitialised_semaphore_leaves_calls_unbounded(server):
     no error."""
     assert async_utils._semaphore is None
     client = _client(server)
+    # All 8 must be in flight together for any of them to answer.
+    server.rendezvous = threading.Barrier(8)
 
     results = await asyncio.wait_for(
         asyncio.gather(
@@ -359,3 +375,127 @@ async def test_uninitialised_semaphore_leaves_calls_unbounded(server):
 
     assert results == [1] * 8
     assert server.peak > 2
+
+
+async def test_timed_out_call_keeps_its_slot_until_the_server_answers(
+    server,
+):
+    """Review item 1: a call whose ``wait_for`` fires while its request
+    is in flight still has that request on the server, so its slot stays
+    taken. With a limit of 1 the next call waits for the first request
+    to finish: the server never sees two at once."""
+    init_semaphore(1)
+    client = _client(server)
+
+    server.delay = 0.6
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(run_sync(client.get_ticket, 1), 0.2)
+
+    assert (
+        await asyncio.wait_for(run_sync(client.get_ticket, 2), TIMEOUT)
+        == 1
+    )
+
+    assert len(server.paths) == 2
+    assert server.peak == 1
+
+
+async def test_deadline_counts_the_running_phase_not_the_queue(server):
+    """Review item 2: ``run_sync_deadline(0.3, ...)`` queued behind a
+    0.8 s call succeeds, because its 0.3 s starts when it gets the slot
+    (``wait_for(run_sync(...), 0.3)`` would time out while queued)."""
+    init_semaphore(1)
+    client = _client(server)
+
+    server.delay = 0.8
+    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
+    for _ in range(100):
+        if server.paths:
+            break
+        await asyncio.sleep(0.02)
+    assert server.paths, "the slow call never reached the server"
+    server.delay = 0.05
+
+    value = await asyncio.wait_for(
+        async_utils.run_sync_deadline(0.3, client.get_ticket, 1),
+        TIMEOUT,
+    )
+
+    assert value == 1
+    assert slow.done(), "the deadline call ran before the slot freed"
+    await asyncio.wait_for(slow, TIMEOUT)
+    assert server.peak == 1
+
+
+async def test_deadline_times_out_a_running_call_and_keeps_its_slot(
+    server,
+):
+    """``run_sync_deadline(0.2, slow)`` with a free slot raises
+    ``TimeoutError`` (so ``except TimeoutError`` sites still match) and,
+    as in ``run_sync``, the slot stays taken until the request ends."""
+    init_semaphore(1)
+    client = _client(server)
+
+    server.delay = 0.6
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            async_utils.run_sync_deadline(0.2, client.get_ticket, 1),
+            TIMEOUT,
+        )
+
+    server.delay = 0.05
+    assert (
+        await asyncio.wait_for(run_sync(client.get_ticket, 2), TIMEOUT)
+        == 1
+    )
+    assert len(server.paths) == 2
+    assert server.peak == 1
+
+
+async def test_deadline_uninitialised_runs_and_times_out(server):
+    assert async_utils._semaphore is None
+    client = _client(server)
+
+    server.delay = 0.6
+    with pytest.raises(TimeoutError):
+        await async_utils.run_sync_deadline(0.2, client.get_ticket, 1)
+    server.delay = 0.05
+    assert (
+        await async_utils.run_sync_deadline(
+            TIMEOUT, client.get_ticket, 2
+        )
+        == 1
+    )
+
+
+async def test_a_batch_does_not_starve_a_single_call(server):
+    """Review item 3: a 20-item batch through ``gather_limited`` (limit
+    2, 0.2 s each, about 2 s in all) puts at most 2 items in the
+    semaphore's queue at a time, so a single ``run_sync`` call started
+    just after waits about one item, not the batch."""
+    init_semaphore(2)
+    client = _client(server)
+
+    batch_started = time.monotonic()
+    batch = asyncio.ensure_future(
+        gather_limited(
+            [run_sync_limited(client.get_ticket, n) for n in range(20)]
+        )
+    )
+    await asyncio.sleep(0.3)
+
+    single_started = time.monotonic()
+    assert (
+        await asyncio.wait_for(run_sync(client.get_ticket, 99), TIMEOUT)
+        == 1
+    )
+    single_took = time.monotonic() - single_started
+
+    await asyncio.wait_for(batch, TIMEOUT)
+    batch_took = time.monotonic() - batch_started
+
+    assert len(server.paths) == 21
+    assert server.peak <= 2
+    assert single_took < batch_took / 3, (
+        f"single call took {single_took:.2f}s of a {batch_took:.2f}s batch"
+    )

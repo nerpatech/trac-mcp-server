@@ -125,8 +125,10 @@ def _restore_async_semaphore():
     from trac_mcp_server.core import async_utils
 
     saved = async_utils._semaphore
+    saved_size = async_utils._max_parallel
     yield
     async_utils._semaphore = saved
+    async_utils._max_parallel = saved_size
 
 
 @pytest.fixture

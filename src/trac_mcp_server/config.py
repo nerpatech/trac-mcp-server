@@ -13,7 +13,11 @@ Environment variables:
     TRAC_INSECURE: Skip SSL verification (optional, default: false)
     TRAC_MAX_PARALLEL_REQUESTS: Max concurrent XML-RPC calls to Trac per
         server process, shared by all instances and callers; a call waits for
-        a slot before it starts; link probes and page fetches are not counted
+        a slot before it starts and keeps it until its request ends. Link
+        probes and the live-preview page fetch are not counted;
+        ticket_render_check's ticket-page fetch runs together with that
+        tool's RPCs and is counted; ping is not counted. A batch occupies at
+        most N slots at a time, so single calls from other callers interleave
         (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)

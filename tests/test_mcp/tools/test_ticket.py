@@ -1726,6 +1726,19 @@ class TestHandleTicketUpdate(unittest.TestCase):
         self.assertIn("comment is required", result.content[0].text)
 
 
+def _deadline_over(run_sync_stub):
+    """Stand-in for ``run_sync_deadline`` on top of a ``run_sync`` stub:
+    the same call, with the deadline applied to it by ``wait_for`` (the
+    queue the real one skips does not exist in these tests)."""
+
+    async def deadline(timeout, func, *a, **kw):
+        return await asyncio.wait_for(
+            run_sync_stub(func, *a, **kw), timeout
+        )
+
+    return deadline
+
+
 class TestHandleTicketUpdateChangeToken(unittest.TestCase):
     """ticket_update hands back the new _ts, so a chained write needs no
     ticket_get (ticket #127)."""
@@ -1744,8 +1757,16 @@ class TestHandleTicketUpdateChangeToken(unittest.TestCase):
                 return None
             return await mock_run_sync(func, *a, **kw)
 
-        with patch(
-            "trac_mcp_server.mcp.tools.ticket_write.run_sync", routed
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync",
+                routed,
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write."
+                "run_sync_deadline",
+                _deadline_over(routed),
+            ),
         ):
             return asyncio.run(
                 _handle_update(
@@ -2055,8 +2076,16 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
                 return None
             return await mock_run_sync(func, *a, **kw)
 
-        with patch(
-            "trac_mcp_server.mcp.tools.ticket_write.run_sync", routed
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync",
+                routed,
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write."
+                "run_sync_deadline",
+                _deadline_over(routed),
+            ),
         ):
             result = asyncio.run(_handle_update(client, base))
         return result, mock_run_sync
@@ -2630,6 +2659,11 @@ class TestHandleTicketUpdateCommentNumber(unittest.TestCase):
             ),
             patch(
                 "trac_mcp_server.mcp.tools.ticket_write."
+                "run_sync_deadline",
+                _deadline_over(effect),
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write."
                 "_COMMENT_LOOKUP_TIMEOUT",
                 0.05,
             ),
@@ -2756,9 +2790,16 @@ class TestCommentLookupViaPlugin(unittest.TestCase):
 
         base = {"ticket_id": 42, "comment": "hello"}
         base.update(args or {})
-        with patch(
-            "trac_mcp_server.mcp.tools.ticket_write.run_sync",
-            side_effect=fake_run_sync,
+        with (
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write.run_sync",
+                side_effect=fake_run_sync,
+            ),
+            patch(
+                "trac_mcp_server.mcp.tools.ticket_write."
+                "run_sync_deadline",
+                _deadline_over(fake_run_sync),
+            ),
         ):
             result = asyncio.run(_handle_update(client, base))
         return result, client, [c[0] for c in calls], calls
