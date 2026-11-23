@@ -11,6 +11,7 @@ constants), and a check that the checks run off the event loop.
 import importlib
 import random
 import re
+import string
 import threading
 from types import SimpleNamespace
 
@@ -45,6 +46,10 @@ from trac_mcp_server.preview.live import RenderedSection
 
 FULL_SIZE = 64 * 1024
 
+# The small inputs take a few milliseconds, so on a busy host a minimum
+# of 3 runs sometimes read 17x for a linear case; 7 runs do not.
+REPEATS = 7
+
 HOSTILE_UNITS = {
     "unclosed macro opener": "x [[ y\n",
     "unclosed inline braces": "a {{{b\n",
@@ -52,6 +57,9 @@ HOSTILE_UNITS = {
     "bracket and label": "[x ",
     "double bracket pipe": "[[x|",
     "dotted prefix run": "a.",
+    "plus prefix run": "a+",
+    "dashed dotted prefix run": "a-b.",
+    "digit dotted prefix run": "1a.",
     "bang bracket": "![",
     "bang bracket quote": "!['",
     "bang bracket zero": "![0",
@@ -82,7 +90,9 @@ def _warnings(source):
 )
 def test_build_warnings_grows_linearly_on_hostile_input(unit):
     n = FULL_SIZE // len(unit)
-    ratio, small, big = _growth(_warnings, _as_build(unit), n)
+    ratio, small, big = _growth(
+        _warnings, _as_build(unit), n, repeats=REPEATS
+    )
     assert ratio < GROWTH_LIMIT, (
         f"CPU time grew {ratio:.1f}x for {GROWTH_FACTOR}x the input "
         f"(limit {GROWTH_LIMIT}x): {small:.4f}s at {n // GROWTH_FACTOR} "
@@ -108,8 +118,10 @@ OLD_TICKET_COMMENT_SCOPED_RE = re.compile(
     r"|\bcomment:\d+:[A-Za-z]+:\d+\b"
     r"|\b[A-Za-z][\w+.-]*://\S+"
 )
-OLD_PREFIX_REALM_HEAD = checks._PREFIX_REALM_HEAD.replace(
-    "{0,%d}" % checks._PREFIX_TAIL_MAX, "*"
+OLD_PREFIX_REALM_HEAD = (
+    r"[A-Za-z][\w.+-]*:(?:"
+    + "|".join(sorted(checks._INTERTRAC_REALMS))
+    + r"):"
 )
 OLD_PREFIX_REALM_RE = re.compile(
     r"(?<=\[)"
@@ -306,9 +318,11 @@ def test_first_literal_link_match_equals_the_old_loop_on_the_corpus():
                 assert new.span() == old.span(), (text, tracwiki)
 
 
-# The scheme-prefix regexes: equal to the old unbounded ones while the
-# prefix is at most 64 characters. Strings are cut to 64 characters, so
-# no prefix in them is longer.
+# The scheme-prefix regexes: equal to the old unbounded ones, except
+# where a prefix would start partway through a `[\w.+-]` run whose head is
+# not a letter (`1a.b:#3` matched `b:#3`; it matches nothing now): the
+# accepted difference of #289, whose strings the equivalence test leaves
+# out and a separate test pins.
 
 PREFIX_PAIRS = [
     (OLD_PREFIX_TICKET_RE, checks._PREFIX_TICKET_RE),
@@ -361,54 +375,118 @@ def _prefix_corpus():
         "[p:wiki:] [p:wiki: label]",
         "a.a.a.a:#1",
         "a" * 64 + ":#1",
+        "a" * 65 + ":#1",
         "a" * 63 + ":wiki:X",
         "a" * 64 + "://x",
+        "changelog:wiki:X",
     ]
-    for _ in range(3000):
-        parts = [rng.choice(PIECES) for _ in range(rng.randint(0, 30))]
-        cases.append("".join(parts)[:64])
+    for _ in range(12000):
+        parts = [rng.choice(PIECES) for _ in range(rng.randint(0, 40))]
+        cases.append("".join(parts)[:120])
     return cases
 
 
 PREFIX_CORPUS = _prefix_corpus()
 
+_RUN_RE = re.compile(r"[\w.+-]+")
+
+
+def _has_run_with_a_non_letter_head(text):
+    return any(
+        m.group(0)[0] not in string.ascii_letters
+        for m in _RUN_RE.finditer(text)
+    )
+
 
 @pytest.mark.parametrize(("old", "new"), PREFIX_PAIRS, ids=PREFIX_IDS)
-def test_prefix_regexes_equal_the_old_ones_up_to_64_characters(
-    old, new
-):
+def test_prefix_regexes_equal_the_old_ones(old, new):
+    compared = 0
     for text in PREFIX_CORPUS:
+        if _has_run_with_a_non_letter_head(text):
+            continue
+        compared += 1
         assert [m.span() for m in new.finditer(text)] == [
             m.span() for m in old.finditer(text)
         ], repr(text)
+    assert compared > 300
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "text"),
+    ("old", "new", "text", "old_hit", "new_hit"),
     [
-        (OLD_PREFIX_TICKET_RE, checks._PREFIX_TICKET_RE, ":#1"),
+        (
+            OLD_PREFIX_TICKET_RE,
+            checks._PREFIX_TICKET_RE,
+            "1a.b:#3",
+            "b:#3",
+            None,
+        ),
         (
             OLD_TICKET_COMMENT_SCOPED_RE,
             checks._TICKET_COMMENT_SCOPED_RE,
-            "://x",
+            "1a.b://x",
+            "b://x",
+            None,
         ),
-        (OLD_PREFIX_REALM_RE, checks._PREFIX_REALM_RE, ":wiki:X"),
+        (
+            OLD_PREFIX_REALM_RE,
+            checks._PREFIX_REALM_RE,
+            "1a.b:wiki:X",
+            "b:wiki:X",
+            None,
+        ),
+        (
+            OLD_REALM_REF_RE,
+            checks._REALM_REF_RE,
+            "1a.b:wiki:X",
+            "b:wiki:X",
+            "wiki:X",
+        ),
     ],
-    ids=["prefix_ticket", "comment_scoped", "prefix_realm"],
+    ids=[
+        "prefix_ticket",
+        "comment_scoped",
+        "prefix_realm",
+        "realm_ref",
+    ],
 )
-def test_a_prefix_of_65_characters_is_not_recognised(old, new, text):
-    # The accepted change of #289: a prefix is at most 64 characters.
-    assert new.search("a" * 64 + text) is not None
-    assert new.search("a" * 65 + text) is None
-    assert old.search("a" * 65 + text) is not None
+def test_a_prefix_no_longer_starts_inside_a_run_with_a_non_letter_head(
+    old, new, text, old_hit, new_hit
+):
+    # The accepted change of #289.
+    assert old.search(text).group(0) == old_hit
+    found = new.search(text)
+    assert (found.group(0) if found else None) == new_hit
 
 
-def test_a_realm_reference_with_a_65_character_prefix_loses_the_prefix():
-    # The prefix is optional here, so the reference is still found, from
-    # its realm: `wiki:X` rather than the whole token.
-    text = "a" * 65 + ":wiki:X"
-    assert OLD_REALM_REF_RE.search(text).span() == (0, len(text))
-    assert checks._REALM_REF_RE.search(text).group(0) == "wiki:X"
+LONG_DOTTED = "org." + "x" * 62 + ".tr"
+
+
+def test_a_long_dotted_prefix_matches_whole():
+    # A cap on the prefix length matched only its tail (`tr:#12`).
+    assert len(LONG_DOTTED) > 64
+    text = f"{LONG_DOTTED}:#12"
+    assert checks._PREFIX_TICKET_RE.search(text).group(0) == text
+    text = f"[{LONG_DOTTED}:wiki:Page]glued"
+    assert [
+        m.group(0) for m in checks._PREFIX_REALM_RE.finditer(text)
+    ] == [f"{LONG_DOTTED}:wiki:Page"]
+    text = f"{LONG_DOTTED}://host/x"
+    assert (
+        checks._TICKET_COMMENT_SCOPED_RE.search(text).group(0) == text
+    )
+    text = f"{LONG_DOTTED}:wiki:Page"
+    assert checks._REALM_REF_RE.search(text).group(0) == text
+
+
+def test_the_realm_reference_regex_still_starts_at_a_word_boundary():
+    # Without the leading `\b`, `log:` inside `changelog:` matched.
+    assert checks._REALM_REF_RE.search("changelog:Page") is None
+    assert OLD_REALM_REF_RE.search("changelog:Page") is None
+    assert (
+        checks._REALM_REF_RE.search("changelog:wiki:X").group(0)
+        == "changelog:wiki:X"
+    )
 
 
 # -- 3. The checks run off the event loop -------------------------------------

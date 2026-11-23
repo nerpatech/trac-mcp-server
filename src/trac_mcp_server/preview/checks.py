@@ -88,15 +88,20 @@ _MARKDOWN_LINK_PARTS_RE = re.compile(
     r"\[(?P<label>[^\]\n]+)\]\((?P<target>[^)\n]+)\)"
 )
 
-# An InterTrac prefix or URL scheme is at most this many characters
-# after its first (so at most 64 in all) in the scheme-prefix regexes
-# below (ticket #289). An unbounded `[\w.+-]*` made them quadratic on a
-# run like `a.a.a.a...`: `\b` holds before every `a`, so the scan restarts
-# at each one, runs to the end of the run, finds no `:` and backtracks.
-# Capping the class bounds each restart. No InterTrac prefix or URL
-# scheme is near 64 characters; the only behaviour change is that a
-# longer prefix is not recognised.
-_PREFIX_TAIL_MAX = 63
+# Prefix starts (ticket #289). The scheme-prefix regexes below
+# (`_PREFIX_TICKET_RE`, `_PREFIX_REALM_RE`, `_REALM_REF_RE`, and the URL
+# alternative of `_TICKET_COMMENT_SCOPED_RE`) read an unbounded
+# `[\w.+-]*` after a letter. Their `\b` holds before every letter that
+# follows a `.`, `+` or `-`, so on a run like `a.a.a.a...` the scan
+# restarted at each `a`, ran to the end of the run, found no `:` and
+# backtracked: quadratic. `(?<![\w.+-])` before the letter that starts a
+# prefix makes a prefix start only where its run starts, and each run is
+# scanned once. Longer prefixes keep working (a cap on the length cut a
+# long dotted one down to its tail: `org.xxx...x.tr:#12` matched `tr:#12`).
+# The one behaviour change: a prefix can no longer start partway through a
+# `[\w.+-]` run whose head is not a letter. `1a.b:#3` used to match
+# `b:#3`; it matches nothing now (`_REALM_REF_RE` falls back to its
+# realm). Trac's own InterTrac prefixes start with a letter.
 
 # A `prefix:#N` token -- the only shape that distinguishes an unconfigured
 # InterTrac ticket prefix (row 16, must warn) from an ordinary colon-shaped
@@ -110,9 +115,7 @@ _PREFIX_TAIL_MAX = 63
 # realm). Its narrowness is what makes the two calibration rows fall out
 # for free -- a bare backticked `#87` has no prefix, and a placeholder
 # `prefix:#N` has no digits.
-_PREFIX_TICKET_RE = re.compile(
-    rf"\b[A-Za-z][\w.+-]{{0,{_PREFIX_TAIL_MAX}}}:#\d+\b"
-)
+_PREFIX_TICKET_RE = re.compile(r"(?<![\w.+-])[A-Za-z][\w.+-]*:#\d+\b")
 
 # Ticket #105. `PR #100`, `pull request #100`, `merge request #100` --
 # GitHub/GitLab vocabulary that reads as a ticket number when written
@@ -138,7 +141,7 @@ _PR_NUMBER_AS_TICKET_RE = re.compile(
 _TICKET_COMMENT_SCOPED_RE = re.compile(
     r"\bticket:\d+#comment:\d+\b"
     r"|\bcomment:\d+:[A-Za-z]+:\d+\b"
-    rf"|\b[A-Za-z][\w+.-]{{0,{_PREFIX_TAIL_MAX}}}://\S+"
+    r"|(?<![\w+.-])[A-Za-z][\w+.-]*://\S+"
 )
 _BARE_COMMENT_REF_RE = re.compile(r"\bcomment:(\d+)\b")
 
@@ -231,7 +234,7 @@ _INTERTRAC_REALMS = frozenset(
 # `]` -- and an empty target followed by whitespace or a backtick still
 # matches nothing, exactly as before.
 _PREFIX_REALM_HEAD = (
-    rf"[A-Za-z][\w.+-]{{0,{_PREFIX_TAIL_MAX}}}:(?:"
+    r"[A-Za-z][\w.+-]*:(?:"
     + "|".join(sorted(_INTERTRAC_REALMS))
     + r"):"
 )
@@ -239,7 +242,7 @@ _PREFIX_REALM_RE = re.compile(
     r"(?<=\[)"
     + _PREFIX_REALM_HEAD
     + r"(?:[^\s`\]]+|(?=\]))"
-    + r"|\b"
+    + r"|(?<![\w.+-])"
     + _PREFIX_REALM_HEAD
     + r"[^\s`]+"
 )
@@ -535,7 +538,7 @@ _WIKI_HREF_PAGE_RE = re.compile(r"/wiki/(.+)\Z")
 # anchor to today's behaviour. Under-blanking is what would hide a real
 # dead link.
 _REALM_REF_RE = re.compile(
-    rf"\b(?:[A-Za-z][\w.+-]{{0,{_PREFIX_TAIL_MAX}}}:)?"
+    r"\b(?:(?<![\w.+-])[A-Za-z][\w.+-]*:)?"
     rf"(?:{'|'.join(sorted(TRACLINK_SCHEMES))}):\S+"
 )
 
