@@ -770,7 +770,7 @@ class TestHandleBatchUpdate(unittest.TestCase):
                 "trac_mcp_server.mcp.tools.ticket_batch.run_sync_limited"
             ) as mock_rsl,
             patch(
-                "trac_mcp_server.mcp.tools.ticket_batch.check_write"
+                "trac_mcp_server.mcp.tools.ticket_batch.gate_item"
             ) as mock_check,
         ):
             asyncio.run(

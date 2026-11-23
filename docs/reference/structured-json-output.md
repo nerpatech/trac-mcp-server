@@ -48,9 +48,9 @@ MCP tool responses can include both `content` (text) and `structuredContent` (JS
 | `ticket_get` | `id`, `summary`, `description`, `status`, `owner`, `reporter`, `type`, `priority`, `component`, `milestone`, `keywords`, `cc`, `resolution`, `created`, `modified`, `_ts`, `comments_included`, and (unless `include_comments=false`) `comments[]` (each: `number`, `author`, `timestamp`, `body`), `comment_count`, `comments_shown`, `comments_truncated`, optional `omitted_comment_numbers`, optional `comments_error` |
 | `ticket_fields` | `fields[]` (each: `name`, `type`, `label`, `custom`, optional `options`) |
 | `ticket_actions` | `actions[]` (each: `name`, `label`, optional `hints`, `input_fields`) |
-| `ticket_batch_create` | `created[]`, `failed[]`, `total`, `succeeded`, `failed_count` |
+| `ticket_batch_create` | `created[]`, `failed[]`, `total`, `succeeded`, `failed_count`, `gate_notes`, `item_notes[]` (each: `id`, `notes`) |
 | `ticket_batch_delete` | `deleted[]`, `failed[]`, `total`, `succeeded`, `failed_count` |
-| `ticket_batch_update` | `updated[]`, `warnings[]` (each: `id`, `warning`), `failed[]`, `total`, `succeeded`, `failed_count`, `gate_notes` |
+| `ticket_batch_update` | `updated[]`, `warnings[]` (each: `id`, `warning`), `failed[]`, `total`, `succeeded`, `failed_count`, `gate_notes`, `item_notes[]` (each: `id`, `notes`) |
 | `wiki_get` | `name`, `content`, `version`, `author`, `lastModified` |
 | `wiki_recent_changes` | `pages[]` (each: `name`, `author`, `lastModified`, `version`), `since_days` |
 | `wiki_file_push` | `page_name`, `action`, `version`, `source_format`, `converted`, `file_path`, `warnings`, `readback_failed` (plus `readback_error` when true; `version` is then `null`), `possible_overwrite` (plus `intervening_versions` when true) |
