@@ -56,7 +56,12 @@ returns a dict, so a note carried only in the text is invisible there.
 `wiki_file_push`, `ticket_batch_create` and `ticket_batch_update` therefore
 carry it as `gate_notes`, a list of strings (the OFF line when the gate is
 off, empty otherwise). `wiki_file_push`'s `gate_notes` also holds the
-gate-on advisory lines the push appends to its text. The other write tools
+gate-on advisory lines the push appends to its text. The batch tools gate
+each item like a single write, so with the gate on a written item keeps the
+lines a single write returns (the `UNCHECKED` note when the render failed,
+and the advisory findings): printed under the item in the text and listed in
+`item_notes`, a list of `{"id", "notes"}` entries, one per written item that
+has any (empty otherwise, and when the gate is off). The other write tools
 return text only, which Claude Code does show.
 
 `list_instances` and `ping` report the switch too, as `write_gate` (top-level
@@ -757,11 +762,12 @@ Each ticket object:
   "total": 3,
   "succeeded": 2,
   "failed_count": 1,
-  "gate_notes": []
+  "gate_notes": [],
+  "item_notes": []
 }
 ```
 
-`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status).
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status). `item_notes` (list, always present) holds one `{"id", "notes"}` entry per item that was written and whose link check had something to say, in result order: the `UNCHECKED` note when the check could not run, and the advisory (non-blocking) findings. Each note is also printed in the text, indented under its item. It is empty when the gate is off or there is nothing to report. A refused item is in `failed` instead, with the gate's refusal as its `error`, and an item whose write then failed reports no notes.
 
 **Error Responses:**
 
@@ -917,11 +923,12 @@ Each update object:
   "succeeded": 3,
   "failed_count": 0,
   "warnings": [],
-  "gate_notes": []
+  "gate_notes": [],
+  "item_notes": []
 }
 ```
 
-`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status). `warnings` (list, always present) holds `{"id", "warning"}` for each item that succeeded with an action-resolution remap warning.
+`gate_notes` (list, always present) holds the write-gate OFF line when the gate is off on this daemon, and is empty otherwise; see [Write Gate Status](#write-gate-status). `item_notes` (list, always present) holds one `{"id", "notes"}` entry per item that was written and whose link check had something to say, in result order: the `UNCHECKED` note when the check could not run, and the advisory (non-blocking) findings. Each note is also printed in the text, indented under its item. It is empty when the gate is off or there is nothing to report. A refused item is in `failed` instead, with the gate's refusal as its `error`, and an item whose write then failed reports no notes. `warnings` (list, always present) holds `{"id", "warning"}` for each item that succeeded with an action-resolution remap warning.
 
 **Error Responses:**
 
