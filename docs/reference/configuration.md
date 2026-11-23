@@ -141,7 +141,7 @@ Environment variables override config file values. They are always checked, even
 | `TRAC_INSECURE` | No | `false` | Skip SSL certificate verification (development only) |
 | `TRAC_DEBUG` | No | `false` | Enable debug logging (YAML `trac.debug`): the level is DEBUG, and beats `LOG_LEVEL` when it is the environment variable that is true. See [Logging](#logging) |
 | `LOG_LEVEL` | No | `WARNING` (stdio) / `INFO` (http) | Log level: `DEBUG`, `INFO`, `WARNING` (`WARN`), `ERROR` or `CRITICAL` (`FATAL`), any case; a blank value counts as unset. Overrides YAML `logging.level` and `trac.debug`. An unknown name stops startup naming the variable. See [Logging](#logging) |
-| `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max concurrent XML-RPC calls to Trac per server process, across all instances and callers (the write gate's link probes have their own per-write cap) |
+| `TRAC_MAX_PARALLEL_REQUESTS` | No | `5` | Max concurrent XML-RPC calls to Trac per server process, shared by all instances and callers (one unreachable instance can hold slots others wait for). A call waits for a slot before it starts, and one cancelled or timed out while waiting sends nothing. The write gate's link probes and the live-preview and render-check page fetches are not counted |
 | `TRAC_MAX_BATCH_SIZE` | No | `500` | Maximum items per batch ticket operation (1-10000) |
 | `TRAC_RPC_TIMEOUT` | No | `60` | Read timeout in seconds for XML-RPC requests (5-300) |
 | `TRAC_ALLOWED_INSTANCES` | No | -- | Comma-separated instances (`/path` on the `TRAC_URL` host, or absolute URL) the default identity may reach; unset = unrestricted. `TRAC_URL` must be on the list (ticket #110) |

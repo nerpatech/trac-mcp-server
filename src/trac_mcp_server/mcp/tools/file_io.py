@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local
 from ...file_handler import (
     read_file_with_encoding,
     validate_file_path,
@@ -131,9 +131,9 @@ async def read_text_input(
     if file_path is not None:
         if _file_access != "local":
             return _path_refused("file_path", cli_hint)
-        resolved = await run_sync(validate_file_path, file_path)
+        resolved = await run_local(validate_file_path, file_path)
         try:
-            text, decoded_as = await run_sync(
+            text, decoded_as = await run_local(
                 read_file_with_encoding, resolved, encoding
             )
         except ValueError as e:
@@ -179,8 +179,8 @@ async def read_binary_input(
     if file_path is not None:
         if _file_access != "local":
             return _path_refused("file_path", cli_hint)
-        resolved = await run_sync(validate_file_path, file_path)
-        data = await run_sync(resolved.read_bytes)
+        resolved = await run_local(validate_file_path, file_path)
+        data = await run_local(resolved.read_bytes)
         return data, resolved.name, str(file_path)
     # Line-wrapped base64 (GNU `base64` wraps at 76 columns) is still
     # base64; strip whitespace, then decode strictly.
@@ -228,7 +228,7 @@ async def check_output_path(
             f"{path_key} is required",
             f"Provide {path_key} parameter.",
         )
-    await run_sync(validate_output_path, args[path_key])
+    await run_local(validate_output_path, args[path_key])
     return None
 
 
@@ -247,8 +247,8 @@ async def deliver_output(
     ``{content_base64, bytes}`` -- or a refusal over max_inline_bytes.
     """
     if args.get(path_key) is not None:
-        resolved = await run_sync(validate_output_path, args[path_key])
-        await run_sync(resolved.write_bytes, payload)
+        resolved = await run_local(validate_output_path, args[path_key])
+        await run_local(resolved.write_bytes, payload)
         return {
             path_key: str(args[path_key]),
             "bytes_written": len(payload),

@@ -1,12 +1,14 @@
 """
 Tests for async_utils module.
 
-Covers run_sync, run_sync_limited, gather_limited, and init_semaphore.
+Covers run_sync, run_sync_limited, run_local, gather_limited, and
+init_semaphore.
 """
 
 from trac_mcp_server.core.async_utils import (
     gather_limited,
     init_semaphore,
+    run_local,
     run_sync,
     run_sync_limited,
 )
@@ -144,3 +146,42 @@ async def test_run_sync_limited_concurrency_bound():
         assert max_concurrent <= 2
     finally:
         mod._semaphore = original
+
+
+async def test_run_sync_concurrency_bound():
+    """run_sync waits for a slot too (ticket #275): same bound as
+    run_sync_limited, and one function holds one slot throughout."""
+    import threading
+    import time
+
+    init_semaphore(2)
+
+    max_concurrent = 0
+    current_concurrent = 0
+    lock = threading.Lock()
+
+    def _track_concurrency(val):
+        nonlocal max_concurrent, current_concurrent
+        with lock:
+            current_concurrent += 1
+            max_concurrent = max(max_concurrent, current_concurrent)
+        time.sleep(0.05)
+        with lock:
+            current_concurrent -= 1
+        return val
+
+    results = await gather_limited(
+        [run_sync(_track_concurrency, i) for i in range(6)]
+    )
+
+    assert results == [0, 1, 2, 3, 4, 5]
+    assert max_concurrent == 2
+
+
+async def test_run_local_runs_function_and_forwards_arguments():
+    assert await run_local(_sync_add, 3, 4) == 7
+
+    def _kw_func(*, name: str) -> str:
+        return f"hello {name}"
+
+    assert await run_local(_kw_func, name="world") == "hello world"

@@ -19,7 +19,6 @@ from urllib3.connection import HTTPConnection
 
 from ..config import Config
 from ..validators import validate_content, validate_page_name
-from .async_utils import rpc_slot
 from .faults import (
     classify_fault,
     is_missing_method_fault,
@@ -660,17 +659,12 @@ class TracClient:
 
         headers = {"Content-Type": "text/xml"}
         session = self._get_session()
-        # Ticket #275: TRAC_MAX_PARALLEL_REQUESTS bounds this one post,
-        # redirect hops included (they happen inside it and are not
-        # re-acquired). The slot is released before the callback below
-        # and before raise_for_status(), so neither can hold it.
-        with rpc_slot():
-            response = session.post(
-                self.rpc_url,
-                data=payload,
-                headers=headers,
-                timeout=(10, self.config.rpc_timeout),
-            )
+        response = session.post(
+            self.rpc_url,
+            data=payload,
+            headers=headers,
+            timeout=(10, self.config.rpc_timeout),
+        )
         # Recorded before raise_for_status(), so a caller that swallows
         # the HTTPError cannot hide the rejection. A redirect's target
         # answering 401 is not the RPC endpoint refusing the token.

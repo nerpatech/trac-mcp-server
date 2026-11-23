@@ -693,7 +693,7 @@ async def auto_convert(
     from trac_mcp_server.converters.markdown_to_tracwiki import (
         convert_with_warnings as markdown_to_tracwiki,
     )
-    from trac_mcp_server.core.async_utils import run_sync
+    from trac_mcp_server.core.async_utils import run_local
     from trac_mcp_server.detection.capabilities import (
         get_server_capabilities,
     )
@@ -727,7 +727,9 @@ async def auto_convert(
         # Off the event loop (ticket #289): a regex call holds the GIL, but
         # the converter is long on a big document and every other client
         # waits behind it otherwise.
-        return await run_sync(markdown_to_tracwiki, text, flavor=flavor)
+        return await run_local(
+            markdown_to_tracwiki, text, flavor=flavor
+        )
     elif source_format == "tracwiki" and target_format == "markdown":
         raise ValueError(
             "TracWiki -> Markdown needs Trac's rendered HTML: use"

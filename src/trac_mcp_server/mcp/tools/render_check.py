@@ -14,7 +14,7 @@ import re
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local, run_sync
 from ...core.client import TracClient
 from ...preview.facts import Anchor, PreviewFacts, extract_facts
 from ...preview.live import (
@@ -374,7 +374,7 @@ async def _probe_all_sections(
     if not check_targets:
         return {}
     all_facts = [
-        await run_sync(extract_facts, s.html) for s in sections
+        await run_local(extract_facts, s.html) for s in sections
     ]
     probeable: list[str] = []
     for facts in all_facts:
@@ -385,7 +385,7 @@ async def _probe_all_sections(
         )
     if not probeable:
         return {}
-    return await run_sync(probe_targets, client, probeable, target_cap)
+    return await run_local(probe_targets, client, probeable, target_cap)
 
 
 def _section_name(section: dict) -> str:
@@ -731,7 +731,7 @@ async def _handle_ticket_render_check(
         client, sections, check_targets, target_cap
     )
     section_results = [
-        await run_sync(
+        await run_local(
             _section_result, s, probes, check_targets, include_html
         )
         for s in sections
@@ -766,7 +766,7 @@ async def _handle_wiki_render_check(
         client, sections, check_targets, target_cap
     )
     section_results = [
-        await run_sync(
+        await run_local(
             _section_result,
             section,
             probes,

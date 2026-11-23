@@ -113,6 +113,22 @@ def pytest_collection_finish(session):
         pytest.exit(problem, returncode=2)
 
 
+@pytest.fixture(autouse=True)
+def _restore_async_semaphore():
+    """Leave ``async_utils._semaphore`` as the test found it.
+
+    ``init_semaphore`` sets a process-wide asyncio semaphore, and
+    ``run_sync`` waits on it, so one test that initialises it and does not
+    restore it bounds (and can bind to a dead event loop) every test that
+    runs after it (Trac /trac_mcp_server #275).
+    """
+    from trac_mcp_server.core import async_utils
+
+    saved = async_utils._semaphore
+    yield
+    async_utils._semaphore = saved
+
+
 @pytest.fixture
 def mock_config():
     """Create a mock Config instance for testing."""

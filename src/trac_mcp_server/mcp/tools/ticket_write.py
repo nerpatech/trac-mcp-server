@@ -391,9 +391,9 @@ async def apply_workflow_fields(
     Shared by ticket_update and ticket_batch_update. `runner` is the
     sync-to-async bridge for the ticket_actions lookup (default
     run_sync, resolved at call time; the batch path passes
-    run_sync_limited so the lookup also counts against the batch's
-    thread limit; every RPC is bounded by TRAC_MAX_PARALLEL_REQUESTS at
-    ``TracClient._rpc_call`` regardless).
+    run_sync_limited, the same bridge under its batch name). Either way
+    the lookup waits for a TRAC_MAX_PARALLEL_REQUESTS slot before it
+    starts.
 
     Returns a refusal when `action` + a non-empty `resolution` cannot
     work (the action is not available for this ticket, or takes no

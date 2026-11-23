@@ -12,7 +12,9 @@ Environment variables:
     TRAC_PASSWORD: Trac password (required, unless an OIDC RPC URL is set)
     TRAC_INSECURE: Skip SSL verification (optional, default: false)
     TRAC_MAX_PARALLEL_REQUESTS: Max concurrent XML-RPC calls to Trac per
-        server process (optional, default: 5)
+        server process, shared by all instances and callers; a call waits for
+        a slot before it starts; link probes and page fetches are not counted
+        (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
     TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint
