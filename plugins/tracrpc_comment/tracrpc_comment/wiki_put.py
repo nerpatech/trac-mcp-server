@@ -37,11 +37,14 @@ import re
 
 from trac.core import Component, TracError, implements
 from trac.wiki.model import WikiPage
-
 from tracrpc.api import IXMLRPCHandler
 
-__all__ = ['WikiConditionalPutRPC', 'WikiVersionConflict',
-           'CONFLICT_FAULT_CODE', 'CONFLICT_MARKER_RE']
+__all__ = [
+    "WikiConditionalPutRPC",
+    "WikiVersionConflict",
+    "CONFLICT_FAULT_CODE",
+    "CONFLICT_MARKER_RE",
+]
 
 #: The XML-RPC ``faultCode`` of a version conflict. TracXMLRPC's
 #: ``send_rpc_error`` has no branch for a plain ``TracError`` subclass and
@@ -55,9 +58,10 @@ CONFLICT_FAULT_CODE = 409
 #: The fault message starts with this token, so a client can tell the
 #: conflict apart from every other fault without parsing prose, and read the
 #: page's current version out of it (``none`` when the page does not exist).
-CONFLICT_MARKER = '[wiki-version-conflict current_version=%s]'
+CONFLICT_MARKER = "[wiki-version-conflict current_version=%s]"
 CONFLICT_MARKER_RE = re.compile(
-    r"\[wiki-version-conflict current_version=(\d+|none)\]")
+    r"\[wiki-version-conflict current_version=(\d+|none)\]"
+)
 
 
 class WikiVersionConflict(TracError):
@@ -75,18 +79,24 @@ class WikiVersionConflict(TracError):
         self.expected_version = expected
         self.current_version = current
         if current is None:
-            detail = 'the page does not exist'
+            detail = "the page does not exist"
         else:
-            detail = 'its current version is %s' % current
+            detail = "its current version is %s" % current
         if expected == 0:
-            wanted = 'create it (expected_version 0: only if absent)'
+            wanted = "create it (expected_version 0: only if absent)"
         else:
-            wanted = 'update version %s' % expected
-        message = ('%s Version conflict on wiki page "%s": you tried to '
-                   '%s but %s.' % (
-                       CONFLICT_MARKER % (
-                           'none' if current is None else current),
-                       pagename, wanted, detail))
+            wanted = "update version %s" % expected
+        message = (
+            '%s Version conflict on wiki page "%s": you tried to '
+            "%s but %s."
+            % (
+                CONFLICT_MARKER
+                % ("none" if current is None else current),
+                pagename,
+                wanted,
+                detail,
+            )
+        )
         super(WikiVersionConflict, self).__init__(message)
 
 
@@ -102,15 +112,14 @@ def _current_version(page):
 
 
 class WikiConditionalPutRPC(Component):
-    """``wiki.putPageIfVersion``: a ``putPage`` with a version precondition.
-    """
+    """``wiki.putPageIfVersion``: a ``putPage`` with a version precondition."""
 
     implements(IXMLRPCHandler)
 
     # IXMLRPCHandler methods
 
     def xmlrpc_namespace(self):
-        return 'wiki'
+        return "wiki"
 
     def xmlrpc_methods(self):
         # Permission None for the same reason as TicketCommentRPC: the
@@ -118,12 +127,17 @@ class WikiConditionalPutRPC(Component):
         # write's real policy is per page (fine-grained policies such as
         # AuthzPolicy can grant or deny WIKI_MODIFY on one page). The checks
         # are made inside the method, against the page's resource.
-        yield (None, ((bool, str, str, dict, int),), self.putPageIfVersion)
+        yield (
+            None,
+            ((bool, str, str, dict, int),),
+            self.putPageIfVersion,
+        )
 
     # Exported methods
 
-    def putPageIfVersion(self, req, pagename, content, attributes,
-                         expected_version):
+    def putPageIfVersion(
+        self, req, pagename, content, attributes, expected_version
+    ):
         """Write `content` to wiki page `pagename` only if its current
         version is `expected_version`. Returns True.
 
@@ -145,11 +159,15 @@ class WikiConditionalPutRPC(Component):
         WIKI_MODIFY (WIKI_CREATE for a new page, WIKI_ADMIN for a read-only
         one) -- the same rules as `wiki.putPage`.
         """
-        if (not isinstance(expected_version, int)
-                or isinstance(expected_version, bool)
-                or expected_version < 0):
-            raise TracError('expected_version must be a non-negative '
-                            'integer, got %r' % (expected_version,))
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 0
+        ):
+            raise TracError(
+                "expected_version must be a non-negative "
+                "integer, got %r" % (expected_version,)
+            )
         attributes = attributes or {}
 
         try:
@@ -158,33 +176,36 @@ class WikiConditionalPutRPC(Component):
                 resource = page.resource
                 # The version is visible to anyone who may view the page,
                 # and to no one else: check that before reporting it.
-                req.perm(resource).require('WIKI_VIEW')
+                req.perm(resource).require("WIKI_VIEW")
 
                 current = _current_version(page)
                 if page.version != expected_version:
-                    raise WikiVersionConflict(pagename, expected_version,
-                                              current)
+                    raise WikiVersionConflict(
+                        pagename, expected_version, current
+                    )
 
                 # The same rules, in the same order, as stock putPage.
                 if page.readonly:
-                    req.perm(resource).require('WIKI_ADMIN')
+                    req.perm(resource).require("WIKI_ADMIN")
                 elif not page.exists:
-                    req.perm(resource).require('WIKI_CREATE')
+                    req.perm(resource).require("WIKI_CREATE")
                 else:
-                    req.perm(resource).require('WIKI_MODIFY')
+                    req.perm(resource).require("WIKI_MODIFY")
 
                 page.text = content
                 # Stock putPage sets readonly from the attribute whenever
                 # the caller is WIKI_ADMIN, so an admin who omits it clears
                 # the flag. Here it changes only when it is passed.
-                if ('readonly' in attributes
-                        and 'WIKI_ADMIN' in req.perm(resource)):
-                    page.readonly = 1 if attributes['readonly'] else 0
+                if (
+                    "readonly" in attributes
+                    and "WIKI_ADMIN" in req.perm(resource)
+                ):
+                    page.readonly = 1 if attributes["readonly"] else 0
 
                 # WikiPage.save itself: name validation, "Page not
                 # modified", the INSERT, the page-name cache, and the
                 # IWikiChangeListener notifications -- not reimplemented.
-                page.save(req.authname, attributes.get('comment'))
+                page.save(req.authname, attributes.get("comment"))
         except self.env.db_exc.IntegrityError:
             # The transaction has rolled back. Another write that committed
             # version + 1 between our read and our INSERT is the
@@ -197,5 +218,6 @@ class WikiConditionalPutRPC(Component):
             if latest.version == expected_version:
                 raise
             raise WikiVersionConflict(
-                pagename, expected_version, _current_version(latest))
+                pagename, expected_version, _current_version(latest)
+            )
         return True

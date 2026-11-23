@@ -65,14 +65,20 @@ Exit codes are the three-state contract of ``Rules/testing/
 ExitCodeContractHasThreeStates``:
 
   0  every check passed
-  1  a check failed -- including a daemon that is unreachable or refuses
-     the connection: that is a finding about the release
+  1  a check ran and failed: the daemon answered, and the answer was
+     wrong (a wrong release, auth not enforced, a tool missing, a read or
+     write failing)
   2  could not run: the token variable is unset or empty, the URL is
      malformed, a write target other than /trac_test was not explicitly
      allowed, --expect-sha is not 7 to 40 lowercase hex characters, or a
      module the checks need (httpx, the MCP SDK, this
      checkout's trac_mcp_server) cannot be imported. Decided before any
-     network call, and says so ("NOT RUN").
+     network call, and says so ("NOT RUN"). Also 2, after the attempt: the
+     daemon cannot be reached at all -- check 1's GET /healthz is refused,
+     its host does not resolve, or it times out (``FAIL 1 healthz: cannot
+     reach the daemon: ...``, then ``DAEMON SMOKE NOT RUN at check 1``).
+     Nothing answered, so there is no verdict on the release. Once
+     /healthz has answered, a connection failure in a later check is 1.
 
 The token is never printed. It is sent only as a bearer header; every
 message built from an exception or a server reply passes through
@@ -129,6 +135,11 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 class CheckFailed(Exception):
     """A check's verdict: the reason is the message."""
+
+
+class DaemonUnreachable(CheckFailed):
+    """Check 1 got no answer at all (refused, unresolvable, timed out):
+    there is no verdict, so the run is NOT RUN (exit 2), not FAILED."""
 
 
 # ---------------------------------------------------------------------------
@@ -419,8 +430,16 @@ async def check_healthz(
 ) -> str:
     import httpx
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
-        response = await http.get(f"{base}/healthz")
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
+            response = await http.get(f"{base}/healthz")
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        # ConnectError covers a refused connection and a DNS failure;
+        # TimeoutException a connect, read or pool timeout. Any other
+        # transport error means something answered, and stays a FAIL.
+        raise DaemonUnreachable(
+            "cannot reach the daemon: " + describe_exception(exc, None)
+        ) from None
     if response.status_code != 200:
         raise CheckFailed(
             f"GET /healthz answered {response.status_code}"
@@ -818,9 +837,15 @@ async def check_comment_plugin(session) -> str:
 
 
 async def _step(reporter, token, n, name, make_check) -> bool:
-    """Run one check; print its line; True when it passed."""
+    """Run one check; print its line; True when it passed.
+
+    ``DaemonUnreachable`` is printed as the check's FAIL line and then
+    re-raised, for ``run_smoke`` to end the run as NOT RUN."""
     try:
         detail = await make_check()
+    except DaemonUnreachable as exc:
+        reporter.failed(n, name, scrub(str(exc), token))
+        raise
     except CheckFailed as exc:
         reporter.failed(n, name, scrub(str(exc), token))
         return False
@@ -933,9 +958,17 @@ async def run_smoke(
         return await check_auth_enforced(base)
 
     for n, make_check in ((1, healthz), (2, auth)):
-        if not await _step(
-            reporter, token, n, _CHECK_NAMES[n], make_check
-        ):
+        try:
+            passed = await _step(
+                reporter, token, n, _CHECK_NAMES[n], make_check
+            )
+        except DaemonUnreachable:
+            reporter.final(
+                f"DAEMON SMOKE NOT RUN at check {n}: the daemon could "
+                f"not be reached -- {_NOT_RUN_TAIL}"
+            )
+            return EXIT_NOT_RUN
+        if not passed:
             reporter.final(f"DAEMON SMOKE FAILED at check {n}")
             return EXIT_FAILED
 

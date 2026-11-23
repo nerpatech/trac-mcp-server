@@ -19,7 +19,7 @@ from typing import NamedTuple, cast
 try:
     import fcntl
 except ImportError:  # not POSIX
-    fcntl = None  # type: ignore[assignment]
+    fcntl = None
 
 
 class JsonFormatter(logging.Formatter):

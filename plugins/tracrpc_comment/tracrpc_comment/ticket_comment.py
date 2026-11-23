@@ -12,23 +12,23 @@ from trac.core import Component, TracError, implements
 from trac.resource import Resource
 from trac.ticket.model import Ticket
 from trac.util.datefmt import from_utimestamp
-
 from tracrpc.api import IXMLRPCHandler
 
-__all__ = ['TicketCommentRPC']
+__all__ = ["TicketCommentRPC"]
 
 
 def _comment_resource(ticket, cnum):
     """The ``comment`` resource a permission check must be scoped to."""
-    return Resource('comment', cnum, parent=ticket.resource)
+    return Resource("comment", cnum, parent=ticket.resource)
 
 
 def _require_change(ticket, cnum):
     """Return the change-set for ``cnum``, or raise as Trac's UI does."""
     change = ticket.get_change(cnum)
     if not change:
-        raise TracError("Comment %s not found on ticket #%s"
-                        % (cnum, ticket.id))
+        raise TracError(
+            "Comment %s not found on ticket #%s" % (cnum, ticket.id)
+        )
     return change
 
 
@@ -41,8 +41,11 @@ def _substantive_fields(change):
     history). Those are exactly the fields a delete would REVERT, so this is
     the set the caller has to be warned about.
     """
-    return sorted(name for name in change['fields']
-                  if name != 'comment' and not name.startswith('_'))
+    return sorted(
+        name
+        for name in change["fields"]
+        if name != "comment" and not name.startswith("_")
+    )
 
 
 def _quote_of(change, cnum):
@@ -53,12 +56,12 @@ def _quote_of(change, cnum):
     then a blank line. Kept byte-compatible with the UI so a reply posted
     over RPC is indistinguishable from one typed in the browser.
     """
-    original = change['fields'].get('comment', {}).get('new', '') or ''
-    author = change.get('author') or ''
-    lines = ['Replying to [comment:%s %s]:' % (cnum, author)]
-    lines += ['> %s' % line for line in original.splitlines()]
-    lines += ['', '']
-    return '\n'.join(lines)
+    original = change["fields"].get("comment", {}).get("new", "") or ""
+    author = change.get("author") or ""
+    lines = ["Replying to [comment:%s %s]:" % (cnum, author)]
+    lines += ["> %s" % line for line in original.splitlines()]
+    lines += ["", ""]
+    return "\n".join(lines)
 
 
 class TicketCommentRPC(Component):
@@ -69,7 +72,7 @@ class TicketCommentRPC(Component):
     # IXMLRPCHandler methods
 
     def xmlrpc_namespace(self):
-        return 'ticket'
+        return "ticket"
 
     def xmlrpc_methods(self):
         # Every permission below is declared as None -- NOT because these
@@ -88,11 +91,17 @@ class TicketCommentRPC(Component):
         # resource, the same way trac/ticket/web_ui.py:606 and
         # tracopt/ticket/deleter.py:81 do it.
         yield (None, ((bool, int, int, str),), self.editComment)
-        yield (None, ((bool, int, int), (bool, int, int, bool)),
-               self.deleteComment)
+        yield (
+            None,
+            ((bool, int, int), (bool, int, int, bool)),
+            self.deleteComment,
+        )
         yield (None, ((list, int, int),), self.getCommentHistory)
-        yield (None, ((int, int, int, str), (int, int, int, str, bool)),
-               self.replyToComment)
+        yield (
+            None,
+            ((int, int, int, str), (int, int, int, str, bool)),
+            self.replyToComment,
+        )
         yield (None, ((list, int, str),), self.getChangeAt)
 
     # Exported methods
@@ -110,8 +119,9 @@ class TicketCommentRPC(Component):
         ticket = Ticket(self.env, id)
         change = _require_change(ticket, cnum)
         req.perm(_comment_resource(ticket, cnum)).require(
-            'TICKET_EDIT_COMMENT')
-        ticket.modify_comment(change['date'], req.authname, comment)
+            "TICKET_EDIT_COMMENT"
+        )
+        ticket.modify_comment(change["date"], req.authname, comment)
         return True
 
     def deleteComment(self, req, id, cnum, force=False):
@@ -129,7 +139,7 @@ class TicketCommentRPC(Component):
         """
         ticket = Ticket(self.env, id)
         change = _require_change(ticket, cnum)
-        req.perm(ticket.resource).require('TICKET_ADMIN')
+        req.perm(ticket.resource).require("TICKET_ADMIN")
 
         reverted = _substantive_fields(change)
         if reverted and not force:
@@ -138,9 +148,10 @@ class TicketCommentRPC(Component):
                 "with changes to %s, and deleting it would revert them to "
                 "their previous values. Re-read the ticket, then pass "
                 "force=True if that is what you intend."
-                % (cnum, ticket.id, ', '.join(reverted)))
+                % (cnum, ticket.id, ", ".join(reverted))
+            )
 
-        ticket.delete_change(cdate=change['date'])
+        ticket.delete_change(cdate=change["date"])
         return True
 
     def getCommentHistory(self, req, id, cnum):
@@ -153,12 +164,14 @@ class TicketCommentRPC(Component):
         Requires TICKET_VIEW on the ticket.
         """
         ticket = Ticket(self.env, id)
-        req.perm(ticket.resource).require('TICKET_VIEW')
+        req.perm(ticket.resource).require("TICKET_VIEW")
         history = ticket.get_comment_history(cnum)
         if not history:
             return []
-        return [[rev, date, author, comment]
-                for rev, date, author, comment in history]
+        return [
+            [rev, date, author, comment]
+            for rev, date, author, comment in history
+        ]
 
     def replyToComment(self, req, id, cnum, comment, quote=False):
         """Post `comment` on ticket `id` as a threaded reply to `cnum`.
@@ -183,7 +196,7 @@ class TicketCommentRPC(Component):
         """
         ticket = Ticket(self.env, id)
         parent = _require_change(ticket, cnum)
-        req.perm(ticket.resource).require('TICKET_APPEND')
+        req.perm(ticket.resource).require("TICKET_APPEND")
 
         body = comment
         if quote:
@@ -210,18 +223,21 @@ class TicketCommentRPC(Component):
         Requires TICKET_VIEW on the ticket.
         """
         ticket = Ticket(self.env, id)
-        req.perm(ticket.resource).require('TICKET_VIEW')
+        req.perm(ticket.resource).require("TICKET_VIEW")
         if not (isinstance(ts, str) and ts.isascii() and ts.isdigit()):
             raise TracError(
-                "ts must be a string of integer microseconds, got %r" % (ts,))
+                "ts must be a string of integer microseconds, got %r"
+                % (ts,)
+            )
         try:
             when = from_utimestamp(int(ts))
         except (OverflowError, ValueError, OSError):
             raise TracError(
                 "ts must be a string of integer microseconds, got %r"
-                % (ts,))
+                % (ts,)
+            )
         change = ticket.get_change(cdate=when)
-        if not change or 'comment' not in change['fields']:
+        if not change or "comment" not in change["fields"]:
             return []
-        comment = change['fields']['comment']
-        return [comment['old'], change['author'], comment['new']]
+        comment = change["fields"]["comment"]
+        return [comment["old"], change["author"], comment["new"]]

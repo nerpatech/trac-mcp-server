@@ -1,8 +1,9 @@
 {
-  "include": ["src"],
+  "include": ["src", "scripts/check_env.py"],
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.12",
   "extraPaths": ["src"],
+  "enableTypeIgnoreComments": false,
   "reportMissingModuleSource": "none"
 }

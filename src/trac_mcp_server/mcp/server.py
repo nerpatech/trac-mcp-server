@@ -333,7 +333,7 @@ async def handle_list_resource_templates() -> list[
     return await handle_list_wiki_resource_templates()
 
 
-@server.read_resource()  # type: ignore[arg-type]  # MCP Url type mismatch
+@server.read_resource()  # pyright: ignore[reportArgumentType]  # MCP Url type mismatch
 async def handle_read_resource(uri: Url) -> str:
     """Read a Trac resource by URI.
 
@@ -482,7 +482,7 @@ async def handle_call_tool(
     result = await registry.call_tool(
         name,
         args,
-        client,  # type: ignore[arg-type]  # None only for list_instances (#110)
+        client,  # pyright: ignore[reportArgumentType]  # None only for list_instances (#110)
     )
     # With OIDC per-user auth there is exactly one instance and no
     # `instance` argument, so the echo carries no information -- and as a

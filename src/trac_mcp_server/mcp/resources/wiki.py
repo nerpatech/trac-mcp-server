@@ -27,7 +27,7 @@ _MAX_VERSION = 2**31 - 1
 # does not offer to read a page literally named "{page_name}".
 WIKI_RESOURCES = [
     types.Resource(
-        uri="trac://wiki/_index",  # type: ignore[arg-type]  # MCP AnyUrl/Url type mismatch
+        uri="trac://wiki/_index",  # pyright: ignore[reportArgumentType]  # MCP AnyUrl/Url type mismatch
         name="Wiki Page Index",
         description=(
             "List all wiki pages in a hierarchical tree structure. "

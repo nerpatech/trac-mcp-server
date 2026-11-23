@@ -125,7 +125,7 @@ def _load_yaml_with_includes(
 
     with open(path, "r", encoding="utf-8") as fh:
         loader = ConfigLoader(fh)
-        loader._include_stack = _include_stack  # type: ignore[attr-defined]
+        loader._include_stack = _include_stack  # pyright: ignore[reportAttributeAccessIssue]
         try:
             return loader.get_single_data()
         finally:
@@ -324,6 +324,6 @@ def load_hierarchical_config() -> dict[str, Any]:
             )
 
     # Apply env var interpolation after merge
-    merged = _interpolate_recursive(merged)  # type: ignore[assignment]
+    merged = _interpolate_recursive(merged)
 
     return merged
