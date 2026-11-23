@@ -21,7 +21,11 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import TracBusyError
+from ...core.async_utils import (
+    TracBusyError,
+    begin_slot_deadline,
+    end_slot_deadline,
+)
 from ...core.client import TracClient, WikiPageStoredReadbackFailed
 from ...core.scope import DestinationOutOfScope
 
@@ -147,6 +151,11 @@ class ToolRegistry:
         if spec is None:
             raise ValueError(f"Unknown tool: {name}")
         args = _normalize_arg_aliases(name, arguments or {})
+        # Trac /trac_mcp_server #275: every wait for a request slot in
+        # this call ends at ONE moment, SLOT_WAIT_TIMEOUT from now, so a
+        # tool that makes several slotted calls in turn cannot hold its
+        # write past the MCP client's timeout (a retry would post twice).
+        slot_scope = begin_slot_deadline()
         try:
             return await spec.handler(client, args)
         except xmlrpc.client.Fault as e:
@@ -198,6 +207,8 @@ class ToolRegistry:
                 str(e),
                 "Contact Trac administrator or retry later.",
             )
+        finally:
+            end_slot_deadline(slot_scope)
 
 
 # Exact tool name -> {alias: canonical}. Checked before any prefix match,

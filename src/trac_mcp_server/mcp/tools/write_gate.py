@@ -48,7 +48,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import run_local, run_sync
+from ...core.async_utils import TracBusyError, run_local, run_sync
 from ...core.client import TracClient
 from ...preview.checks import build_warnings
 from ...preview.facts import extract_facts
@@ -234,6 +234,12 @@ async def check_write(
             known_comment_numbers,
             attachment_names,
         )
+    except TracBusyError:
+        # Trac /trac_mcp_server #275: no request slot is not "the gate
+        # could not do its job". Failing open here would send the write
+        # with its link check skipped; nothing has been sent yet, so
+        # let the caller report server_busy and the retry be checked.
+        raise
     except Exception as exc:
         # The gate could not do its job. See the module docstring: a
         # failure HERE is not the author's fault, and refusing would
@@ -378,6 +384,11 @@ async def known_comment_numbers(
     """
     try:
         changelog = await runner(client.get_ticket_changelog, ticket_id)
+    except TracBusyError:
+        # Not a failed read: no slot, nothing sent (#275). Failing open
+        # would skip the dangling-comment check on a write that then goes
+        # out; the busy propagates and the write is never sent.
+        raise
     except Exception:
         return None
 
@@ -460,6 +471,9 @@ async def attachment_names(
                 and item
                 and isinstance(item[0], str)
             )
+    except TracBusyError:
+        # No slot, nothing sent (#275): not "attachments unreadable".
+        raise
     except Exception as exc:
         target = wiki_page if wiki_page is not None else ticket_id
         logger.warning(

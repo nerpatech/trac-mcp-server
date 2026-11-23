@@ -40,9 +40,11 @@ _COMMENT_LOOKUP_TIMEOUT = 10.0
 # included (#275). ``_COMMENT_LOOKUP_TIMEOUT`` counts only the time its
 # RPCs run, so on its own a starved queue could hold ``ticket_update``
 # past the MCP client's timeout, and the agent would retry and post the
-# comment twice. Sized above the running budget so it fires only when
-# the queue, not Trac's answer, is what is slow.
-_COMMENT_LOOKUP_WALL_TIMEOUT = 30.0
+# comment twice. Sized above the slot-wait cap (``SLOT_WAIT_TIMEOUT``,
+# 30 s, the longest a call waits for a slot), so the cap's own "no
+# request slot" answer comes first and this fires only for a lookup that
+# waited and then ran too long.
+_COMMENT_LOOKUP_WALL_TIMEOUT = 45.0
 # What a comment lookup says when it got no request slot (the server is
 # busy), as opposed to a read that ran and was too slow.
 _LOOKUP_NO_SLOT = (
@@ -460,6 +462,10 @@ async def apply_workflow_fields(
 
     try:
         actions = await runner(client.get_ticket_actions, ticket_id)
+    except TracBusyError:
+        # No slot, nothing sent (#275): the update must not go out as a
+        # bare resolution without its workflow action. server_busy.
+        raise
     except Exception:
         actions = None
     if not isinstance(actions, (list, tuple)):

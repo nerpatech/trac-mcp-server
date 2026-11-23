@@ -18,8 +18,13 @@ Environment variables:
         ticket_render_check's ticket-page fetch runs together with that
         tool's RPCs and is counted; ping is not counted. A batch occupies at
         most N slots at a time, so single calls from other callers interleave.
-        A call that waits more than 30 s for a slot fails with server_busy and
-        nothing is sent (optional, default: 5)
+        A tool call waits at most 30 s in total for slots (each batch item
+        gets its own 30 s), then fails with server_busy and nothing is sent.
+        On Python 3.10 the wait is not strictly first-come-first-served, so an
+        old waiter can occasionally get server_busy while a newer call gets
+        through (production runs 3.12); and because the limit is one per
+        process, a stalled instance can hold every slot, so calls to healthy
+        instances fail with server_busy after that wait (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
     TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint

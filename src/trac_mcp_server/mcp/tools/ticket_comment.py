@@ -28,7 +28,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import TracBusyError, run_sync
 from ...core.client import TracClient
 from ...core.faults import is_missing_method_fault
 from .errors import build_error_response, compact_time
@@ -332,6 +332,10 @@ async def _handle_edit(
         if history:
             previous_body = str(history[-1][3])
             previous_snippet = previous_body[:80]
+    except TracBusyError:
+        # No slot, nothing sent (#275): not "no history". Skipping past
+        # it would send the edit anyway; report server_busy instead.
+        raise
     except Exception:
         previous_snippet = None
 
