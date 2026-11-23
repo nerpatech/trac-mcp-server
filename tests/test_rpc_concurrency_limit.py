@@ -439,7 +439,7 @@ async def test_deadline_times_out_a_running_call_and_keeps_its_slot(
     client = _client(server)
 
     server.delay = 0.6
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(
             async_utils.run_sync_deadline(0.2, client.get_ticket, 1),
             TIMEOUT,
@@ -459,7 +459,7 @@ async def test_deadline_uninitialised_runs_and_times_out(server):
     client = _client(server)
 
     server.delay = 0.6
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await async_utils.run_sync_deadline(0.2, client.get_ticket, 1)
     server.delay = 0.05
     assert (

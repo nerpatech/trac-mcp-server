@@ -1009,11 +1009,14 @@ async def _find_posted_comment(
     slot until its thread ends. See ``_lookup_posted_comment``.
     """
     try:
-        async with asyncio.timeout(_COMMENT_LOOKUP_WALL_TIMEOUT):
-            return await _lookup_posted_comment(
+        return await asyncio.wait_for(
+            _lookup_posted_comment(
                 client, ticket_id, comment, update_result, new_ts
-            )
-    except TimeoutError:
+            ),
+            _COMMENT_LOOKUP_WALL_TIMEOUT,
+        )
+    # One class from 3.11; two on 3.10, which the package still supports.
+    except (asyncio.TimeoutError, TimeoutError):
         return _PostedComment(failure="changelog read timed out")
 
 
@@ -1060,7 +1063,7 @@ async def _lookup_posted_comment(
         changelog = await run_sync_deadline(
             budget, client.get_ticket_changelog, ticket_id
         )
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return _PostedComment(failure="changelog read timed out")
     except Exception:
         return _PostedComment(failure="changelog unreadable")

@@ -3009,7 +3009,13 @@ class TestCommentLookupViaPlugin(unittest.TestCase):
         timeouts = []
 
         async def recording_wait_for(aw, timeout=None):
-            timeouts.append(timeout)
+            # The wall-clock cap around the whole lookup is not a run
+            # phase: record only the deadlines of the RPC calls.
+            if (
+                getattr(aw, "__qualname__", "")
+                != "_lookup_posted_comment"
+            ):
+                timeouts.append(timeout)
             return await real_wait_for(aw, timeout=timeout)
 
         async def plugin_takes_a_while():
