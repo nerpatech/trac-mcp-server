@@ -64,8 +64,10 @@ async def _start_in_slot(
         # What asyncio.to_thread does: the caller's context variables
         # travel into the thread.
         ctx = contextvars.copy_context()
-        fut = asyncio.get_running_loop().run_in_executor(
-            None, functools.partial(ctx.run, func, *args, **kwargs)
+        fut: asyncio.Future[T] = (
+            asyncio.get_running_loop().run_in_executor(
+                None, functools.partial(ctx.run, func, *args, **kwargs)
+            )
         )
     except BaseException:
         semaphore.release()
@@ -159,8 +161,12 @@ async def run_sync_deadline(
     Returns:
         Result of func(*args, **kwargs)
     """
-    budget = timeout if isinstance(timeout, RunBudget) else None
-    seconds = budget.remaining if budget is not None else timeout
+    budget: RunBudget | None
+    seconds: float | None
+    if isinstance(timeout, RunBudget):
+        budget, seconds = timeout, timeout.remaining
+    else:
+        budget, seconds = None, timeout
     ran: list[float] = []
     run = func
     if budget is not None:
