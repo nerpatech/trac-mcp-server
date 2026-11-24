@@ -40,10 +40,13 @@ def init_semaphore(max_parallel: int = 2) -> None:
     ``trac-rpc``, so a call that holds a slot always gets a thread at
     once.
 
-    Re-initialising while calls are queued on the old semaphore is not
-    supported (production calls this once, in the server's lifespan):
-    such a call would submit to the executor this shut down. Calls
-    already running when it is called finish on the old executor.
+    Production calls this once, at startup (the server's lifespan).
+    Re-initialising is for tests, and calls in flight across it get
+    mixed pools: a call already running finishes on the old executor,
+    and a call queued on the old semaphore runs on the NEW pool
+    (``_start_in_slot`` reads ``_rpc_executor`` after its acquire)
+    while it holds, and later releases, a slot of the OLD semaphore,
+    so up to 2N requests can be in flight for a while.
     """
     global _semaphore, _max_parallel, _rpc_executor
     previous = _rpc_executor
@@ -245,7 +248,15 @@ async def run_sync_deadline(
         got_slot = True
         if budget is not None:
             budget.waiting = False
-        return await asyncio.wait_for(asyncio.shield(fut), seconds)
+        # ``asyncio.wait`` leaves ``fut`` alone when the caller is
+        # cancelled or the timeout passes (the shield's job), and it
+        # always lets a cancellation through: ``wait_for`` over a
+        # shielded future returns the result and swallows a cancel that
+        # lands in the step ``fut`` completes in, on Python 3.10/3.11.
+        done, _ = await asyncio.wait({fut}, timeout=seconds)
+        if fut not in done:
+            raise asyncio.TimeoutError()
+        return fut.result()
     finally:
         if budget is not None and got_slot:
             # Its thread has ended: what it ran. Still running (timed

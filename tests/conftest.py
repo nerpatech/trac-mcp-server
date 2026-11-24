@@ -135,6 +135,12 @@ def _restore_async_semaphore():
         made.shutdown(wait=False)
     async_utils._semaphore = saved
     async_utils._max_parallel = saved_size
+    # A test that re-initialised made ``init_semaphore`` shut the saved
+    # pool down: restore None (the uninitialised state), not a dead pool.
+    if saved_executor is not None and getattr(
+        saved_executor, "_shutdown", False
+    ):
+        saved_executor = None
     async_utils._rpc_executor = saved_executor
 
 

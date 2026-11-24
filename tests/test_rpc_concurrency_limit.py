@@ -842,6 +842,56 @@ async def test_a_call_cancelled_while_queued_charges_the_budget_nothing(
     assert server.paths == []
 
 
+async def test_cancel_in_the_step_the_call_finishes_still_cancels(
+    monkeypatch,
+):
+    """The caller's cancellation is not lost when it lands in the same
+    loop step in which the call's future completes. ``wait_for`` over a
+    shielded future returned the result and swallowed the
+    ``CancelledError`` there on Python 3.10 and 3.11 (``asyncio.wait``
+    does not), so a cancelled ``run_sync_deadline`` went on to its
+    caller's next, unbounded step. The slot is released exactly once.
+
+    The future is a loop future the test completes itself, so the
+    ``set_result`` and the ``cancel`` are guaranteed to share one step
+    (a real thread's completion cannot be timed that exactly). On 3.12
+    ``wait_for`` already propagates, so this passes before and after the
+    change there; it fails on the old code under 3.10 and 3.11.
+    """
+    init_semaphore(1)
+    semaphore = async_utils._semaphore
+    fut = asyncio.get_running_loop().create_future()
+
+    async def start_in_slot(func, args, kwargs):
+        await semaphore.acquire()
+        fut.add_done_callback(
+            lambda f: async_utils._slot_released(semaphore, f)
+        )
+        return fut
+
+    monkeypatch.setattr(async_utils, "_start_in_slot", start_in_slot)
+
+    call = asyncio.ensure_future(
+        async_utils.run_sync_deadline(10.0, lambda: 1)
+    )
+    await _wait_until(semaphore.locked)
+    await asyncio.sleep(0.05)  # the call is now waiting on its future
+
+    fut.set_result(1)
+    call.cancel()  # same step: the future is done, the caller cancelled
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(call, TIMEOUT)
+
+    assert call.cancelled()
+    assert fut.done() and not fut.cancelled(), (
+        "the shield was cancelled"
+    )
+    assert not semaphore.locked(), "the slot was not released"
+    await asyncio.wait_for(semaphore.acquire(), TIMEOUT)
+    assert semaphore.locked(), "the slot was released twice"
+    semaphore.release()
+
+
 def _probe_registry(handler):
     """A ``ToolRegistry`` serving one tool, ``probe_tool``, whose handler
     is ``handler(client, args)``: the real ``call_tool`` around a
