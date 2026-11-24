@@ -16,7 +16,7 @@ from ...converters.flavors import (
     flavor_problem,
 )
 from ...converters.markdown_to_tracwiki import convert_with_warnings
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local, run_sync
 from ...core.client import TracClient
 from ...preview.checks import build_warnings
 from ...preview.facts import extract_facts
@@ -235,7 +235,7 @@ async def _handle_convert_preview(
         tracwiki = content
     else:
         try:
-            conversion = await run_sync(
+            conversion = await run_local(
                 convert_with_warnings, content, flavor=flavor
             )
         except ValueError as e:
@@ -259,7 +259,7 @@ async def _handle_convert_preview(
             markdown_source = conversion.normalised_source
 
     rendered_html = await run_sync(client.wiki_to_html, tracwiki)
-    facts = await run_sync(extract_facts, rendered_html)
+    facts = await run_local(extract_facts, rendered_html)
 
     probes: dict[str, dict] = {}
     if check_targets:
@@ -267,7 +267,7 @@ async def _handle_convert_preview(
             a.href for a in facts.anchors if is_probeable_href(a.href)
         ]
         if probeable_hrefs:
-            probes = await run_sync(
+            probes = await run_local(
                 probe_targets,
                 client,
                 probeable_hrefs,
@@ -289,7 +289,7 @@ async def _handle_convert_preview(
 
     # Off the event loop (ticket #289): the checks scan the whole
     # document and this runs on a shared daemon's loop.
-    warnings = await run_sync(
+    warnings = await run_local(
         build_warnings,
         markdown_source=markdown_source,
         tracwiki=tracwiki,

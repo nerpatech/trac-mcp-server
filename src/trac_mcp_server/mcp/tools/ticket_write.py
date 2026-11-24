@@ -15,7 +15,7 @@ from typing import Any, NamedTuple
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import RunBudget, run_sync, run_sync_deadline
 from ...core.client import (
     TicketCreateTimeout,
     TicketUpdateConflict,
@@ -31,6 +31,19 @@ from .write_gate import TARGET_CAP_SCHEMA, gate_or_refuse
 # (#124). The write has already landed by then, so a slow read costs the
 # number, never the write.
 _COMMENT_LOOKUP_TIMEOUT = 10.0
+# The same lookup is also capped in WALL-CLOCK time, queue for a slot
+# included (#275). ``_COMMENT_LOOKUP_TIMEOUT`` counts only the time its
+# RPCs run, so on its own a starved queue could hold ``ticket_update``
+# past the MCP client's timeout, and the agent would retry and post the
+# comment twice. Sized above the running budget so it fires only when
+# the queue, not Trac's answer, is what is slow.
+_COMMENT_LOOKUP_WALL_TIMEOUT = 30.0
+# What a comment lookup says when no request slot freed up in time (the
+# server is busy), as opposed to a read that ran and was too slow.
+_LOOKUP_NO_SLOT = (
+    "no request slot freed up for the lookup in time (server busy)"
+)
+_LOOKUP_TIMED_OUT = "changelog read timed out"
 
 
 def _build_ticket_create_tool() -> types.Tool:
@@ -391,7 +404,9 @@ async def apply_workflow_fields(
     Shared by ticket_update and ticket_batch_update. `runner` is the
     sync-to-async bridge for the ticket_actions lookup (default
     run_sync, resolved at call time; the batch path passes
-    run_sync_limited so the lookup honours TRAC_MAX_PARALLEL_REQUESTS).
+    run_sync_limited, the same bridge under its batch name). Either way
+    the lookup waits for a TRAC_MAX_PARALLEL_REQUESTS slot before it
+    starts.
 
     Returns a refusal when `action` + a non-empty `resolution` cannot
     work (the action is not available for this ticket, or takes no
@@ -932,12 +947,13 @@ async def _comment_from_plugin(
     ticket_id: int,
     comment: str,
     new_ts: str | None,
-    timeout: float,
+    budget: RunBudget,
 ) -> _PostedComment | None:
     """The posted comment as the plugin's ``ticket.getChangeAt`` names it,
     or None when the changelog scan has to answer instead.
 
-    ``timeout`` is what is left of the read-back's one deadline.
+    ``budget`` is what is left of the read-back's one deadline; the call
+    charges it the time its RPC ran.
 
     The answer is taken only when it is certainly this write's. tracrpc's
     ``ticket.update`` reads ``_ts`` back from the database AFTER saving,
@@ -952,12 +968,11 @@ async def _comment_from_plugin(
     timeout -- gives None, and the scan then reports a genuine mismatch
     itself or fails cleanly. So this path never reports a mismatch.
     """
-    if new_ts is None or timeout <= 0:
+    if new_ts is None or budget.remaining <= 0:
         return None
     try:
-        found = await asyncio.wait_for(
-            run_sync(client.get_ticket_change_at, ticket_id, new_ts),
-            timeout=timeout,
+        found = await run_sync_deadline(
+            budget, client.get_ticket_change_at, ticket_id, new_ts
         )
     except Exception:
         return None
@@ -991,6 +1006,46 @@ async def _find_posted_comment(
     update_result: Any,
     new_ts: str | None,
 ) -> _PostedComment:
+    """Find the comment a ``ticket.update`` just posted, in at most
+    ``_COMMENT_LOOKUP_WALL_TIMEOUT`` seconds of wall-clock time.
+
+    Past that cap the answer is the failure that matches where the
+    lookup was: "no request slot" when a phase was still waiting for
+    its slot, "changelog read timed out" when a read was running. The
+    work is cancelled: a call still queued for a slot never sends, and
+    one already running keeps its slot until its thread ends. See
+    ``_lookup_posted_comment``.
+    """
+    budget = RunBudget(_COMMENT_LOOKUP_TIMEOUT)
+    try:
+        return await asyncio.wait_for(
+            _lookup_posted_comment(
+                client,
+                ticket_id,
+                comment,
+                update_result,
+                new_ts,
+                budget,
+            ),
+            _COMMENT_LOOKUP_WALL_TIMEOUT,
+        )
+    # One class from 3.11; two on 3.10, which the package still supports.
+    except (asyncio.TimeoutError, TimeoutError):
+        return _PostedComment(
+            failure=(
+                _LOOKUP_NO_SLOT if budget.waiting else _LOOKUP_TIMED_OUT
+            )
+        )
+
+
+async def _lookup_posted_comment(
+    client: TracClient,
+    ticket_id: int,
+    comment: str,
+    update_result: Any,
+    new_ts: str | None,
+    budget: RunBudget,
+) -> _PostedComment:
     """Find the comment a ``ticket.update`` just posted.
 
     Never raises: the write has already landed, so a failed lookup is
@@ -1001,7 +1056,9 @@ async def _find_posted_comment(
     used only when its author and text are this write's (see
     ``_comment_from_plugin`` for why: the ``_ts`` read-back race); in
     every other case the whole changelog is read and scanned. Plugin and
-    scan share ONE deadline, ``_COMMENT_LOOKUP_TIMEOUT`` in all.
+    scan share ONE budget of running time, ``_COMMENT_LOOKUP_TIMEOUT``
+    in all: each RPC is charged the time it ran, not the time it spent
+    queued for a slot (``RunBudget``).
 
     The scan cannot count the number from the changelog, because a
     description-only edit consumes one too; it is read off the row.
@@ -1009,15 +1066,8 @@ async def _find_posted_comment(
     the update's second; if several remain (another write of ours in the
     same second) the text sent picks among them.
     """
-    deadline = (
-        asyncio.get_running_loop().time() + _COMMENT_LOOKUP_TIMEOUT
-    )
     via_plugin = await _comment_from_plugin(
-        client,
-        ticket_id,
-        comment,
-        new_ts,
-        deadline - asyncio.get_running_loop().time(),
+        client, ticket_id, comment, new_ts, budget
     )
     if via_plugin is not None:
         return via_plugin
@@ -1025,16 +1075,14 @@ async def _find_posted_comment(
     epoch = _update_change_epoch(update_result, new_ts)
     if epoch is None:
         return _PostedComment(failure="no change time in Trac's reply")
-    remaining = deadline - asyncio.get_running_loop().time()
-    if remaining <= 0:
-        return _PostedComment(failure="changelog read timed out")
+    if budget.remaining <= 0:
+        return _PostedComment(failure=_LOOKUP_TIMED_OUT)
     try:
-        changelog = await asyncio.wait_for(
-            run_sync(client.get_ticket_changelog, ticket_id),
-            timeout=remaining,
+        changelog = await run_sync_deadline(
+            budget, client.get_ticket_changelog, ticket_id
         )
-    except TimeoutError:
-        return _PostedComment(failure="changelog read timed out")
+    except (asyncio.TimeoutError, TimeoutError):
+        return _PostedComment(failure=_LOOKUP_TIMED_OUT)
     except Exception:
         return _PostedComment(failure="changelog unreadable")
 

@@ -113,6 +113,37 @@ def pytest_collection_finish(session):
         pytest.exit(problem, returncode=2)
 
 
+@pytest.fixture(autouse=True)
+def _restore_async_semaphore():
+    """Leave ``async_utils._semaphore`` as the test found it.
+
+    ``init_semaphore`` sets a process-wide asyncio semaphore, and
+    ``run_sync`` waits on it, so one test that initialises it and does not
+    restore it bounds (and can bind to a dead event loop) every test that
+    runs after it (Trac /trac_mcp_server #275).
+    """
+    from trac_mcp_server.core import async_utils
+
+    saved = async_utils._semaphore
+    saved_size = async_utils._max_parallel
+    saved_executor = async_utils._rpc_executor
+    yield
+    # ``init_semaphore`` makes a thread pool too: stop any a test made
+    # (the one it replaced was already shut down by the next init).
+    made = async_utils._rpc_executor
+    if made is not None and made is not saved_executor:
+        made.shutdown(wait=False)
+    async_utils._semaphore = saved
+    async_utils._max_parallel = saved_size
+    # A test that re-initialised made ``init_semaphore`` shut the saved
+    # pool down: restore None (the uninitialised state), not a dead pool.
+    if saved_executor is not None and getattr(
+        saved_executor, "_shutdown", False
+    ):
+        saved_executor = None
+    async_utils._rpc_executor = saved_executor
+
+
 @pytest.fixture
 def mock_config():
     """Create a mock Config instance for testing."""

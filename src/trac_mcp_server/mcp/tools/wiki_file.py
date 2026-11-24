@@ -41,7 +41,7 @@ from ...converters.markdown_to_tracwiki import (
     describe_list_item_split,
     find_list_item_splits,
 )
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local, run_sync
 from ...core.client import (
     TracClient,
     WikiPageConflict,
@@ -498,7 +498,7 @@ async def _handle_push(
         # because they have a filename to go on, and removed the
         # Markdown path from every inline tool), so nothing else is
         # watching it.
-        losses = await run_sync(
+        losses = await run_local(
             find_code_block_indentation_loss, checked, wiki_content
         )
         if losses:
@@ -522,7 +522,7 @@ async def _handle_push(
         if "list_item_split" not in _allowed_codes(
             checked, wiki_content
         ):
-            splits = await run_sync(
+            splits = await run_local(
                 find_list_item_splits, checked, flavor=flavor
             )
             warnings.extend(

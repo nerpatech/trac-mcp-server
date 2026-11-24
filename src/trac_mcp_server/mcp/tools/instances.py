@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local
 from ...core.client import TracClient
 from ...core.scope import ScopedSession
 from ...detection.web_scraper import scrape_project_index
@@ -364,7 +364,7 @@ async def _handle_list_instances(
                 host_root, session, _SCRAPE_TIMEOUT
             )
 
-        discovered = await run_sync(scrape)
+        discovered = await run_local(scrape)
         if allowed is not None:
             discovered = [
                 e for e in discovered if e["url"].rstrip("/") in allowed

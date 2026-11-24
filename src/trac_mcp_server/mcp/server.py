@@ -29,7 +29,7 @@ from ..config_bootstrap import (
     resolve_logging_settings,
 )
 from ..config_schema import ServerConfig
-from ..core.async_utils import run_sync
+from ..core.async_utils import run_local
 from ..core.client import TracClient
 from ..instances import (
     IdentityRequiredError,
@@ -111,7 +111,11 @@ async def _handle_ping(
 ) -> types.CallToolResult:
     """Handle ping tool -- test Trac connectivity."""
     try:
-        version = await run_sync(client.validate_connection)
+        # run_local, not run_sync (Trac /trac_mcp_server #275): the one
+        # deliberate RPC outside TRAC_MAX_PARALLEL_REQUESTS. The
+        # connectivity diagnostic must not queue behind the limit, or a
+        # full queue reads as Trac being down.
+        version = await run_local(client.validate_connection)
         # Ticket #153: the gate's state rides along -- one attribute
         # read, and the cheapest call a session makes.
         write_gate = gate_enabled(client)

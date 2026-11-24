@@ -17,7 +17,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync, run_sync_limited
+from ...core.async_utils import run_local, run_sync, run_sync_limited
 from ...core.client import TracClient
 from ...core.wiki_search import tokenize
 from .errors import (
@@ -1022,7 +1022,7 @@ async def _handle_diff(
         else f"{page_name}@v{from_version}"
     )
     # CPU-bound, so off the event loop the HTTP daemon shares.
-    hunk_list, minimal = await run_sync(
+    hunk_list, minimal = await run_local(
         _unified_hunks,
         from_text.replace("\r\n", "\n"),
         to_text.replace("\r\n", "\n"),

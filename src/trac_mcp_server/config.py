@@ -11,7 +11,20 @@ Environment variables:
     TRAC_USERNAME: Trac username (required, unless an OIDC RPC URL is set)
     TRAC_PASSWORD: Trac password (required, unless an OIDC RPC URL is set)
     TRAC_INSECURE: Skip SSL verification (optional, default: false)
-    TRAC_MAX_PARALLEL_REQUESTS: Max parallel XML-RPC requests (optional, default: 5)
+    TRAC_MAX_PARALLEL_REQUESTS: Max concurrent XML-RPC calls to Trac per
+        server process, shared by all instances and callers; a call waits for
+        a slot before it starts and keeps it until its request ends. Link
+        probes and the live-preview page fetch are not counted;
+        ticket_render_check's ticket-page fetch runs together with that
+        tool's RPCs and is counted; ping is not counted. A batch occupies at
+        most N slots at a time, so single calls from other callers interleave.
+        Waiting for a slot has no time limit, so a write queues until one is
+        free; a client that times out and retries without cancelling the
+        first call can therefore post twice. On Python 3.10 the wait is not
+        strictly first-come-first-served, so an old waiter can occasionally
+        be passed by a newer call (production runs 3.12); and because the
+        limit is one per process, a stalled instance can hold every slot, so
+        calls to healthy instances queue behind it (optional, default: 5)
     TRAC_MAX_BATCH_SIZE: Max items per batch operation (optional, default: 500)
     TRAC_RPC_TIMEOUT: Read timeout in seconds for XML-RPC requests (optional, default: 60)
     TRAC_MCP_OIDC_RPC_URL: Full XML-RPC URL of an OIDC-protected Trac endpoint

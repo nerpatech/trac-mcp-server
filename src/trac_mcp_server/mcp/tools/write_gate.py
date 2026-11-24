@@ -48,7 +48,7 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import run_sync
+from ...core.async_utils import run_local, run_sync
 from ...core.client import TracClient
 from ...preview.checks import build_warnings
 from ...preview.facts import extract_facts
@@ -143,18 +143,18 @@ async def _run_checks(
     partial-coverage mistake in miniature."""
     rendered_html = await run_sync(client.wiki_to_html, content)
     # Parsing and the checks run off the event loop (ticket #289).
-    facts = await run_sync(extract_facts, rendered_html)
+    facts = await run_local(extract_facts, rendered_html)
 
     probes: dict[str, dict] = {}
     probeable = [
         a.href for a in facts.anchors if is_probeable_href(a.href)
     ]
     if probeable:
-        probes = await run_sync(
+        probes = await run_local(
             probe_targets, client, probeable, target_cap
         )
 
-    return await run_sync(
+    return await run_local(
         build_warnings,
         markdown_source=None,
         tracwiki=content,
@@ -352,8 +352,9 @@ async def known_comment_numbers(
     undefined order, so the numbers max+1 .. max+``pending_writes`` are
     all possible for this write's own comment. The default, 1, is every
     single write. ``runner`` runs the changelog call: the batch tools
-    pass ``run_sync_limited`` so the lookups honour
-    TRAC_MAX_PARALLEL_REQUESTS.
+    pass ``run_sync_limited`` (the same bridge as ``run_sync``), and
+    either way the lookup waits for a TRAC_MAX_PARALLEL_REQUESTS slot
+    before it starts.
 
     Every ``ticket.update`` call -- even a comment-less field edit --
     consumes the next number in sequence (``ticket_comment.py``'s
@@ -554,9 +555,11 @@ async def gate_item(
     ``pending_writes`` and ``runner``, ticket #271, are for the batch
     tools: how many writes to this ticket may land first (see
     :func:`known_comment_numbers`), and the runner for the changelog and
-    attachment lookups -- ``run_sync_limited``, so they honour the
-    parallel-request limit. Both reach those two lookups only; the
-    render and probe path is :func:`check_write`'s.
+    attachment lookups -- ``run_sync_limited``, the same bridge as
+    ``run_sync``, so they wait for a TRAC_MAX_PARALLEL_REQUESTS slot like
+    any RPC. Both reach those two lookups only; the render and probe path
+    is :func:`check_write`'s (the render takes a slot; the link probes use
+    ``run_local``, outside the limit).
 
     With the gate off (ticket #153) nothing is checked and the result
     carries no refusal and NO lines: unlike :func:`gate_or_refuse`, this

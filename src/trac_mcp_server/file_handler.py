@@ -2,7 +2,7 @@
 
 Provides the core file I/O infrastructure for file-based wiki tools.
 All sync functions are pure (no side effects besides file I/O).
-Async wrappers compose validation + I/O via run_sync().
+Async wrappers compose validation + I/O via run_local().
 """
 
 import codecs
@@ -11,7 +11,7 @@ from pathlib import Path
 from charset_normalizer import from_bytes
 
 from trac_mcp_server.converters.common import detect_format_heuristic
-from trac_mcp_server.core.async_utils import run_sync
+from trac_mcp_server.core.async_utils import run_local
 
 # =============================================================================
 # Path Validation
@@ -280,8 +280,8 @@ async def read_file_async(path_str: str) -> tuple[str, str, Path]:
     Raises:
         ValueError: If path validation fails.
     """
-    resolved = await run_sync(validate_file_path, path_str)
-    content, encoding = await run_sync(
+    resolved = await run_local(validate_file_path, path_str)
+    content, encoding = await run_local(
         read_file_with_encoding, resolved
     )
     return (content, encoding, resolved)
@@ -303,6 +303,6 @@ async def write_file_async(
     Raises:
         ValueError: If output path validation fails.
     """
-    resolved = await run_sync(validate_output_path, path_str)
-    count = await run_sync(write_file, resolved, content, encoding)
+    resolved = await run_local(validate_output_path, path_str)
+    count = await run_local(write_file, resolved, content, encoding)
     return (resolved, count)

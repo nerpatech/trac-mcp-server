@@ -718,7 +718,7 @@ With an `action` and a non-empty `resolution`, the tool looks up the action's in
 
 ## ticket_batch_create
 
-**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Bounded by TRAC_MAX_PARALLEL_REQUESTS semaphore. Descriptions are TracWiki and are stored byte-for-byte.
+**Description:** Create multiple tickets in a single batch operation. Best-effort: all items attempted, per-item results reported. Concurrent calls to Trac are bounded by TRAC_MAX_PARALLEL_REQUESTS. Descriptions are TracWiki and are stored byte-for-byte.
 
 **Parameters:**
 
@@ -788,7 +788,7 @@ Each ticket object:
 
 **Implementation Notes:**
 - Batch size limited by `TRAC_MAX_BATCH_SIZE` (default 500, max 10000)
-- Parallelism bounded by `TRAC_MAX_PARALLEL_REQUESTS` semaphore
+- Concurrent calls to Trac bounded by `TRAC_MAX_PARALLEL_REQUESTS`
 - Descriptions are TracWiki and are stored byte-for-byte
 
 **Example Call:**
@@ -864,7 +864,7 @@ Each ticket object:
 
 **Implementation Notes:**
 - Batch size limited by `TRAC_MAX_BATCH_SIZE` (default 500, max 10000)
-- Parallelism bounded by `TRAC_MAX_PARALLEL_REQUESTS` semaphore
+- Concurrent calls to Trac bounded by `TRAC_MAX_PARALLEL_REQUESTS`
 - Requires TICKET_ADMIN permission and `tracopt.ticket.deleter` enabled in trac.ini
 
 **Example Call:**
@@ -949,7 +949,7 @@ Each update object:
 
 **Implementation Notes:**
 - Batch size limited by `TRAC_MAX_BATCH_SIZE` (default 500, max 10000)
-- Parallelism bounded by `TRAC_MAX_PARALLEL_REQUESTS` semaphore
+- Concurrent calls to Trac bounded by `TRAC_MAX_PARALLEL_REQUESTS`
 - Comments are TracWiki and are stored byte-for-byte
 - An item with a `status`, a non-empty `resolution` or `action_*` keys but no `action` (a null or empty `action` counts as none) is refused: it is listed under `failed` with the same text `ticket_update` returns, nothing is written for it, and the other items still run. `resolution=""` alone is allowed and clears a stale resolution
 - A `resolution` alongside an `action` is remapped onto the action's own resolution field (the `ticket_actions` lookup `ticket_update` does, run through the same `TRAC_MAX_PARALLEL_REQUESTS` limit). An action the ticket does not offer, or one that takes no resolution (e.g. `accept`), is refused for that item like the cases above. When the lookup itself fails the item is still sent and succeeds with a warning, listed under `warnings` in the structured output and under the item in the text
