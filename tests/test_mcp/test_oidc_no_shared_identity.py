@@ -138,6 +138,7 @@ def _arguments_for(schema: dict) -> dict:
 _EXTRA_ARGUMENTS = {
     "milestone_update": {"attributes": {"description": "x"}},
     "ticket_check_list": {"values": "1"},
+    "user_activity": {"date_from": "2026-01-01", "username": "u"},
     "wiki_search": {"query": "xyz"},
 }
 

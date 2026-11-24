@@ -3334,6 +3334,43 @@ Structured content: `{"milestones": ["v1.1", "v2.0"], "details": [{"name": "v1.1
 
 ---
 
+## user_activity
+
+**Description:** What one account did in Trac in a period, in one call: tickets it created, every ticket change and comment it made (also on tickets changed again later, which a `changetime` query misses), and wiki page edits.
+
+**Permission:** TICKET_VIEW, with `TRAC_MCP_ACTIVITY_TIMELINE` also TIMELINE_VIEW. Needs no plugin: it uses `ticket.query`, `ticket.changeLog` (batched through `system.multicall`), `ticket.get`, `wiki.getRecentChanges` and `wiki.getPageInfo`.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `date_from` | string | **Yes** | - | First day as YYYY-MM-DD (or an ISO date-time), inclusive, in `time_zone`. |
+| `date_to` | string | No | - | Last day, inclusive; empty means the day of `date_from`. |
+| `username` | string | No | - | Trac user name; empty means the signed-in account. |
+| `time_zone` | string | No | `UTC` | IANA time zone of the days and of the times in the answer. |
+| `include_wiki` | boolean | No | `true` | Also list wiki page edits. |
+
+How it works:
+
+- Tickets the account changed: with `TRAC_MCP_ACTIVITY_TIMELINE=true` from Trac's RSS timeline (`/timeline?format=rss&authors=<user>&ticket=on&ticket_details=on&max=0`, in windows of 30 days from the day after the period back to the day before it), below the base of the RPC endpoint under OIDC. The timeline lists ticket updates only when the Trac instance sets `[timeline] ticket_show_details = enabled`; set the variable only then. If a timeline request fails or returns no RSS, and without the variable, the tool falls back to a scan: a ticket query filters only on a ticket's last change, so it queries every ticket whose `changetime` is on or after the day before `date_from` (newest first, at most 3000). `ticket_source` says which of the two ran (`timeline`, `changetime`).
+- The tool reads the change logs of these tickets and keeps the entries in the period whose author is the account. Entries of one ticket at one moment form one activity with the changed `fields`, the `comment` (at most 200 characters) and the file names of added `attachments` (Trac lists a ticket attachment in the change log).
+- Tickets created: `reporter=<user>` with `time` around the period, checked against each ticket's creation time.
+- Wiki edits: `wiki.getRecentChanges` since `date_from`, then each page's versions back to the first day (at most 300 pages, 50 versions each).
+- The signed-in account: with OIDC the claim `preferred_username` of the caller's access token (another claim via `TRAC_MCP_OIDC_USER_CLAIM`), read without checking the signature -- it only selects the entries to keep, Trac decides what the token may see; with basic auth the configured user name.
+- `complete` is false when a limit cut the scan or a change log did not load.
+- Not covered: Trac keeps no history of milestone changes, and `wiki.listAttachments` gives wiki attachments without time or author.
+
+**Success Response:** `username`, `period`, `tickets_scanned`, `ticket_source`, `total`, `by_kind` (`ticket_created`, `ticket_change`, `wiki_edit`), `comments`, `tickets`, `complete`, and `activities` oldest first: `time`, `kind`, `ticket`, `summary`, `fields`, `attachments`, `comment`, `url` (wiki: `page`, `version`, `comment`, `url`).
+
+```json
+{
+  "name": "user_activity",
+  "arguments": {"date_from": "2026-01-16", "time_zone": "Europe/Berlin"}
+}
+```
+
+---
+
 ## list_instances
 
 **Description:** List Trac instances reachable from this server: named instances from configuration, and (when `discover=true`) other projects visible on the same Trac host's project index. Use the returned path (e.g. `/project`) as the `instance` argument on any other tool to target that project. Always available -- no Trac permission required.
