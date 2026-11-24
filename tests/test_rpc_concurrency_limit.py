@@ -29,7 +29,6 @@ import requests
 from trac_mcp_server.config import Config
 from trac_mcp_server.core import async_utils
 from trac_mcp_server.core.async_utils import (
-    TracBusyError,
     gather_limited,
     init_semaphore,
     run_sync,
@@ -707,96 +706,6 @@ async def test_comment_lookup_wall_cap_on_a_running_read_says_timed_out(
     assert posted.failure == ticket_write._LOOKUP_TIMED_OUT
 
 
-async def test_a_call_that_gets_no_slot_raises_busy_and_sends_nothing(
-    server, monkeypatch
-):
-    """Operator decision, review-4 item 1: a call that waits longer than
-    ``SLOT_WAIT_TIMEOUT`` (patched to 0.3 s) for a slot raises
-    ``TracBusyError`` and the server never receives its request."""
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
-    client = _client(server)
-
-    server.delay = 1.0
-    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
-    await _wait_until(lambda: bool(server.paths))
-
-    with pytest.raises(
-        TracBusyError, match="TRAC_MAX_PARALLEL_REQUESTS"
-    ):
-        await asyncio.wait_for(run_sync(client.get_ticket, 1), TIMEOUT)
-    assert not slow.done(), "the slot was free: it did not wait"
-
-    await asyncio.wait_for(slow, TIMEOUT)
-    assert len(server.paths) == 1
-    assert server.peak == 1
-
-
-async def test_a_busy_timeout_leaks_no_permit(server, monkeypatch):
-    """After the slow call ends, a new call runs, and several calls
-    that timed out waiting left the limit exactly 1 (peak 1)."""
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
-    client = _client(server)
-
-    server.delay = 0.8
-    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
-    await _wait_until(lambda: bool(server.paths))
-    for n in range(1, 4):
-        with pytest.raises(TracBusyError):
-            await asyncio.wait_for(
-                run_sync(client.get_ticket, n), TIMEOUT
-            )
-    await asyncio.wait_for(slow, TIMEOUT)
-
-    server.delay = 0.1
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 10.0)
-    results = await asyncio.wait_for(
-        asyncio.gather(
-            run_sync(client.get_ticket, 10),
-            run_sync(client.get_ticket, 11),
-        ),
-        TIMEOUT,
-    )
-
-    assert results == [1, 1]
-    assert len(server.paths) == 3
-    assert server.peak == 1
-
-
-async def test_the_tool_handler_reports_busy_as_server_busy(
-    server, monkeypatch
-):
-    """Through the real dispatcher and ``ticket_update`` against the
-    local server: busy comes back as the ``server_busy`` error, and the
-    update itself was never sent."""
-    from trac_mcp_server.mcp.tools import ALL_SPECS
-    from trac_mcp_server.mcp.tools.registry import ToolRegistry
-
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
-    client = _client(server)
-    registry = ToolRegistry(ALL_SPECS)
-
-    server.delay = 1.0
-    slow = asyncio.ensure_future(run_sync(client.get_ticket, 0))
-    await _wait_until(lambda: bool(server.paths))
-
-    result = await asyncio.wait_for(
-        registry.call_tool(
-            "ticket_update", {"ticket_id": 1, "comment": "hi"}, client
-        ),
-        TIMEOUT,
-    )
-    await asyncio.wait_for(slow, TIMEOUT)
-
-    assert result.isError
-    text = result.content[0].text
-    assert text.startswith("Error (server_busy):")
-    assert "nothing was sent" in text
-    assert len(server.paths) == 1
-
-
 async def test_run_sync_deadline_with_nothing_left_raises_at_once(
     server,
 ):
@@ -832,24 +741,29 @@ async def test_run_sync_deadline_with_nothing_left_raises_at_once(
 async def test_comment_lookup_distinguishes_no_slot_from_a_slow_read(
     monkeypatch,
 ):
-    """A lookup phase that gets no slot within ``SLOT_WAIT_TIMEOUT`` (0.2 s)
-    says so ("server busy"), where a read that ran too long says "changelog
-    read timed out" (running budget 0.3 s, read takes 1 s)."""
+    """A lookup the wall cap (0.2 s) ends while a phase still waits for
+    its slot says so ("server busy"); a read that ran too long (running
+    budget 0.3 s, read takes 1 s, slot free) says "changelog read timed
+    out"."""
     init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
+    monkeypatch.setattr(
+        ticket_write, "_COMMENT_LOOKUP_WALL_TIMEOUT", 0.2
+    )
     monkeypatch.setattr(ticket_write, "_COMMENT_LOOKUP_TIMEOUT", 0.3)
     client, new_ts = _lookup_client(0.01, 1.0)
 
     holder, started = _hold_slot(1.0)
     await _wait_until(started.is_set)
-    busy = await asyncio.wait_for(
+    no_slot = await asyncio.wait_for(
         ticket_write._find_posted_comment(
             client, 1, "hello", None, new_ts
         ),
         TIMEOUT,
     )
     await asyncio.wait_for(holder, TIMEOUT)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 10.0)
+    monkeypatch.setattr(
+        ticket_write, "_COMMENT_LOOKUP_WALL_TIMEOUT", 10.0
+    )
     slow = await asyncio.wait_for(
         ticket_write._find_posted_comment(
             client, 1, "hello", None, new_ts
@@ -857,22 +771,81 @@ async def test_comment_lookup_distinguishes_no_slot_from_a_slow_read(
         TIMEOUT,
     )
 
-    assert busy.failure == ticket_write._LOOKUP_NO_SLOT
+    assert no_slot.failure == ticket_write._LOOKUP_NO_SLOT
     assert slow.failure == ticket_write._LOOKUP_TIMED_OUT
     assert "busy" in ticket_write._LOOKUP_NO_SLOT
     assert "busy" not in ticket_write._LOOKUP_TIMED_OUT
 
 
-# ---------------------------------------------------------------------------
-# Review 5: the slot wait is capped per TOOL CALL, busy is never swallowed,
-# a cancelled acquire leaks no permit, a busy call charges no budget.
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("hops", range(5))
+async def test_a_caller_cancelled_as_its_slot_is_granted_leaks_no_slot(
+    hops,
+):
+    """The slot is granted (the one permit released) and the queued
+    caller cancelled ``hops`` loop steps later: while it still waits for
+    the permit, as it acquires it, or after, with its function already
+    running in a thread. Whichever it was, the caller ends cancelled or
+    finished, and the slot comes back (at once, or when the thread
+    ends), exactly once: the one slot is free and a following call
+    runs."""
+    init_semaphore(1)
+    semaphore = async_utils._semaphore
+    assert semaphore is not None
+    await semaphore.acquire()  # the one slot is taken
+    ran = threading.Event()
+    caller = asyncio.ensure_future(run_sync(ran.set))
+    for _ in range(5):
+        await asyncio.sleep(0)  # the caller waits for the slot
+    assert not caller.done()
+
+    semaphore.release()  # the slot is granted ...
+    for _ in range(hops):
+        await asyncio.sleep(0)
+    took_effect = caller.cancel()  # ... and the caller cancelled
+
+    if took_effect:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(caller, TIMEOUT)
+    else:
+        await asyncio.wait_for(caller, TIMEOUT)
+        assert ran.is_set()
+    await _wait_until(lambda: not semaphore.locked())
+    # Exactly one slot came back (a double release would leave two).
+    await asyncio.wait_for(semaphore.acquire(), 1)
+    assert semaphore.locked(), "the slot was released twice"
+    semaphore.release()
+    assert await asyncio.wait_for(run_sync(lambda: 7), TIMEOUT) == 7
+
+
+async def test_a_call_cancelled_while_queued_charges_the_budget_nothing(
+    server,
+):
+    """A ``run_sync_deadline`` call cancelled while it waits for its
+    slot never ran, so the budget keeps every second for the calls that
+    follow, and nothing reaches the server."""
+    init_semaphore(1)
+    client = _client(server)
+    budget = async_utils.RunBudget(5.0)
+
+    holder, started = _hold_slot(0.5)
+    await _wait_until(started.is_set)
+    queued = asyncio.ensure_future(
+        async_utils.run_sync_deadline(budget, client.get_ticket, 2)
+    )
+    await _wait_until(lambda: budget.waiting)
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(queued, TIMEOUT)
+    await asyncio.wait_for(holder, TIMEOUT)
+
+    assert budget.remaining == 5.0
+    assert server.paths == []
 
 
 def _probe_registry(handler):
     """A ``ToolRegistry`` serving one tool, ``probe_tool``, whose handler
-    is ``handler(client, args)``: the real ``call_tool`` (the scope of
-    the slot-wait deadline) around a handler the test controls."""
+    is ``handler(client, args)``: the real ``call_tool`` around a
+    handler the test controls."""
     from trac_mcp_server.mcp.tools.registry import (
         ToolRegistry,
         ToolSpec,
@@ -896,290 +869,50 @@ def _ok_result() -> types.CallToolResult:
     )
 
 
-async def _try_call(client, outcomes: list[str], n: int) -> None:
-    """One slotted call; records whether it ran or got ``busy``."""
-    try:
-        await run_sync(client.get_ticket, n)
-    except TracBusyError:
-        outcomes.append("busy")
-    else:
-        outcomes.append("ran")
+# ---------------------------------------------------------------------------
+# Operator decision: no cap on waiting for a slot. A call queues for as long
+# as it takes; it is never turned away as "busy".
+# ---------------------------------------------------------------------------
 
 
-async def test_the_slot_wait_cap_is_per_tool_call_not_per_call(
-    server, monkeypatch
+@pytest.mark.parametrize("kind", ["run_sync", "run_sync_deadline"])
+async def test_a_call_queued_past_the_old_30_s_cap_still_runs(
+    server, monkeypatch, kind
 ):
-    """Review-5 item 1. A tool that makes three slotted calls in turn
-    (``ticket_update`` makes up to six) gets ONE wait of
-    ``SLOT_WAIT_TIMEOUT`` (0.5 s), not one per call: with the slot held
-    for 1.2 s, all three give up at once after the first wait, while the
-    holder still runs, and none reaches the server. (Per call, the third
-    waited 1.0 s..1.2 s, got the slot the holder freed, and sent.)"""
+    """A slotted call that has waited past 30 s (the cap this change
+    took out) still runs and reaches the server. The clock inside
+    ``async_utils`` jumps 31 s once the tool call is under way; the slot
+    is held until after that, so the call has to queue. (With the cap the
+    call found its deadline past, was refused and sent nothing.) No real
+    30 s wait: order and a patched clock only."""
     init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.5)
-    client = _client(server)
-    outcomes: list[str] = []
-
-    async def handler(c, args):
-        for n in range(3):
-            await _try_call(c, outcomes, n)
-        return _ok_result()
-
-    holder, started = _hold_slot(1.2)
-    await _wait_until(started.is_set)
-    await asyncio.wait_for(
-        _probe_registry(handler).call_tool("probe_tool", {}, client),
-        TIMEOUT,
-    )
-    holder_still_running = not holder.done()
-    await asyncio.wait_for(holder, TIMEOUT)
-
-    assert outcomes == ["busy", "busy", "busy"]
-    assert holder_still_running, "a later call waited out the holder"
-    assert server.paths == []
-
-
-async def test_a_free_permit_is_taken_even_after_the_deadline(
-    server, monkeypatch
-):
-    """Review-5 item 1: past the tool call's deadline a call that finds
-    a permit FREE takes it without waiting (the deadline limits waiting,
-    not progress). The first call gives up at 0.2 s; once the holder has
-    ended, the second call, long after the deadline, runs."""
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
     client = _client(server)
     server.delay = 0.05
-    outcomes: list[str] = []
-
-    async def handler(c, args):
-        await _try_call(c, outcomes, 1)
-        await (
-            holder
-        )  # the permit is free now; the deadline is long past
-        await _try_call(c, outcomes, 2)
-        return _ok_result()
-
-    holder, started = _hold_slot(0.5)
-    await _wait_until(started.is_set)
-    await asyncio.wait_for(
-        _probe_registry(handler).call_tool("probe_tool", {}, client),
-        TIMEOUT,
+    real = time.monotonic
+    jump = [0.0]
+    monkeypatch.setattr(
+        async_utils,
+        "time",
+        SimpleNamespace(monotonic=lambda: real() + jump[0]),
     )
 
-    assert outcomes == ["busy", "ran"]
-    assert len(server.paths) == 1
-
-
-async def test_a_batch_item_gets_a_fresh_deadline_of_its_own(
-    server, monkeypatch
-):
-    """Review-5 item 1: ``gather_limited`` gives each item a fresh
-    ``SLOT_WAIT_TIMEOUT`` when it starts on a worker. The tool call's own
-    deadline (0.5 s) is past when the batch starts (0.55 s), yet both
-    items wait for the slot the holder frees at 0.8 s and run: a long
-    batch does not fail its later items for being old."""
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.5)
-    client = _client(server)
-    server.delay = 0.05
-    done: list[int] = []
-
-    async def item(c, n):
-        await run_sync(c.get_ticket, n)
-        done.append(n)
-
     async def handler(c, args):
-        await asyncio.sleep(0.55)  # the tool call's deadline is past
-        await gather_limited([item(c, n) for n in range(2)])
+        jump[0] = 31.0  # the tool call is now "31 s old"
+        if kind == "run_sync":
+            await run_sync(c.get_ticket, 1)
+        else:
+            await async_utils.run_sync_deadline(
+                async_utils.RunBudget(5.0), c.get_ticket, 1
+            )
         return _ok_result()
 
-    holder, started = _hold_slot(0.8)
+    holder, started = _hold_slot(0.3)
     await _wait_until(started.is_set)
     result = await asyncio.wait_for(
         _probe_registry(handler).call_tool("probe_tool", {}, client),
         TIMEOUT,
     )
-    await asyncio.wait_for(holder, TIMEOUT)
 
+    assert holder.done(), "the call did not wait for the slot"
     assert not result.isError, result.content[0].text
-    assert done == [0, 1]
-    assert len(server.paths) == 2
-
-
-async def test_ticket_update_gate_does_not_swallow_busy(
-    server, monkeypatch
-):
-    """Review-5 item 2. ``ticket_update``'s gate reads the changelog for
-    a ``comment:`` link; with no slot (cap 0.3 s, slot held 0.5 s) that
-    read is busy, and the handler answers ``server_busy`` with nothing
-    sent. (The gate used to log it and fail open: its render then got the
-    slot the holder freed at 0.5 s, and the ``ticket.update`` went out
-    with its link check skipped.)"""
-    from trac_mcp_server.mcp.tools import ALL_SPECS
-    from trac_mcp_server.mcp.tools.registry import ToolRegistry
-
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
-    client = _client(server)
-    server.delay = 0.05
-    registry = ToolRegistry(ALL_SPECS)
-
-    holder, started = _hold_slot(0.5)
-    await _wait_until(started.is_set)
-    result = await asyncio.wait_for(
-        registry.call_tool(
-            "ticket_update",
-            {"ticket_id": 1, "comment": "see comment:1"},
-            client,
-        ),
-        TIMEOUT,
-    )
-    await asyncio.wait_for(holder, TIMEOUT)
-
-    assert result.isError
-    assert result.content[0].text.startswith("Error (server_busy):")
-    assert not any(b"ticket.update" in b for b in server.bodies)
-    assert server.paths == []
-
-
-async def test_workflow_lookup_does_not_swallow_busy(
-    server, monkeypatch
-):
-    """Review-5 item 2. ``apply_workflow_fields``' ``ticket_actions``
-    lookup that gets no slot is ``server_busy`` and nothing is sent. (It
-    used to be swallowed into the "sent as-is" warning, and the update
-    then went out with the bare resolution and no workflow action.)"""
-    from trac_mcp_server.mcp.tools import ALL_SPECS
-    from trac_mcp_server.mcp.tools.registry import ToolRegistry
-
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.3)
-    client = _client(server)
-    server.delay = 0.05
-    registry = ToolRegistry(ALL_SPECS)
-
-    holder, started = _hold_slot(0.5)
-    await _wait_until(started.is_set)
-    result = await asyncio.wait_for(
-        registry.call_tool(
-            "ticket_update",
-            {
-                "ticket_id": 1,
-                "action": "resolve",
-                "resolution": "fixed",
-            },
-            client,
-        ),
-        TIMEOUT,
-    )
-    await asyncio.wait_for(holder, TIMEOUT)
-
-    assert result.isError
-    assert result.content[0].text.startswith("Error (server_busy):")
-    assert not any(b"ticket.update" in b for b in server.bodies)
-    assert server.paths == []
-
-
-async def test_gate_lookups_and_render_raise_busy(server, monkeypatch):
-    """Review-5 item 2, at the gate's own entry points: the attachment
-    list, the changelog read and the render all raise ``TracBusyError``
-    when they get no slot, instead of failing open to ``None`` / an
-    UNCHECKED outcome."""
-    from trac_mcp_server.mcp.tools import write_gate
-
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
-    client = _client(server)
-
-    holder, started = _hold_slot(0.8)
-    await _wait_until(started.is_set)
-    with pytest.raises(TracBusyError):
-        await write_gate.attachment_names(
-            client,
-            wiki_page="Some/Page",
-            ticket_id=None,
-            new_ticket=False,
-        )
-    with pytest.raises(TracBusyError):
-        await write_gate.known_comment_numbers(client, 1)
-    with pytest.raises(TracBusyError):
-        await write_gate.check_write(
-            client, "text", field="comment", recheck_with=None
-        )
-    await asyncio.wait_for(holder, TIMEOUT)
-    assert server.paths == []
-
-
-@pytest.mark.parametrize("hops", range(5))
-async def test_a_caller_cancelled_as_the_acquire_completes_leaks_no_permit(
-    hops,
-):
-    """Review-5 item 5, driven deterministically. The permit is released,
-    the loop runs ``hops`` steps (the acquire task completes and the
-    wake-up travels toward the caller), and the caller is cancelled at
-    that exact point. Whenever ``cancel()`` takes effect (the caller had
-    not finished) the caller must get ``CancelledError``, never a
-    successful return with its cancellation lost (``wait_for`` on 3.10
-    and 3.11 returns the result for hops 1 and 2), and no permit may
-    leak: the one permit is free again, or is held by a caller whose
-    acquire really finished before the cancel."""
-    semaphore = asyncio.Semaphore(1)
-    await semaphore.acquire()  # the one permit is held
-    caller = asyncio.ensure_future(async_utils._acquire_slot(semaphore))
-    for _ in range(5):
-        await asyncio.sleep(0)  # the caller waits for the permit
-    assert not caller.done()
-
-    semaphore.release()  # the waiter is woken ...
-    for _ in range(hops):
-        await asyncio.sleep(0)
-    took_effect = caller.cancel()  # ... and the caller cancelled
-
-    if took_effect:
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(caller, TIMEOUT)
-        for _ in range(5):
-            await asyncio.sleep(0)
-        assert not semaphore.locked(), "the permit leaked"
-    else:
-        await asyncio.wait_for(caller, TIMEOUT)  # it finished first
-        assert semaphore.locked(), "the finished call holds the permit"
-        semaphore.release()
-    await asyncio.wait_for(semaphore.acquire(), 1)
-    assert semaphore.locked()
-    semaphore.release()
-
-
-async def test_a_busy_call_charges_the_budget_nothing(
-    server, monkeypatch
-):
-    """Review-5 item 6. A ``run_sync_deadline`` call that never got a
-    slot (busy, or cancelled while queued) is charged nothing: the budget
-    keeps every second for the calls that follow. (It was charged all it
-    had been given.)"""
-    init_semaphore(1)
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 0.2)
-    client = _client(server)
-    budget = async_utils.RunBudget(5.0)
-
-    holder, started = _hold_slot(1.0)
-    await _wait_until(started.is_set)
-    with pytest.raises(TracBusyError):
-        await async_utils.run_sync_deadline(
-            budget, client.get_ticket, 1
-        )
-    assert budget.remaining == 5.0
-
-    monkeypatch.setattr(async_utils, "SLOT_WAIT_TIMEOUT", 10.0)
-    queued = asyncio.ensure_future(
-        async_utils.run_sync_deadline(budget, client.get_ticket, 2)
-    )
-    await _wait_until(lambda: budget.waiting)
-    queued.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(queued, TIMEOUT)
-    await asyncio.wait_for(holder, TIMEOUT)
-
-    assert budget.remaining == 5.0
-    assert server.paths == []
+    assert len(server.paths) == 1

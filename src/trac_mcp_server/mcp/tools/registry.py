@@ -21,11 +21,6 @@ from typing import Any
 
 import mcp.types as types
 
-from ...core.async_utils import (
-    TracBusyError,
-    begin_slot_deadline,
-    end_slot_deadline,
-)
 from ...core.client import TracClient, WikiPageStoredReadbackFailed
 from ...core.scope import DestinationOutOfScope
 
@@ -151,11 +146,6 @@ class ToolRegistry:
         if spec is None:
             raise ValueError(f"Unknown tool: {name}")
         args = _normalize_arg_aliases(name, arguments or {})
-        # Trac /trac_mcp_server #275: every wait for a request slot in
-        # this call ends at ONE moment, SLOT_WAIT_TIMEOUT from now, so a
-        # tool that makes several slotted calls in turn cannot hold its
-        # write past the MCP client's timeout (a retry would post twice).
-        slot_scope = begin_slot_deadline()
         try:
             return await spec.handler(client, args)
         except xmlrpc.client.Fault as e:
@@ -185,15 +175,6 @@ class ToolRegistry:
                 f"Do not retry the write; check the page with "
                 f"wiki_get(page_name='{e.page_name}').",
             )
-        except TracBusyError as e:
-            # Trac /trac_mcp_server #275: no request slot freed up in
-            # time, so the call was never sent. Not server_error's "retry
-            # later": a retry is safe, and this says so.
-            return build_error_response(
-                "server_busy",
-                str(e),
-                "Retry the call in a little while; it was not sent.",
-            )
         except ValueError as e:
             return build_error_response(
                 "validation_error",
@@ -207,8 +188,6 @@ class ToolRegistry:
                 str(e),
                 "Contact Trac administrator or retry later.",
             )
-        finally:
-            end_slot_deadline(slot_scope)
 
 
 # Exact tool name -> {alias: canonical}. Checked before any prefix match,

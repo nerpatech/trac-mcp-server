@@ -15,12 +15,7 @@ from typing import Any, NamedTuple
 
 import mcp.types as types
 
-from ...core.async_utils import (
-    RunBudget,
-    TracBusyError,
-    run_sync,
-    run_sync_deadline,
-)
+from ...core.async_utils import RunBudget, run_sync, run_sync_deadline
 from ...core.client import (
     TicketCreateTimeout,
     TicketUpdateConflict,
@@ -40,15 +35,13 @@ _COMMENT_LOOKUP_TIMEOUT = 10.0
 # included (#275). ``_COMMENT_LOOKUP_TIMEOUT`` counts only the time its
 # RPCs run, so on its own a starved queue could hold ``ticket_update``
 # past the MCP client's timeout, and the agent would retry and post the
-# comment twice. Sized above the slot-wait cap (``SLOT_WAIT_TIMEOUT``,
-# 30 s, the longest a call waits for a slot), so the cap's own "no
-# request slot" answer comes first and this fires only for a lookup that
-# waited and then ran too long.
-_COMMENT_LOOKUP_WALL_TIMEOUT = 45.0
-# What a comment lookup says when it got no request slot (the server is
-# busy), as opposed to a read that ran and was too slow.
+# comment twice. Sized above the running budget so it fires only when
+# the queue, not Trac's answer, is what is slow.
+_COMMENT_LOOKUP_WALL_TIMEOUT = 30.0
+# What a comment lookup says when no request slot freed up in time (the
+# server is busy), as opposed to a read that ran and was too slow.
 _LOOKUP_NO_SLOT = (
-    "the lookup got no request slot within the wait limit (server busy)"
+    "no request slot freed up for the lookup in time (server busy)"
 )
 _LOOKUP_TIMED_OUT = "changelog read timed out"
 
@@ -462,10 +455,6 @@ async def apply_workflow_fields(
 
     try:
         actions = await runner(client.get_ticket_actions, ticket_id)
-    except TracBusyError:
-        # No slot, nothing sent (#275): the update must not go out as a
-        # bare resolution without its workflow action. server_busy.
-        raise
     except Exception:
         actions = None
     if not isinstance(actions, (list, tuple)):
@@ -985,9 +974,6 @@ async def _comment_from_plugin(
         found = await run_sync_deadline(
             budget, client.get_ticket_change_at, ticket_id, new_ts
         )
-    except TracBusyError:
-        # No slot: the scan would wait for one too. The caller reports it.
-        raise
     except Exception:
         return None
     if not isinstance(found, list) or len(found) != 3:
@@ -1080,12 +1066,9 @@ async def _lookup_posted_comment(
     the update's second; if several remain (another write of ours in the
     same second) the text sent picks among them.
     """
-    try:
-        via_plugin = await _comment_from_plugin(
-            client, ticket_id, comment, new_ts, budget
-        )
-    except TracBusyError:
-        return _PostedComment(failure=_LOOKUP_NO_SLOT)
+    via_plugin = await _comment_from_plugin(
+        client, ticket_id, comment, new_ts, budget
+    )
     if via_plugin is not None:
         return via_plugin
 
@@ -1098,8 +1081,6 @@ async def _lookup_posted_comment(
         changelog = await run_sync_deadline(
             budget, client.get_ticket_changelog, ticket_id
         )
-    except TracBusyError:
-        return _PostedComment(failure=_LOOKUP_NO_SLOT)
     except (asyncio.TimeoutError, TimeoutError):
         return _PostedComment(failure=_LOOKUP_TIMED_OUT)
     except Exception:
